@@ -3,6 +3,10 @@
 from kortny.tools.echo import EchoTool
 from kortny.tools.pdf_generator import PdfGeneratorTool
 from kortny.tools.registry import DuplicateToolError, ToolNotFoundError, ToolRegistry
+from kortny.tools.slack_channel_history import (
+    SlackChannelHistoryError,
+    SlackChannelHistoryTool,
+)
 from kortny.tools.types import JsonObject, JsonSchema, Tool, ToolArtifact, ToolResult
 from kortny.tools.web_search import WebSearchTool
 
@@ -12,6 +16,8 @@ __all__ = [
     "JsonObject",
     "JsonSchema",
     "PdfGeneratorTool",
+    "SlackChannelHistoryError",
+    "SlackChannelHistoryTool",
     "Tool",
     "ToolArtifact",
     "ToolNotFoundError",

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, cast
+from typing import Any, Protocol, cast
 
 from slack_sdk import WebClient
 from sqlalchemy import select
@@ -28,7 +28,13 @@ from kortny.slack.comments import (
 from kortny.slack.posting import SlackPostingClient
 from kortny.slack.thread_context import SlackThreadTranscriptProvider
 from kortny.tasks import TaskService
-from kortny.tools import PdfGeneratorTool, Tool, ToolRegistry, WebSearchTool
+from kortny.tools import (
+    PdfGeneratorTool,
+    SlackChannelHistoryTool,
+    Tool,
+    ToolRegistry,
+    WebSearchTool,
+)
 
 GENERIC_FAILURE_TEXT = (
     "Something went wrong while I was working on this. Please try again soon."
@@ -191,7 +197,18 @@ class AgentTaskExecutor:
             task_id=task.id,
             task_service=task_service,
         )
-        return ToolRegistry([web_search, pdf_generator])
+        slack_channel_history = SlackChannelHistoryTool(
+            self._build_slack_history_client(settings),
+            default_channel_id=task.slack_channel_id,
+        )
+        return ToolRegistry([web_search, pdf_generator, slack_channel_history])
+
+    def _build_slack_history_client(self, settings: Settings) -> Any:
+        if self.slack_client is not None and hasattr(
+            self.slack_client, "conversations_history"
+        ):
+            return self.slack_client
+        return WebClient(token=settings.slack_bot_token)
 
     def _post_outputs(
         self,
