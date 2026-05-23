@@ -21,6 +21,15 @@ from kortny.slack.acknowledgement import (
 from kortny.tasks import TaskService
 
 LEADING_MENTION_RE = re.compile(r"^\s*<@[^>]+>\s*")
+IGNORED_DM_SUBTYPES = frozenset(
+    {
+        "bot_message",
+        "channel_join",
+        "group_join",
+        "message_changed",
+        "message_deleted",
+    }
+)
 logger = logging.getLogger(__name__)
 
 
@@ -39,7 +48,7 @@ class SlackPostMessageClient(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class AppMentionResult:
-    """Result of processing a Slack app_mention event."""
+    """Result of processing a Slack event that creates or finds a task."""
 
     task: Task
     created: bool
@@ -73,6 +82,46 @@ class SlackIngress:
     ) -> AppMentionResult:
         """Create a task for a Slack app_mention and post the immediate reply."""
 
+        return self._handle_addressed_message(
+            body=body,
+            event=event,
+            input_text=_task_input(event, strip_leading_mention=True),
+            source="app_mention",
+        )
+
+    def handle_dm(
+        self,
+        *,
+        body: Mapping[str, Any],
+        event: Mapping[str, Any],
+    ) -> AppMentionResult | None:
+        """Create a task for a direct message user event."""
+
+        ignore_reason = _dm_ignore_reason(event)
+        if ignore_reason is not None:
+            logger.info(
+                "slack dm ignored reason=%s event_id=%s channel=%s",
+                ignore_reason,
+                body.get("event_id"),
+                event.get("channel"),
+            )
+            return None
+
+        return self._handle_addressed_message(
+            body=body,
+            event=event,
+            input_text=_task_input(event, strip_leading_mention=False),
+            source="dm",
+        )
+
+    def _handle_addressed_message(
+        self,
+        *,
+        body: Mapping[str, Any],
+        event: Mapping[str, Any],
+        input_text: str,
+        source: str,
+    ) -> AppMentionResult:
         event_id = _required_str(body, "event_id")
         channel_id = _required_str(event, "channel")
         message_ts = _required_str(event, "ts")
@@ -81,7 +130,8 @@ class SlackIngress:
             existing = self._get_by_slack_message(channel_id, message_ts)
         if existing is not None:
             logger.info(
-                "slack app_mention duplicate task_id=%s event_id=%s channel=%s thread_ts=%s",
+                "slack %s duplicate task_id=%s event_id=%s channel=%s thread_ts=%s",
+                source,
                 existing.id,
                 event_id,
                 channel_id,
@@ -105,10 +155,11 @@ class SlackIngress:
             slack_thread_ts=thread_ts,
             slack_message_ts=message_ts,
             slack_user_id=user_id,
-            input=_task_input(event),
+            input=input_text,
         )
         logger.info(
-            "slack app_mention created task_id=%s event_id=%s channel=%s thread_ts=%s user=%s input_len=%s",
+            "slack %s created task_id=%s event_id=%s channel=%s thread_ts=%s user=%s input_len=%s",
+            source,
             task.id,
             event_id,
             channel_id,
@@ -117,9 +168,10 @@ class SlackIngress:
             len(task.input),
         )
 
-        if _is_thread_follow_up(event):
+        if _should_skip_visible_ack(event, source=source):
             logger.info(
-                "slack follow-up acknowledgement skipped task_id=%s channel=%s thread_ts=%s",
+                "slack %s acknowledgement skipped task_id=%s channel=%s thread_ts=%s",
+                source,
                 task.id,
                 channel_id,
                 thread_ts,
@@ -154,7 +206,8 @@ class SlackIngress:
             },
         )
         logger.info(
-            "slack acknowledgement posted task_id=%s channel=%s thread_ts=%s message_ts=%s",
+            "slack %s acknowledgement posted task_id=%s channel=%s thread_ts=%s message_ts=%s",
+            source,
             task.id,
             channel_id,
             thread_ts,
@@ -234,11 +287,34 @@ def _is_thread_follow_up(event: Mapping[str, Any]) -> bool:
     )
 
 
-def _task_input(event: Mapping[str, Any]) -> str:
+def _should_skip_visible_ack(event: Mapping[str, Any], *, source: str) -> bool:
+    return source == "dm" or _is_thread_follow_up(event)
+
+
+def _dm_ignore_reason(event: Mapping[str, Any]) -> str | None:
+    channel_type = event.get("channel_type")
+    if channel_type != "im":
+        return "non_dm"
+    subtype = event.get("subtype")
+    if isinstance(subtype, str) and subtype in IGNORED_DM_SUBTYPES:
+        return f"subtype:{subtype}"
+    bot_id = event.get("bot_id")
+    if isinstance(bot_id, str) and bot_id:
+        return "bot_id"
+    return None
+
+
+def _task_input(
+    event: Mapping[str, Any],
+    *,
+    strip_leading_mention: bool,
+) -> str:
     text = event.get("text")
     if not isinstance(text, str):
         return ""
-    stripped = LEADING_MENTION_RE.sub("", text, count=1).strip()
+    stripped = text.strip()
+    if strip_leading_mention:
+        stripped = LEADING_MENTION_RE.sub("", text, count=1).strip()
     return stripped or text.strip()
 
 

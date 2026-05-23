@@ -133,6 +133,36 @@ def test_post_message_posts_to_thread_and_logs_event(db_session: Session) -> Non
     }
 
 
+def test_post_message_in_dm_posts_without_thread_ts(db_session: Session) -> None:
+    task = create_task(db_session, channel_id="D123")
+    client = FakeSlackClient()
+
+    SlackPoster(session=db_session, client=client).post_message(
+        SlackThread.from_task(task),
+        "Done.",
+    )
+
+    event = db_session.scalar(
+        select(TaskEvent)
+        .where(
+            TaskEvent.task_id == task.id,
+            TaskEvent.type == TaskEventType.message_posted,
+        )
+        .order_by(TaskEvent.seq.desc())
+        .limit(1)
+    )
+
+    assert client.messages == [
+        {
+            "channel": "D123",
+            "text": "Done.",
+            "thread_ts": None,
+        }
+    ]
+    assert event is not None
+    assert event.payload["thread_ts"] is None
+
+
 def test_upload_file_updates_artifact_and_logs_event(
     db_session: Session,
     tmp_path: Path,
@@ -185,6 +215,54 @@ def test_upload_file_updates_artifact_and_logs_event(
     assert event.payload["slack_file_id"] == "F000001"
     assert event.payload["artifact_id"] == str(artifact.id)
     assert event.payload["purpose"] == "file_upload"
+
+
+def test_upload_file_in_dm_posts_without_thread_ts(
+    db_session: Session,
+    tmp_path: Path,
+) -> None:
+    task = create_task(db_session, channel_id="D123")
+    report_path = tmp_path / "report.pdf"
+    report_path.write_bytes(b"%PDF-1.4 test")
+    artifact = Artifact(
+        task_id=task.id,
+        filename="report.pdf",
+        mime_type="application/pdf",
+        size_bytes=report_path.stat().st_size,
+        storage_path=str(report_path),
+    )
+    db_session.add(artifact)
+    db_session.flush()
+    client = FakeSlackClient()
+
+    SlackPoster(session=db_session, client=client).upload_file(
+        SlackThread.from_task(task),
+        report_path,
+        initial_comment="Here is the report.",
+    )
+
+    event = db_session.scalar(
+        select(TaskEvent)
+        .where(
+            TaskEvent.task_id == task.id,
+            TaskEvent.type == TaskEventType.message_posted,
+        )
+        .order_by(TaskEvent.seq.desc())
+        .limit(1)
+    )
+
+    assert client.uploads == [
+        {
+            "file": str(report_path),
+            "filename": "report.pdf",
+            "title": "report.pdf",
+            "channel": "D123",
+            "initial_comment": "Here is the report.",
+            "thread_ts": None,
+        }
+    ]
+    assert event is not None
+    assert event.payload["thread_ts"] is None
 
 
 def test_upload_file_uses_posted_at_as_dedup_guard(
@@ -262,14 +340,14 @@ def cleanup_database(session: Session) -> None:
         session.execute(delete(model))
 
 
-def create_task(session: Session) -> Task:
+def create_task(session: Session, *, channel_id: str = "C123") -> Task:
     installation = Installation(slack_team_id=f"T{uuid.uuid4().hex}")
     session.add(installation)
     session.flush()
     return TaskService(session).create_task(
         installation_id=installation.id,
         slack_event_id=f"Ev{uuid.uuid4().hex}",
-        slack_channel_id="C123",
+        slack_channel_id=channel_id,
         slack_thread_ts="1716400000.000001",
         slack_message_ts="1716400000.000001",
         slack_user_id="U123",

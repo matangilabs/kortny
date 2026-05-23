@@ -67,8 +67,32 @@ def create_bolt_app(
     @app.event("message")
     def handle_message(
         ack: Callable[[], None],
+        body: dict[str, Any],
+        event: dict[str, Any],
+        client: Any,
+        logger: Any,
     ) -> None:
-        ack()
+        def handle() -> None:
+            # Non-DM message subscriptions are reserved for the V1.1 ambient
+            # observer. For now, only explicit app mentions and DMs create tasks.
+            if event.get("channel_type") != "im":
+                return
+
+            try:
+                with session_scope(session_factory) as session:
+                    SlackIngress(
+                        session=session,
+                        client=client,
+                        acknowledgement_generator=acknowledgement_generator,
+                    ).handle_dm(
+                        body=body,
+                        event=event,
+                    )
+            except Exception:
+                logger.exception("Failed to process Slack message event")
+                raise
+
+        acknowledge_then_handle(ack, handle)
 
     return app
 

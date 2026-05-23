@@ -89,10 +89,11 @@ class SlackPoster:
     ) -> str:
         """Post text into a Slack thread and return the Slack message ts."""
 
+        post_thread_ts = _post_thread_ts(thread)
         response = self.client.chat_postMessage(
             channel=thread.channel_id,
             text=text,
-            thread_ts=thread.thread_ts,
+            thread_ts=post_thread_ts,
         )
         message_ts = _response_ts(response)
         if message_ts is None:
@@ -104,7 +105,7 @@ class SlackPoster:
                 TaskEventType.message_posted,
                 {
                     "channel": thread.channel_id,
-                    "thread_ts": thread.thread_ts,
+                    "thread_ts": post_thread_ts,
                     "message_ts": message_ts,
                     "text": text,
                     "purpose": purpose,
@@ -137,13 +138,14 @@ class SlackPoster:
                 return artifact_obj.slack_file_id
             raise SlackPostingError("Artifact is posted but missing slack_file_id")
 
+        post_thread_ts = _post_thread_ts(thread)
         response = self.client.files_upload_v2(
             file=str(file_path),
             filename=file_path.name,
             title=title or file_path.name,
             channel=thread.channel_id,
             initial_comment=initial_comment,
-            thread_ts=thread.thread_ts,
+            thread_ts=post_thread_ts,
         )
         slack_file_id = _response_file_id(response)
         if slack_file_id is None:
@@ -158,7 +160,7 @@ class SlackPoster:
             TaskEventType.message_posted,
             {
                 "channel": thread.channel_id,
-                "thread_ts": thread.thread_ts,
+                "thread_ts": post_thread_ts,
                 "slack_file_id": slack_file_id,
                 "artifact_id": str(artifact_obj.id),
                 "filename": artifact_obj.filename,
@@ -240,6 +242,14 @@ class SlackPoster:
             .order_by(Artifact.created_at.desc())
             .limit(1)
         )
+
+
+def _post_thread_ts(thread: SlackThread) -> str | None:
+    # Slack direct-message channels are linear by default. Posting with thread_ts
+    # creates a hidden DM thread, which makes Kortny feel like it replied twice.
+    if thread.channel_id.startswith("D"):
+        return None
+    return thread.thread_ts
 
 
 def _response_ts(response: Mapping[str, Any]) -> str | None:

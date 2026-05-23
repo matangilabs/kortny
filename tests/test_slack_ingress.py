@@ -295,6 +295,124 @@ def test_app_mention_dedupes_by_slack_message_timestamp(db_session: Session) -> 
     assert len(client.calls) == 1
 
 
+def test_dm_creates_task_without_visible_ack(db_session: Session) -> None:
+    client = FakeSlackClient()
+    acknowledgements = FakeAcknowledgementGenerator(
+        "I'll take a look and send the answer here."
+    )
+
+    result = SlackIngress(
+        session=db_session,
+        client=client,
+        acknowledgement_generator=acknowledgements,
+    ).handle_dm(
+        body=message_body(event_id="EvDm1"),
+        event=dm_event(text="<@UBOT> research private context"),
+    )
+    db_session.commit()
+
+    assert result is not None
+    task = db_session.scalar(select(Task).where(Task.id == result.task.id))
+    installation = db_session.scalar(select(Installation))
+    message_event = db_session.scalar(
+        select(TaskEvent).where(
+            TaskEvent.task_id == result.task.id,
+            TaskEvent.type == TaskEventType.message_posted,
+        )
+    )
+
+    assert result.created is True
+    assert result.thread_ts == "1716500000.000001"
+    assert result.acknowledgement_ts is None
+    assert installation is not None
+    assert installation.slack_team_id == "T123"
+    assert task is not None
+    assert task.slack_event_id == "EvDm1"
+    assert task.slack_channel_id == "D123"
+    assert task.slack_thread_ts == "1716500000.000001"
+    assert task.slack_message_ts == "1716500000.000001"
+    assert task.slack_user_id == "U123"
+    assert task.input == "<@UBOT> research private context"
+    assert client.calls == []
+    assert acknowledgements.calls == []
+    assert message_event is None
+
+
+def test_dm_from_bot_is_ignored(db_session: Session) -> None:
+    client = FakeSlackClient()
+
+    result = SlackIngress(session=db_session, client=client).handle_dm(
+        body=message_body(event_id="EvDmBot"),
+        event=dm_event(bot_id="B123", text="bot reply"),
+    )
+    db_session.commit()
+
+    task_count = db_session.scalar(select(func.count()).select_from(Task))
+
+    assert result is None
+    assert task_count == 0
+    assert client.calls == []
+
+
+def test_dm_edit_event_is_ignored(db_session: Session) -> None:
+    client = FakeSlackClient()
+
+    result = SlackIngress(session=db_session, client=client).handle_dm(
+        body=message_body(event_id="EvDmEdit"),
+        event=dm_event(subtype="message_changed", text="edited"),
+    )
+    db_session.commit()
+
+    task_count = db_session.scalar(select(func.count()).select_from(Task))
+
+    assert result is None
+    assert task_count == 0
+    assert client.calls == []
+
+
+def test_non_dm_message_event_is_ignored_by_dm_ingress(db_session: Session) -> None:
+    client = FakeSlackClient()
+
+    result = SlackIngress(session=db_session, client=client).handle_dm(
+        body=message_body(event_id="EvChannelMessage"),
+        event=dm_event(channel="C123", channel_type="channel"),
+    )
+    db_session.commit()
+
+    task_count = db_session.scalar(select(func.count()).select_from(Task))
+
+    assert result is None
+    assert task_count == 0
+    assert client.calls == []
+
+
+def test_redelivered_dm_is_idempotent(db_session: Session) -> None:
+    client = FakeSlackClient()
+    ingress = SlackIngress(session=db_session, client=client)
+    body = message_body(event_id="EvDmDuplicate")
+    event = dm_event(text="research duplicate delivery")
+
+    first = ingress.handle_dm(body=body, event=event)
+    second = ingress.handle_dm(body=body, event=event)
+    db_session.commit()
+
+    task_count = db_session.scalar(select(func.count()).select_from(Task))
+    message_event_count = db_session.scalar(
+        select(func.count())
+        .select_from(TaskEvent)
+        .where(TaskEvent.type == TaskEventType.message_posted)
+    )
+
+    assert first is not None
+    assert second is not None
+    assert first.created is True
+    assert second.created is False
+    assert second.task.id == first.task.id
+    assert task_count == 1
+    assert message_event_count == 0
+    assert client.calls == []
+
+
 def cleanup_database(session: Session) -> None:
     for model in (
         Artifact,
@@ -309,6 +427,13 @@ def cleanup_database(session: Session) -> None:
 
 
 def app_mention_body(*, event_id: str | None = None) -> dict[str, Any]:
+    return {
+        "event_id": event_id or f"Ev{uuid.uuid4().hex}",
+        "team_id": "T123",
+    }
+
+
+def message_body(*, event_id: str | None = None) -> dict[str, Any]:
     return {
         "event_id": event_id or f"Ev{uuid.uuid4().hex}",
         "team_id": "T123",
@@ -330,4 +455,31 @@ def app_mention_event(
     }
     if thread_ts is not None:
         event["thread_ts"] = thread_ts
+    return event
+
+
+def dm_event(
+    *,
+    text: str = "research a private topic",
+    channel: str = "D123",
+    channel_type: str = "im",
+    ts: str = "1716500000.000001",
+    thread_ts: str | None = None,
+    subtype: str | None = None,
+    bot_id: str | None = None,
+) -> dict[str, Any]:
+    event = {
+        "type": "message",
+        "channel": channel,
+        "channel_type": channel_type,
+        "user": "U123",
+        "text": text,
+        "ts": ts,
+    }
+    if thread_ts is not None:
+        event["thread_ts"] = thread_ts
+    if subtype is not None:
+        event["subtype"] = subtype
+    if bot_id is not None:
+        event["bot_id"] = bot_id
     return event
