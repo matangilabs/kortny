@@ -11,6 +11,7 @@ from kortny.slack.comments import (
     LLMArtifactCommentGenerator,
     StaticArtifactCommentGenerator,
 )
+from kortny.slack.formatting import normalize_slack_mrkdwn
 from kortny.slack.ingress import AppMentionResult, SlackIngress
 from kortny.slack.posting import (
     SlackPoster,
@@ -32,5 +33,6 @@ __all__ = [
     "StaticAcknowledgementGenerator",
     "acknowledge_then_handle",
     "create_bolt_app",
+    "normalize_slack_mrkdwn",
     "run_socket_mode",
 ]

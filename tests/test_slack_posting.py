@@ -163,6 +163,33 @@ def test_post_message_in_dm_posts_without_thread_ts(db_session: Session) -> None
     assert event.payload["thread_ts"] is None
 
 
+def test_post_message_normalizes_slack_mrkdwn(db_session: Session) -> None:
+    task = create_task(db_session)
+    client = FakeSlackClient()
+
+    SlackPoster(session=db_session, client=client).post_message(
+        SlackThread.from_task(task),
+        "### Capabilities\n1. **Web Searches:** Read [docs](https://docs.slack.dev).",
+    )
+
+    event = db_session.scalar(
+        select(TaskEvent)
+        .where(
+            TaskEvent.task_id == task.id,
+            TaskEvent.type == TaskEventType.message_posted,
+        )
+        .order_by(TaskEvent.seq.desc())
+        .limit(1)
+    )
+
+    expected_text = (
+        "*Capabilities*\n1. *Web Searches:* Read <https://docs.slack.dev|docs>."
+    )
+    assert client.messages[0]["text"] == expected_text
+    assert event is not None
+    assert event.payload["text"] == expected_text
+
+
 def test_upload_file_updates_artifact_and_logs_event(
     db_session: Session,
     tmp_path: Path,

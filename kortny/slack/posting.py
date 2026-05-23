@@ -14,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from kortny.db.models import Artifact, Task, TaskEventType
+from kortny.slack.formatting import normalize_slack_mrkdwn
 from kortny.tasks import TaskService
 
 
@@ -90,9 +91,10 @@ class SlackPoster:
         """Post text into a Slack thread and return the Slack message ts."""
 
         post_thread_ts = _post_thread_ts(thread)
+        slack_text = normalize_slack_mrkdwn(text)
         response = self.client.chat_postMessage(
             channel=thread.channel_id,
-            text=text,
+            text=slack_text,
             thread_ts=post_thread_ts,
         )
         message_ts = _response_ts(response)
@@ -107,7 +109,7 @@ class SlackPoster:
                     "channel": thread.channel_id,
                     "thread_ts": post_thread_ts,
                     "message_ts": message_ts,
-                    "text": text,
+                    "text": slack_text,
                     "purpose": purpose,
                 },
             )
