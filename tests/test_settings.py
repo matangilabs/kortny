@@ -10,6 +10,7 @@ SETTINGS_ENV_VARS = {
     "LLM_API_KEY",
     "LLM_MODEL",
     "COMPOSIO_API_KEY",
+    "BRAVE_SEARCH_API_KEY",
     "POSTGRES_URL",
 }
 
@@ -45,10 +46,12 @@ def test_settings_loads_optional_environment(monkeypatch: pytest.MonkeyPatch) ->
     clear_settings_env(monkeypatch)
     set_required_settings_env(monkeypatch)
     monkeypatch.setenv("COMPOSIO_API_KEY", "composio-key")
+    monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "brave-key")
 
     settings = load_settings(env_file=None)
 
     assert settings.composio_api_key == "composio-key"
+    assert settings.brave_search_api_key == "brave-key"
 
 
 def test_blank_optional_environment_values_are_none(
@@ -57,10 +60,12 @@ def test_blank_optional_environment_values_are_none(
     clear_settings_env(monkeypatch)
     set_required_settings_env(monkeypatch)
     monkeypatch.setenv("COMPOSIO_API_KEY", "")
+    monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "")
 
     settings = load_settings(env_file=None)
 
     assert settings.composio_api_key is None
+    assert settings.brave_search_api_key is None
 
 
 def test_load_settings_reports_missing_required_keys(

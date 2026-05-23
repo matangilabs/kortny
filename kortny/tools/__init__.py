@@ -3,6 +3,7 @@
 from kortny.tools.echo import EchoTool
 from kortny.tools.registry import DuplicateToolError, ToolNotFoundError, ToolRegistry
 from kortny.tools.types import JsonObject, JsonSchema, Tool, ToolArtifact, ToolResult
+from kortny.tools.web_search import WebSearchTool
 
 __all__ = [
     "DuplicateToolError",
@@ -14,4 +15,5 @@ __all__ = [
     "ToolNotFoundError",
     "ToolRegistry",
     "ToolResult",
+    "WebSearchTool",
 ]

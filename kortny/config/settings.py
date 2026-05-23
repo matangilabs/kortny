@@ -40,10 +40,13 @@ class Settings(BaseSettings):
     composio_api_key: str | None = Field(
         default=None, validation_alias="COMPOSIO_API_KEY"
     )
+    brave_search_api_key: str | None = Field(
+        default=None, validation_alias="BRAVE_SEARCH_API_KEY"
+    )
 
     postgres_url: str = Field(validation_alias="POSTGRES_URL", min_length=1)
 
-    @field_validator("composio_api_key", mode="before")
+    @field_validator("composio_api_key", "brave_search_api_key", mode="before")
     @classmethod
     def _blank_optional_strings_to_none(cls, value: Any) -> Any:
         if isinstance(value, str) and value.strip() == "":
