@@ -124,8 +124,7 @@ docker compose up
 ```
 
 This starts Postgres on `localhost:5432`, runs the Alembic migration, and
-starts the Slack Socket Mode ingress service. The worker service will be added
-to the stack when the worker entrypoint lands.
+starts the Slack Socket Mode ingress service plus the task worker.
 
 ### 4. Develop against the local database
 
@@ -136,8 +135,13 @@ make migrate
 KORTNY_TEST_POSTGRES_URL=postgresql://kortny:kortny@localhost:5432/kortny uv run pytest tests/test_task_service.py tests/test_queue.py
 ```
 
-The worker and management UI services will be added to Compose as those
-entrypoints land.
+To process at most one pending task from your host shell:
+
+```
+uv run python -m kortny.worker --once
+```
+
+The management UI service will be added to Compose when that entrypoint lands.
 
 ### 5. Invite your bot to a channel
 
