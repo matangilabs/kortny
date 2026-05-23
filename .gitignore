@@ -1,0 +1,128 @@
+# Google ADK + Slack/Bolt Python project
+
+# Local secrets and environment files
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+!.env.*.example
+*.secret
+*.secrets
+*.key
+*.pem
+*.p12
+*.pfx
+client_secret*.json
+credentials*.json
+*credentials*.json
+*service-account*.json
+google-application-credentials*.json
+application_default_credentials.json
+token.json
+
+# Slack local output and credentials
+.slack/logs/
+.slack/*.log
+.slack/*token*
+slack-debug.log*
+
+# Google ADK local runtime output
+.adk/
+.adk_sessions/
+.agent_engine_staging/
+*.session.json
+sessions*.db
+/artifacts/
+/traces/
+
+# Python bytecode and native extensions
+__pycache__/
+*.py[codz]
+*$py.class
+*.so
+
+# Python packaging and build output
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments and local dependency state
+.venv/
+venv/
+env/
+ENV/
+.pixi/
+__pypackages__/
+.uv-cache/
+
+# Test, coverage, type-check, and lint caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.pytype/
+.hypothesis/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Notebook checkpoints
+.ipynb_checkpoints/
+
+# Logs and temporary files
+*.log
+*.pid
+*.tmp
+*.temp
+.cache/
+tmp/
+temp/
+
+# Node/TypeScript tooling sometimes used by Slack CLI hooks or web surfaces
+node_modules/
+.npm/
+.pnpm-store/
+.yarn/cache/
+.yarn/unplugged/
+.yarn/build-state.yml
+.yarn/install-state.gz
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Terraform and local cloud deployment state
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfvars.json
+crash.log
+crash.*.log
+
+# IDE and OS noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+!.vscode/extensions.json
+!.vscode/settings.example.json
