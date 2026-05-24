@@ -14,6 +14,14 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from kortny.db.models import Installation, Task, TaskEventType
+from kortny.intent import (
+    IntentClassifier,
+    IntentDecision,
+    IntentRequest,
+    IntentSurface,
+    should_classify_channel_message,
+    should_create_task_from_soft_mention,
+)
 from kortny.memory import Fact, PendingFact, WorkspaceStateService
 from kortny.slack.acknowledgement import (
     AcknowledgementGenerator,
@@ -46,6 +54,8 @@ REACTION_RETRY = "arrows_counterclockwise"
 REACTION_CONFIRM = "white_check_mark"
 REACTION_REJECT = "no_entry_sign"
 CONFIRMATION_REACTIONS = frozenset({REACTION_CONFIRM, REACTION_REJECT})
+INTENT_CLASSIFIED_MESSAGE = "intent_classification_completed"
+INTENT_CLASSIFICATION_FAILED_MESSAGE = "intent_classification_failed"
 
 
 class SlackPostMessageClient(Protocol):
@@ -92,6 +102,7 @@ class SlackIngress:
         task_service: TaskService | None = None,
         acknowledgement_generator: AcknowledgementGenerator | None = None,
         reaction_provider: ReactionProvider | None = None,
+        intent_classifier: IntentClassifier | None = None,
     ) -> None:
         self.session = session
         self.client = client
@@ -100,6 +111,7 @@ class SlackIngress:
             acknowledgement_generator or StaticAcknowledgementGenerator()
         )
         self.reaction_provider = reaction_provider or LibraryReactionProvider()
+        self.intent_classifier = intent_classifier
 
     def handle_app_mention(
         self,
@@ -139,6 +151,73 @@ class SlackIngress:
             event=event,
             input_text=_task_input(event, strip_leading_mention=False),
             source="dm",
+        )
+
+    def handle_channel_message(
+        self,
+        *,
+        body: Mapping[str, Any],
+        event: Mapping[str, Any],
+        app_name: str = "kortny",
+    ) -> AppMentionResult | None:
+        """Create a task for a direct soft app-name mention in a channel."""
+
+        if not should_classify_channel_message(event, app_name=app_name):
+            logger.info(
+                "slack channel_message ignored reason=not_soft_mention event_id=%s channel=%s",
+                body.get("event_id"),
+                event.get("channel"),
+            )
+            return None
+
+        event_id = _required_str(body, "event_id")
+        channel_id = _required_str(event, "channel")
+        message_ts = _required_str(event, "ts")
+        existing = self._find_existing_task(event_id, channel_id, message_ts)
+        if existing is not None:
+            logger.info(
+                "slack channel_message duplicate task_id=%s event_id=%s channel=%s thread_ts=%s",
+                existing.id,
+                event_id,
+                channel_id,
+                existing.slack_thread_ts or _event_thread_ts(event),
+            )
+            return AppMentionResult(
+                task=existing,
+                created=False,
+                thread_ts=existing.slack_thread_ts
+                or _context_thread_ts(
+                    event,
+                    source="channel_message",
+                    channel_id=channel_id,
+                ),
+            )
+
+        input_text = _task_input(event, strip_leading_mention=False)
+        intent_decision = self._classify_soft_channel_message(
+            event=event,
+            input_text=input_text,
+            app_name=app_name,
+        )
+        if intent_decision is None:
+            return None
+        if not should_create_task_from_soft_mention(intent_decision):
+            logger.info(
+                "slack channel_message ignored reason=intent_rejected event_id=%s channel=%s classification=%s confidence=%.3f addressed=%s",
+                event_id,
+                channel_id,
+                intent_decision.classification.value,
+                intent_decision.confidence,
+                intent_decision.addressed_to_kortny,
+            )
+            return None
+
+        return self._handle_addressed_message(
+            body=body,
+            event=event,
+            input_text=input_text,
+            source="channel_message",
+            preclassified_intent_decision=intent_decision,
         )
 
     def handle_reaction_added(
@@ -204,13 +283,12 @@ class SlackIngress:
         event: Mapping[str, Any],
         input_text: str,
         source: str,
+        preclassified_intent_decision: IntentDecision | None = None,
     ) -> AppMentionResult:
         event_id = _required_str(body, "event_id")
         channel_id = _required_str(event, "channel")
         message_ts = _required_str(event, "ts")
-        existing = self.task_service.get_by_slack_event_id(event_id)
-        if existing is None:
-            existing = self.task_service.get_by_slack_message(channel_id, message_ts)
+        existing = self._find_existing_task(event_id, channel_id, message_ts)
         if existing is not None:
             logger.info(
                 "slack %s duplicate task_id=%s event_id=%s channel=%s thread_ts=%s",
@@ -251,11 +329,25 @@ class SlackIngress:
             user_id,
             len(task.input),
         )
+        if preclassified_intent_decision is None:
+            intent_decision = self._classify_intent(
+                task=task,
+                source=source,
+                event=event,
+            )
+        else:
+            intent_decision = preclassified_intent_decision
+            self._record_intent_decision(
+                task=task,
+                source=source,
+                decision=intent_decision,
+            )
         self._post_ack_reaction(
             task=task,
             source=source,
             channel_id=channel_id,
             message_ts=message_ts,
+            intent_decision=intent_decision,
         )
 
         if _should_skip_visible_ack(event, source=source):
@@ -311,6 +403,17 @@ class SlackIngress:
             acknowledgement_ts=acknowledgement_ts,
         )
 
+    def _find_existing_task(
+        self,
+        event_id: str,
+        channel_id: str,
+        message_ts: str,
+    ) -> Task | None:
+        existing = self.task_service.get_by_slack_event_id(event_id)
+        if existing is None:
+            existing = self.task_service.get_by_slack_message(channel_id, message_ts)
+        return existing
+
     def _post_ack_reaction(
         self,
         *,
@@ -318,10 +421,12 @@ class SlackIngress:
         source: str,
         channel_id: str,
         message_ts: str,
+        intent_decision: IntentDecision | None,
     ) -> None:
         choice = self.reaction_provider.acknowledgement_reaction(
             input_text=task.input,
             source=source,
+            intent_decision=intent_decision,
         )
         reactions_add = getattr(self.client, "reactions_add", None)
         if not callable(reactions_add):
@@ -390,6 +495,114 @@ class SlackIngress:
             channel_id,
             message_ts,
             choice.name,
+        )
+
+    def _classify_intent(
+        self,
+        *,
+        task: Task,
+        source: str,
+        event: Mapping[str, Any],
+    ) -> IntentDecision | None:
+        if self.intent_classifier is None:
+            return None
+
+        try:
+            decision = self.intent_classifier.classify(
+                task_id=task.id,
+                request=IntentRequest(
+                    text=task.input,
+                    surface=_intent_surface(source),
+                    is_thread_follow_up=_is_thread_follow_up(event),
+                    has_files=bool(_event_files(event)),
+                ),
+            )
+        except Exception as exc:
+            logger.info(
+                "slack intent classification failed task_id=%s source=%s error_type=%s error=%s",
+                task.id,
+                source,
+                type(exc).__name__,
+                exc,
+            )
+            self.task_service.append_event(
+                task,
+                TaskEventType.log,
+                {
+                    "message": INTENT_CLASSIFICATION_FAILED_MESSAGE,
+                    "source": source,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                },
+            )
+            return None
+
+        self._record_intent_decision(task=task, source=source, decision=decision)
+        return decision
+
+    def _classify_soft_channel_message(
+        self,
+        *,
+        event: Mapping[str, Any],
+        input_text: str,
+        app_name: str,
+    ) -> IntentDecision | None:
+        if self.intent_classifier is None:
+            logger.info(
+                "slack channel_message ignored reason=no_intent_classifier channel=%s",
+                event.get("channel"),
+            )
+            return None
+        try:
+            decision = self.intent_classifier.classify(
+                request=IntentRequest(
+                    text=input_text,
+                    surface=IntentSurface.channel_message,
+                    app_name=app_name,
+                    is_thread_follow_up=_is_thread_follow_up(event),
+                    has_files=bool(_event_files(event)),
+                ),
+            )
+        except Exception as exc:
+            logger.info(
+                "slack channel_message intent classification failed channel=%s error_type=%s error=%s",
+                event.get("channel"),
+                type(exc).__name__,
+                exc,
+            )
+            return None
+
+        logger.info(
+            "slack channel_message intent classified channel=%s classification=%s confidence=%.3f addressed=%s",
+            event.get("channel"),
+            decision.classification.value,
+            decision.confidence,
+            decision.addressed_to_kortny,
+        )
+        return decision
+
+    def _record_intent_decision(
+        self,
+        *,
+        task: Task,
+        source: str,
+        decision: IntentDecision,
+    ) -> None:
+        self.task_service.append_event(
+            task,
+            TaskEventType.log,
+            {
+                "message": INTENT_CLASSIFIED_MESSAGE,
+                "source": source,
+                "decision": decision.model_dump(mode="json"),
+            },
+        )
+        logger.info(
+            "slack intent classified task_id=%s source=%s classification=%s confidence=%.3f",
+            task.id,
+            source,
+            decision.classification.value,
+            decision.confidence,
         )
 
     def _get_or_create_installation(self, slack_team_id: str) -> Installation:
@@ -639,6 +852,14 @@ def _is_thread_follow_up(event: Mapping[str, Any]) -> bool:
         and isinstance(message_ts, str)
         and thread_ts != message_ts
     )
+
+
+def _intent_surface(source: str) -> IntentSurface:
+    if source == "dm":
+        return IntentSurface.dm
+    if source == "channel_message":
+        return IntentSurface.channel_message
+    return IntentSurface.app_mention
 
 
 def _should_skip_visible_ack(event: Mapping[str, Any], *, source: str) -> bool:

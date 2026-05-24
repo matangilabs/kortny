@@ -157,6 +157,33 @@ def test_openrouter_provider_serializes_prior_tool_messages() -> None:
     ]
 
 
+def test_openrouter_provider_sends_response_format() -> None:
+    captured_payloads: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_payloads.append(json.loads(request.read().decode()))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": '{"ok":true}'}}],
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        )
+
+    provider = OpenRouterProvider(
+        api_key="openrouter-key",
+        model="openai/gpt-4o-mini",
+        transport=httpx.MockTransport(handler),
+    )
+
+    provider.complete(
+        [ChatMessage(role="user", content="classify")],
+        response_format={"type": "json_object"},
+    )
+
+    assert captured_payloads[0]["response_format"] == {"type": "json_object"}
+
+
 def test_create_llm_provider_uses_openrouter_settings() -> None:
     settings = make_settings(
         SettingsLLMProvider.openrouter,

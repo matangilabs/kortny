@@ -24,7 +24,7 @@ from kortny.db.session import make_engine, make_session_factory, normalize_datab
 from kortny.llm import ChatMessage, Completion, LLMService, TokenUsage
 from kortny.llm.service import ModelPricingNotFoundError, calculate_cost_usd
 from kortny.tasks import TaskService
-from kortny.tools.types import JsonSchema
+from kortny.tools.types import JsonObject, JsonSchema
 
 TEST_POSTGRES_URL = os.environ.get("KORTNY_TEST_POSTGRES_URL")
 
@@ -40,7 +40,10 @@ class FakeProvider:
         self,
         messages: Sequence[ChatMessage],
         tools: Sequence[JsonSchema] = (),
+        *,
+        response_format: JsonObject | None = None,
     ) -> Completion:
+        del response_format
         self.calls.append((messages, tools))
         return self.completion
 

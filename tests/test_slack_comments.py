@@ -27,7 +27,7 @@ from kortny.slack.comments import (
     sanitize_artifact_comment,
 )
 from kortny.tasks import TaskService
-from kortny.tools.types import JsonSchema
+from kortny.tools.types import JsonObject, JsonSchema
 
 TEST_POSTGRES_URL = os.environ.get("KORTNY_TEST_POSTGRES_URL")
 
@@ -43,7 +43,10 @@ class FakeProvider:
         self,
         messages: Sequence[ChatMessage],
         tools: Sequence[JsonSchema] = (),
+        *,
+        response_format: JsonObject | None = None,
     ) -> Completion:
+        del response_format
         self.calls.append((messages, tools))
         return self.completion
 

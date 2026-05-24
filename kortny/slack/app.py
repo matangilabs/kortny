@@ -10,7 +10,10 @@ from slack_bolt.adapter.socket_mode import SocketModeHandler
 from sqlalchemy.orm import Session, sessionmaker
 
 from kortny.config import Settings, load_settings
+from kortny.db.models import LLMProvider as DbLLMProvider
 from kortny.db.session import session_scope
+from kortny.intent import LLMIntentClassifier, should_classify_channel_message
+from kortny.llm import LLMService, create_llm_provider
 from kortny.logging_config import configure_logging
 from kortny.slack.acknowledgement import LLMAcknowledgementGenerator
 from kortny.slack.ingress import SlackIngress
@@ -54,6 +57,10 @@ def create_bolt_app(
                         session=session,
                         client=client,
                         acknowledgement_generator=acknowledgement_generator,
+                        intent_classifier=_intent_classifier(
+                            resolved_settings,
+                            session,
+                        ),
                     ).handle_app_mention(
                         body=body,
                         event=event,
@@ -73,21 +80,38 @@ def create_bolt_app(
         logger: Any,
     ) -> None:
         def handle() -> None:
-            # Non-DM message subscriptions are reserved for the V1.1 ambient
-            # observer. For now, only explicit app mentions and DMs create tasks.
-            if event.get("channel_type") != "im":
+            is_dm = event.get("channel_type") == "im"
+            is_soft_mention_candidate = should_classify_channel_message(
+                event,
+                app_name=resolved_settings.slack_app_name,
+            )
+            if not is_dm and not is_soft_mention_candidate:
                 return
 
             try:
                 with session_scope(session_factory) as session:
-                    SlackIngress(
+                    ingress = SlackIngress(
                         session=session,
                         client=client,
                         acknowledgement_generator=acknowledgement_generator,
-                    ).handle_dm(
-                        body=body,
-                        event=event,
+                        intent_classifier=_intent_classifier(
+                            resolved_settings,
+                            session,
+                        )
+                        if is_dm
+                        else _pre_task_intent_classifier(resolved_settings),
                     )
+                    if is_dm:
+                        ingress.handle_dm(
+                            body=body,
+                            event=event,
+                        )
+                    else:
+                        ingress.handle_channel_message(
+                            body=body,
+                            event=event,
+                            app_name=resolved_settings.slack_app_name,
+                        )
             except Exception:
                 logger.exception("Failed to process Slack message event")
                 raise
@@ -119,6 +143,20 @@ def create_bolt_app(
         acknowledge_then_handle(ack, handle)
 
     return app
+
+
+def _intent_classifier(settings: Settings, session: Session) -> LLMIntentClassifier:
+    return LLMIntentClassifier(
+        llm=LLMService(
+            session=session,
+            provider=create_llm_provider(settings),
+            provider_name=DbLLMProvider(settings.llm_provider),
+        )
+    )
+
+
+def _pre_task_intent_classifier(settings: Settings) -> LLMIntentClassifier:
+    return LLMIntentClassifier(provider=create_llm_provider(settings))
 
 
 def run_socket_mode(settings: Settings | None = None) -> None:

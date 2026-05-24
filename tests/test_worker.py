@@ -721,7 +721,10 @@ class FakeAgentProvider:
         self,
         messages: Sequence[ChatMessage],
         tools: Sequence[JsonSchema] = (),
+        *,
+        response_format: JsonObject | None = None,
     ) -> Completion:
+        del response_format
         self.calls.append((tuple(messages), tuple(tools)))
         if not self.completions:
             raise AssertionError("FakeAgentProvider received too many calls")

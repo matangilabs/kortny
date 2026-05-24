@@ -6,6 +6,8 @@ import hashlib
 from dataclasses import dataclass
 from typing import Protocol
 
+from kortny.intent import IntentClassification, IntentDecision
+
 COMPLETED_REACTION = "heavy_check_mark"
 FAILED_REACTION = "warning"
 ACK_REACTION_ADDED_MESSAGE = "slack_ack_reaction_added"
@@ -29,7 +31,11 @@ class ReactionProvider(Protocol):
     """Selects Slack reactions for task lifecycle feedback."""
 
     def acknowledgement_reaction(
-        self, *, input_text: str, source: str
+        self,
+        *,
+        input_text: str,
+        source: str,
+        intent_decision: IntentDecision | None = None,
     ) -> ReactionChoice:
         """Return the reaction to add when a Slack task is accepted."""
 
@@ -117,8 +123,16 @@ class LibraryReactionProvider:
     )
 
     def acknowledgement_reaction(
-        self, *, input_text: str, source: str
+        self,
+        *,
+        input_text: str,
+        source: str,
+        intent_decision: IntentDecision | None = None,
     ) -> ReactionChoice:
+        intent_choice = _choice_from_intent_decision(intent_decision)
+        if intent_choice is not None:
+            return intent_choice
+
         bucket = _intent_bucket(input_text, self.buckets)
         index = _stable_index(f"{source}\n{input_text}", len(bucket.names))
         return ReactionChoice(name=bucket.names[index], intent=bucket.intent)
@@ -147,6 +161,22 @@ def _intent_bucket(
     return default
 
 
+def _choice_from_intent_decision(
+    decision: IntentDecision | None,
+) -> ReactionChoice | None:
+    if decision is None:
+        return None
+
+    suggested = decision.suggested_reaction
+    if suggested in APPROVED_ACK_REACTIONS:
+        return ReactionChoice(name=suggested, intent=decision.classification.value)
+
+    mapped = REACTION_BY_CLASSIFICATION.get(decision.classification)
+    if mapped is None:
+        return None
+    return ReactionChoice(name=mapped, intent=decision.classification.value)
+
+
 def _normalize(value: str) -> str:
     return " ".join(value.casefold().split())
 
@@ -156,3 +186,31 @@ def _stable_index(value: str, modulo: int) -> int:
         raise ValueError("modulo must be at least 1")
     digest = hashlib.sha256(value.encode("utf-8")).digest()
     return int.from_bytes(digest[:4], "big") % modulo
+
+
+APPROVED_ACK_REACTIONS = frozenset(
+    {
+        "bar_chart",
+        "bookmark",
+        "clipboard",
+        "compass",
+        "eyes",
+        "hourglass_flowing_sand",
+        "mag",
+        "memo",
+        "newspaper",
+        "open_file_folder",
+        "page_facing_up",
+        "paperclip",
+        "pushpin",
+        "speech_balloon",
+        "thinking_face",
+    }
+)
+REACTION_BY_CLASSIFICATION = {
+    IntentClassification.task_request: "eyes",
+    IntentClassification.follow_up: "speech_balloon",
+    IntentClassification.memory_candidate: "memo",
+    IntentClassification.clarification: "thinking_face",
+    IntentClassification.cancel_or_retry: "arrows_counterclockwise",
+}

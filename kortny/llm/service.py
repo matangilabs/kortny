@@ -14,7 +14,7 @@ from kortny.db.models import LLMProvider as DbLLMProvider
 from kortny.db.models import ModelPricing
 from kortny.llm.types import ChatMessage, Completion, LLMProvider, TokenUsage
 from kortny.tasks import TaskService
-from kortny.tools.types import JsonSchema
+from kortny.tools.types import JsonObject, JsonSchema
 
 USD_QUANTUM = Decimal("0.000001")
 TOKENS_PER_MTOK = Decimal("1000000")
@@ -46,10 +46,15 @@ class LLMService:
         task_id: uuid.UUID,
         messages: Sequence[ChatMessage],
         tools: Sequence[JsonSchema] = (),
+        response_format: JsonObject | None = None,
     ) -> Completion:
         """Complete a turn, price it, and persist the usage rollup."""
 
-        completion = self.provider.complete(messages, tools)
+        completion = self.provider.complete(
+            messages,
+            tools,
+            response_format=response_format,
+        )
         model = completion.model or self.provider.model
         cost_usd = completion.cost_usd
         if cost_usd is None:

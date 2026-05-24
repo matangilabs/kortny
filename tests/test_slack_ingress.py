@@ -21,7 +21,15 @@ from kortny.db.models import (
     TaskStatus,
 )
 from kortny.db.session import make_engine, make_session_factory, normalize_database_url
+from kortny.intent import (
+    IntentClassification,
+    IntentDecision,
+    IntentRequest,
+    IntentSurface,
+    ModelTier,
+)
 from kortny.slack import SlackIngress, acknowledge_then_handle
+from kortny.slack.ingress import INTENT_CLASSIFIED_MESSAGE
 from kortny.slack.reactions import ACK_REACTION_ADDED_MESSAGE, ReactionChoice
 from kortny.tasks import TaskService
 
@@ -100,11 +108,17 @@ class FakeReactionProvider:
     def __init__(self, name: str = "eyes", intent: str = "working") -> None:
         self.choice = ReactionChoice(name=name, intent=intent)
         self.calls: list[dict[str, str]] = []
+        self.intent_decisions: list[IntentDecision | None] = []
 
     def acknowledgement_reaction(
-        self, *, input_text: str, source: str
+        self,
+        *,
+        input_text: str,
+        source: str,
+        intent_decision: IntentDecision | None = None,
     ) -> ReactionChoice:
         self.calls.append({"input_text": input_text, "source": source})
+        self.intent_decisions.append(intent_decision)
         return self.choice
 
     def completion_reaction(
@@ -112,6 +126,33 @@ class FakeReactionProvider:
     ) -> ReactionChoice:
         del input_text, source, succeeded
         return ReactionChoice(name="heavy_check_mark", intent="completed")
+
+
+class FakeIntentClassifier:
+    def __init__(
+        self,
+        decision: IntentDecision | None = None,
+        *,
+        error: Exception | None = None,
+        require_task_id: bool = True,
+    ) -> None:
+        self.decision = decision or intent_decision()
+        self.error = error
+        self.require_task_id = require_task_id
+        self.calls: list[tuple[uuid.UUID | None, IntentRequest]] = []
+
+    def classify(
+        self,
+        *,
+        request: IntentRequest,
+        task_id: uuid.UUID | None = None,
+    ) -> IntentDecision:
+        if self.require_task_id and task_id is None:
+            raise AssertionError("FakeIntentClassifier expected a task_id")
+        self.calls.append((task_id, request))
+        if self.error is not None:
+            raise self.error
+        return self.decision
 
 
 def test_acknowledge_then_handle_acks_before_work() -> None:
@@ -272,6 +313,42 @@ def test_thread_follow_up_creates_task_without_visible_ack(
     ]
     assert acknowledgements.calls == []
     assert message_event_count == 0
+
+
+def test_app_mention_records_intent_decision_when_classifier_configured(
+    db_session: Session,
+) -> None:
+    client = FakeSlackClient()
+    decision = intent_decision(
+        classification=IntentClassification.memory_candidate,
+        suggested_reaction="memo",
+    )
+    classifier = FakeIntentClassifier(decision)
+    reactions = FakeReactionProvider(name="memo", intent="memory")
+
+    result = SlackIngress(
+        session=db_session,
+        client=client,
+        intent_classifier=classifier,
+        reaction_provider=reactions,
+    ).handle_app_mention(
+        body=app_mention_body(event_id="EvIntentClassified"),
+        event=app_mention_event(text="<@UBOT> remember that briefs stay concise"),
+    )
+    db_session.commit()
+
+    events = task_events(db_session, result.task)
+
+    assert classifier.calls[0][0] == result.task.id
+    assert classifier.calls[0][1].surface is IntentSurface.app_mention
+    assert classifier.calls[0][1].text == "remember that briefs stay concise"
+    assert reactions.intent_decisions == [decision]
+    assert any(
+        event.payload.get("message") == INTENT_CLASSIFIED_MESSAGE
+        and event.payload.get("decision", {}).get("classification")
+        == "memory_candidate"
+        for event in events
+    )
 
 
 def test_ack_reaction_failure_does_not_block_task_creation(
@@ -529,6 +606,182 @@ def test_non_dm_message_event_is_ignored_by_dm_ingress(db_session: Session) -> N
     assert client.calls == []
 
 
+def test_soft_channel_message_creates_task_after_high_confidence_intent(
+    db_session: Session,
+) -> None:
+    client = FakeSlackClient()
+    decision = intent_decision(suggested_reaction="thinking_face")
+    classifier = FakeIntentClassifier(decision, require_task_id=False)
+    reactions = FakeReactionProvider(name="thinking_face", intent="thinking")
+
+    result = SlackIngress(
+        session=db_session,
+        client=client,
+        intent_classifier=classifier,
+        reaction_provider=reactions,
+    ).handle_channel_message(
+        body=message_body(event_id="EvSoftMention1"),
+        event=channel_event(
+            text=(
+                "Kortny can you compare the tradeoffs between reaction ACKs "
+                "and verbal ACKs for this app?"
+            )
+        ),
+        app_name="kortny",
+    )
+    db_session.commit()
+
+    assert result is not None
+    assert result.created is True
+    assert result.thread_ts == "1716600000.000001"
+    assert result.acknowledgement_ts is None
+    assert result.task.input == (
+        "Kortny can you compare the tradeoffs between reaction ACKs "
+        "and verbal ACKs for this app?"
+    )
+    assert result.task.slack_thread_ts == "1716600000.000001"
+    assert result.task.slack_message_ts == "1716600000.000001"
+    assert classifier.calls[0][0] is None
+    assert classifier.calls[0][1].surface is IntentSurface.channel_message
+    assert classifier.calls[0][1].app_name == "kortny"
+    assert client.calls == []
+    assert client.reactions == [
+        {
+            "channel": "C123",
+            "name": "thinking_face",
+            "timestamp": "1716600000.000001",
+        }
+    ]
+    assert reactions.calls == [
+        {
+            "input_text": result.task.input,
+            "source": "channel_message",
+        }
+    ]
+    assert any(
+        event.payload.get("message") == INTENT_CLASSIFIED_MESSAGE
+        and event.payload.get("source") == "channel_message"
+        for event in task_events(db_session, result.task)
+    )
+
+
+def test_soft_channel_message_ignores_third_person_reference(
+    db_session: Session,
+) -> None:
+    client = FakeSlackClient()
+    decision = intent_decision(
+        classification=IntentClassification.third_person_reference,
+    ).model_copy(
+        update={
+            "addressed_to_kortny": False,
+            "should_create_task": False,
+            "confidence": 0.98,
+        }
+    )
+    classifier = FakeIntentClassifier(decision, require_task_id=False)
+
+    result = SlackIngress(
+        session=db_session,
+        client=client,
+        intent_classifier=classifier,
+    ).handle_channel_message(
+        body=message_body(event_id="EvSoftMentionThirdPerson"),
+        event=channel_event(text="I think Kortny might be too eager here."),
+        app_name="kortny",
+    )
+    db_session.commit()
+
+    task_count = db_session.scalar(select(func.count()).select_from(Task))
+
+    assert result is None
+    assert task_count == 0
+    assert len(classifier.calls) == 1
+    assert client.calls == []
+    assert client.reactions == []
+
+
+def test_soft_channel_message_without_app_name_is_ignored_before_llm(
+    db_session: Session,
+) -> None:
+    client = FakeSlackClient()
+    classifier = FakeIntentClassifier(require_task_id=False)
+
+    result = SlackIngress(
+        session=db_session,
+        client=client,
+        intent_classifier=classifier,
+    ).handle_channel_message(
+        body=message_body(event_id="EvSoftMentionNoName"),
+        event=channel_event(text="Can someone compare the two options?"),
+        app_name="kortny",
+    )
+    db_session.commit()
+
+    task_count = db_session.scalar(select(func.count()).select_from(Task))
+
+    assert result is None
+    assert task_count == 0
+    assert classifier.calls == []
+    assert client.calls == []
+    assert client.reactions == []
+
+
+def test_soft_channel_message_from_bot_is_ignored_before_llm(
+    db_session: Session,
+) -> None:
+    client = FakeSlackClient()
+    classifier = FakeIntentClassifier(require_task_id=False)
+
+    result = SlackIngress(
+        session=db_session,
+        client=client,
+        intent_classifier=classifier,
+    ).handle_channel_message(
+        body=message_body(event_id="EvSoftMentionBot"),
+        event=channel_event(
+            text="Kortny can you summarize this?",
+            bot_id="B123",
+        ),
+        app_name="kortny",
+    )
+    db_session.commit()
+
+    task_count = db_session.scalar(select(func.count()).select_from(Task))
+
+    assert result is None
+    assert task_count == 0
+    assert classifier.calls == []
+    assert client.calls == []
+    assert client.reactions == []
+
+
+def test_soft_channel_message_preserves_thread_context(
+    db_session: Session,
+) -> None:
+    client = FakeSlackClient()
+    classifier = FakeIntentClassifier(require_task_id=False)
+
+    result = SlackIngress(
+        session=db_session,
+        client=client,
+        intent_classifier=classifier,
+    ).handle_channel_message(
+        body=message_body(event_id="EvSoftMentionThread"),
+        event=channel_event(
+            text="Kortny can you summarize the decision above?",
+            ts="1716600100.000001",
+            thread_ts="1716600000.000001",
+        ),
+        app_name="kortny",
+    )
+
+    assert result is not None
+    assert result.thread_ts == "1716600000.000001"
+    assert result.task.slack_thread_ts == "1716600000.000001"
+    assert result.task.slack_message_ts == "1716600100.000001"
+    assert classifier.calls[0][1].is_thread_follow_up is True
+
+
 def test_redelivered_dm_is_idempotent(db_session: Session) -> None:
     client = FakeSlackClient()
     ingress = SlackIngress(session=db_session, client=client)
@@ -743,6 +996,27 @@ def create_installation(session: Session) -> Installation:
     return installation
 
 
+def intent_decision(
+    *,
+    classification: IntentClassification = IntentClassification.task_request,
+    suggested_reaction: str | None = "eyes",
+) -> IntentDecision:
+    return IntentDecision(
+        addressed_to_kortny=True,
+        classification=classification,
+        confidence=0.9,
+        should_create_task=True,
+        should_ack_with_reaction=True,
+        suggested_reaction=suggested_reaction,
+        needs_channel_context=False,
+        needs_thread_context=False,
+        needs_file_context=False,
+        likely_tools=[],
+        model_tier=ModelTier.cheap,
+        reason="Direct request to Kortny.",
+    )
+
+
 def task_events(session: Session, task: Task) -> list[TaskEvent]:
     return list(
         session.scalars(
@@ -794,6 +1068,33 @@ def dm_event(
     channel: str = "D123",
     channel_type: str = "im",
     ts: str = "1716500000.000001",
+    thread_ts: str | None = None,
+    subtype: str | None = None,
+    bot_id: str | None = None,
+) -> dict[str, Any]:
+    event: dict[str, Any] = {
+        "type": "message",
+        "channel": channel,
+        "channel_type": channel_type,
+        "user": "U123",
+        "text": text,
+        "ts": ts,
+    }
+    if thread_ts is not None:
+        event["thread_ts"] = thread_ts
+    if subtype is not None:
+        event["subtype"] = subtype
+    if bot_id is not None:
+        event["bot_id"] = bot_id
+    return event
+
+
+def channel_event(
+    *,
+    text: str = "Kortny can you research this?",
+    channel: str = "C123",
+    channel_type: str = "channel",
+    ts: str = "1716600000.000001",
     thread_ts: str | None = None,
     subtype: str | None = None,
     bot_id: str | None = None,

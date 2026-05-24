@@ -66,5 +66,7 @@ class LLMProvider(Protocol):
         self,
         messages: Sequence[ChatMessage],
         tools: Sequence[JsonSchema] = (),
+        *,
+        response_format: JsonObject | None = None,
     ) -> Completion:
         """Complete a chat turn with optional tool declarations."""

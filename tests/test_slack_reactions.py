@@ -1,3 +1,4 @@
+from kortny.intent import IntentClassification, IntentDecision, ModelTier
 from kortny.slack.reactions import LibraryReactionProvider
 
 
@@ -60,3 +61,30 @@ def test_library_reaction_provider_marks_completion_and_failure() -> None:
     assert completed.intent == "completed"
     assert failed.name == "warning"
     assert failed.intent == "failed"
+
+
+def test_acknowledgement_reaction_uses_intent_decision_when_available() -> None:
+    provider = LibraryReactionProvider()
+    decision = IntentDecision(
+        addressed_to_kortny=True,
+        classification=IntentClassification.memory_candidate,
+        confidence=0.9,
+        should_create_task=True,
+        should_ack_with_reaction=True,
+        suggested_reaction="memo",
+        needs_channel_context=False,
+        needs_thread_context=False,
+        needs_file_context=False,
+        likely_tools=[],
+        model_tier=ModelTier.cheap,
+        reason="User stated a durable preference.",
+    )
+
+    choice = provider.acknowledgement_reaction(
+        input_text="please remember this",
+        source="app_mention",
+        intent_decision=decision,
+    )
+
+    assert choice.name == "memo"
+    assert choice.intent == "memory_candidate"

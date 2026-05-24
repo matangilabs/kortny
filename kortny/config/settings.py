@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     slack_signing_secret: str = Field(
         validation_alias="SLACK_SIGNING_SECRET", min_length=1
     )
+    slack_app_name: str = Field(
+        default="kortny", validation_alias="SLACK_APP_NAME", min_length=1
+    )
 
     llm_provider: LLMProvider = Field(validation_alias="LLM_PROVIDER")
     llm_api_key: str = Field(validation_alias="LLM_API_KEY", min_length=1)
@@ -56,6 +59,14 @@ class Settings(BaseSettings):
         if isinstance(value, str) and value.strip() == "":
             return None
         return value
+
+    @field_validator("slack_app_name")
+    @classmethod
+    def _normalize_app_name(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("SLACK_APP_NAME cannot be blank")
+        return stripped
 
     @field_validator("slack_file_read_max_bytes")
     @classmethod

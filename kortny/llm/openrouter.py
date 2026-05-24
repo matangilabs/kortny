@@ -59,6 +59,8 @@ class OpenRouterProvider:
         self,
         messages: Sequence[ChatMessage],
         tools: Sequence[JsonSchema] = (),
+        *,
+        response_format: JsonObject | None = None,
     ) -> Completion:
         payload: JsonObject = {
             "model": self.model,
@@ -66,6 +68,8 @@ class OpenRouterProvider:
         }
         if tools:
             payload["tools"] = [_tool_to_openai_payload(tool) for tool in tools]
+        if response_format is not None:
+            payload["response_format"] = response_format
 
         headers = {
             "Authorization": f"Bearer {self.api_key}",
