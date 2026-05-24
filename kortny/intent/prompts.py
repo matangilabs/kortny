@@ -33,5 +33,14 @@ For channel_message surfaces without @mention, be conservative: only mark addres
 
 Confidence is a routing score from 0 to 1, not a claim of truth. Use lower confidence for ambiguous cases.
 Prefer false negatives over interrupting human conversation.
-Only suggest common Slack emoji names without colons, such as eyes, memo, mag, page_facing_up, thinking_face, speech_balloon.
+For channel_message third_person_reference, set should_ack_with_reaction true only when a quiet social reaction would feel natural, such as a positive introduction or neutral acknowledgement. Keep it false for criticism, conflict, sensitive topics, or random references.
+Choose suggested_reaction from this safe catalog only, without colons:
+eyes, hourglass_flowing_sand, speech_balloon, gear, zap, hourglass,
+memo, bookmark, pushpin, label, spiral_note_pad, card_index_dividers,
+page_facing_up, paperclip, open_file_folder, writing_hand, art, hammer_and_wrench,
+mag, newspaper, compass, bulb, dart, satellite,
+thinking_face, bar_chart, clipboard, mag_right, brain,
+wave, sparkles, raised_hands, tada, star, handshake, clap, smile,
+arrows_counterclockwise.
+Pick a reaction that matches the exact tone of the message. Do not default to wave for every social reference.
 Do not include markdown, comments, or text outside the JSON object."""

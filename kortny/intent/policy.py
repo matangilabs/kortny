@@ -8,11 +8,17 @@ from collections.abc import Mapping
 from kortny.intent.models import IntentClassification, IntentDecision
 
 SOFT_MENTION_TASK_CONFIDENCE = 0.85
+SOFT_MENTION_REACTION_CONFIDENCE = 0.85
 TASK_CREATING_CLASSIFICATIONS = frozenset(
     {
         IntentClassification.task_request,
         IntentClassification.follow_up,
         IntentClassification.memory_candidate,
+    }
+)
+REACTION_ONLY_CLASSIFICATIONS = frozenset(
+    {
+        IntentClassification.third_person_reference,
     }
 )
 
@@ -64,6 +70,22 @@ def should_create_task_from_soft_mention(
         and decision.classification in TASK_CREATING_CLASSIFICATIONS
         and decision.confidence >= threshold
         and decision.should_create_task
+    )
+
+
+def should_react_to_rejected_soft_mention(
+    decision: IntentDecision,
+    *,
+    threshold: float = SOFT_MENTION_REACTION_CONFIDENCE,
+) -> bool:
+    """Return true for high-confidence no-task messages worth a quiet reaction."""
+
+    return (
+        not decision.addressed_to_kortny
+        and decision.classification in REACTION_ONLY_CLASSIFICATIONS
+        and decision.confidence >= threshold
+        and not decision.should_create_task
+        and decision.should_ack_with_reaction
     )
 
 

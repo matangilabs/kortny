@@ -21,6 +21,7 @@ from kortny.intent import (
     IntentSurface,
     should_classify_channel_message,
     should_create_task_from_soft_mention,
+    should_react_to_rejected_soft_mention,
 )
 from kortny.memory import Fact, PendingFact, WorkspaceStateService
 from kortny.slack.acknowledgement import (
@@ -202,6 +203,13 @@ class SlackIngress:
         if intent_decision is None:
             return None
         if not should_create_task_from_soft_mention(intent_decision):
+            self._post_rejected_soft_mention_reaction(
+                source="channel_message",
+                channel_id=channel_id,
+                message_ts=message_ts,
+                input_text=input_text,
+                intent_decision=intent_decision,
+            )
             logger.info(
                 "slack channel_message ignored reason=intent_rejected event_id=%s channel=%s classification=%s confidence=%.3f addressed=%s",
                 event_id,
@@ -495,6 +503,60 @@ class SlackIngress:
             channel_id,
             message_ts,
             choice.name,
+        )
+
+    def _post_rejected_soft_mention_reaction(
+        self,
+        *,
+        source: str,
+        channel_id: str,
+        message_ts: str,
+        input_text: str,
+        intent_decision: IntentDecision,
+    ) -> None:
+        if not should_react_to_rejected_soft_mention(intent_decision):
+            return
+
+        choice = self.reaction_provider.acknowledgement_reaction(
+            input_text=input_text,
+            source=source,
+            intent_decision=intent_decision,
+        )
+        reactions_add = getattr(self.client, "reactions_add", None)
+        if not callable(reactions_add):
+            logger.info(
+                "slack %s rejected soft mention reaction unavailable channel=%s message_ts=%s reaction=%s",
+                source,
+                channel_id,
+                message_ts,
+                choice.name,
+            )
+            return
+        try:
+            reactions_add(
+                channel=channel_id,
+                name=choice.name,
+                timestamp=message_ts,
+            )
+        except Exception as exc:
+            logger.info(
+                "slack %s rejected soft mention reaction failed channel=%s message_ts=%s reaction=%s error_type=%s error=%s",
+                source,
+                channel_id,
+                message_ts,
+                choice.name,
+                type(exc).__name__,
+                exc,
+            )
+            return
+
+        logger.info(
+            "slack %s rejected soft mention reaction added channel=%s message_ts=%s reaction=%s classification=%s",
+            source,
+            channel_id,
+            message_ts,
+            choice.name,
+            intent_decision.classification.value,
         )
 
     def _classify_intent(

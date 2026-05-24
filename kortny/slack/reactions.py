@@ -60,7 +60,14 @@ class LibraryReactionProvider:
     buckets: tuple[ReactionBucket, ...] = (
         ReactionBucket(
             "memory",
-            ("memo", "bookmark", "pushpin"),
+            (
+                "memo",
+                "bookmark",
+                "pushpin",
+                "label",
+                "spiral_note_pad",
+                "card_index_dividers",
+            ),
             (
                 "remember",
                 "keep in mind",
@@ -72,7 +79,14 @@ class LibraryReactionProvider:
         ),
         ReactionBucket(
             "creation",
-            ("page_facing_up", "paperclip", "open_file_folder"),
+            (
+                "page_facing_up",
+                "paperclip",
+                "open_file_folder",
+                "writing_hand",
+                "art",
+                "hammer_and_wrench",
+            ),
             (
                 "create",
                 "draft",
@@ -90,7 +104,14 @@ class LibraryReactionProvider:
         ),
         ReactionBucket(
             "discovery",
-            ("mag", "newspaper", "compass"),
+            (
+                "mag",
+                "newspaper",
+                "compass",
+                "bulb",
+                "dart",
+                "satellite",
+            ),
             (
                 "research",
                 "search",
@@ -105,7 +126,14 @@ class LibraryReactionProvider:
         ),
         ReactionBucket(
             "review",
-            ("thinking_face", "bar_chart", "clipboard"),
+            (
+                "thinking_face",
+                "bar_chart",
+                "clipboard",
+                "mag_right",
+                "brain",
+                "memo",
+            ),
             (
                 "analyze",
                 "analyse",
@@ -119,7 +147,39 @@ class LibraryReactionProvider:
                 "evaluate",
             ),
         ),
-        ReactionBucket("working", ("eyes", "hourglass_flowing_sand", "speech_balloon")),
+        ReactionBucket(
+            "social_presence",
+            (
+                "wave",
+                "sparkles",
+                "raised_hands",
+                "tada",
+                "star",
+                "handshake",
+                "clap",
+                "smile",
+            ),
+            (
+                "coworker",
+                "team",
+                "welcome",
+                "introduced",
+                "good work",
+                "help us",
+                "helping",
+            ),
+        ),
+        ReactionBucket(
+            "working",
+            (
+                "eyes",
+                "hourglass_flowing_sand",
+                "speech_balloon",
+                "gear",
+                "zap",
+                "hourglass",
+            ),
+        ),
     )
 
     def acknowledgement_reaction(
@@ -129,7 +189,12 @@ class LibraryReactionProvider:
         source: str,
         intent_decision: IntentDecision | None = None,
     ) -> ReactionChoice:
-        intent_choice = _choice_from_intent_decision(intent_decision)
+        intent_choice = _choice_from_intent_decision(
+            input_text=input_text,
+            source=source,
+            buckets=self.buckets,
+            decision=intent_decision,
+        )
         if intent_choice is not None:
             return intent_choice
 
@@ -162,6 +227,10 @@ def _intent_bucket(
 
 
 def _choice_from_intent_decision(
+    *,
+    input_text: str,
+    source: str,
+    buckets: tuple[ReactionBucket, ...],
     decision: IntentDecision | None,
 ) -> ReactionChoice | None:
     if decision is None:
@@ -172,9 +241,33 @@ def _choice_from_intent_decision(
         return ReactionChoice(name=suggested, intent=decision.classification.value)
 
     mapped = REACTION_BY_CLASSIFICATION.get(decision.classification)
-    if mapped is None:
+    if mapped is not None:
+        return ReactionChoice(name=mapped, intent=decision.classification.value)
+
+    bucket_name = REACTION_BUCKET_BY_CLASSIFICATION.get(decision.classification)
+    if bucket_name is None:
         return None
-    return ReactionChoice(name=mapped, intent=decision.classification.value)
+    bucket = _bucket_by_intent(bucket_name, buckets)
+    if bucket is None:
+        return None
+    index = _stable_index(
+        f"{source}\n{decision.classification.value}\n{input_text}",
+        len(bucket.names),
+    )
+    return ReactionChoice(
+        name=bucket.names[index],
+        intent=decision.classification.value,
+    )
+
+
+def _bucket_by_intent(
+    intent: str,
+    buckets: tuple[ReactionBucket, ...],
+) -> ReactionBucket | None:
+    for bucket in buckets:
+        if bucket.intent == intent:
+            return bucket
+    return None
 
 
 def _normalize(value: str) -> str:
@@ -188,24 +281,18 @@ def _stable_index(value: str, modulo: int) -> int:
     return int.from_bytes(digest[:4], "big") % modulo
 
 
-APPROVED_ACK_REACTIONS = frozenset(
+REACTION_EXTRA_ALLOWLIST = frozenset(
     {
-        "bar_chart",
-        "bookmark",
-        "clipboard",
-        "compass",
-        "eyes",
-        "hourglass_flowing_sand",
-        "mag",
-        "memo",
-        "newspaper",
-        "open_file_folder",
-        "page_facing_up",
-        "paperclip",
-        "pushpin",
-        "speech_balloon",
-        "thinking_face",
+        "arrows_counterclockwise",
+        COMPLETED_REACTION,
+        FAILED_REACTION,
     }
+)
+APPROVED_ACK_REACTIONS = (
+    frozenset(
+        {name for bucket in LibraryReactionProvider.buckets for name in bucket.names}
+    )
+    | REACTION_EXTRA_ALLOWLIST
 )
 REACTION_BY_CLASSIFICATION = {
     IntentClassification.task_request: "eyes",
@@ -213,4 +300,7 @@ REACTION_BY_CLASSIFICATION = {
     IntentClassification.memory_candidate: "memo",
     IntentClassification.clarification: "thinking_face",
     IntentClassification.cancel_or_retry: "arrows_counterclockwise",
+}
+REACTION_BUCKET_BY_CLASSIFICATION = {
+    IntentClassification.third_person_reference: "social_presence",
 }

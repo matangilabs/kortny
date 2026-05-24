@@ -675,6 +675,7 @@ def test_soft_channel_message_ignores_third_person_reference(
         update={
             "addressed_to_kortny": False,
             "should_create_task": False,
+            "should_ack_with_reaction": False,
             "confidence": 0.98,
         }
     )
@@ -698,6 +699,65 @@ def test_soft_channel_message_ignores_third_person_reference(
     assert len(classifier.calls) == 1
     assert client.calls == []
     assert client.reactions == []
+
+
+def test_soft_channel_message_can_react_to_social_third_person_reference(
+    db_session: Session,
+) -> None:
+    client = FakeSlackClient()
+    decision = intent_decision(
+        classification=IntentClassification.third_person_reference,
+        suggested_reaction="wave",
+    ).model_copy(
+        update={
+            "addressed_to_kortny": False,
+            "should_create_task": False,
+            "should_ack_with_reaction": True,
+            "confidence": 0.92,
+        }
+    )
+    classifier = FakeIntentClassifier(decision, require_task_id=False)
+    reactions = FakeReactionProvider(name="wave", intent="third_person_reference")
+
+    result = SlackIngress(
+        session=db_session,
+        client=client,
+        intent_classifier=classifier,
+        reaction_provider=reactions,
+    ).handle_channel_message(
+        body=message_body(event_id="EvSoftMentionIntro"),
+        event=channel_event(
+            text=(
+                "Hey guys guess what? Kortny is our new coworker who will "
+                "help us with tasks."
+            )
+        ),
+        app_name="kortny",
+    )
+    db_session.commit()
+
+    task_count = db_session.scalar(select(func.count()).select_from(Task))
+
+    assert result is None
+    assert task_count == 0
+    assert len(classifier.calls) == 1
+    assert client.calls == []
+    assert client.reactions == [
+        {
+            "channel": "C123",
+            "name": "wave",
+            "timestamp": "1716600000.000001",
+        }
+    ]
+    assert reactions.calls == [
+        {
+            "input_text": (
+                "Hey guys guess what? Kortny is our new coworker who will "
+                "help us with tasks."
+            ),
+            "source": "channel_message",
+        }
+    ]
 
 
 def test_soft_channel_message_without_app_name_is_ignored_before_llm(

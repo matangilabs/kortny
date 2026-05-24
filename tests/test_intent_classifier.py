@@ -14,6 +14,7 @@ from kortny.intent import (
     parse_intent_decision,
     should_classify_channel_message,
     should_create_task_from_soft_mention,
+    should_react_to_rejected_soft_mention,
 )
 from kortny.llm import ChatMessage, Completion, TokenUsage
 from kortny.tools.types import JsonObject, JsonSchema
@@ -173,6 +174,35 @@ def test_soft_mention_policy_fails_closed() -> None:
     assert should_create_task_from_soft_mention(high_confidence) is True
     assert should_create_task_from_soft_mention(third_person) is False
     assert should_create_task_from_soft_mention(low_confidence) is False
+
+
+def test_rejected_soft_mention_reaction_policy_is_social_only() -> None:
+    social_reference = parse_intent_decision(
+        """
+        {
+          "addressed_to_kortny": false,
+          "classification": "third_person_reference",
+          "confidence": 0.9,
+          "should_create_task": false,
+          "should_ack_with_reaction": true,
+          "suggested_reaction": "wave",
+          "needs_channel_context": false,
+          "needs_thread_context": false,
+          "needs_file_context": false,
+          "likely_tools": [],
+          "model_tier": "cheap",
+          "reason": "User introduces Kortny to other people."
+        }
+        """
+    )
+    silent_reference = social_reference.model_copy(
+        update={"should_ack_with_reaction": False}
+    )
+    low_confidence = social_reference.model_copy(update={"confidence": 0.6})
+
+    assert should_react_to_rejected_soft_mention(social_reference) is True
+    assert should_react_to_rejected_soft_mention(silent_reference) is False
+    assert should_react_to_rejected_soft_mention(low_confidence) is False
 
 
 def test_channel_message_prefilter_only_selects_soft_name_candidates() -> None:
