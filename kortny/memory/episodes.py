@@ -222,13 +222,17 @@ def _task_artifacts(session: Session, task: Task) -> tuple[Artifact, ...]:
 
 def _episode_summary(task: Task, artifacts: Sequence[Artifact]) -> str:
     if task.result_summary and task.result_summary.strip():
-        return _shorten(task.result_summary.strip(), max_chars=MAX_EPISODE_SUMMARY_CHARS)
+        return _shorten(
+            task.result_summary.strip(), max_chars=MAX_EPISODE_SUMMARY_CHARS
+        )
 
     status = DbTaskStatus(task.status)
     if status is DbTaskStatus.failed:
         error = _error_summary(task.error)
         if error:
-            return _shorten(f"Task failed: {error}", max_chars=MAX_EPISODE_SUMMARY_CHARS)
+            return _shorten(
+                f"Task failed: {error}", max_chars=MAX_EPISODE_SUMMARY_CHARS
+            )
         return "Task failed before producing a final summary."
     if status is DbTaskStatus.cancelled:
         return "Task was cancelled before completion."
