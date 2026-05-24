@@ -18,7 +18,7 @@ from kortny.config import Settings, load_settings
 from kortny.db.models import Artifact, Task, TaskEvent, TaskEventType
 from kortny.db.models import LLMProvider as DbLLMProvider
 from kortny.execution import task_workspace
-from kortny.llm import LLMProvider, LLMService, create_llm_provider
+from kortny.llm import LLMProvider, LLMService, ModelRouter, create_llm_provider
 from kortny.memory import WorkspaceStateService
 from kortny.slack import SlackPoster, SlackThread
 from kortny.slack.comments import (
@@ -118,6 +118,7 @@ class AgentTaskExecutor:
                 llm = self._build_llm(
                     settings=settings,
                     session=session,
+                    task=task,
                     task_service=task_service,
                 )
                 registry = self._build_registry(
@@ -188,15 +189,43 @@ class AgentTaskExecutor:
         *,
         settings: Settings,
         session: Session,
+        task: Task,
         task_service: TaskService,
     ) -> LLMService:
-        provider = self.llm_provider or create_llm_provider(settings)
+        model_route = None
+        provider: LLMProvider
+        if self.llm_provider is None:
+            model_route = ModelRouter(settings).route_for_task(
+                task,
+                events=_task_events(session, task),
+            )
+            provider = create_llm_provider(settings, model=model_route.model)
+            task_service.append_event(
+                task,
+                TaskEventType.log,
+                {
+                    "message": "model_route_selected",
+                    "tier": model_route.tier.value,
+                    "model": model_route.model,
+                    "reason": model_route.reason,
+                },
+            )
+            logger.info(
+                "agent executor model route selected task_id=%s tier=%s model=%s reason=%s",
+                task.id,
+                model_route.tier.value,
+                model_route.model,
+                model_route.reason,
+            )
+        else:
+            provider = self.llm_provider
         provider_name = self.provider_name or DbLLMProvider(settings.llm_provider.value)
         return LLMService(
             session=session,
             provider=provider,
             provider_name=provider_name,
             task_service=task_service,
+            model_route=model_route,
         )
 
     def _build_thread_transcript_provider(
@@ -583,6 +612,16 @@ def _latest_ack_reaction_event(session: Session, task: Task) -> TaskEvent | None
         )
         .order_by(TaskEvent.seq.desc())
         .limit(1)
+    )
+
+
+def _task_events(session: Session, task: Task) -> tuple[TaskEvent, ...]:
+    return tuple(
+        session.scalars(
+            select(TaskEvent)
+            .where(TaskEvent.task_id == task.id)
+            .order_by(TaskEvent.seq)
+        )
     )
 
 

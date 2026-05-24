@@ -305,6 +305,7 @@ class TaskRepository:
         output_tokens: int,
         cost_usd: Decimal | int | str,
         event_id: int | None = None,
+        model_tier: str | None = None,
     ) -> LLMUsage:
         """Record LLM usage and refresh denormalized totals on the task."""
 
@@ -324,6 +325,7 @@ class TaskRepository:
                 {
                     "provider": provider_value.value,
                     "model": model,
+                    "model_tier": model_tier,
                     "input_tokens": input_tokens,
                     "output_tokens": output_tokens,
                     "cost_usd": str(cost),
@@ -336,6 +338,7 @@ class TaskRepository:
             event_id=event_id,
             provider=provider_value,
             model=model,
+            model_tier=model_tier,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             cost_usd=cost,

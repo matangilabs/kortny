@@ -10,6 +10,11 @@ SETTINGS_ENV_VARS = {
     "LLM_PROVIDER",
     "LLM_API_KEY",
     "LLM_MODEL",
+    "LLM_CHEAP_MODEL",
+    "LLM_STANDARD_MODEL",
+    "LLM_ANALYSIS_MODEL",
+    "LLM_DOCUMENT_MODEL",
+    "LLM_HIGH_REASONING_MODEL",
     "COMPOSIO_API_KEY",
     "BRAVE_SEARCH_API_KEY",
     "POSTGRES_URL",
@@ -52,6 +57,8 @@ def test_settings_loads_optional_environment(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "brave-key")
     monkeypatch.setenv("SLACK_FILE_READ_MAX_BYTES", "1024")
     monkeypatch.setenv("SLACK_APP_NAME", "Courtney")
+    monkeypatch.setenv("LLM_CHEAP_MODEL", "anthropic/claude-haiku-test")
+    monkeypatch.setenv("LLM_DOCUMENT_MODEL", "anthropic/claude-sonnet-test")
 
     settings = load_settings(env_file=None)
 
@@ -59,6 +66,8 @@ def test_settings_loads_optional_environment(monkeypatch: pytest.MonkeyPatch) ->
     assert settings.brave_search_api_key == "brave-key"
     assert settings.slack_file_read_max_bytes == 1024
     assert settings.slack_app_name == "Courtney"
+    assert settings.llm_cheap_model == "anthropic/claude-haiku-test"
+    assert settings.llm_document_model == "anthropic/claude-sonnet-test"
 
 
 def test_blank_optional_environment_values_are_none(
@@ -68,11 +77,13 @@ def test_blank_optional_environment_values_are_none(
     set_required_settings_env(monkeypatch)
     monkeypatch.setenv("COMPOSIO_API_KEY", "")
     monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "")
+    monkeypatch.setenv("LLM_CHEAP_MODEL", "")
 
     settings = load_settings(env_file=None)
 
     assert settings.composio_api_key is None
     assert settings.brave_search_api_key is None
+    assert settings.llm_cheap_model is None
 
 
 def test_load_settings_reports_missing_required_keys(

@@ -44,6 +44,7 @@ class OpenRouterProvider:
     def from_settings(
         cls,
         settings: Settings | None = None,
+        model: str | None = None,
         **kwargs: Any,
     ) -> OpenRouterProvider:
         """Create an OpenRouter provider from application settings."""
@@ -51,7 +52,7 @@ class OpenRouterProvider:
         resolved_settings = settings or load_settings()
         return cls(
             api_key=resolved_settings.llm_api_key,
-            model=resolved_settings.llm_model,
+            model=model or resolved_settings.llm_model,
             **kwargs,
         )
 
@@ -89,6 +90,8 @@ class OpenRouterProvider:
 
 def create_llm_provider(
     settings: Settings | None = None,
+    *,
+    model: str | None = None,
     **kwargs: Any,
 ) -> OpenRouterProvider:
     """Create the configured MVP provider.
@@ -103,7 +106,7 @@ def create_llm_provider(
             f"LLM_PROVIDER={resolved_settings.llm_provider.value!r} is not "
             "implemented yet; use 'openrouter' for the MVP provider"
         )
-    return OpenRouterProvider.from_settings(resolved_settings, **kwargs)
+    return OpenRouterProvider.from_settings(resolved_settings, model=model, **kwargs)
 
 
 def _message_to_payload(message: ChatMessage) -> JsonObject:

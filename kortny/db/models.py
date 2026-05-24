@@ -312,6 +312,7 @@ class LLMUsage(Base):
     )
     provider: Mapped[LLMProvider] = mapped_column(LLM_PROVIDER, nullable=False)
     model: Mapped[str] = mapped_column(String, nullable=False)
+    model_tier: Mapped[str | None] = mapped_column(String)
     input_tokens: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default=text("0")
     )

@@ -431,6 +431,45 @@ def test_agent_executor_falls_back_when_artifact_comment_generation_fails(
     )
 
 
+def test_agent_executor_builds_routed_llm_from_task_input(
+    db_session: Session,
+) -> None:
+    task = create_task(db_session, event_id="EvRouteDocument")
+    task.input = "make a detailed PDF report about this discussion"
+    task_service = TaskService(db_session)
+    settings = Settings.model_validate(
+        {
+            "SLACK_BOT_TOKEN": "xoxb-test",
+            "SLACK_APP_TOKEN": "xapp-test",
+            "SLACK_SIGNING_SECRET": "signing-secret",
+            "LLM_PROVIDER": SettingsLLMProvider.openrouter,
+            "LLM_API_KEY": "openrouter-key",
+            "LLM_MODEL": "openai/default",
+            "LLM_DOCUMENT_MODEL": "anthropic/document-model",
+            "BRAVE_SEARCH_API_KEY": "brave-key",
+            "POSTGRES_URL": "postgresql://kortny:kortny@localhost/kortny",
+        }
+    )
+
+    llm = AgentTaskExecutor(settings=settings)._build_llm(
+        settings=settings,
+        session=db_session,
+        task=task,
+        task_service=task_service,
+    )
+
+    events = task_events(db_session, task)
+
+    assert llm.provider.model == "anthropic/document-model"
+    assert llm.model_tier == "document"
+    assert any(
+        event.payload.get("message") == "model_route_selected"
+        and event.payload.get("tier") == "document"
+        and event.payload.get("model") == "anthropic/document-model"
+        for event in events
+    )
+
+
 def test_agent_executor_replaces_ack_reaction_after_success(
     db_session: Session,
     worker_session_factory: sessionmaker[Session],

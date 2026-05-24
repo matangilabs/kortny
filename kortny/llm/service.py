@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from kortny.db.models import LLMProvider as DbLLMProvider
 from kortny.db.models import ModelPricing
+from kortny.llm.routing import ModelRoute, ModelRouteTier
 from kortny.llm.types import ChatMessage, Completion, LLMProvider, TokenUsage
 from kortny.tasks import TaskService
 from kortny.tools.types import JsonObject, JsonSchema
@@ -34,11 +35,13 @@ class LLMService:
         provider: LLMProvider,
         provider_name: DbLLMProvider | str,
         task_service: TaskService | None = None,
+        model_route: ModelRoute | None = None,
     ) -> None:
         self.session = session
         self.provider = provider
         self.provider_name = DbLLMProvider(provider_name)
         self.task_service = task_service or TaskService(session)
+        self.model_route = model_route
 
     def complete(
         self,
@@ -65,11 +68,21 @@ class LLMService:
             task_id,
             provider=self.provider_name,
             model=model,
+            model_tier=self.model_tier,
             input_tokens=completion.usage.input_tokens,
             output_tokens=completion.usage.output_tokens,
             cost_usd=cost_usd,
         )
         return completion
+
+    @property
+    def model_tier(self) -> str | None:
+        if self.model_route is None:
+            return None
+        tier = self.model_route.tier
+        if isinstance(tier, ModelRouteTier):
+            return tier.value
+        return str(tier)
 
     def get_pricing(
         self,

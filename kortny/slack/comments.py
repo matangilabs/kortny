@@ -10,7 +10,14 @@ from sqlalchemy.orm import Session
 from kortny.config import Settings
 from kortny.db.models import Artifact, Task
 from kortny.db.models import LLMProvider as DbLLMProvider
-from kortny.llm import ChatMessage, LLMProvider, LLMService, create_llm_provider
+from kortny.llm import (
+    ChatMessage,
+    LLMProvider,
+    LLMService,
+    ModelRouter,
+    ModelRouteTier,
+    create_llm_provider,
+)
 from kortny.tasks import TaskService
 
 ARTIFACT_COMMENT_FALLBACK_TEXT = "I finished this and attached it here."
@@ -74,13 +81,21 @@ class LLMArtifactCommentGenerator:
         artifact: Artifact,
         task_service: TaskService,
     ) -> str:
-        provider = self.provider or create_llm_provider(self.settings)
+        model_route = ModelRouter(self.settings).route_for_tier(
+            ModelRouteTier.cheap_fast,
+            reason="artifact_comment",
+        )
+        provider = self.provider or create_llm_provider(
+            self.settings,
+            model=model_route.model,
+        )
         provider_name = self.provider_name or DbLLMProvider(self.settings.llm_provider)
         completion = LLMService(
             session=session,
             provider=provider,
             provider_name=provider_name,
             task_service=task_service,
+            model_route=model_route,
         ).complete(
             task_id=task.id,
             messages=(

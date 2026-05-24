@@ -199,6 +199,22 @@ def test_create_llm_provider_uses_openrouter_settings() -> None:
     assert provider.model == "openai/gpt-4o-mini"
 
 
+def test_create_llm_provider_accepts_model_override() -> None:
+    settings = make_settings(
+        SettingsLLMProvider.openrouter,
+        "openrouter-key",
+        "openai/gpt-4o-mini",
+    )
+
+    provider = create_llm_provider(
+        settings,
+        model="anthropic/claude-sonnet-test",
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})),
+    )
+
+    assert provider.model == "anthropic/claude-sonnet-test"
+
+
 def test_create_llm_provider_rejects_unimplemented_provider() -> None:
     settings = make_settings(SettingsLLMProvider.openai, "openai-key", "gpt-4o-mini")
 

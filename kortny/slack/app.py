@@ -13,7 +13,7 @@ from kortny.config import Settings, load_settings
 from kortny.db.models import LLMProvider as DbLLMProvider
 from kortny.db.session import session_scope
 from kortny.intent import LLMIntentClassifier, should_classify_channel_message
-from kortny.llm import LLMService, create_llm_provider
+from kortny.llm import LLMService, ModelRouter, ModelRouteTier, create_llm_provider
 from kortny.logging_config import configure_logging
 from kortny.slack.acknowledgement import LLMAcknowledgementGenerator
 from kortny.slack.ingress import SlackIngress
@@ -146,17 +146,28 @@ def create_bolt_app(
 
 
 def _intent_classifier(settings: Settings, session: Session) -> LLMIntentClassifier:
+    model_route = ModelRouter(settings).route_for_tier(
+        ModelRouteTier.cheap_fast,
+        reason="intent_classification",
+    )
     return LLMIntentClassifier(
         llm=LLMService(
             session=session,
-            provider=create_llm_provider(settings),
+            provider=create_llm_provider(settings, model=model_route.model),
             provider_name=DbLLMProvider(settings.llm_provider),
+            model_route=model_route,
         )
     )
 
 
 def _pre_task_intent_classifier(settings: Settings) -> LLMIntentClassifier:
-    return LLMIntentClassifier(provider=create_llm_provider(settings))
+    model_route = ModelRouter(settings).route_for_tier(
+        ModelRouteTier.cheap_fast,
+        reason="intent_classification",
+    )
+    return LLMIntentClassifier(
+        provider=create_llm_provider(settings, model=model_route.model)
+    )
 
 
 def run_socket_mode(settings: Settings | None = None) -> None:

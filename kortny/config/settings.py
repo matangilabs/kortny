@@ -39,6 +39,21 @@ class Settings(BaseSettings):
     llm_provider: LLMProvider = Field(validation_alias="LLM_PROVIDER")
     llm_api_key: str = Field(validation_alias="LLM_API_KEY", min_length=1)
     llm_model: str = Field(validation_alias="LLM_MODEL", min_length=1)
+    llm_cheap_model: str | None = Field(
+        default=None, validation_alias="LLM_CHEAP_MODEL"
+    )
+    llm_standard_model: str | None = Field(
+        default=None, validation_alias="LLM_STANDARD_MODEL"
+    )
+    llm_analysis_model: str | None = Field(
+        default=None, validation_alias="LLM_ANALYSIS_MODEL"
+    )
+    llm_document_model: str | None = Field(
+        default=None, validation_alias="LLM_DOCUMENT_MODEL"
+    )
+    llm_high_reasoning_model: str | None = Field(
+        default=None, validation_alias="LLM_HIGH_REASONING_MODEL"
+    )
 
     composio_api_key: str | None = Field(
         default=None, validation_alias="COMPOSIO_API_KEY"
@@ -53,12 +68,35 @@ class Settings(BaseSettings):
 
     postgres_url: str = Field(validation_alias="POSTGRES_URL", min_length=1)
 
-    @field_validator("composio_api_key", "brave_search_api_key", mode="before")
+    @field_validator(
+        "composio_api_key",
+        "brave_search_api_key",
+        "llm_cheap_model",
+        "llm_standard_model",
+        "llm_analysis_model",
+        "llm_document_model",
+        "llm_high_reasoning_model",
+        mode="before",
+    )
     @classmethod
     def _blank_optional_strings_to_none(cls, value: Any) -> Any:
         if isinstance(value, str) and value.strip() == "":
             return None
         return value
+
+    @field_validator(
+        "llm_cheap_model",
+        "llm_standard_model",
+        "llm_analysis_model",
+        "llm_document_model",
+        "llm_high_reasoning_model",
+    )
+    @classmethod
+    def _strip_optional_model(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        return stripped or None
 
     @field_validator("slack_app_name")
     @classmethod

@@ -19,9 +19,17 @@ from kortny.db.models import (
     ModelPricing,
     Task,
     TaskEvent,
+    TaskEventType,
 )
 from kortny.db.session import make_engine, make_session_factory, normalize_database_url
-from kortny.llm import ChatMessage, Completion, LLMService, TokenUsage
+from kortny.llm import (
+    ChatMessage,
+    Completion,
+    LLMService,
+    ModelRoute,
+    ModelRouteTier,
+    TokenUsage,
+)
 from kortny.llm.service import ModelPricingNotFoundError, calculate_cost_usd
 from kortny.tasks import TaskService
 from kortny.tools.types import JsonObject, JsonSchema
@@ -134,6 +142,46 @@ def test_llm_service_records_usage_and_rolls_up_cost(db_session: Session) -> Non
     assert task.total_input_tokens == 1000
     assert task.total_output_tokens == 2000
     assert task.total_cost_usd == Decimal("0.070000")
+
+
+def test_llm_service_records_model_tier(db_session: Session) -> None:
+    task = create_task(db_session)
+    provider = FakeProvider(
+        Completion(
+            content="done",
+            tool_calls=(),
+            usage=TokenUsage(input_tokens=10, output_tokens=5),
+            cost_usd=Decimal("0.000123"),
+            model="anthropic/sonnet",
+        )
+    )
+
+    LLMService(
+        session=db_session,
+        provider=provider,
+        provider_name=LLMProvider.openrouter,
+        model_route=ModelRoute(
+            tier=ModelRouteTier.analysis,
+            model="anthropic/sonnet",
+            reason="test",
+        ),
+    ).complete(
+        task_id=task.id,
+        messages=[ChatMessage(role="user", content="hello")],
+    )
+
+    usage = db_session.scalar(select(LLMUsage).where(LLMUsage.task_id == task.id))
+    event = db_session.scalar(
+        select(TaskEvent).where(
+            TaskEvent.task_id == task.id,
+            TaskEvent.type == TaskEventType.llm_call,
+        )
+    )
+
+    assert usage is not None
+    assert usage.model_tier == "analysis"
+    assert event is not None
+    assert event.payload["model_tier"] == "analysis"
 
 
 def test_llm_service_uses_latest_effective_pricing(db_session: Session) -> None:
