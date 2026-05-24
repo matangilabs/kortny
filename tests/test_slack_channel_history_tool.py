@@ -276,6 +276,35 @@ def test_slack_channel_history_fans_out_active_threads() -> None:
     ]
 
 
+def test_slack_channel_history_treats_blank_optional_args_as_omitted() -> None:
+    client = FakeSlackHistoryClient(
+        history_pages=[
+            {
+                "ok": True,
+                "messages": [{"ts": "1.000000", "user": "U1", "text": "first"}],
+                "response_metadata": {"next_cursor": ""},
+            }
+        ]
+    )
+
+    result = SlackChannelHistoryTool(client, default_channel_id="C123").invoke(
+        {
+            "channel_id": "",
+            "oldest_ts": " ",
+            "latest_ts": "",
+            "limit": 10,
+        }
+    )
+
+    assert result.output["channel_id"] == "C123"
+    assert result.output["oldest_ts"] is None
+    assert result.output["latest_ts"] is None
+    assert result.output["message_count"] == 1
+    assert client.history_calls[0]["channel"] == "C123"
+    assert client.history_calls[0]["oldest"] is None
+    assert client.history_calls[0]["latest"] is None
+
+
 def test_slack_channel_history_reports_inaccessible_channel_as_recoverable() -> None:
     client = FakeSlackHistoryClient(
         history_pages=[

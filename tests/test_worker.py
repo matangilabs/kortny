@@ -123,6 +123,7 @@ def test_worker_run_once_processes_pending_task(
         (TaskEventType.log, None),
         (TaskEventType.log, None),
         (TaskEventType.status_changed, TaskStatus.succeeded.value),
+        (TaskEventType.log, None),
     ]
     assert events[2].payload == {
         "message": "task_executor_started",
@@ -132,6 +133,8 @@ def test_worker_run_once_processes_pending_task(
         "message": "task_executor_completed",
         "worker_id": "worker-test",
     }
+    assert events[5].payload["message"] == "episode_recorded"
+    assert events[5].payload["outcome"] == TaskStatus.succeeded.value
     episode = db_session.scalar(select(Episode).where(Episode.task_id == task.id))
     assert episode is not None
     assert episode.outcome == TaskStatus.succeeded.value
@@ -196,10 +199,13 @@ def test_worker_marks_task_failed_when_handler_raises(
     }
 
     events = task_events(db_session, task)
-    assert events[-2].type is TaskEventType.error
-    assert events[-2].payload["message"] == "task_executor_failed"
-    assert events[-1].type is TaskEventType.status_changed
-    assert events[-1].payload["to"] == TaskStatus.failed.value
+    assert events[-3].type is TaskEventType.error
+    assert events[-3].payload["message"] == "task_executor_failed"
+    assert events[-2].type is TaskEventType.status_changed
+    assert events[-2].payload["to"] == TaskStatus.failed.value
+    assert events[-1].type is TaskEventType.log
+    assert events[-1].payload["message"] == "episode_recorded"
+    assert events[-1].payload["outcome"] == TaskStatus.failed.value
 
 
 def test_worker_exits_cleanly_when_task_is_cancelled_cooperatively(

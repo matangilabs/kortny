@@ -214,12 +214,20 @@ def test_coordinator_finishes_with_final_answer(db_session: Session) -> None:
 
     events = task_events(db_session, task)
     assert event_messages(events) == [
+        "episode_retrieval_completed",
+        "context_assembled",
         "agent_started",
         "agent_llm_turn_started",
         "agent_llm_turn_completed",
         "agent_completed",
     ]
     assert events[-1].payload["reason"] == "final_answer"
+    context_event = next(
+        event for event in events if event.payload.get("message") == "context_assembled"
+    )
+    assert context_event.payload["selected_fact_ids"] == []
+    assert context_event.payload["selected_episode_ids"] == []
+    assert context_event.payload["context_budget"]["thread_context_max_chars"] == 12000
 
 
 def test_coordinator_injects_workspace_facts(db_session: Session) -> None:
@@ -552,6 +560,12 @@ def test_context_assembler_exposes_known_fact_metadata(
     assert package.selected_facts[0].scope_id is None
     assert package.selected_facts[0].key == "default_report_template"
     assert package.budget.known_facts_chars == len(known_facts)
+    events = task_events(db_session, task)
+    context_event = next(
+        event for event in events if event.payload.get("message") == "context_assembled"
+    )
+    assert context_event.payload["selected_fact_ids"] == [str(fact.id)]
+    assert context_event.payload["selected_fact_keys"] == ["default_report_template"]
 
 
 def test_context_assembler_exposes_prior_task_and_artifact_metadata(
@@ -596,6 +610,12 @@ def test_context_assembler_exposes_prior_task_and_artifact_metadata(
     assert package.selected_artifacts[0].filename == "pypl_report_v2.pdf"
     assert package.selected_artifacts[0].slack_file_id == "FGENV2"
     assert package.budget.prior_context_chars == len(prior_context)
+    events = task_events(db_session, current)
+    context_event = next(
+        event for event in events if event.payload.get("message") == "context_assembled"
+    )
+    assert context_event.payload["selected_prior_task_ids"] == [str(prior.id)]
+    assert context_event.payload["selected_artifact_ids"] == [str(artifact.id)]
 
 
 def test_context_assembler_records_context_omissions(
@@ -854,6 +874,18 @@ def test_context_assembler_includes_relevant_episode_context(
     assert package.selected_episodes[0].task_id == prior.id
     assert package.selected_episodes[0].relation == "same_channel"
     assert package.budget.episode_context_chars == len(episode_context)
+    events = task_events(db_session, current)
+    retrieval_event = next(
+        event
+        for event in events
+        if event.payload.get("message") == "episode_retrieval_completed"
+    )
+    assert retrieval_event.payload["selected_episode_ids"] == [str(episode.id)]
+    assert retrieval_event.payload["selected_episode_relations"] == ["same_channel"]
+    context_event = next(
+        event for event in events if event.payload.get("message") == "context_assembled"
+    )
+    assert context_event.payload["selected_episode_ids"] == [str(episode.id)]
 
 
 def test_coordinator_orders_three_turn_thread_context(db_session: Session) -> None:

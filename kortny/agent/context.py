@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import uuid
 from collections.abc import Sequence
@@ -19,6 +20,7 @@ from kortny.agent.thread_context import (
 from kortny.db.models import Artifact, Task, TaskEvent, TaskEventType
 from kortny.llm import ChatMessage
 from kortny.memory import EpisodeService, Fact, RelevantEpisode, WorkspaceStateService
+from kortny.observability import observe_task_event
 from kortny.tasks import TaskService
 
 DEFAULT_THREAD_CONTEXT_MAX_CHARS = 12_000
@@ -37,6 +39,7 @@ THREAD_CONTEXT_EVENT_TYPES = {
     TaskEventType.tool_result,
     TaskEventType.error,
 }
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,7 +197,7 @@ class ContextAssembler:
             session,
             task_service=self.task_service,
         )
-        self.episode_service = EpisodeService(session)
+        self.episode_service = EpisodeService(session, task_service=self.task_service)
 
     def build_for_task(self, task: Task) -> ContextPackage:
         """Build prompt messages and context-selection metadata."""
@@ -226,7 +229,7 @@ class ContextAssembler:
 
         messages.append(ChatMessage(role="user", content=task.input))
 
-        return ContextPackage(
+        package = ContextPackage(
             messages=tuple(messages),
             selected_facts=known_facts.selected_facts,
             selected_prior_tasks=prior_context.selected_prior_tasks,
@@ -250,6 +253,52 @@ class ContextAssembler:
                 + prior_context.omissions
                 + episode_context.omissions
             ),
+        )
+        self._record_context_assembled(task, package)
+        return package
+
+    def _record_context_assembled(
+        self,
+        task: Task,
+        package: ContextPackage,
+    ) -> None:
+        observe_task_event(
+            self.task_service,
+            task,
+            "context_assembled",
+            logger=logger,
+            message_count=len(package.messages),
+            selected_fact_ids=[str(fact.fact_id) for fact in package.selected_facts],
+            selected_fact_keys=[fact.key for fact in package.selected_facts],
+            selected_episode_ids=[
+                str(episode.episode_id) for episode in package.selected_episodes
+            ],
+            selected_episode_task_ids=[
+                str(episode.task_id) for episode in package.selected_episodes
+            ],
+            selected_episode_relations=[
+                episode.relation for episode in package.selected_episodes
+            ],
+            selected_prior_task_ids=[
+                str(prior.task_id) for prior in package.selected_prior_tasks
+            ],
+            selected_artifact_ids=[
+                str(artifact.artifact_id) for artifact in package.selected_artifacts
+            ],
+            acknowledgement_present=package.acknowledgement is not None,
+            acknowledgement_message_ts=package.acknowledgement.message_ts
+            if package.acknowledgement
+            else None,
+            context_chars=_context_chars(package),
+            context_budget=_context_budget_payload(package.budget),
+            context_omissions=[
+                {
+                    "kind": omission.kind,
+                    "reason": omission.reason,
+                    "count": omission.count,
+                }
+                for omission in package.omissions
+            ],
         )
 
     def _acknowledgement_context(self, task: Task) -> ContextAcknowledgement | None:
@@ -701,6 +750,25 @@ def _context_artifact(artifact: Artifact) -> ContextArtifact:
         mime_type=artifact.mime_type,
         size_bytes=artifact.size_bytes,
     )
+
+
+def _context_chars(package: ContextPackage) -> int:
+    return sum(len(message.content or "") for message in package.messages)
+
+
+def _context_budget_payload(budget: ContextBudget) -> dict[str, int]:
+    return {
+        "system_prompt_chars": budget.system_prompt_chars,
+        "known_facts_max_chars": budget.known_facts_max_chars,
+        "known_facts_chars": budget.known_facts_chars,
+        "thread_context_max_chars": budget.thread_context_max_chars,
+        "prior_context_chars": budget.prior_context_chars,
+        "thread_context_recent_tasks": budget.thread_context_recent_tasks,
+        "thread_transcript_limit": budget.thread_transcript_limit,
+        "episode_context_max_chars": budget.episode_context_max_chars,
+        "episode_context_chars": budget.episode_context_chars,
+        "episode_context_limit": budget.episode_context_limit,
+    }
 
 
 def _render_acknowledgement_context(acknowledgement: ContextAcknowledgement) -> str:

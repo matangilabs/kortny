@@ -104,6 +104,7 @@ class LLMAcknowledgementGenerator:
                 ChatMessage(role="system", content=ACK_SYSTEM_PROMPT),
                 ChatMessage(role="user", content=task.input),
             ),
+            prompt_name="kortny.ack_generator",
         )
         return sanitize_acknowledgement(completion.content)
 

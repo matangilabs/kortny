@@ -17,6 +17,19 @@ SETTINGS_ENV_VARS = {
     "LLM_HIGH_REASONING_MODEL",
     "COMPOSIO_API_KEY",
     "BRAVE_SEARCH_API_KEY",
+    "OBSERVABILITY_ENABLED",
+    "OBSERVABILITY_CAPTURE_CONTENT",
+    "OTEL_EXPORTER_OTLP_ENDPOINT",
+    "OTEL_SERVICE_NAME",
+    "OTEL_TRACE_SAMPLING_RATIO",
+    "LANGFUSE_ENABLED",
+    "LANGFUSE_HOST",
+    "LANGFUSE_PUBLIC_KEY",
+    "LANGFUSE_SECRET_KEY",
+    "LANGFUSE_PROMPTS_ENABLED",
+    "LANGFUSE_PROMPT_LABEL",
+    "KORTNY_RELEASE",
+    "KORTNY_VERSION",
     "POSTGRES_URL",
 }
 
@@ -48,6 +61,10 @@ def test_settings_loads_required_environment(monkeypatch: pytest.MonkeyPatch) ->
     assert settings.postgres_url == "postgresql://kortny:kortny@localhost/kortny"
     assert settings.slack_file_read_max_bytes == 25 * 1024 * 1024
     assert settings.slack_app_name == "kortny"
+    assert settings.observability_enabled is True
+    assert settings.observability_capture_content == "metadata"
+    assert settings.otel_service_name == "kortny"
+    assert settings.langfuse_enabled is False
 
 
 def test_settings_loads_optional_environment(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -59,6 +76,14 @@ def test_settings_loads_optional_environment(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("SLACK_APP_NAME", "Courtney")
     monkeypatch.setenv("LLM_CHEAP_MODEL", "anthropic/claude-haiku-test")
     monkeypatch.setenv("LLM_DOCUMENT_MODEL", "anthropic/claude-sonnet-test")
+    monkeypatch.setenv("OBSERVABILITY_CAPTURE_CONTENT", "summaries")
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://otel:4318")
+    monkeypatch.setenv("OTEL_TRACE_SAMPLING_RATIO", "0.25")
+    monkeypatch.setenv("LANGFUSE_ENABLED", "true")
+    monkeypatch.setenv("LANGFUSE_HOST", "http://langfuse:3000")
+    monkeypatch.setenv("LANGFUSE_PROMPTS_ENABLED", "true")
+    monkeypatch.setenv("LANGFUSE_PROMPT_LABEL", "staging")
+    monkeypatch.setenv("KORTNY_RELEASE", "2026.05.24")
 
     settings = load_settings(env_file=None)
 
@@ -68,6 +93,14 @@ def test_settings_loads_optional_environment(monkeypatch: pytest.MonkeyPatch) ->
     assert settings.slack_app_name == "Courtney"
     assert settings.llm_cheap_model == "anthropic/claude-haiku-test"
     assert settings.llm_document_model == "anthropic/claude-sonnet-test"
+    assert settings.observability_capture_content == "summaries"
+    assert settings.otel_exporter_otlp_endpoint == "http://otel:4318"
+    assert settings.otel_trace_sampling_ratio == 0.25
+    assert settings.langfuse_enabled is True
+    assert settings.langfuse_host == "http://langfuse:3000"
+    assert settings.langfuse_prompts_enabled is True
+    assert settings.langfuse_prompt_label == "staging"
+    assert settings.kortny_release == "2026.05.24"
 
 
 def test_blank_optional_environment_values_are_none(
@@ -78,12 +111,20 @@ def test_blank_optional_environment_values_are_none(
     monkeypatch.setenv("COMPOSIO_API_KEY", "")
     monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "")
     monkeypatch.setenv("LLM_CHEAP_MODEL", "")
+    monkeypatch.setenv("LANGFUSE_HOST", "")
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "")
+    monkeypatch.setenv("LANGFUSE_PROMPT_LABEL", "")
 
     settings = load_settings(env_file=None)
 
     assert settings.composio_api_key is None
     assert settings.brave_search_api_key is None
     assert settings.llm_cheap_model is None
+    assert settings.langfuse_host is None
+    assert settings.langfuse_public_key is None
+    assert settings.langfuse_secret_key is None
+    assert settings.langfuse_prompt_label is None
 
 
 def test_load_settings_reports_missing_required_keys(

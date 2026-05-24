@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from kortny.db.models import LLMProvider, LLMUsage, Task, TaskEvent, TaskEventType
 from kortny.db.models import TaskStatus as DbTaskStatus
+from kortny.observability import sanitize_payload
 
 TERMINAL_STATUSES = {
     DbTaskStatus.succeeded,
@@ -306,6 +307,7 @@ class TaskRepository:
         cost_usd: Decimal | int | str,
         event_id: int | None = None,
         model_tier: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> LLMUsage:
         """Record LLM usage and refresh denormalized totals on the task."""
 
@@ -319,17 +321,22 @@ class TaskRepository:
             raise ValueError("LLM cost must be non-negative")
 
         if event_id is None:
+            event_payload = {
+                "message": "llm_call_completed",
+                "provider": provider_value.value,
+                "model": model,
+                "model_tier": model_tier,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "total_tokens": input_tokens + output_tokens,
+                "cost_usd": str(cost),
+            }
+            if metadata:
+                event_payload.update(sanitize_payload(metadata))
             event = self.append_event(
                 task_obj,
                 TaskEventType.llm_call,
-                {
-                    "provider": provider_value.value,
-                    "model": model,
-                    "model_tier": model_tier,
-                    "input_tokens": input_tokens,
-                    "output_tokens": output_tokens,
-                    "cost_usd": str(cost),
-                },
+                event_payload,
             )
             event_id = event.id
 

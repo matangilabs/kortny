@@ -307,21 +307,26 @@ class SlackChannelHistoryTool:
 
 
 def _channel_id(args: Mapping[str, Any], default_channel_id: str | None) -> str:
-    value = args.get("channel_id", default_channel_id)
-    if not isinstance(value, str) or not value.strip():
+    value = args.get("channel_id")
+    if value is None or (isinstance(value, str) and not value.strip()):
+        if default_channel_id is not None:
+            return default_channel_id
         raise ValueError(
             "slack_channel_history requires a non-empty 'channel_id' argument "
             "when no default task channel is available"
         )
+    if not isinstance(value, str):
+        raise ValueError("slack_channel_history 'channel_id' must be a string")
     return value.strip()
 
 
 def _optional_string(value: object, name: str) -> str | None:
     if value is None:
         return None
-    if not isinstance(value, str) or not value.strip():
+    if not isinstance(value, str):
         raise ValueError(f"slack_channel_history {name!r} must be a non-empty string")
-    return value.strip()
+    stripped = value.strip()
+    return stripped or None
 
 
 def _limit(args: Mapping[str, Any], max_limit: int) -> int:

@@ -109,6 +109,7 @@ class LLMArtifactCommentGenerator:
                     ),
                 ),
             ),
+            prompt_name="kortny.artifact_comment",
         )
         return sanitize_artifact_comment(completion.content)
 

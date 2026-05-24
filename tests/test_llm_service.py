@@ -130,6 +130,13 @@ def test_llm_service_records_usage_and_rolls_up_cost(db_session: Session) -> Non
     )
 
     usage = db_session.scalar(select(LLMUsage).where(LLMUsage.task_id == task.id))
+    events = list(
+        db_session.scalars(
+            select(TaskEvent)
+            .where(TaskEvent.task_id == task.id)
+            .order_by(TaskEvent.seq)
+        )
+    )
 
     assert completion.response_id == "gen-123"
     assert provider.calls[0][0] == [ChatMessage(role="user", content="hello")]
@@ -142,6 +149,17 @@ def test_llm_service_records_usage_and_rolls_up_cost(db_session: Session) -> Non
     assert task.total_input_tokens == 1000
     assert task.total_output_tokens == 2000
     assert task.total_cost_usd == Decimal("0.070000")
+    assert events[-2].type is TaskEventType.log
+    assert events[-2].payload["message"] == "llm_call_started"
+    assert events[-1].type is TaskEventType.llm_call
+    assert events[-1].payload["message"] == "llm_call_completed"
+    assert events[-1].payload["response_id"] == "gen-123"
+    assert events[-1].payload["latency_ms"] >= 0
+    assert events[-1].payload["message_count"] == 1
+    assert events[-1].payload["tool_count"] == 1
+    assert events[-1].payload["total_tokens"] == 3000
+    assert events[-1].payload["prompt_name"] == "kortny.agent_coordinator.system"
+    assert events[-1].payload["prompt_source"] == "code"
 
 
 def test_llm_service_records_model_tier(db_session: Session) -> None:
@@ -182,6 +200,7 @@ def test_llm_service_records_model_tier(db_session: Session) -> None:
     assert usage.model_tier == "analysis"
     assert event is not None
     assert event.payload["model_tier"] == "analysis"
+    assert event.payload["route_reason"] == "test"
 
 
 def test_llm_service_uses_latest_effective_pricing(db_session: Session) -> None:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import Field, ValidationError, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -66,6 +66,38 @@ class Settings(BaseSettings):
         validation_alias="SLACK_FILE_READ_MAX_BYTES",
     )
 
+    observability_enabled: bool = Field(
+        default=True, validation_alias="OBSERVABILITY_ENABLED"
+    )
+    observability_capture_content: Literal["metadata", "summaries", "full"] = Field(
+        default="metadata", validation_alias="OBSERVABILITY_CAPTURE_CONTENT"
+    )
+    otel_exporter_otlp_endpoint: str | None = Field(
+        default=None, validation_alias="OTEL_EXPORTER_OTLP_ENDPOINT"
+    )
+    otel_service_name: str = Field(
+        default="kortny", validation_alias="OTEL_SERVICE_NAME", min_length=1
+    )
+    otel_trace_sampling_ratio: float = Field(
+        default=1.0, validation_alias="OTEL_TRACE_SAMPLING_RATIO"
+    )
+    langfuse_enabled: bool = Field(default=False, validation_alias="LANGFUSE_ENABLED")
+    langfuse_host: str | None = Field(default=None, validation_alias="LANGFUSE_HOST")
+    langfuse_public_key: str | None = Field(
+        default=None, validation_alias="LANGFUSE_PUBLIC_KEY"
+    )
+    langfuse_secret_key: str | None = Field(
+        default=None, validation_alias="LANGFUSE_SECRET_KEY"
+    )
+    langfuse_prompts_enabled: bool = Field(
+        default=False, validation_alias="LANGFUSE_PROMPTS_ENABLED"
+    )
+    langfuse_prompt_label: str | None = Field(
+        default=None, validation_alias="LANGFUSE_PROMPT_LABEL"
+    )
+    kortny_release: str | None = Field(default=None, validation_alias="KORTNY_RELEASE")
+    kortny_version: str | None = Field(default=None, validation_alias="KORTNY_VERSION")
+
     postgres_url: str = Field(validation_alias="POSTGRES_URL", min_length=1)
 
     @field_validator(
@@ -76,6 +108,13 @@ class Settings(BaseSettings):
         "llm_analysis_model",
         "llm_document_model",
         "llm_high_reasoning_model",
+        "otel_exporter_otlp_endpoint",
+        "langfuse_host",
+        "langfuse_public_key",
+        "langfuse_secret_key",
+        "langfuse_prompt_label",
+        "kortny_release",
+        "kortny_version",
         mode="before",
     )
     @classmethod
@@ -111,6 +150,13 @@ class Settings(BaseSettings):
     def _positive_file_read_limit(cls, value: int) -> int:
         if value < 1:
             raise ValueError("SLACK_FILE_READ_MAX_BYTES must be at least 1")
+        return value
+
+    @field_validator("otel_trace_sampling_ratio")
+    @classmethod
+    def _valid_trace_sampling_ratio(cls, value: float) -> float:
+        if value < 0 or value > 1:
+            raise ValueError("OTEL_TRACE_SAMPLING_RATIO must be between 0 and 1")
         return value
 
 

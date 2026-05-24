@@ -7,6 +7,7 @@ task/events/artifacts that produced them.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -18,6 +19,8 @@ from sqlalchemy.orm import Session
 
 from kortny.db.models import Artifact, Episode, Task, TaskEvent, TaskEventType
 from kortny.db.models import TaskStatus as DbTaskStatus
+from kortny.observability import observe_task_event
+from kortny.tasks import TaskService
 
 EPISODE_OUTCOMES = {
     DbTaskStatus.succeeded,
@@ -26,6 +29,7 @@ EPISODE_OUTCOMES = {
 }
 MAX_EPISODE_SUMMARY_CHARS = 2_000
 MAX_EPISODE_SOURCE_REFS = 12
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,8 +63,18 @@ class RelevantEpisode:
 class EpisodeService:
     """Records and retrieves bounded task episodes."""
 
-    def __init__(self, session: Session, *, commit_after_write: bool = False) -> None:
+    def __init__(
+        self,
+        session: Session,
+        *,
+        task_service: TaskService | None = None,
+        commit_after_write: bool = False,
+    ) -> None:
         self.session = session
+        self.task_service = task_service or TaskService(
+            session,
+            commit_after_write=commit_after_write,
+        )
         self.commit_after_write = commit_after_write
 
     def record_task(self, task: Task | uuid.UUID) -> TaskEpisode | None:
@@ -107,6 +121,18 @@ class EpisodeService:
         episode.error_json = _error_json(task_obj, events)
 
         self.session.flush()
+        observe_task_event(
+            self.task_service,
+            task_obj,
+            "episode_recorded",
+            logger=logger,
+            episode_id=episode.id,
+            outcome=episode.outcome,
+            tools_used=list(episode.tools_used),
+            artifact_count=len(episode.artifacts_created),
+            source_ref_count=len(episode.source_refs),
+            summary_chars=len(episode.summary or ""),
+        )
         self._commit_if_requested()
         return _episode_from_row(episode)
 
@@ -156,7 +182,19 @@ class EpisodeService:
             limit=limit,
             statement=base.where(Episode.user_id == task_obj.slack_user_id),
         )
-        return tuple(selected.values())
+        relevant = tuple(selected.values())
+        observe_task_event(
+            self.task_service,
+            task_obj,
+            "episode_retrieval_completed",
+            logger=logger,
+            selected_episode_ids=[item.episode.id for item in relevant],
+            selected_episode_task_ids=[item.episode.task_id for item in relevant],
+            selected_episode_relations=[item.relation for item in relevant],
+            limit=limit,
+            selected_count=len(relevant),
+        )
+        return relevant
 
     def _collect(
         self,

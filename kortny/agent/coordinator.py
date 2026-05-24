@@ -7,7 +7,9 @@ OpenAI/OpenRouter chat completions so they can be adapted to ADK later.
 from __future__ import annotations
 
 import json
+import logging
 import re
+import time
 import uuid
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
@@ -26,12 +28,14 @@ from kortny.agent.context import (
 from kortny.agent.thread_context import ThreadTranscriptProvider
 from kortny.db.models import Task, TaskEventType
 from kortny.llm import ChatMessage, Completion, ToolCall
+from kortny.observability import log_observation
 from kortny.tasks import TaskService
 from kortny.tools import ToolRegistry
 from kortny.tools.types import JsonObject, JsonSchema, ToolArtifact, ToolResult
 
 DEFAULT_MAX_TURNS = 6
 REQUESTED_PAGES_RE = re.compile(r"\b(\d{1,2})\s+pages?\b", re.I)
+logger = logging.getLogger(__name__)
 DEFAULT_SYSTEM_PROMPT = (
     "You are Kortny, a Slack-native AI coworker. Use the available tools when "
     "they are needed to complete the user's request. If the user asks for "
@@ -252,12 +256,36 @@ class AgentCoordinator:
                     "turn": turn,
                     "tool_call_id": tool_call.id,
                     "tool": tool_call.name,
+                    "argument_keys": sorted(arguments),
                     "arguments": arguments,
                 },
             )
+            log_observation(
+                logger,
+                "tool_call_started",
+                task=task_obj,
+                turn=turn,
+                tool_call_id=tool_call.id,
+                tool=tool_call.name,
+                argument_keys=sorted(arguments),
+            )
+            started = time.perf_counter()
             try:
                 result = self.registry.invoke(tool_call.name, arguments)
             except Exception as exc:
+                latency_ms = _latency_ms(started)
+                log_observation(
+                    logger,
+                    "tool_call_failed",
+                    level=logging.ERROR,
+                    task=task_obj,
+                    turn=turn,
+                    tool_call_id=tool_call.id,
+                    tool=tool_call.name,
+                    latency_ms=latency_ms,
+                    error_type=type(exc).__name__,
+                    error_summary=str(exc),
+                )
                 self._append_error(
                     task_obj,
                     exc,
@@ -266,6 +294,7 @@ class AgentCoordinator:
                         "phase": "tool_invoke",
                         "tool_call_id": tool_call.id,
                         "tool": tool_call.name,
+                        "latency_ms": latency_ms,
                     },
                 )
                 raise
@@ -273,6 +302,7 @@ class AgentCoordinator:
             self.task_service.raise_if_cancelled(
                 task_obj, phase=f"after_tool_{tool_call.name}"
             )
+            latency_ms = _latency_ms(started)
             artifact_count += len(result.artifacts)
             result_payload = _tool_result_payload(tool_call.name, result)
             self.task_service.append_event(
@@ -282,8 +312,25 @@ class AgentCoordinator:
                     "turn": turn,
                     "tool_call_id": tool_call.id,
                     "tool": tool_call.name,
+                    "latency_ms": latency_ms,
+                    "output_shape": _output_shape(result.output),
+                    "artifact_count": len(result.artifacts),
+                    "recoverable": _recoverable_tool_result(result.output),
                     **result_payload,
                 },
+            )
+            log_observation(
+                logger,
+                "tool_call_completed",
+                task=task_obj,
+                turn=turn,
+                tool_call_id=tool_call.id,
+                tool=tool_call.name,
+                latency_ms=latency_ms,
+                output_shape=_output_shape(result.output),
+                artifact_count=len(result.artifacts),
+                recoverable=_recoverable_tool_result(result.output),
+                cost_usd=str(result.cost_usd),
             )
             messages.append(
                 ChatMessage(
@@ -431,6 +478,25 @@ def _requested_pdf_min_pages(input_text: str) -> int | None:
 
 def _json_dumps(payload: object) -> str:
     return json.dumps(payload, default=_json_default, separators=(",", ":"))
+
+
+def _latency_ms(started: float) -> int:
+    return max(0, int((time.perf_counter() - started) * 1000))
+
+
+def _output_shape(output: JsonObject) -> JsonObject:
+    return {
+        "type": "object",
+        "keys": sorted(output),
+    }
+
+
+def _recoverable_tool_result(output: JsonObject) -> bool | None:
+    error = output.get("error")
+    if not isinstance(error, dict):
+        return None
+    recoverable = error.get("recoverable")
+    return recoverable if isinstance(recoverable, bool) else None
 
 
 def _json_default(value: object) -> object:
