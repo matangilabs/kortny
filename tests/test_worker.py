@@ -426,6 +426,95 @@ def test_agent_executor_falls_back_when_artifact_comment_generation_fails(
     )
 
 
+def test_agent_executor_suppresses_final_message_after_memory_prompt(
+    db_session: Session,
+    worker_session_factory: sessionmaker[Session],
+    tmp_path: Path,
+) -> None:
+    claim_time = datetime(2026, 5, 23, 9, 53, tzinfo=UTC)
+    task = create_task(db_session, event_id="EvAgentWorkerMemory")
+    task.input = "remember that I do not want PDFs unless I explicitly ask"
+    task.available_at = claim_time - timedelta(seconds=1)
+    db_session.add(
+        ModelPricing(
+            provider=LLMProvider.openrouter,
+            model="openai/gpt-4o-mini",
+            input_price_per_mtok=Decimal("1.000000"),
+            output_price_per_mtok=Decimal("2.000000"),
+            effective_from=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+    )
+    db_session.commit()
+
+    slack_client = FakeSlackClient()
+    provider = FakeAgentProvider(
+        [
+            Completion(
+                content=None,
+                tool_calls=(
+                    ToolCall(
+                        id="call-memory",
+                        name="remember_fact",
+                        arguments={
+                            "scope": "user",
+                            "key": "no_auto_pdfs",
+                            "value": {
+                                "preference": (
+                                    "Do not generate PDFs unless explicitly requested"
+                                )
+                            },
+                            "value_text": (
+                                "Do not generate PDFs unless explicitly requested"
+                            ),
+                        },
+                    ),
+                ),
+                usage=TokenUsage(input_tokens=100, output_tokens=40),
+                model="openai/gpt-4o-mini",
+            ),
+            Completion(
+                content="I've posted a confirmation to save this preference.",
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=80, output_tokens=20),
+                model="openai/gpt-4o-mini",
+            ),
+        ]
+    )
+
+    result = TaskWorker(
+        session_factory=worker_session_factory,
+        worker_id="agent-worker-test",
+        executor=AgentTaskExecutor(
+            settings=make_settings(),
+            llm_provider=provider,
+            provider_name=LLMProvider.openrouter,
+            web_search_tool=StaticWebSearchTool(),
+            slack_client=slack_client,
+            artifact_comment_generator=FakeArtifactCommentGenerator(),
+            workspace_base_dir=tmp_path,
+        ),
+    ).run_once(now=claim_time)
+
+    db_session.refresh(task)
+    events = task_events(db_session, task)
+    posted_events = [
+        event for event in events if event.type is TaskEventType.message_posted
+    ]
+
+    assert result.status == TaskStatus.succeeded.value, task.error
+    assert task.result_summary == "I've posted a confirmation to save this preference."
+    assert len(slack_client.messages) == 1
+    assert slack_client.messages[0]["channel"] == "C123"
+    assert slack_client.messages[0]["thread_ts"] == "EvAgentWorkerMemory"
+    assert slack_client.messages[0]["text"] == (
+        "Should I remember this for you?\n"
+        "Do not generate PDFs unless explicitly requested\n\n"
+        "React with :white_check_mark: to save it or :no_entry_sign: to skip."
+    )
+    assert posted_events[0].payload["purpose"] == "memory_confirmation"
+    assert not any(event.payload.get("purpose") == "result" for event in posted_events)
+
+
 def test_agent_executor_posts_generic_failure_notice_for_setup_errors(
     db_session: Session,
     worker_session_factory: sessionmaker[Session],

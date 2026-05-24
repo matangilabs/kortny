@@ -15,10 +15,11 @@ from kortny.agent import AgentCoordinator
 from kortny.agent.coordinator import DEFAULT_SYSTEM_PROMPT
 from kortny.agent.thread_context import ThreadTranscriptProvider
 from kortny.config import Settings, load_settings
-from kortny.db.models import Artifact, Task
+from kortny.db.models import Artifact, Task, TaskEvent, TaskEventType
 from kortny.db.models import LLMProvider as DbLLMProvider
 from kortny.execution import task_workspace
 from kortny.llm import LLMProvider, LLMService, create_llm_provider
+from kortny.memory import WorkspaceStateService
 from kortny.slack import SlackPoster, SlackThread
 from kortny.slack.comments import (
     ArtifactCommentGenerator,
@@ -30,6 +31,8 @@ from kortny.slack.thread_context import SlackThreadTranscriptProvider
 from kortny.tasks import TaskCancelledError, TaskService
 from kortny.tools import (
     PdfGeneratorTool,
+    RecallFactTool,
+    RememberFactTool,
     SlackChannelHistoryTool,
     SlackFileReadTool,
     Tool,
@@ -40,6 +43,7 @@ from kortny.tools import (
 GENERIC_FAILURE_TEXT = (
     "Something went wrong while I was working on this. Please try again soon."
 )
+MEMORY_CONFIRMATION_PURPOSE = "memory_confirmation"
 logger = logging.getLogger(__name__)
 
 
@@ -212,8 +216,26 @@ class AgentTaskExecutor:
             working_dir=working_dir,
             max_file_size_bytes=settings.slack_file_read_max_bytes,
         )
+        memory_service = WorkspaceStateService(
+            session,
+            task_service=task_service,
+            poster=SlackPoster(
+                session=session,
+                client=self._build_slack_posting_client(settings),
+                task_service=task_service,
+            ),
+        )
+        remember_fact = RememberFactTool(service=memory_service, task=task)
+        recall_fact = RecallFactTool(service=memory_service, task=task)
         return ToolRegistry(
-            [web_search, pdf_generator, slack_channel_history, slack_file_read]
+            [
+                web_search,
+                pdf_generator,
+                slack_channel_history,
+                slack_file_read,
+                remember_fact,
+                recall_fact,
+            ]
         )
 
     def _build_slack_history_client(self, settings: Settings) -> Any:
@@ -227,6 +249,11 @@ class AgentTaskExecutor:
         if self.slack_client is not None and hasattr(self.slack_client, "files_info"):
             return self.slack_client
         return WebClient(token=settings.slack_bot_token)
+
+    def _build_slack_posting_client(self, settings: Settings) -> SlackPostingClient:
+        if self.slack_client is not None:
+            return self.slack_client
+        return cast(SlackPostingClient, WebClient(token=settings.slack_bot_token))
 
     def _post_outputs(
         self,
@@ -261,6 +288,12 @@ class AgentTaskExecutor:
             )
         )
         if not artifacts:
+            if self._has_memory_confirmation_prompt(session=session, task=task):
+                logger.info(
+                    "suppressing final message after memory confirmation prompt task_id=%s",
+                    task.id,
+                )
+                return
             logger.info("posting final message task_id=%s", task.id)
             poster.post_message(thread, result_summary)
             return
@@ -290,6 +323,26 @@ class AgentTaskExecutor:
                 initial_comment=initial_comment,
                 title=artifact.filename,
             )
+
+    def _has_memory_confirmation_prompt(
+        self,
+        *,
+        session: Session,
+        task: Task,
+    ) -> bool:
+        return (
+            session.scalar(
+                select(TaskEvent.id)
+                .where(
+                    TaskEvent.task_id == task.id,
+                    TaskEvent.type == TaskEventType.message_posted,
+                    TaskEvent.payload["purpose"].as_string()
+                    == MEMORY_CONFIRMATION_PURPOSE,
+                )
+                .limit(1)
+            )
+            is not None
+        )
 
     def _post_failure_notice(
         self,

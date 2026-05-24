@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -13,6 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from kortny.db.models import Installation, Task, TaskEventType
+from kortny.memory import Fact, PendingFact, WorkspaceStateService
 from kortny.slack.acknowledgement import (
     AcknowledgementGenerator,
     StaticAcknowledgementGenerator,
@@ -150,6 +152,14 @@ class SlackIngress:
 
         channel_id = _required_str(item, "channel")
         message_ts = _required_str(item, "ts")
+        if reaction in CONFIRMATION_REACTIONS:
+            return self._handle_confirmation_reaction(
+                reaction=reaction,
+                channel_id=channel_id,
+                message_ts=message_ts,
+                user_id=user_id,
+            )
+
         task = self.task_service.get_by_slack_reaction_target(channel_id, message_ts)
         if task is None:
             logger.info(
@@ -169,27 +179,6 @@ class SlackIngress:
             return self._handle_cancel_reaction(task, user_id=user_id)
         if reaction == REACTION_RETRY:
             return self._handle_retry_reaction(task, user_id=user_id)
-        if reaction in CONFIRMATION_REACTIONS:
-            logger.info(
-                "slack confirmation reaction received task_id=%s reaction=%s user=%s",
-                task.id,
-                reaction,
-                user_id,
-            )
-            self.task_service.append_event(
-                task,
-                TaskEventType.log,
-                {
-                    "message": "confirmation_reaction_noop",
-                    "reaction": reaction,
-                    "by_user_id": user_id,
-                },
-            )
-            return ReactionResult(
-                handled=True,
-                action="confirmation_noop",
-                task=task,
-            )
 
         return ReactionResult(
             handled=False,
@@ -394,6 +383,102 @@ class SlackIngress:
         logger.info("slack retry reaction handled task_id=%s user=%s", task.id, user_id)
         return ReactionResult(handled=True, action="retry", task=retried)
 
+    def _handle_confirmation_reaction(
+        self,
+        *,
+        reaction: str,
+        channel_id: str,
+        message_ts: str,
+        user_id: str,
+    ) -> ReactionResult:
+        memory_service = WorkspaceStateService(
+            self.session,
+            task_service=self.task_service,
+        )
+        try:
+            if reaction == REACTION_CONFIRM:
+                fact = memory_service.confirm(
+                    message_ts,
+                    user_id,
+                    channel_id=channel_id,
+                )
+                logger.info(
+                    "slack memory confirmation handled fact_id=%s key=%s user=%s",
+                    fact.id,
+                    fact.key,
+                    user_id,
+                )
+                self._post_memory_reaction_result(
+                    task_id=fact.source_task_id,
+                    channel_id=channel_id,
+                    text=_memory_confirmed_text(fact),
+                    purpose="memory_confirmed",
+                )
+                return ReactionResult(handled=True, action="confirm_memory")
+
+            pending = memory_service.reject(
+                message_ts,
+                user_id,
+                channel_id=channel_id,
+            )
+            logger.info(
+                "slack memory rejection handled key=%s user=%s",
+                pending.key,
+                user_id,
+            )
+            self._post_memory_reaction_result(
+                task_id=pending.task_id,
+                channel_id=channel_id,
+                text=_memory_rejected_text(pending),
+                purpose="memory_rejected",
+            )
+            return ReactionResult(handled=True, action="reject_memory")
+        except LookupError:
+            logger.info(
+                "slack confirmation reaction ignored reason=no_pending_memory_proposal channel=%s message_ts=%s reaction=%s user=%s",
+                channel_id,
+                message_ts,
+                reaction,
+                user_id,
+            )
+            return ReactionResult(
+                handled=False,
+                action="confirmation",
+                reason="no_pending_memory_proposal",
+            )
+
+    def _post_memory_reaction_result(
+        self,
+        *,
+        task_id: uuid.UUID | None,
+        channel_id: str,
+        text: str,
+        purpose: str,
+    ) -> None:
+        if task_id is None:
+            return
+        task = self.task_service.get_task(task_id)
+        if task is None:
+            return
+
+        thread_ts = _result_thread_ts(task)
+        response = self.client.chat_postMessage(
+            channel=channel_id,
+            text=text,
+            thread_ts=thread_ts,
+        )
+        self.task_service.append_event(
+            task,
+            TaskEventType.message_posted,
+            {
+                "channel": channel_id,
+                "thread_ts": thread_ts,
+                "message_ts": _optional_response_ts(response),
+                "text": text,
+                "purpose": purpose,
+            },
+        )
+
 
 def _required_str(values: Mapping[str, Any], key: str) -> str:
     value = values.get(key)
@@ -407,6 +492,24 @@ def _team_id(body: Mapping[str, Any], event: Mapping[str, Any]) -> str:
     if not isinstance(team_id, str) or not team_id:
         raise ValueError("Slack event is missing team_id")
     return team_id
+
+
+def _result_thread_ts(task: Task) -> str | None:
+    if task.slack_channel_id.startswith("D"):
+        return None
+    return task.slack_thread_ts or task.slack_message_ts
+
+
+def _memory_confirmed_text(fact: Fact) -> str:
+    detail = (fact.value_text or "").strip()
+    if detail:
+        return f"Saved. I'll use this going forward: {detail}"
+    return "Saved. I'll use this going forward."
+
+
+def _memory_rejected_text(pending: PendingFact) -> str:
+    del pending
+    return "No problem, I won't save that."
 
 
 def _event_thread_ts(event: Mapping[str, Any]) -> str:
