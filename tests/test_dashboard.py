@@ -189,6 +189,12 @@ def test_dashboard_usage_rollups_by_model_user_and_day(
 ) -> None:
     test_client, session = client
     create_dashboard_task(session)
+    create_dashboard_task(
+        session,
+        slack_channel_id="DUsage",
+        slack_user_id="UDmCost",
+        input_text="Create a private usage dashboard",
+    )
     login(test_client)
 
     response = test_client.get(
@@ -202,8 +208,10 @@ def test_dashboard_usage_rollups_by_model_user_and_day(
     assert "Cost by Channel" in response.text
     assert "#ops-desk" in response.text
     assert "CCost" in response.text
+    assert "UDmCost" in response.text
+    assert "DUsage" not in response.text
     assert "2026-05-24" in response.text
-    assert "1,200" in response.text
+    assert "2,400" in response.text
     assert "$0.004200" in response.text
     assert 'class="input" type="date"' in response.text
 
@@ -216,7 +224,13 @@ def login(test_client: TestClient) -> Response:
     )
 
 
-def create_dashboard_task(session: Session) -> Task:
+def create_dashboard_task(
+    session: Session,
+    *,
+    slack_channel_id: str = "CCost",
+    slack_user_id: str = "UCost",
+    input_text: str = "Create a usage dashboard",
+) -> Task:
     installation = Installation(slack_team_id=f"T{uuid.uuid4().hex}")
     session.add(installation)
     session.flush()
@@ -224,11 +238,11 @@ def create_dashboard_task(session: Session) -> Task:
     task = Task(
         installation_id=installation.id,
         slack_event_id=f"Ev{uuid.uuid4().hex}",
-        slack_channel_id="CCost",
+        slack_channel_id=slack_channel_id,
         slack_thread_ts="1779660000.000001",
         slack_message_ts="1779660000.000001",
-        slack_user_id="UCost",
-        input="Create a usage dashboard",
+        slack_user_id=slack_user_id,
+        input=input_text,
         status=TaskStatus.succeeded,
         result_summary="Done with cost summary",
         total_input_tokens=1200,

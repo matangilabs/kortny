@@ -306,7 +306,7 @@ def get_usage_aggregate(
             func.coalesce(func.sum(LLMUsage.cost_usd), 0),
         )
         .join(Task, Task.id == LLMUsage.task_id)
-        .where(*usage_filter)
+        .where(*usage_filter, ~Task.slack_channel_id.startswith("D"))
         .group_by(Task.installation_id, Task.slack_channel_id)
         .order_by(func.sum(LLMUsage.cost_usd).desc())
     ).all()

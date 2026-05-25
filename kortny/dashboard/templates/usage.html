@@ -42,7 +42,7 @@
   <section class="card detail-section">
     <header>
       <h2>Cost by Channel</h2>
-      <p>Slack channel-level usage and cost attribution.</p>
+      <p>Slack channel-level usage and cost attribution. DMs are attributed under users.</p>
     </header>
     {% set rows = aggregate.by_channel %}
     {% include "_aggregate_table.html" with context %}
