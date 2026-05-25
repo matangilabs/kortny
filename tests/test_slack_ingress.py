@@ -333,7 +333,7 @@ def test_app_mention_refreshes_slack_identity_cache(
     events = task_events(db_session, result.task)
 
     assert user_identity is not None
-    assert user_identity.display_name == "Aneesh"
+    assert user_identity.display_name == "Aneesh Melkot"
     assert channel_identity is not None
     assert channel_identity.display_name == "#general"
     assert client.identity_calls == [

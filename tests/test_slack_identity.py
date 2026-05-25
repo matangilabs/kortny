@@ -156,7 +156,7 @@ def test_identity_service_refreshes_missing_user_and_channel(
     assert user_result.refreshed is True
     assert channel_result.refreshed is True
     assert user is not None
-    assert user.display_name == "Aneesh"
+    assert user.display_name == "Aneesh Melkot"
     assert user.raw_name == "Aneesh Melkot"
     assert channel is not None
     assert channel.display_name == "#research-room"
@@ -198,6 +198,47 @@ def test_identity_service_uses_fresh_cache_without_api_call(
     assert result.reason is None
     assert identity.last_seen_at == now
     assert identity.refreshed_at == refreshed_at
+    assert client.calls == []
+
+
+def test_identity_service_normalizes_fresh_cached_user_to_full_name(
+    db_session: Session,
+) -> None:
+    installation = create_installation(db_session)
+    refreshed_at = datetime(2026, 5, 25, 9, 0, tzinfo=UTC)
+    identity = SlackIdentity(
+        installation_id=installation.id,
+        kind="user",
+        slack_id="U123",
+        display_name="aneesh",
+        raw_name="aneesh",
+        raw_json={
+            "id": "U123",
+            "name": "aneesh",
+            "real_name": "Aneesh Melkot",
+            "profile": {"display_name": "aneesh"},
+        },
+        refreshed_at=refreshed_at,
+        last_seen_at=refreshed_at,
+    )
+    db_session.add(identity)
+    db_session.flush()
+    client = FailIfCalledClient()
+    now = datetime(2026, 5, 25, 10, 0, tzinfo=UTC)
+
+    result = SlackIdentityService(db_session).ensure_user(
+        installation_id=installation.id,
+        user_id="U123",
+        client=client,
+        now=now,
+    )
+
+    assert result.identity == identity
+    assert result.refreshed is False
+    assert identity.display_name == "Aneesh Melkot"
+    assert identity.raw_name == "Aneesh Melkot"
+    assert identity.last_seen_at == now
+    assert identity.refreshed_at == now
     assert client.calls == []
 
 

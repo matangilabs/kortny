@@ -423,6 +423,10 @@ p {
   overflow-wrap: anywhere;
 }
 
+.user-metrics {
+  margin-top: 20px;
+}
+
 .usage-summary {
   margin-bottom: 20px;
 }

@@ -106,6 +106,7 @@ class SlackIdentityService:
             slack_id=slack_id,
         )
         if existing is not None and not self._is_stale(existing, current_time):
+            self._normalize_cached_identity(existing, now=current_time)
             existing.last_seen_at = current_time
             self.session.flush()
             return IdentityRefreshResult(identity=existing, refreshed=False)
@@ -207,6 +208,24 @@ class SlackIdentityService:
             return True
         return identity.refreshed_at <= now - self.refresh_after
 
+    def _normalize_cached_identity(
+        self,
+        identity: SlackIdentity,
+        *,
+        now: datetime,
+    ) -> None:
+        if not identity.raw_json:
+            return
+        fields = (
+            _user_fields(identity.slack_id, {"user": identity.raw_json})
+            if identity.kind == "user"
+            else _channel_fields(identity.slack_id, {"channel": identity.raw_json})
+        )
+        if fields["display_name"] != identity.display_name:
+            identity.display_name = fields["display_name"]
+            identity.raw_name = fields["raw_name"]
+            identity.refreshed_at = now
+
     def _fetch(
         self,
         *,
@@ -230,14 +249,19 @@ def _user_fields(slack_id: str, response: Mapping[str, Any]) -> dict[str, Any]:
     user = _mapping(response.get("user"))
     profile = _mapping(user.get("profile"))
     display_name = _first_present(
-        profile.get("display_name"),
+        profile.get("real_name_normalized"),
         profile.get("real_name"),
+        user.get("real_name_normalized"),
         user.get("real_name"),
+        profile.get("display_name_normalized"),
+        profile.get("display_name"),
         user.get("name"),
         slack_id,
     )
     raw_name = _first_present(
+        profile.get("real_name_normalized"),
         profile.get("real_name"),
+        user.get("real_name_normalized"),
         user.get("real_name"),
         user.get("name"),
     )
