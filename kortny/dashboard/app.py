@@ -8,7 +8,7 @@ from collections.abc import Iterator
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Annotated, cast
-from urllib.parse import parse_qs, quote
+from urllib.parse import parse_qs, parse_qsl, quote, urlencode, urlsplit, urlunsplit
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
@@ -31,6 +31,11 @@ from kortny.dashboard.data import (
     list_tasks,
     list_users,
     parse_date_bound,
+)
+from kortny.dashboard.memory_actions import (
+    dashboard_actor,
+    forget_fact,
+    supersede_fact,
 )
 from kortny.dashboard.settings import DashboardSettings, load_dashboard_settings
 from kortny.db.session import make_session_factory
@@ -245,6 +250,8 @@ def register_routes(app: FastAPI) -> None:
         sort: Annotated[str | None, Query()] = None,
         page: Annotated[int, Query(ge=1)] = 1,
         page_size: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)] = DEFAULT_PAGE_SIZE,
+        notice: Annotated[str | None, Query()] = None,
+        notice_tone: Annotated[str, Query()] = "success",
     ) -> Response:
         memory_dashboard = get_memory_dashboard(
             session,
@@ -264,8 +271,61 @@ def register_routes(app: FastAPI) -> None:
                 "active_page": "memory",
                 "dashboard_user": username,
                 "memory": memory_dashboard,
+                "memory_return_path": _request_path(request),
+                "notice": notice,
+                "notice_tone": _notice_tone(notice_tone),
             },
         )
+
+    @app.post("/memory/facts/{fact_id}/forget")
+    async def memory_forget_fact(
+        request: Request,
+        fact_id: UUID,
+        username: Annotated[str, Depends(require_user)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> RedirectResponse:
+        form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+        next_path = _safe_next_path(form.get("next", ["/memory"])[0])
+        try:
+            forget_fact(
+                session,
+                fact_id,
+                by_user_id=dashboard_actor(username),
+            )
+            session.commit()
+        except LookupError as exc:
+            session.rollback()
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND) from exc
+        except ValueError as exc:
+            session.rollback()
+            return _redirect_with_notice(next_path, str(exc), tone="danger")
+        return _redirect_with_notice(next_path, "Memory fact forgotten.")
+
+    @app.post("/memory/facts/{fact_id}/supersede")
+    async def memory_supersede_fact(
+        request: Request,
+        fact_id: UUID,
+        username: Annotated[str, Depends(require_user)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> RedirectResponse:
+        form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+        next_path = _safe_next_path(form.get("next", ["/memory"])[0])
+        value_text = form.get("value_text", [""])[0]
+        try:
+            supersede_fact(
+                session,
+                fact_id,
+                value_text=value_text,
+                by_user_id=dashboard_actor(username),
+            )
+            session.commit()
+        except LookupError as exc:
+            session.rollback()
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND) from exc
+        except ValueError as exc:
+            session.rollback()
+            return _redirect_with_notice(next_path, str(exc), tone="danger")
+        return _redirect_with_notice(next_path, "Memory fact superseded.")
 
     @app.get("/users/{slack_user_id}", response_class=HTMLResponse)
     def user_detail(
@@ -366,10 +426,47 @@ def _login_url_for(request: Request) -> str:
     return f"/login?next={quote(next_path, safe='')}"
 
 
+def _request_path(request: Request) -> str:
+    path = request.url.path
+    if request.url.query:
+        return f"{path}?{request.url.query}"
+    return path
+
+
 def _safe_next_path(value: str | None) -> str:
     if not value or not value.startswith("/") or value.startswith("//"):
         return "/"
     return value
+
+
+def _redirect_with_notice(
+    next_path: str,
+    notice: str,
+    *,
+    tone: str = "success",
+) -> RedirectResponse:
+    path = _path_with_notice(next_path, notice=notice, tone=tone)
+    return RedirectResponse(url=path, status_code=status.HTTP_303_SEE_OTHER)
+
+
+def _path_with_notice(next_path: str, *, notice: str, tone: str) -> str:
+    parts = urlsplit(_safe_next_path(next_path))
+    query_pairs = [
+        (key, value)
+        for key, value in parse_qsl(parts.query, keep_blank_values=True)
+        if key not in {"notice", "notice_tone"}
+    ]
+    query_pairs.append(("notice", notice))
+    query_pairs.append(("notice_tone", _notice_tone(tone)))
+    return urlunsplit(
+        (parts.scheme, parts.netloc, parts.path, urlencode(query_pairs), parts.fragment)
+    )
+
+
+def _notice_tone(value: str) -> str:
+    if value in {"success", "warning", "danger", "neutral"}:
+        return value
+    return "success"
 
 
 def _money(value: Decimal | int | float | str | None) -> str:

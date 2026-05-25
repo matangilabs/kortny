@@ -6,10 +6,14 @@
   <section class="page-heading">
     <div>
       <h1>Memory</h1>
-      <p>Read-only view of durable facts and episodic task memory.</p>
+      <p>Inspect durable facts, manage lifecycle state, and review episodic task memory.</p>
     </div>
     <a class="btn-ghost" href="/tasks">View Tasks</a>
   </section>
+
+  {% if notice %}
+    <div class="notice notice-{{ notice_tone }}" role="status">{{ notice }}</div>
+  {% endif %}
 
   <section class="summary-grid memory-summary" aria-label="Memory overview">
     <div class="card metric-card metric-success">
@@ -89,54 +93,87 @@
         <button class="btn" type="submit">Apply</button>
         <a class="btn-ghost" href="{{ memory.reset_url }}">Reset</a>
       </form>
-      <div class="overflow-x-auto">
-        <table class="table memory-table">
-          <caption>Workspace state facts.</caption>
-          <thead>
-            <tr>
-              <th>Scope</th>
-              <th>Key</th>
-              <th>Value</th>
-              <th>Status</th>
-              <th>Confirmed By</th>
-              <th>Updated</th>
-              <th>Source</th>
-            </tr>
-          </thead>
-          <tbody>
-            {% for row in memory.facts %}
-              <tr>
-                <td>
-                  <span class="identity-name">{{ row.scope.name }}</span>
-                  <span class="identity-id">{{ row.fact.scope_type }}{% if row.scope.secondary %} - {{ row.scope.secondary }}{% endif %}</span>
-                </td>
-                <td><code class="inline-code">{{ row.fact.key }}</code></td>
-                <td class="memory-value">{{ row.value_summary }}</td>
-                <td><span class="badge badge-{{ row.tone }}">{{ row.fact.status }}</span></td>
-                <td>
+      <div class="memory-fact-list" role="list" aria-label="Workspace state facts">
+        {% for row in memory.facts %}
+          <article class="memory-fact-row" role="listitem">
+            <div class="memory-fact-main">
+              <div class="memory-fact-title">
+                <code class="inline-code">{{ row.fact.key }}</code>
+                <span class="badge badge-{{ row.tone }}">{{ row.fact.status }}</span>
+              </div>
+              <p class="memory-fact-value">{{ row.value_summary }}</p>
+              <div class="memory-fact-meta">
+                <span class="identity-name">{{ row.scope.name }}</span>
+                <span>{{ row.fact.scope_type }}{% if row.scope.secondary %} - {{ row.scope.secondary }}{% endif %}</span>
+                <span>Updated {{ row.fact.updated_at|datetime }}</span>
+                {% if row.source_task %}
+                  <a href="/tasks/{{ row.source_task.id }}">Source task</a>
+                {% elif row.fact.source_url %}
+                  <a href="{{ row.fact.source_url }}">Source</a>
+                {% else %}
+                  <span>{{ row.fact.source_kind }}</span>
+                {% endif %}
+              </div>
+            </div>
+
+            <aside class="memory-fact-side">
+              <section class="memory-fact-panel">
+                <h3>Audit</h3>
+                <div class="memory-audit">
+                  {% if row.proposed_by %}
+                    <span>Proposed by {{ row.proposed_by.name }}</span>
+                  {% endif %}
                   {% if row.confirmed_by %}
-                    <span class="identity-name">{{ row.confirmed_by.name }}</span>
-                    {% if row.confirmed_by.secondary %}<span class="identity-id">{{ row.confirmed_by.secondary }}</span>{% endif %}
-                  {% else %}
-                    <span class="identity-id">-</span>
+                    <span>Confirmed by {{ row.confirmed_by.name }}</span>
                   {% endif %}
-                </td>
-                <td>{{ row.fact.updated_at|datetime }}</td>
-                <td>
-                  {% if row.source_task %}
-                    <a href="/tasks/{{ row.source_task.id }}">Task</a>
-                  {% elif row.fact.source_url %}
-                    <a href="{{ row.fact.source_url }}">Source</a>
-                  {% else %}
-                    <span class="identity-id">{{ row.fact.source_kind }}</span>
+                  {% if row.fact.confirmed_at %}
+                    <span>Confirmed {{ row.fact.confirmed_at|datetime }}</span>
                   {% endif %}
-                </td>
-              </tr>
-            {% else %}
-              <tr><td colspan="7" class="empty">No facts match these filters.</td></tr>
-            {% endfor %}
-          </tbody>
-        </table>
+                  {% if row.fact.superseded_at %}
+                    <span>Superseded {{ row.fact.superseded_at|datetime }}</span>
+                  {% endif %}
+                  {% if row.fact.superseded_by_id %}
+                    <span>Replacement {{ row.fact.superseded_by_id }}</span>
+                  {% endif %}
+                  {% if row.fact.forgotten_at %}
+                    <span>Forgotten {{ row.fact.forgotten_at|datetime }}</span>
+                  {% endif %}
+                  {% if row.forgotten_by %}
+                    <span>Forgotten by {{ row.forgotten_by.name }}</span>
+                  {% endif %}
+                  {% if row.rejected_by %}
+                    <span>Rejected by {{ row.rejected_by.name }}</span>
+                  {% endif %}
+                </div>
+              </section>
+
+              <section class="memory-fact-panel memory-fact-actions">
+                <h3>Actions</h3>
+                {% if row.fact.status == "active" %}
+                  <form method="post" action="/memory/facts/{{ row.fact.id }}/forget" onsubmit="return confirm('Forget this memory fact? Kortny will stop using it, but the audit history will remain.');">
+                    <input type="hidden" name="next" value="{{ memory_return_path }}">
+                    <button class="btn-ghost btn-danger" type="submit">Forget</button>
+                  </form>
+                  <details class="memory-supersede">
+                    <summary>Supersede</summary>
+                    <form method="post" action="/memory/facts/{{ row.fact.id }}/supersede" onsubmit="return confirm('Supersede this memory fact with the replacement value?');">
+                      <input type="hidden" name="next" value="{{ memory_return_path }}">
+                      <label>
+                        Replacement value
+                        <textarea class="input memory-textarea" name="value_text" rows="3" required>{{ row.value_summary }}</textarea>
+                      </label>
+                      <button class="btn" type="submit">Save Replacement</button>
+                    </form>
+                  </details>
+                {% else %}
+                  <span class="identity-id">No active controls</span>
+                {% endif %}
+              </section>
+            </aside>
+          </article>
+        {% else %}
+          <p class="empty attention-empty">No facts match these filters.</p>
+        {% endfor %}
       </div>
     </section>
   {% else %}

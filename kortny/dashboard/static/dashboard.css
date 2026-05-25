@@ -377,6 +377,17 @@ p {
   text-decoration: none;
 }
 
+.btn-danger {
+  border-color: color-mix(in srgb, var(--destructive) 32%, var(--border));
+  color: var(--destructive);
+}
+
+.btn-danger:hover {
+  background: var(--destructive-bg);
+  border-color: color-mix(in srgb, var(--destructive) 42%, var(--border));
+  color: var(--destructive);
+}
+
 .btn-ghost.disabled {
   color: var(--muted-foreground);
   cursor: not-allowed;
@@ -862,13 +873,129 @@ p {
   flex: 1 1 260px;
 }
 
-.memory-table {
-  min-width: 980px;
+.memory-fact-list {
+  display: grid;
 }
 
-.memory-value {
-  max-width: 360px;
+.memory-fact-row {
+  align-items: start;
+  border-bottom: 1px solid var(--border);
+  display: grid;
+  gap: 18px;
+  grid-template-columns: minmax(0, 1fr) minmax(300px, 0.36fr);
+  padding: 16px;
+}
+
+.memory-fact-row:last-child {
+  border-bottom: 0;
+}
+
+.memory-fact-main {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.memory-fact-title {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.memory-fact-value {
+  color: var(--foreground);
+  font-size: 14px;
+  line-height: 1.5;
+  margin: 0;
+  max-width: 78ch;
   overflow-wrap: anywhere;
+}
+
+.memory-fact-meta {
+  align-items: center;
+  color: var(--muted-foreground);
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 12px;
+  gap: 8px;
+}
+
+.memory-fact-meta .identity-name {
+  display: inline;
+}
+
+.memory-fact-meta > *:not(:last-child)::after {
+  color: var(--border);
+  content: "/";
+  margin-left: 8px;
+}
+
+.memory-fact-side {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.memory-fact-panel {
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+}
+
+.memory-fact-panel h3 {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0;
+  margin: 0;
+  text-transform: uppercase;
+}
+
+.memory-audit {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.memory-audit span {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.memory-audit span + span {
+  margin-top: 4px;
+}
+
+.memory-fact-actions form {
+  margin: 0;
+}
+
+.memory-supersede {
+  margin-top: 2px;
+}
+
+.memory-supersede summary {
+  color: var(--foreground);
+  cursor: pointer;
+  font-weight: 700;
+  min-height: 30px;
+  padding-top: 5px;
+}
+
+.memory-supersede form {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.memory-textarea {
+  min-height: 96px;
+  resize: vertical;
+  width: 100%;
 }
 
 .episode-list {
@@ -1062,6 +1189,37 @@ pre {
   gap: 20px;
   grid-template-columns: minmax(0, 1.55fr) minmax(280px, 0.7fr);
   margin-bottom: 20px;
+}
+
+.notice {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-weight: 650;
+  margin-bottom: 20px;
+  padding: 11px 13px;
+}
+
+.notice-success {
+  background: var(--success-bg);
+  border-color: color-mix(in srgb, var(--success) 30%, transparent);
+  color: var(--success);
+}
+
+.notice-warning {
+  background: var(--warning-bg);
+  border-color: color-mix(in srgb, var(--warning) 30%, transparent);
+  color: var(--warning);
+}
+
+.notice-danger {
+  background: var(--destructive-bg);
+  border-color: color-mix(in srgb, var(--destructive) 30%, transparent);
+  color: var(--destructive);
+}
+
+.notice-neutral {
+  background: var(--muted);
+  color: var(--foreground);
 }
 
 .system-checks,
@@ -1602,6 +1760,15 @@ pre {
 
   .episode-row {
     grid-template-columns: 1fr;
+  }
+
+  .memory-fact-row {
+    grid-template-columns: 1fr;
+    padding: 14px 12px;
+  }
+
+  .memory-fact-value {
+    max-width: none;
   }
 
   .episode-stats {

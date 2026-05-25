@@ -353,6 +353,8 @@ class MemoryFactRow:
     value_summary: str
     confirmed_by: IdentityLabel | None
     proposed_by: IdentityLabel | None
+    rejected_by: IdentityLabel | None
+    forgotten_by: IdentityLabel | None
     source_task: Task | None
     tone: str
 
@@ -1621,6 +1623,16 @@ def _memory_fact_rows(
                 fact_identities,
                 installation_id=fact.installation_id,
                 slack_id=fact.proposed_by,
+            ),
+            rejected_by=_optional_user_label(
+                fact_identities,
+                installation_id=fact.installation_id,
+                slack_id=fact.rejected_by_user_id,
+            ),
+            forgotten_by=_optional_user_label(
+                fact_identities,
+                installation_id=fact.installation_id,
+                slack_id=fact.forgotten_by_user_id,
             ),
             source_task=(
                 source_tasks.get(fact.source_task_id)

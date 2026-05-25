@@ -9,7 +9,7 @@ from alembic import command
 from alembic.config import Config
 from fastapi.testclient import TestClient
 from httpx import Response
-from sqlalchemy import Engine, delete
+from sqlalchemy import Engine, delete, select
 from sqlalchemy.orm import Session
 
 from kortny.dashboard.app import create_app
@@ -476,6 +476,9 @@ def test_dashboard_memory_page_shows_facts_and_episodes(
     assert "no_auto_pdfs" in response.text
     assert "Do not generate PDFs unless explicitly requested" in response.text
     assert "Aneesh Melkot" in response.text
+    assert "Audit" in response.text
+    assert "Forget" in response.text
+    assert "Supersede" in response.text
     assert f"/tasks/{task.id}" in response.text
     assert (
         "Remembered the user&#39;s PDF preference after confirmation."
@@ -509,6 +512,128 @@ def test_dashboard_memory_page_shows_facts_and_episodes(
     assert "#ops-desk" in episodes_response.text
     assert "Aneesh Melkot" in episodes_response.text
     assert f"/tasks/{task.id}" in episodes_response.text
+
+
+def test_dashboard_memory_forget_preserves_audit_and_hides_from_active_view(
+    client: tuple[TestClient, Session],
+) -> None:
+    test_client, session = client
+    task = create_dashboard_task(session)
+    fact = create_dashboard_memory_fact(
+        session,
+        task,
+        key="pdf_style",
+        value_text="Use concise PDF summaries",
+    )
+    login(test_client)
+
+    response = test_client.post(
+        f"/memory/facts/{fact.id}/forget",
+        data={"next": "/memory?q=pdf_style"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"].startswith("/memory?q=pdf_style")
+    assert "notice=Memory+fact+forgotten." in response.headers["location"]
+
+    session.refresh(fact)
+    assert fact.status == "forgotten"
+    assert fact.forgotten_by_user_id == "dashboard:admin"
+    assert fact.forgotten_at is not None
+    events = list(
+        session.scalars(
+            select(TaskEvent)
+            .where(TaskEvent.task_id == task.id)
+            .order_by(TaskEvent.seq)
+        )
+    )
+    assert any(
+        event.payload.get("message") == "workspace_state_fact_forgotten"
+        and event.payload.get("workspace_state_id") == str(fact.id)
+        for event in events
+    )
+
+    active_view = test_client.get("/memory?q=pdf_style")
+    forgotten_view = test_client.get("/memory?q=pdf_style&status=forgotten")
+
+    assert "No facts match these filters." in active_view.text
+    assert "Use concise PDF summaries" in forgotten_view.text
+    assert "dashboard:admin" in forgotten_view.text
+
+
+def test_dashboard_memory_supersede_replaces_active_fact_and_links_history(
+    client: tuple[TestClient, Session],
+) -> None:
+    test_client, session = client
+    task = create_dashboard_task(session)
+    fact = create_dashboard_memory_fact(
+        session,
+        task,
+        key="briefing_style",
+        value_text="Use short briefing notes",
+    )
+    login(test_client)
+
+    response = test_client.post(
+        f"/memory/facts/{fact.id}/supersede",
+        data={
+            "next": "/memory?q=briefing_style",
+            "value_text": "Use executive-ready briefing notes with open questions.",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert "notice=Memory+fact+superseded." in response.headers["location"]
+
+    session.refresh(fact)
+    replacement = session.scalar(
+        select(WorkspaceState).where(
+            WorkspaceState.installation_id == task.installation_id,
+            WorkspaceState.scope_type == "user",
+            WorkspaceState.scope_id == "UCost",
+            WorkspaceState.key == "briefing_style",
+            WorkspaceState.status == "active",
+        )
+    )
+    assert replacement is not None
+    assert replacement.id != fact.id
+    assert replacement.value_json == {
+        "text": "Use executive-ready briefing notes with open questions."
+    }
+    assert (
+        replacement.value_text
+        == "Use executive-ready briefing notes with open questions."
+    )
+    assert replacement.confirmed_by_user_id == "dashboard:admin"
+    assert replacement.proposed_by == "dashboard:admin"
+    assert fact.status == "superseded"
+    assert fact.superseded_by_id == replacement.id
+    assert fact.superseded_at is not None
+
+    events = list(
+        session.scalars(
+            select(TaskEvent)
+            .where(TaskEvent.task_id == task.id)
+            .order_by(TaskEvent.seq)
+        )
+    )
+    assert any(
+        event.payload.get("message") == "workspace_state_dashboard_fact_superseded"
+        and event.payload.get("workspace_state_id") == str(fact.id)
+        and event.payload.get("replacement_workspace_state_id") == str(replacement.id)
+        for event in events
+    )
+    assert replacement.source_event_id in {event.id for event in events}
+
+    active_view = test_client.get("/memory?q=briefing_style")
+    superseded_view = test_client.get("/memory?q=briefing_style&status=superseded")
+
+    assert "Use executive-ready briefing notes with open questions." in active_view.text
+    assert "Use short briefing notes" not in active_view.text
+    assert "Use short briefing notes" in superseded_view.text
+    assert str(replacement.id) in superseded_view.text
 
 
 def login(test_client: TestClient) -> Response:
@@ -691,6 +816,36 @@ def create_dashboard_task(
     )
     session.commit()
     return task
+
+
+def create_dashboard_memory_fact(
+    session: Session,
+    task: Task,
+    *,
+    key: str,
+    value_text: str,
+    scope_type: str = "user",
+    scope_id: str | None = "UCost",
+) -> WorkspaceState:
+    fact = WorkspaceState(
+        installation_id=task.installation_id,
+        scope_type=scope_type,
+        scope_id=scope_id,
+        key=key,
+        value_json={"text": value_text},
+        value_text=value_text,
+        status="active",
+        source_kind="user_explicit",
+        source_task_id=task.id,
+        source_slack_channel_id=task.slack_channel_id,
+        source_slack_message_ts=task.slack_message_ts,
+        proposed_by=task.slack_user_id,
+        confirmed_by_user_id=task.slack_user_id,
+        confirmed_at=datetime(2026, 5, 24, 12, 1, tzinfo=UTC),
+    )
+    session.add(fact)
+    session.commit()
+    return fact
 
 
 def cleanup_database(session: Session) -> None:
