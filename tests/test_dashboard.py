@@ -216,6 +216,39 @@ def test_dashboard_usage_rollups_by_model_user_and_day(
     assert 'class="input" type="date"' in response.text
 
 
+def test_dashboard_usage_renders_visual_analytics(
+    client: tuple[TestClient, Session],
+) -> None:
+    test_client, session = client
+    create_dashboard_task(session)
+    create_dashboard_task(
+        session,
+        slack_user_id="UCost",
+        input_text="Investigate failed dashboard task",
+        status=TaskStatus.failed,
+        cost_usd=Decimal("0.008400"),
+        input_tokens=2400,
+        output_tokens=600,
+        created_at=datetime(2026, 5, 25, 12, 0, tzinfo=UTC),
+    )
+    login(test_client)
+
+    response = test_client.get("/usage?from=2026-05-24&to=2026-05-25")
+
+    assert response.status_code == 200
+    assert "Daily Cost" in response.text
+    assert "Task Volume" in response.text
+    assert "Model Spend" in response.text
+    assert "User Spend" in response.text
+    assert "Task Failure Rate" in response.text
+    assert "50.0%" in response.text
+    assert "$0.012600" in response.text
+    assert "4,500" in response.text
+    assert "1 failed" in response.text
+    assert 'class="charts-grid"' in response.text
+    assert "--bar-value:" in response.text
+
+
 def test_dashboard_users_list_shows_rollups_and_detail_links(
     client: tuple[TestClient, Session],
 ) -> None:
@@ -299,9 +332,15 @@ def create_dashboard_task(
     slack_user_id: str = "UCost",
     input_text: str = "Create a usage dashboard",
     created_at: datetime | None = None,
+    status: TaskStatus = TaskStatus.succeeded,
+    cost_usd: Decimal | None = None,
+    input_tokens: int = 1200,
+    output_tokens: int = 300,
+    model: str = "openai/gpt-5.4-mini",
 ) -> Task:
     task_created_at = created_at or datetime(2026, 5, 24, 12, 0, tzinfo=UTC)
     task_finished_at = task_created_at + timedelta(minutes=1)
+    task_cost_usd = cost_usd if cost_usd is not None else Decimal("0.004200")
     installation = Installation(slack_team_id=f"T{uuid.uuid4().hex}")
     session.add(installation)
     session.flush()
@@ -314,11 +353,11 @@ def create_dashboard_task(
         slack_message_ts="1779660000.000001",
         slack_user_id=slack_user_id,
         input=input_text,
-        status=TaskStatus.succeeded,
+        status=status,
         result_summary="Done with cost summary",
-        total_input_tokens=1200,
-        total_output_tokens=300,
-        total_cost_usd=Decimal("0.004200"),
+        total_input_tokens=input_tokens,
+        total_output_tokens=output_tokens,
+        total_cost_usd=task_cost_usd,
         created_at=task_created_at,
         finished_at=task_finished_at,
     )
@@ -372,7 +411,7 @@ def create_dashboard_task(
                 payload={
                     "message": "llm_call_started",
                     "provider": "openrouter",
-                    "model": "openai/gpt-5.4-mini",
+                    "model": model,
                     "model_tier": "analysis",
                     "prompt_name": "kortny.agent_coordinator.system",
                     "route_reason": "intent_classifier",
@@ -386,12 +425,12 @@ def create_dashboard_task(
                 payload={
                     "message": "llm_call_completed",
                     "provider": "openrouter",
-                    "model": "openai/gpt-5.4-mini",
+                    "model": model,
                     "model_tier": "analysis",
-                    "input_tokens": 1200,
-                    "output_tokens": 300,
-                    "total_tokens": 1500,
-                    "cost_usd": "0.004200",
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "total_tokens": input_tokens + output_tokens,
+                    "cost_usd": str(task_cost_usd),
                     "latency_ms": 890,
                     "prompt_name": "kortny.agent_coordinator.system",
                 },
@@ -415,17 +454,17 @@ def create_dashboard_task(
                 task_id=task.id,
                 seq=5,
                 type=TaskEventType.status_changed,
-                payload={"from": "running", "to": "succeeded"},
+                payload={"from": "running", "to": status.value},
                 created_at=task_finished_at,
             ),
             LLMUsage(
                 task_id=task.id,
                 provider=LLMProvider.openrouter,
-                model="openai/gpt-5.4-mini",
+                model=model,
                 model_tier="analysis",
-                input_tokens=1200,
-                output_tokens=300,
-                cost_usd=Decimal("0.004200"),
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cost_usd=task_cost_usd,
                 created_at=task_created_at + timedelta(seconds=30),
             ),
             Artifact(

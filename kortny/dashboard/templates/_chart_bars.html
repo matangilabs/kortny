@@ -1,0 +1,18 @@
+<div class="chart-bars" role="img" aria-label="{{ chart_label }}">
+  {% for bar in bars %}
+    <div class="chart-bar">
+      <div class="chart-bar-meta">
+        <span>
+          <strong>{{ bar.label }}</strong>
+          {% if bar.secondary %}<small>{{ bar.secondary }}</small>{% endif %}
+        </span>
+        <strong class="chart-bar-value">{{ bar.value_label }}</strong>
+      </div>
+      <div class="chart-bar-track" aria-hidden="true">
+        <span class="chart-bar-fill" style="--bar-value: {{ bar.percent }}%;"></span>
+      </div>
+    </div>
+  {% else %}
+    <p class="chart-empty">{{ empty_message }}</p>
+  {% endfor %}
+</div>

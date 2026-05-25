@@ -21,6 +21,72 @@
     </form>
   </section>
 
+  <section class="summary-grid usage-summary" aria-label="Usage overview">
+    <div class="card metric-card">
+      <span>Total Cost</span>
+      <strong>{{ aggregate.total_cost_usd|money }}</strong>
+    </div>
+    <div class="card metric-card">
+      <span>LLM Calls</span>
+      <strong>{{ aggregate.total_calls|number }}</strong>
+    </div>
+    <div class="card metric-card">
+      <span>Total Tokens</span>
+      <strong>{{ (aggregate.total_input_tokens + aggregate.total_output_tokens)|number }}</strong>
+    </div>
+    <div class="card metric-card">
+      <span>Task Failure Rate</span>
+      <strong>{{ aggregate.task_failure_rate_label }}</strong>
+    </div>
+  </section>
+
+  {% set charts = aggregate.charts %}
+  <section class="charts-grid" aria-label="Usage charts">
+    <article class="card chart-card">
+      <header>
+        <h2>Daily Cost</h2>
+        <p>Spend trend by LLM call date.</p>
+      </header>
+      {% set points = charts.daily_cost %}
+      {% set chart_label = "Daily LLM cost chart" %}
+      {% set empty_message = "No cost data in this range." %}
+      {% include "_chart_columns.html" with context %}
+    </article>
+
+    <article class="card chart-card">
+      <header>
+        <h2>Task Volume</h2>
+        <p>Daily tasks with failure days highlighted.</p>
+      </header>
+      {% set points = charts.daily_task_volume %}
+      {% set chart_label = "Daily task volume chart" %}
+      {% set empty_message = "No task data in this range." %}
+      {% include "_chart_columns.html" with context %}
+    </article>
+
+    <article class="card chart-card">
+      <header>
+        <h2>Model Spend</h2>
+        <p>Top model spend concentration.</p>
+      </header>
+      {% set bars = charts.cost_by_model %}
+      {% set chart_label = "Cost by model chart" %}
+      {% set empty_message = "No model cost data in this range." %}
+      {% include "_chart_bars.html" with context %}
+    </article>
+
+    <article class="card chart-card">
+      <header>
+        <h2>User Spend</h2>
+        <p>Top user spend concentration.</p>
+      </header>
+      {% set bars = charts.cost_by_user %}
+      {% set chart_label = "Cost by user chart" %}
+      {% set empty_message = "No user cost data in this range." %}
+      {% include "_chart_bars.html" with context %}
+    </article>
+  </section>
+
   <section class="card detail-section">
     <header>
       <h2>Cost by Model</h2>

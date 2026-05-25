@@ -146,6 +146,38 @@ class DailyUsageRow:
 
 
 @dataclass(frozen=True)
+class DailyTaskRow:
+    day: date
+    task_count: int
+    failed_task_count: int
+
+
+@dataclass(frozen=True)
+class ChartBar:
+    label: str
+    secondary: str | None
+    value_label: str
+    percent: int
+
+
+@dataclass(frozen=True)
+class ChartPoint:
+    label: str
+    value_label: str
+    percent: int
+    tone: str = "accent"
+    detail: str | None = None
+
+
+@dataclass(frozen=True)
+class UsageCharts:
+    daily_cost: tuple[ChartPoint, ...]
+    daily_task_volume: tuple[ChartPoint, ...]
+    cost_by_model: tuple[ChartBar, ...]
+    cost_by_user: tuple[ChartBar, ...]
+
+
+@dataclass(frozen=True)
 class UsageAggregate:
     start: datetime | None
     end: datetime | None
@@ -153,6 +185,46 @@ class UsageAggregate:
     by_user: tuple[AggregateRow, ...]
     by_channel: tuple[AggregateRow, ...]
     by_day: tuple[DailyUsageRow, ...]
+    by_task_day: tuple[DailyTaskRow, ...]
+
+    @property
+    def total_calls(self) -> int:
+        return sum(row.calls for row in self.by_day)
+
+    @property
+    def total_input_tokens(self) -> int:
+        return sum(row.input_tokens for row in self.by_day)
+
+    @property
+    def total_output_tokens(self) -> int:
+        return sum(row.output_tokens for row in self.by_day)
+
+    @property
+    def total_cost_usd(self) -> Decimal:
+        return sum((row.cost_usd for row in self.by_day), Decimal("0"))
+
+    @property
+    def total_tasks(self) -> int:
+        return sum(row.task_count for row in self.by_task_day)
+
+    @property
+    def failed_tasks(self) -> int:
+        return sum(row.failed_task_count for row in self.by_task_day)
+
+    @property
+    def task_failure_rate_label(self) -> str:
+        if self.total_tasks == 0:
+            return "0.0%"
+        return f"{(self.failed_tasks / self.total_tasks) * 100:.1f}%"
+
+    @property
+    def charts(self) -> UsageCharts:
+        return UsageCharts(
+            daily_cost=_daily_cost_points(self.by_day),
+            daily_task_volume=_daily_task_points(self.by_task_day),
+            cost_by_model=_aggregate_bars(self.by_model),
+            cost_by_user=_aggregate_bars(self.by_user),
+        )
 
 
 @dataclass(frozen=True)
@@ -401,6 +473,17 @@ def get_usage_aggregate(
         .group_by(day_bucket)
         .order_by(day_bucket.desc())
     ).all()
+    task_day_bucket = func.date_trunc("day", Task.created_at).label("day")
+    by_task_day_rows = session.execute(
+        select(
+            task_day_bucket,
+            func.count(Task.id),
+            func.coalesce(func.sum(_failed_task_case()), 0),
+        )
+        .where(*_task_filter(start=start, end=end))
+        .group_by(task_day_bucket)
+        .order_by(task_day_bucket.desc())
+    ).all()
     return UsageAggregate(
         start=start,
         end=end,
@@ -408,6 +491,7 @@ def get_usage_aggregate(
         by_user=by_user_rows,
         by_channel=by_channel_rows,
         by_day=tuple(_daily_row(row) for row in by_day_rows),
+        by_task_day=tuple(_daily_task_row(row) for row in by_task_day_rows),
     )
 
 
@@ -1087,3 +1171,79 @@ def _daily_row(row: Row[Any]) -> DailyUsageRow:
         output_tokens=int(output_tokens),
         cost_usd=Decimal(cost_usd),
     )
+
+
+def _daily_task_row(row: Row[Any]) -> DailyTaskRow:
+    day_value, task_count, failed_task_count = row
+    if isinstance(day_value, datetime):
+        day = day_value.date()
+    elif isinstance(day_value, date):
+        day = day_value
+    else:
+        day = date.fromisoformat(str(day_value)[:10])
+    return DailyTaskRow(
+        day=day,
+        task_count=int(task_count),
+        failed_task_count=int(failed_task_count),
+    )
+
+
+def _daily_cost_points(rows: Sequence[DailyUsageRow]) -> tuple[ChartPoint, ...]:
+    ordered = tuple(reversed(rows))
+    max_value = max((row.cost_usd for row in ordered), default=Decimal("0"))
+    return tuple(
+        ChartPoint(
+            label=row.day.isoformat(),
+            value_label=_format_money(row.cost_usd),
+            percent=_percent_of(row.cost_usd, max_value),
+        )
+        for row in ordered
+    )
+
+
+def _daily_task_points(rows: Sequence[DailyTaskRow]) -> tuple[ChartPoint, ...]:
+    ordered = tuple(reversed(rows))
+    max_value = max((row.task_count for row in ordered), default=0)
+    return tuple(
+        ChartPoint(
+            label=row.day.isoformat(),
+            value_label=_format_number(row.task_count),
+            percent=_percent_of(row.task_count, max_value),
+            tone="danger" if row.failed_task_count else "accent",
+            detail=(
+                f"{_format_number(row.failed_task_count)} failed"
+                if row.failed_task_count
+                else "0 failed"
+            ),
+        )
+        for row in ordered
+    )
+
+
+def _aggregate_bars(rows: Sequence[AggregateRow]) -> tuple[ChartBar, ...]:
+    limited = tuple(rows[:8])
+    max_value = max((row.cost_usd for row in limited), default=Decimal("0"))
+    return tuple(
+        ChartBar(
+            label=row.display_key,
+            secondary=row.secondary_key,
+            value_label=_format_money(row.cost_usd),
+            percent=_percent_of(row.cost_usd, max_value),
+        )
+        for row in limited
+    )
+
+
+def _percent_of(value: Decimal | int, max_value: Decimal | int) -> int:
+    if value <= 0 or max_value <= 0:
+        return 0
+    percent = int((Decimal(value) / Decimal(max_value)) * 100)
+    return max(4, min(100, percent))
+
+
+def _format_money(value: Decimal) -> str:
+    return f"${value:,.6f}"
+
+
+def _format_number(value: int) -> str:
+    return f"{value:,}"

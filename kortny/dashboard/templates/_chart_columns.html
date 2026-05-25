@@ -1,0 +1,22 @@
+<div class="chart-column-wrap">
+  {% if points %}
+    <div class="chart-columns" role="img" aria-label="{{ chart_label }}">
+      {% for point in points %}
+        <div class="chart-column">
+          <div class="chart-column-plot">
+            <span
+              class="chart-column-fill chart-tone-{{ point.tone }}"
+              style="--bar-value: {{ point.percent }}%;"
+              aria-hidden="true"
+            ></span>
+          </div>
+          <span class="chart-value">{{ point.value_label }}</span>
+          {% if point.detail %}<span class="chart-detail">{{ point.detail }}</span>{% endif %}
+          <span class="chart-label">{{ point.label }}</span>
+        </div>
+      {% endfor %}
+    </div>
+  {% else %}
+    <p class="chart-empty">{{ empty_message }}</p>
+  {% endif %}
+</div>
