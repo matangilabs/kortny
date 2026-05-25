@@ -131,20 +131,46 @@
   <section class="detail-section">
     <header class="section-header">
       <h2>Task Events</h2>
-      <p>Ordered execution events written by the task service.</p>
+      <p>Ordered execution timeline with expandable raw payloads.</p>
     </header>
-    <div class="event-list">
-      {% for event in detail.events %}
-        <article class="card event-card">
-          <header>
-            <strong>#{{ event.seq }} {{ event.type.value }}</strong>
-            <span>{{ event.created_at|datetime }}</span>
-          </header>
-          <pre>{{ event.payload|json }}</pre>
-        </article>
+    <ol class="timeline" aria-label="Task event timeline">
+      {% for event in detail.timeline %}
+        <li class="timeline-item timeline-{{ event.tone }}">
+          <div class="timeline-marker" aria-hidden="true">{{ event.seq }}</div>
+          <article class="card timeline-card">
+            <header class="timeline-card-header">
+              <div class="timeline-title-stack">
+                <div class="timeline-title-row">
+                  <h3>{{ event.title }}</h3>
+                  <div class="timeline-badges" aria-label="Event labels">
+                    {% for badge in event.badges %}
+                      <span class="badge badge-{{ badge.tone }}">{{ badge.label }}</span>
+                    {% endfor %}
+                  </div>
+                </div>
+                <p>{{ event.summary }}</p>
+              </div>
+              <time datetime="{{ event.created_at.isoformat() }}">{{ event.created_at|datetime }}</time>
+            </header>
+            {% if event.metrics %}
+              <dl class="event-metrics" aria-label="Event metrics">
+                {% for metric in event.metrics %}
+                  <div>
+                    <dt>{{ metric.label }}</dt>
+                    <dd>{{ metric.value }}</dd>
+                  </div>
+                {% endfor %}
+              </dl>
+            {% endif %}
+            <details class="event-payload">
+              <summary>Raw payload</summary>
+              <pre>{{ event.payload_json }}</pre>
+            </details>
+          </article>
+        </li>
       {% else %}
-        <p class="empty">No events recorded.</p>
+        <li class="empty">No events recorded.</li>
       {% endfor %}
-    </div>
+    </ol>
   </section>
 {% endblock %}

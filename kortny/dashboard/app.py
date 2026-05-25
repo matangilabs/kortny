@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import secrets
 from collections.abc import Iterator
 from decimal import Decimal
@@ -240,4 +241,4 @@ def _datetime(value: object) -> str:
 def _json(value: object) -> str:
     if value is None:
         return "{}"
-    return str(value)
+    return json.dumps(value, indent=2, sort_keys=True, default=str)

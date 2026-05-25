@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import uuid
 from collections import defaultdict
@@ -58,8 +59,34 @@ class TaskListPage:
 class TaskDetail:
     task: Task
     events: tuple[TaskEvent, ...]
+    timeline: tuple[TimelineEvent, ...]
     usage: tuple[LLMUsage, ...]
     artifacts: tuple[Artifact, ...]
+
+
+@dataclass(frozen=True)
+class TimelineBadge:
+    label: str
+    tone: str = "neutral"
+
+
+@dataclass(frozen=True)
+class TimelineMetric:
+    label: str
+    value: str
+
+
+@dataclass(frozen=True)
+class TimelineEvent:
+    seq: int
+    event_type: str
+    tone: str
+    title: str
+    summary: str
+    created_at: datetime
+    badges: tuple[TimelineBadge, ...]
+    metrics: tuple[TimelineMetric, ...]
+    payload_json: str
 
 
 @dataclass(frozen=True)
@@ -154,7 +181,13 @@ def get_task_detail(session: Session, task_id: uuid.UUID) -> TaskDetail | None:
             .order_by(Artifact.created_at.asc(), Artifact.id.asc())
         )
     )
-    return TaskDetail(task=task, events=events, usage=usage, artifacts=artifacts)
+    return TaskDetail(
+        task=task,
+        events=events,
+        timeline=tuple(_timeline_event(event) for event in events),
+        usage=usage,
+        artifacts=artifacts,
+    )
 
 
 def get_usage_aggregate(
@@ -222,6 +255,271 @@ def parse_date_bound(
     if inclusive_end:
         return parsed + timedelta(days=1)
     return parsed
+
+
+def _timeline_event(event: TaskEvent) -> TimelineEvent:
+    payload = event.payload if isinstance(event.payload, dict) else {}
+    message = _payload_string(payload, "message")
+    title = _event_title(event.type.value, message)
+    summary = _event_summary(event.type.value, payload, message)
+    tone = _event_tone(event.type.value, message)
+    badges = _event_badges(event.type.value, payload, message, tone)
+    metrics = _event_metrics(event.type.value, payload)
+    return TimelineEvent(
+        seq=event.seq,
+        event_type=event.type.value,
+        tone=tone,
+        title=title,
+        summary=summary,
+        created_at=event.created_at,
+        badges=badges,
+        metrics=metrics,
+        payload_json=json.dumps(payload, indent=2, sort_keys=True, default=str),
+    )
+
+
+def _event_title(event_type: str, message: str) -> str:
+    if event_type == "log" and message:
+        return _message_title(message)
+    titles = {
+        "task_created": "Task created",
+        "status_changed": "Status changed",
+        "llm_call": "LLM call completed",
+        "tool_call": "Tool call started",
+        "tool_result": "Tool result recorded",
+        "artifact_created": "Artifact created",
+        "message_posted": "Slack message posted",
+        "error": "Error recorded",
+        "log": "Log event",
+    }
+    return titles.get(event_type, _humanize_slug(event_type))
+
+
+def _message_title(message: str) -> str:
+    titles = {
+        "agent_executor_completed": "Agent executor completed",
+        "agent_executor_started": "Agent executor started",
+        "context_assembled": "Context assembled",
+        "episode_recorded": "Episode recorded",
+        "episode_retrieval_completed": "Episode retrieval completed",
+        "llm_call_failed": "LLM call failed",
+        "llm_call_started": "LLM call started",
+        "memory_confirmation_posted": "Memory confirmation posted",
+        "memory_write_confirmed": "Memory saved",
+        "memory_write_skipped": "Memory skipped",
+        "task_executor_started": "Worker started task",
+        "tool_call_completed": "Tool call completed",
+        "tool_call_failed": "Tool call failed",
+        "tool_call_started": "Tool call started",
+    }
+    return titles.get(message, _humanize_slug(message))
+
+
+def _event_summary(event_type: str, payload: dict[str, Any], message: str) -> str:
+    if event_type == "task_created":
+        return _summary_from_fields(
+            "Created from Slack",
+            payload,
+            ("slack_channel_id", "channel"),
+            ("slack_user_id", "user"),
+            ("slack_thread_ts", "thread_ts"),
+            ("slack_event_id", "event_id"),
+        )
+    if event_type == "status_changed":
+        from_status = _payload_string(payload, "from")
+        to_status = _payload_string(payload, "to") or _payload_string(payload, "status")
+        if from_status and to_status:
+            return f"Moved from {from_status} to {to_status}."
+        if to_status:
+            return f"Task status is now {to_status}."
+        return "Task status changed."
+    if event_type == "llm_call":
+        model = _payload_string(payload, "model") or "model"
+        total_tokens = _payload_string(payload, "total_tokens")
+        cost = _payload_string(payload, "cost_usd")
+        pieces = [f"Completed by {model}"]
+        if total_tokens:
+            pieces.append(f"{total_tokens} tokens")
+        if cost:
+            pieces.append(f"${cost} recorded cost")
+        return ". ".join(pieces) + "."
+    if event_type == "tool_call":
+        tool = _payload_string(payload, "tool") or "tool"
+        argument_keys = payload.get("argument_keys")
+        if isinstance(argument_keys, list) and argument_keys:
+            return f"Invoked {tool} with {', '.join(map(str, argument_keys))}."
+        return f"Invoked {tool}."
+    if event_type == "tool_result":
+        tool = _payload_string(payload, "tool") or "tool"
+        latency = _payload_string(payload, "latency_ms")
+        artifacts = _payload_string(payload, "artifact_count")
+        pieces = [f"{tool} returned a result"]
+        if latency:
+            pieces.append(f"{latency} ms")
+        if artifacts:
+            pieces.append(f"{artifacts} artifacts")
+        return ". ".join(pieces) + "."
+    if event_type == "artifact_created":
+        filename = _payload_string(payload, "filename") or "file"
+        return f"Created artifact {filename}."
+    if event_type == "message_posted":
+        purpose = _payload_string(payload, "purpose") or "Slack update"
+        channel = _payload_string(payload, "channel")
+        if channel:
+            return f"Posted {purpose} to {channel}."
+        return f"Posted {purpose}."
+    if event_type == "error":
+        error_type = _payload_string(payload, "error_type") or "Error"
+        error_summary = _payload_string(payload, "error_summary")
+        if error_summary:
+            return f"{error_type}: {error_summary}"
+        return f"{error_type} recorded."
+    if message == "context_assembled":
+        fact_count = len(_payload_list(payload, "selected_fact_ids"))
+        episode_count = len(_payload_list(payload, "selected_episode_ids"))
+        artifact_count = len(_payload_list(payload, "selected_artifact_ids"))
+        return (
+            "Built the prompt context with "
+            f"{fact_count} facts, {episode_count} episodes, "
+            f"and {artifact_count} artifacts."
+        )
+    if message == "episode_retrieval_completed":
+        selected_count = _payload_string(payload, "selected_count")
+        if selected_count:
+            return f"Retrieved {selected_count} relevant prior episodes."
+    if message == "llm_call_started":
+        model = _payload_string(payload, "model") or "model"
+        prompt = _payload_string(payload, "prompt_name")
+        if prompt:
+            return f"Started {model} with prompt {prompt}."
+        return f"Started {model}."
+    if message:
+        return _humanize_slug(message) + "."
+    return "Recorded execution metadata."
+
+
+def _summary_from_fields(
+    prefix: str, payload: dict[str, Any], *keys: tuple[str, str]
+) -> str:
+    fields = [
+        f"{label}={value}"
+        for key, label in keys
+        if (value := _payload_string(payload, key))
+    ]
+    if not fields:
+        return f"{prefix}."
+    return f"{prefix}: {', '.join(fields)}."
+
+
+def _event_tone(event_type: str, message: str) -> str:
+    if event_type == "error" or message.endswith("_failed"):
+        return "danger"
+    if event_type in {"llm_call", "tool_call", "tool_result"}:
+        return "accent"
+    if event_type in {"artifact_created", "message_posted"}:
+        return "success"
+    if event_type == "status_changed":
+        return "warning"
+    return "neutral"
+
+
+def _event_badges(
+    event_type: str, payload: dict[str, Any], message: str, tone: str
+) -> tuple[TimelineBadge, ...]:
+    badges = [TimelineBadge(label=event_type, tone=tone)]
+    if message and message != event_type:
+        badges.append(TimelineBadge(label=message, tone="neutral"))
+    for key, badge_tone in (
+        ("model_tier", "accent"),
+        ("provider", "neutral"),
+        ("tool", "accent"),
+        ("status", "warning"),
+        ("to", "warning"),
+        ("purpose", "neutral"),
+        ("error_type", "danger"),
+    ):
+        value = _payload_string(payload, key)
+        if value:
+            badges.append(TimelineBadge(label=value, tone=badge_tone))
+    return tuple(_unique_badges(badges)[:5])
+
+
+def _event_metrics(
+    event_type: str, payload: dict[str, Any]
+) -> tuple[TimelineMetric, ...]:
+    message = _payload_string(payload, "message")
+    keys = (
+        "model",
+        "prompt_name",
+        "route_reason",
+        "latency_ms",
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+        "cost_usd",
+        "tool_call_count",
+        "artifact_count",
+        "selected_count",
+        "worker_id",
+        "filename",
+        "mime_type",
+        "size_bytes",
+        "channel",
+        "thread_ts",
+        "message_ts",
+        "phase",
+    )
+    metrics: list[TimelineMetric] = []
+    for key in keys:
+        value = _payload_string(payload, key)
+        if value:
+            metrics.append(TimelineMetric(label=_humanize_slug(key), value=value))
+    if event_type == "context_assembled" or message == "context_assembled":
+        metrics.extend(
+            [
+                TimelineMetric(
+                    label="facts",
+                    value=str(len(_payload_list(payload, "selected_fact_ids"))),
+                ),
+                TimelineMetric(
+                    label="episodes",
+                    value=str(len(_payload_list(payload, "selected_episode_ids"))),
+                ),
+            ]
+        )
+    return tuple(metrics[:8])
+
+
+def _payload_string(payload: dict[str, Any], key: str) -> str:
+    value = payload.get(key)
+    if value is None or value == "":
+        return ""
+    if isinstance(value, list):
+        return ", ".join(str(item) for item in value)
+    if isinstance(value, dict):
+        return json.dumps(value, sort_keys=True, default=str)
+    return str(value)
+
+
+def _payload_list(payload: dict[str, Any], key: str) -> list[Any]:
+    value = payload.get(key)
+    return value if isinstance(value, list) else []
+
+
+def _unique_badges(badges: list[TimelineBadge]) -> list[TimelineBadge]:
+    seen: set[tuple[str, str]] = set()
+    unique: list[TimelineBadge] = []
+    for badge in badges:
+        marker = (badge.label, badge.tone)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        unique.append(badge)
+    return unique
+
+
+def _humanize_slug(value: str) -> str:
+    return value.replace("_", " ").replace("-", " ").strip().capitalize()
 
 
 def _usage_by_task(

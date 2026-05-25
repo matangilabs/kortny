@@ -163,9 +163,17 @@ def test_dashboard_task_detail_shows_events_usage_and_artifacts(
     assert "Create a usage dashboard" in response.text
     assert "Done with cost summary" in response.text
     assert "status_changed" in response.text
+    assert "Task created" in response.text
+    assert "LLM call started" in response.text
+    assert "LLM call completed" in response.text
+    assert "Tool result recorded" in response.text
+    assert "Raw payload" in response.text
+    assert "&#34;source&#34;: &#34;test&#34;" in response.text
+    assert "{&#x27;source&#x27;: &#x27;test&#x27;}" not in response.text
     assert "dashboard_report.pdf" in response.text
     assert "analysis" in response.text
     assert 'class="card metric-card"' in response.text
+    assert 'class="timeline"' in response.text
 
 
 def test_dashboard_usage_rollups_by_model_user_and_day(
@@ -225,12 +233,64 @@ def create_dashboard_task(session: Session) -> Task:
                 task_id=task.id,
                 seq=1,
                 type=TaskEventType.task_created,
-                payload={"source": "test"},
+                payload={
+                    "source": "test",
+                    "slack_channel_id": task.slack_channel_id,
+                    "slack_user_id": task.slack_user_id,
+                    "slack_thread_ts": task.slack_thread_ts,
+                    "slack_event_id": task.slack_event_id,
+                },
                 created_at=datetime(2026, 5, 24, 12, 0, tzinfo=UTC),
             ),
             TaskEvent(
                 task_id=task.id,
                 seq=2,
+                type=TaskEventType.log,
+                payload={
+                    "message": "llm_call_started",
+                    "provider": "openrouter",
+                    "model": "openai/gpt-5.4-mini",
+                    "model_tier": "analysis",
+                    "prompt_name": "kortny.agent_coordinator.system",
+                    "route_reason": "intent_classifier",
+                },
+                created_at=datetime(2026, 5, 24, 12, 0, 20, tzinfo=UTC),
+            ),
+            TaskEvent(
+                task_id=task.id,
+                seq=3,
+                type=TaskEventType.llm_call,
+                payload={
+                    "message": "llm_call_completed",
+                    "provider": "openrouter",
+                    "model": "openai/gpt-5.4-mini",
+                    "model_tier": "analysis",
+                    "input_tokens": 1200,
+                    "output_tokens": 300,
+                    "total_tokens": 1500,
+                    "cost_usd": "0.004200",
+                    "latency_ms": 890,
+                    "prompt_name": "kortny.agent_coordinator.system",
+                },
+                created_at=datetime(2026, 5, 24, 12, 0, 30, tzinfo=UTC),
+            ),
+            TaskEvent(
+                task_id=task.id,
+                seq=4,
+                type=TaskEventType.tool_result,
+                payload={
+                    "turn": 1,
+                    "tool_call_id": "call_dashboard",
+                    "tool": "web_search",
+                    "latency_ms": 240,
+                    "artifact_count": 0,
+                    "recoverable": False,
+                },
+                created_at=datetime(2026, 5, 24, 12, 0, 45, tzinfo=UTC),
+            ),
+            TaskEvent(
+                task_id=task.id,
+                seq=5,
                 type=TaskEventType.status_changed,
                 payload={"from": "running", "to": "succeeded"},
                 created_at=datetime(2026, 5, 24, 12, 1, tzinfo=UTC),
