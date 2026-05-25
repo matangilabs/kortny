@@ -338,6 +338,13 @@ class SlackIngress:
                 "kortny.task.id": task.id,
                 "kortny.installation.id": task.installation_id,
                 "slack.ingress.source": source,
+                "langfuse.trace.name": "kortny.task",
+                "langfuse.user.id": user_id,
+                "langfuse.session.id": f"{channel_id}:{thread_ts}",
+                "langfuse.trace.metadata.task_id": task.id,
+                "langfuse.trace.metadata.installation_id": task.installation_id,
+                "langfuse.trace.metadata.slack_channel_id": channel_id,
+                "langfuse.trace.metadata.slack_thread_ts": thread_ts,
             }
         )
         self._capture_traceparent(task, source=source)

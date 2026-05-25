@@ -42,6 +42,12 @@ services:
     env_file:
       - .env
     environment:
+      OBSERVABILITY_ENABLED: ${OBSERVABILITY_ENABLED:-true}
+      OBSERVABILITY_CAPTURE_CONTENT: ${OBSERVABILITY_CAPTURE_CONTENT:-metadata}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      OTEL_EXPORTER_OTLP_HEADERS: ${OTEL_EXPORTER_OTLP_HEADERS:-}
+      OTEL_SERVICE_NAME: ${OTEL_APP_SERVICE_NAME:-kortny-app}
+      OTEL_TRACE_SAMPLING_RATIO: ${OTEL_TRACE_SAMPLING_RATIO:-1.0}
       POSTGRES_URL: postgresql://${POSTGRES_USER:-kortny}:${POSTGRES_PASSWORD:-kortny}@postgres:5432/${POSTGRES_DB:-kortny}
       UV_CACHE_DIR: /tmp/uv-cache
       UV_LINK_MODE: copy
@@ -60,6 +66,12 @@ services:
     env_file:
       - .env
     environment:
+      OBSERVABILITY_ENABLED: ${OBSERVABILITY_ENABLED:-true}
+      OBSERVABILITY_CAPTURE_CONTENT: ${OBSERVABILITY_CAPTURE_CONTENT:-metadata}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      OTEL_EXPORTER_OTLP_HEADERS: ${OTEL_EXPORTER_OTLP_HEADERS:-}
+      OTEL_SERVICE_NAME: ${OTEL_WORKER_SERVICE_NAME:-kortny-worker}
+      OTEL_TRACE_SAMPLING_RATIO: ${OTEL_TRACE_SAMPLING_RATIO:-1.0}
       POSTGRES_URL: postgresql://${POSTGRES_USER:-kortny}:${POSTGRES_PASSWORD:-kortny}@postgres:5432/${POSTGRES_DB:-kortny}
       UV_CACHE_DIR: /tmp/uv-cache
       UV_LINK_MODE: copy
@@ -68,6 +80,25 @@ services:
       - .:/app
       - uv-cache:/tmp/uv-cache
 
+  phoenix:
+    image: ${PHOENIX_IMAGE:-arizephoenix/phoenix:latest}
+    profiles:
+      - observability
+    environment:
+      PHOENIX_HOST: 0.0.0.0
+      PHOENIX_PORT: 6006
+      PHOENIX_GRPC_PORT: 4317
+      PHOENIX_WORKING_DIR: /mnt/data
+      PHOENIX_SQL_DATABASE_URL: ${PHOENIX_SQL_DATABASE_URL:-sqlite:////mnt/data/phoenix.db}
+      PHOENIX_DEFAULT_RETENTION_POLICY_DAYS: ${PHOENIX_DEFAULT_RETENTION_POLICY_DAYS:-30}
+      PHOENIX_TELEMETRY_ENABLED: ${PHOENIX_TELEMETRY_ENABLED:-false}
+    ports:
+      - "${PHOENIX_HOST_PORT:-6006}:6006"
+      - "127.0.0.1:${PHOENIX_GRPC_HOST_PORT:-4317}:4317"
+    volumes:
+      - phoenix-data:/mnt/data
+
 volumes:
   postgres-data:
+  phoenix-data:
   uv-cache:

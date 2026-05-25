@@ -20,6 +20,7 @@ SETTINGS_ENV_VARS = {
     "OBSERVABILITY_ENABLED",
     "OBSERVABILITY_CAPTURE_CONTENT",
     "OTEL_EXPORTER_OTLP_ENDPOINT",
+    "OTEL_EXPORTER_OTLP_HEADERS",
     "OTEL_SERVICE_NAME",
     "OTEL_TRACE_SAMPLING_RATIO",
     "LANGFUSE_ENABLED",
@@ -78,6 +79,10 @@ def test_settings_loads_optional_environment(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("LLM_DOCUMENT_MODEL", "anthropic/claude-sonnet-test")
     monkeypatch.setenv("OBSERVABILITY_CAPTURE_CONTENT", "summaries")
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://otel:4318")
+    monkeypatch.setenv(
+        "OTEL_EXPORTER_OTLP_HEADERS",
+        "Authorization=Basic token,x-langfuse-ingestion-version=4",
+    )
     monkeypatch.setenv("OTEL_TRACE_SAMPLING_RATIO", "0.25")
     monkeypatch.setenv("LANGFUSE_ENABLED", "true")
     monkeypatch.setenv("LANGFUSE_HOST", "http://langfuse:3000")
@@ -95,6 +100,10 @@ def test_settings_loads_optional_environment(monkeypatch: pytest.MonkeyPatch) ->
     assert settings.llm_document_model == "anthropic/claude-sonnet-test"
     assert settings.observability_capture_content == "summaries"
     assert settings.otel_exporter_otlp_endpoint == "http://otel:4318"
+    assert (
+        settings.otel_exporter_otlp_headers
+        == "Authorization=Basic token,x-langfuse-ingestion-version=4"
+    )
     assert settings.otel_trace_sampling_ratio == 0.25
     assert settings.langfuse_enabled is True
     assert settings.langfuse_host == "http://langfuse:3000"

@@ -202,7 +202,11 @@ class ContextAssembler:
     def build_for_task(self, task: Task) -> ContextPackage:
         """Build prompt messages and context-selection metadata."""
 
-        with start_span("context.assemble", task=task):
+        with start_span(
+            "context.assemble",
+            task=task,
+            attributes={"openinference.span.kind": "CHAIN"},
+        ):
             return self._build_for_task(task)
 
     def _build_for_task(self, task: Task) -> ContextPackage:

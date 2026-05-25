@@ -119,7 +119,10 @@ class TaskWorker:
                 with start_span(
                     "task.run",
                     task=task,
-                    attributes={"worker.id": self.worker_id},
+                    attributes={
+                        "openinference.span.kind": "AGENT",
+                        "worker.id": self.worker_id,
+                    },
                     linked_traceparent=_task_traceparent(session, task),
                 ):
                     execution_result = self.executor.execute(

@@ -78,7 +78,12 @@ def configure_tracing(settings: Settings) -> None:
             ),
         )
         provider.add_span_processor(
-            BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint))
+            BatchSpanProcessor(
+                OTLPSpanExporter(
+                    endpoint=endpoint,
+                    headers=_parse_otlp_headers(settings.otel_exporter_otlp_headers),
+                )
+            )
         )
         trace.set_tracer_provider(provider)
         _TRACER = trace.get_tracer(_TRACER_NAME, version)
@@ -180,6 +185,7 @@ def current_traceparent() -> str | None:
 def task_span_attributes(task: Task) -> dict[str, Any]:
     """Return stable task correlation attributes for spans."""
 
+    session_id = task.slack_thread_ts or task.slack_message_ts
     return {
         "kortny.task.id": task.id,
         "kortny.installation.id": task.installation_id,
@@ -187,6 +193,15 @@ def task_span_attributes(task: Task) -> dict[str, Any]:
         "slack.thread_ts": task.slack_thread_ts,
         "slack.message_ts": task.slack_message_ts,
         "slack.user_id": task.slack_user_id,
+        "langfuse.trace.name": "kortny.task",
+        "langfuse.user.id": task.slack_user_id,
+        "langfuse.session.id": f"{task.slack_channel_id}:{session_id}"
+        if session_id
+        else task.slack_channel_id,
+        "langfuse.trace.metadata.task_id": task.id,
+        "langfuse.trace.metadata.installation_id": task.installation_id,
+        "langfuse.trace.metadata.slack_channel_id": task.slack_channel_id,
+        "langfuse.trace.metadata.slack_thread_ts": task.slack_thread_ts,
     }
 
 
@@ -229,6 +244,27 @@ def _span_attribute_value(value: Any) -> str | bool | int | float:
     if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
         return _json_attribute(list(value))
     return _truncate(str(value))
+
+
+def _parse_otlp_headers(value: str | None) -> dict[str, str] | None:
+    if value is None:
+        return None
+
+    headers: dict[str, str] = {}
+    for raw_pair in value.split(","):
+        pair = raw_pair.strip()
+        if not pair:
+            continue
+        key, separator, raw_header_value = pair.partition("=")
+        if not separator:
+            logger.warning("ignoring malformed OTLP header entry key=%s", key.strip())
+            continue
+        key = key.strip()
+        header_value = raw_header_value.strip()
+        if not key or not header_value:
+            continue
+        headers[key] = header_value
+    return headers or None
 
 
 def _json_attribute(value: Any) -> str:

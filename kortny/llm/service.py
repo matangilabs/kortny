@@ -84,7 +84,12 @@ class LLMService:
         with start_span(
             "llm.complete",
             task=self.task_service.get_task(task_id),
-            attributes=start_fields,
+            attributes={
+                **start_fields,
+                "openinference.span.kind": "LLM",
+                "llm.provider": self.provider_name.value,
+                "llm.model_name": self.provider.model,
+            },
         ):
             observe_task_event(
                 self.task_service,
@@ -150,12 +155,31 @@ class LLMService:
             )
             set_span_attributes(
                 {
+                    "langfuse.observation.type": "generation",
+                    "langfuse.observation.model.name": model,
+                    "langfuse.observation.usage_details": {
+                        "input": completion.usage.input_tokens,
+                        "output": completion.usage.output_tokens,
+                        "total": total_tokens,
+                    },
+                    "langfuse.observation.cost_details": {"total": str(cost_usd)},
+                    "langfuse.observation.prompt.name": prompt_name,
+                    "gen_ai.response.model": model,
+                    "gen_ai.usage.input_tokens": completion.usage.input_tokens,
+                    "gen_ai.usage.output_tokens": completion.usage.output_tokens,
+                    "gen_ai.usage.total_tokens": total_tokens,
+                    "gen_ai.usage.cost": str(cost_usd),
+                    "openinference.span.kind": "LLM",
                     "llm.provider": self.provider_name.value,
                     "llm.model": model,
+                    "llm.model_name": model,
                     "llm.response_id": completion.response_id,
                     "llm.input_tokens": completion.usage.input_tokens,
                     "llm.output_tokens": completion.usage.output_tokens,
                     "llm.total_tokens": total_tokens,
+                    "llm.token_count.prompt": completion.usage.input_tokens,
+                    "llm.token_count.completion": completion.usage.output_tokens,
+                    "llm.token_count.total": total_tokens,
                     "llm.cost_usd": str(cost_usd),
                     "llm.latency_ms": latency_ms,
                     "llm.tool_count": len(tools),

@@ -10,6 +10,7 @@ from alembic.config import Config
 from sqlalchemy import Engine, delete, select
 from sqlalchemy.orm import Session
 
+import kortny.llm.service as llm_service_module
 from kortny.db.models import (
     Artifact,
     EncryptedSecret,
@@ -98,7 +99,14 @@ def db_session(engine: Engine) -> Iterator[Session]:
         session.commit()
 
 
-def test_llm_service_records_usage_and_rolls_up_cost(db_session: Session) -> None:
+def test_llm_service_records_usage_and_rolls_up_cost(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    span_attributes: list[JsonObject] = []
+    monkeypatch.setattr(
+        llm_service_module, "set_span_attributes", span_attributes.append
+    )
     task = create_task(db_session)
     pricing = ModelPricing(
         provider=LLMProvider.openrouter,
@@ -160,6 +168,11 @@ def test_llm_service_records_usage_and_rolls_up_cost(db_session: Session) -> Non
     assert events[-1].payload["total_tokens"] == 3000
     assert events[-1].payload["prompt_name"] == "kortny.agent_coordinator.system"
     assert events[-1].payload["prompt_source"] == "code"
+    assert span_attributes[-1]["openinference.span.kind"] == "LLM"
+    assert span_attributes[-1]["llm.model_name"] == "openai/gpt-4o-mini"
+    assert span_attributes[-1]["llm.token_count.prompt"] == 1000
+    assert span_attributes[-1]["llm.token_count.completion"] == 2000
+    assert span_attributes[-1]["llm.token_count.total"] == 3000
 
 
 def test_llm_service_records_model_tier(db_session: Session) -> None:

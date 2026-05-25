@@ -280,6 +280,7 @@ class AgentCoordinator:
                     "tool.invoke",
                     task=task_obj,
                     attributes={
+                        "openinference.span.kind": "TOOL",
                         "agent.turn": turn,
                         "tool.name": tool_call.name,
                         "tool.call_id": tool_call.id,

@@ -75,6 +75,9 @@ class Settings(BaseSettings):
     otel_exporter_otlp_endpoint: str | None = Field(
         default=None, validation_alias="OTEL_EXPORTER_OTLP_ENDPOINT"
     )
+    otel_exporter_otlp_headers: str | None = Field(
+        default=None, validation_alias="OTEL_EXPORTER_OTLP_HEADERS"
+    )
     otel_service_name: str = Field(
         default="kortny", validation_alias="OTEL_SERVICE_NAME", min_length=1
     )
@@ -109,6 +112,7 @@ class Settings(BaseSettings):
         "llm_document_model",
         "llm_high_reasoning_model",
         "otel_exporter_otlp_endpoint",
+        "otel_exporter_otlp_headers",
         "langfuse_host",
         "langfuse_public_key",
         "langfuse_secret_key",

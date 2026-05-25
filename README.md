@@ -126,6 +126,8 @@ docker compose up
 This starts Postgres on `localhost:5432`, runs the Alembic migration, and
 starts the Slack Socket Mode ingress service plus the task worker.
 
+This does not start optional observability services such as Phoenix.
+
 ### 4. Develop against the local database
 
 Host-side commands use the same `POSTGRES_URL` from `.env`:
@@ -142,6 +144,39 @@ uv run python -m kortny.worker --once
 ```
 
 The management UI service will be added to Compose when that entrypoint lands.
+
+### Optional: run local observability
+
+Kortny can run with a lightweight local Phoenix trace UI:
+
+```
+make compose-up-observability
+```
+
+Open Phoenix at `http://localhost:6006`. Phoenix runs as one optional container
+behind the `observability` Compose profile, and persists traces to the
+`phoenix-data` Docker volume with SQLite by default. Set
+`PHOENIX_SQL_DATABASE_URL` to use a separate Postgres database for Phoenix.
+
+Kortny does not bundle a self-hosted Langfuse stack because that requires a
+larger observability deployment: Langfuse web/worker, Postgres, ClickHouse,
+Redis, and blob storage. To use Langfuse Cloud or a separate Langfuse instance,
+set:
+
+```
+OTEL_EXPORTER_OTLP_ENDPOINT=https://cloud.langfuse.com/api/public/otel/v1/traces
+OTEL_EXPORTER_OTLP_HEADERS=Authorization=Basic <base64-public-secret>,x-langfuse-ingestion-version=4
+LANGFUSE_ENABLED=true
+LANGFUSE_HOST=https://cloud.langfuse.com
+LANGFUSE_PUBLIC_KEY=pk-lf-...
+LANGFUSE_SECRET_KEY=sk-lf-...
+```
+
+Generate the Basic Auth value with:
+
+```
+printf 'pk-lf-...:sk-lf-...' | base64
+```
 
 ### 5. Invite your bot to a channel
 
