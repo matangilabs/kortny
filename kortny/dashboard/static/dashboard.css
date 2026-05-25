@@ -806,6 +806,158 @@ p {
   margin-bottom: 20px;
 }
 
+.memory-summary {
+  margin-bottom: 20px;
+}
+
+.memory-toolbar {
+  align-items: center;
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+  margin-bottom: 20px;
+}
+
+.memory-toolbar p {
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  margin: 0;
+}
+
+.segmented-nav {
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+}
+
+.segmented-item {
+  align-items: center;
+  border-radius: 4px;
+  color: var(--muted-foreground);
+  display: inline-flex;
+  font-weight: 700;
+  min-height: 30px;
+  padding: 5px 11px;
+}
+
+.segmented-item:hover,
+.segmented-item.active {
+  background: var(--card);
+  color: var(--foreground);
+  text-decoration: none;
+}
+
+.memory-filters {
+  flex-wrap: wrap;
+}
+
+.memory-filters label {
+  min-width: 150px;
+}
+
+.memory-filters label:first-of-type {
+  flex: 1 1 260px;
+}
+
+.memory-table {
+  min-width: 980px;
+}
+
+.memory-value {
+  max-width: 360px;
+  overflow-wrap: anywhere;
+}
+
+.episode-list {
+  display: grid;
+}
+
+.episode-row {
+  align-items: start;
+  border-bottom: 1px solid var(--border);
+  display: grid;
+  gap: 16px;
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 0.42fr);
+  padding: 15px 16px;
+}
+
+.episode-row:last-child {
+  border-bottom: 0;
+}
+
+.episode-main {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.episode-title {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.episode-title a,
+.episode-title strong {
+  color: var(--foreground);
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.episode-meta {
+  color: var(--muted-foreground);
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 12px;
+  gap: 8px;
+}
+
+.episode-meta span:not(:last-child)::after {
+  color: var(--border);
+  content: "/";
+  margin-left: 8px;
+}
+
+.episode-stats {
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 0;
+}
+
+.episode-stats div {
+  border-right: 1px solid var(--border);
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  padding: 9px 10px;
+}
+
+.episode-stats div:last-child {
+  border-right: 0;
+}
+
+.episode-stats dt {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.episode-stats dd {
+  color: var(--foreground);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  margin: 0;
+}
+
 .section-header-row {
   align-items: center;
   display: flex;
@@ -855,6 +1007,15 @@ pre {
   padding: 14px;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.inline-code {
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--foreground);
+  font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  padding: 2px 5px;
 }
 
 .badge-neutral {
@@ -1437,6 +1598,36 @@ pre {
 
   .config-list > div {
     grid-template-columns: 1fr;
+  }
+
+  .episode-row {
+    grid-template-columns: 1fr;
+  }
+
+  .episode-stats {
+    grid-template-columns: 1fr;
+  }
+
+  .episode-stats div,
+  .episode-stats div:last-child {
+    border-right: 0;
+  }
+
+  .episode-stats div {
+    border-bottom: 1px solid var(--border);
+  }
+
+  .episode-stats div:last-child {
+    border-bottom: 0;
+  }
+
+  .memory-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .segmented-nav {
+    align-self: start;
   }
 
   .charts-grid {

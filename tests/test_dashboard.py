@@ -422,6 +422,95 @@ def test_dashboard_user_detail_returns_404_when_date_filter_has_no_tasks(
     assert response.status_code == 404
 
 
+def test_dashboard_memory_page_shows_facts_and_episodes(
+    client: tuple[TestClient, Session],
+) -> None:
+    test_client, session = client
+    task = create_dashboard_task(session)
+    session.add(
+        WorkspaceState(
+            installation_id=task.installation_id,
+            scope_type="user",
+            scope_id="UCost",
+            key="no_auto_pdfs",
+            value_json={
+                "preference": "Do not generate PDFs unless explicitly requested"
+            },
+            value_text="Do not generate PDFs unless explicitly requested",
+            status="active",
+            source_kind="user_explicit",
+            source_task_id=task.id,
+            proposed_by="UCost",
+            confirmed_by_user_id="UCost",
+            confirmed_at=datetime(2026, 5, 24, 12, 1, tzinfo=UTC),
+        )
+    )
+    session.add(
+        Episode(
+            installation_id=task.installation_id,
+            task_id=task.id,
+            channel_id="CCost",
+            user_id="UCost",
+            thread_ts=task.slack_thread_ts,
+            summary="Remembered the user's PDF preference after confirmation.",
+            tools_used=["remember_fact"],
+            artifacts_created=[],
+            source_refs=[{"url": "https://example.com/source"}],
+            outcome="succeeded",
+            created_at=datetime(2026, 5, 24, 12, 2, tzinfo=UTC),
+        )
+    )
+    session.commit()
+    login(test_client)
+
+    response = test_client.get("/memory")
+
+    assert response.status_code == 200
+    assert "Memory" in response.text
+    assert "Active Facts" in response.text
+    assert "Workspace State" in response.text
+    assert "Showing 1-1" in response.text
+    assert "of 1 facts." in response.text
+    assert "All scopes" in response.text
+    assert "Recently updated" in response.text
+    assert "no_auto_pdfs" in response.text
+    assert "Do not generate PDFs unless explicitly requested" in response.text
+    assert "Aneesh Melkot" in response.text
+    assert f"/tasks/{task.id}" in response.text
+    assert (
+        "Remembered the user&#39;s PDF preference after confirmation."
+        not in response.text
+    )
+
+    filtered_facts = test_client.get(
+        "/memory?q=Aneesh&scope=user&status=active&sort=key_asc"
+    )
+
+    assert filtered_facts.status_code == 200
+    assert "Showing 1-1" in filtered_facts.text
+    assert "of 1 facts." in filtered_facts.text
+    assert "no_auto_pdfs" in filtered_facts.text
+
+    episodes_response = test_client.get(
+        "/memory?view=episodes&q=ops-desk&outcome=succeeded&sort=created_asc"
+    )
+
+    assert episodes_response.status_code == 200
+    assert "Episodes" in episodes_response.text
+    assert "Task memories retained for follow-up context" in episodes_response.text
+    assert "Showing 1-1" in episodes_response.text
+    assert "of 1 episodes." in episodes_response.text
+    assert (
+        "Remembered the user&#39;s PDF preference after confirmation."
+        in episodes_response.text
+    )
+    assert "1 tool" in episodes_response.text
+    assert "1 source" in episodes_response.text
+    assert "#ops-desk" in episodes_response.text
+    assert "Aneesh Melkot" in episodes_response.text
+    assert f"/tasks/{task.id}" in episodes_response.text
+
+
 def login(test_client: TestClient) -> Response:
     return test_client.post(
         "/login",

@@ -1,0 +1,228 @@
+{% extends "base.html" %}
+
+{% block title %}Memory - Kortny Dashboard{% endblock %}
+
+{% block content %}
+  <section class="page-heading">
+    <div>
+      <h1>Memory</h1>
+      <p>Read-only view of durable facts and episodic task memory.</p>
+    </div>
+    <a class="btn-ghost" href="/tasks">View Tasks</a>
+  </section>
+
+  <section class="summary-grid memory-summary" aria-label="Memory overview">
+    <div class="card metric-card metric-success">
+      <span>Active Facts</span>
+      <strong>{{ memory.active_fact_count|number }}</strong>
+      <small>Confirmed facts available for recall</small>
+    </div>
+    <div class="card metric-card metric-warning">
+      <span>Proposed Facts</span>
+      <strong>{{ memory.proposed_fact_count|number }}</strong>
+      <small>Waiting for confirmation or review</small>
+    </div>
+    <div class="card metric-card">
+      <span>Episodes</span>
+      <strong>{{ memory.episode_count|number }}</strong>
+      <small>Recorded task memories</small>
+    </div>
+    <div class="card metric-card metric-danger">
+      <span>Failed Episodes</span>
+      <strong>{{ memory.failed_episode_count|number }}</strong>
+      <small>Failures retained for future context</small>
+    </div>
+  </section>
+
+  <section class="memory-toolbar" aria-label="Memory view selector">
+    <nav class="segmented-nav">
+      <a class="segmented-item {{ 'active' if memory.active_view == 'facts' else '' }}" href="/memory?view=facts" {% if memory.active_view == 'facts' %}aria-current="page"{% endif %}>Facts</a>
+      <a class="segmented-item {{ 'active' if memory.active_view == 'episodes' else '' }}" href="/memory?view=episodes" {% if memory.active_view == 'episodes' %}aria-current="page"{% endif %}>Episodes</a>
+    </nav>
+    <p>
+      Showing {{ memory.page.first_item|number }}-{{ memory.page.last_item|number }}
+      of {{ memory.page.total_count|number }} {{ memory.page.noun }}.
+    </p>
+  </section>
+
+  {% if memory.active_view == "facts" %}
+    <section class="card detail-section">
+      <header>
+        <h2>Workspace State</h2>
+        <p>Facts Kortny can recall, filtered by scope, status, and text search.</p>
+      </header>
+      <form class="filters panel-filters memory-filters" method="get" action="/memory">
+        <input type="hidden" name="view" value="facts">
+        <label>
+          Search
+          <input class="input" type="search" name="q" value="{{ memory.query }}" placeholder="key, value, user, channel">
+        </label>
+        <label>
+          Scope
+          <select class="input" name="scope">
+            <option value="all" {{ "selected" if memory.scope_filter == "all" else "" }}>All scopes</option>
+            <option value="workspace" {{ "selected" if memory.scope_filter == "workspace" else "" }}>Workspace</option>
+            <option value="channel" {{ "selected" if memory.scope_filter == "channel" else "" }}>Channel</option>
+            <option value="user" {{ "selected" if memory.scope_filter == "user" else "" }}>User</option>
+          </select>
+        </label>
+        <label>
+          Status
+          <select class="input" name="status">
+            <option value="active" {{ "selected" if memory.status_filter == "active" else "" }}>Active</option>
+            <option value="proposed" {{ "selected" if memory.status_filter == "proposed" else "" }}>Proposed</option>
+            <option value="all" {{ "selected" if memory.status_filter == "all" else "" }}>All statuses</option>
+            <option value="superseded" {{ "selected" if memory.status_filter == "superseded" else "" }}>Superseded</option>
+            <option value="forgotten" {{ "selected" if memory.status_filter == "forgotten" else "" }}>Forgotten</option>
+            <option value="rejected" {{ "selected" if memory.status_filter == "rejected" else "" }}>Rejected</option>
+          </select>
+        </label>
+        <label>
+          Sort
+          <select class="input" name="sort">
+            <option value="updated_desc" {{ "selected" if memory.sort == "updated_desc" else "" }}>Recently updated</option>
+            <option value="created_desc" {{ "selected" if memory.sort == "created_desc" else "" }}>Recently created</option>
+            <option value="key_asc" {{ "selected" if memory.sort == "key_asc" else "" }}>Key A-Z</option>
+            <option value="scope_asc" {{ "selected" if memory.sort == "scope_asc" else "" }}>Scope A-Z</option>
+          </select>
+        </label>
+        <button class="btn" type="submit">Apply</button>
+        <a class="btn-ghost" href="{{ memory.reset_url }}">Reset</a>
+      </form>
+      <div class="overflow-x-auto">
+        <table class="table memory-table">
+          <caption>Workspace state facts.</caption>
+          <thead>
+            <tr>
+              <th>Scope</th>
+              <th>Key</th>
+              <th>Value</th>
+              <th>Status</th>
+              <th>Confirmed By</th>
+              <th>Updated</th>
+              <th>Source</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in memory.facts %}
+              <tr>
+                <td>
+                  <span class="identity-name">{{ row.scope.name }}</span>
+                  <span class="identity-id">{{ row.fact.scope_type }}{% if row.scope.secondary %} - {{ row.scope.secondary }}{% endif %}</span>
+                </td>
+                <td><code class="inline-code">{{ row.fact.key }}</code></td>
+                <td class="memory-value">{{ row.value_summary }}</td>
+                <td><span class="badge badge-{{ row.tone }}">{{ row.fact.status }}</span></td>
+                <td>
+                  {% if row.confirmed_by %}
+                    <span class="identity-name">{{ row.confirmed_by.name }}</span>
+                    {% if row.confirmed_by.secondary %}<span class="identity-id">{{ row.confirmed_by.secondary }}</span>{% endif %}
+                  {% else %}
+                    <span class="identity-id">-</span>
+                  {% endif %}
+                </td>
+                <td>{{ row.fact.updated_at|datetime }}</td>
+                <td>
+                  {% if row.source_task %}
+                    <a href="/tasks/{{ row.source_task.id }}">Task</a>
+                  {% elif row.fact.source_url %}
+                    <a href="{{ row.fact.source_url }}">Source</a>
+                  {% else %}
+                    <span class="identity-id">{{ row.fact.source_kind }}</span>
+                  {% endif %}
+                </td>
+              </tr>
+            {% else %}
+              <tr><td colspan="7" class="empty">No facts match these filters.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  {% else %}
+    <section class="card detail-section">
+      <header>
+        <h2>Episodes</h2>
+        <p>Task memories retained for follow-up context and future retrieval.</p>
+      </header>
+      <form class="filters panel-filters memory-filters" method="get" action="/memory">
+        <input type="hidden" name="view" value="episodes">
+        <label>
+          Search
+          <input class="input" type="search" name="q" value="{{ memory.query }}" placeholder="task, summary, user, channel">
+        </label>
+        <label>
+          Outcome
+          <select class="input" name="outcome">
+            <option value="all" {{ "selected" if memory.outcome_filter == "all" else "" }}>All outcomes</option>
+            <option value="succeeded" {{ "selected" if memory.outcome_filter == "succeeded" else "" }}>Succeeded</option>
+            <option value="failed" {{ "selected" if memory.outcome_filter == "failed" else "" }}>Failed</option>
+            <option value="cancelled" {{ "selected" if memory.outcome_filter == "cancelled" else "" }}>Cancelled</option>
+          </select>
+        </label>
+        <label>
+          Sort
+          <select class="input" name="sort">
+            <option value="created_desc" {{ "selected" if memory.sort == "created_desc" else "" }}>Newest first</option>
+            <option value="created_asc" {{ "selected" if memory.sort == "created_asc" else "" }}>Oldest first</option>
+            <option value="outcome_asc" {{ "selected" if memory.sort == "outcome_asc" else "" }}>Outcome A-Z</option>
+          </select>
+        </label>
+        <button class="btn" type="submit">Apply</button>
+        <a class="btn-ghost" href="{{ memory.reset_url }}">Reset</a>
+      </form>
+      <div class="episode-list">
+        {% for row in memory.episodes %}
+          <article class="episode-row">
+            <div class="episode-main">
+              <div class="episode-title">
+                <span class="badge badge-{{ row.tone }}">{{ row.episode.outcome }}</span>
+                {% if row.task %}
+                  <a href="/tasks/{{ row.task.id }}">{{ row.task.input }}</a>
+                {% else %}
+                  <strong>{{ row.episode.task_id }}</strong>
+                {% endif %}
+              </div>
+              <p>{{ row.episode.summary }}</p>
+              <div class="episode-meta">
+                <span>{{ row.channel.name }}</span>
+                <span>{{ row.user.name }}</span>
+                <span>{{ row.episode.created_at|datetime }}</span>
+              </div>
+            </div>
+            <dl class="episode-stats">
+              <div>
+                <dt>Tools</dt>
+                <dd>{{ row.tools_label }}</dd>
+              </div>
+              <div>
+                <dt>Artifacts</dt>
+                <dd>{{ row.artifacts_label }}</dd>
+              </div>
+              <div>
+                <dt>Sources</dt>
+                <dd>{{ row.source_refs_label }}</dd>
+              </div>
+            </dl>
+          </article>
+        {% else %}
+          <p class="empty attention-empty">No episodes match these filters.</p>
+        {% endfor %}
+      </div>
+    </section>
+  {% endif %}
+
+  <nav class="pager" role="navigation" aria-label="Memory pages">
+    {% if memory.previous_page_url %}
+      <a class="btn-ghost" href="{{ memory.previous_page_url }}">Previous</a>
+    {% else %}
+      <span class="btn-ghost disabled" aria-disabled="true">Previous</span>
+    {% endif %}
+    <strong>Page {{ memory.page.page|number }} of {{ memory.page.total_pages|number }}</strong>
+    {% if memory.next_page_url %}
+      <a class="btn-ghost" href="{{ memory.next_page_url }}">Next</a>
+    {% else %}
+      <span class="btn-ghost disabled" aria-disabled="true">Next</span>
+    {% endif %}
+  </nav>
+{% endblock %}

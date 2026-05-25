@@ -11,9 +11,9 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlencode, urlsplit, urlunsplit
 
-from sqlalchemy import Select, case, func, select
+from sqlalchemy import Select, Text, case, cast, func, or_, select
 from sqlalchemy.engine import Row
 from sqlalchemy.orm import Session
 from sqlalchemy.sql.elements import ColumnElement
@@ -22,11 +22,13 @@ from kortny.config import Settings
 from kortny.dashboard.settings import DashboardSettings
 from kortny.db.models import (
     Artifact,
+    Episode,
     LLMUsage,
     SlackIdentity,
     Task,
     TaskEvent,
     TaskStatus,
+    WorkspaceState,
 )
 
 DEFAULT_PAGE_SIZE = 25
@@ -342,6 +344,85 @@ class DashboardOverview:
     recent_tasks: tuple[TaskListItem, ...]
     system_health: SystemHealth
     window_label: str
+
+
+@dataclass(frozen=True)
+class MemoryFactRow:
+    fact: WorkspaceState
+    scope: IdentityLabel
+    value_summary: str
+    confirmed_by: IdentityLabel | None
+    proposed_by: IdentityLabel | None
+    source_task: Task | None
+    tone: str
+
+
+@dataclass(frozen=True)
+class MemoryEpisodeRow:
+    episode: Episode
+    channel: IdentityLabel
+    user: IdentityLabel
+    task: Task | None
+    tools_label: str
+    artifacts_label: str
+    source_refs_label: str
+    tone: str
+
+
+@dataclass(frozen=True)
+class MemoryPageInfo:
+    page: int
+    page_size: int
+    total_count: int
+    noun: str
+
+    @property
+    def total_pages(self) -> int:
+        if self.total_count == 0:
+            return 1
+        return math.ceil(self.total_count / self.page_size)
+
+    @property
+    def previous_page(self) -> int | None:
+        if self.page <= 1:
+            return None
+        return self.page - 1
+
+    @property
+    def next_page(self) -> int | None:
+        if self.page >= self.total_pages:
+            return None
+        return self.page + 1
+
+    @property
+    def first_item(self) -> int:
+        if self.total_count == 0:
+            return 0
+        return ((self.page - 1) * self.page_size) + 1
+
+    @property
+    def last_item(self) -> int:
+        return min(self.page * self.page_size, self.total_count)
+
+
+@dataclass(frozen=True)
+class MemoryDashboard:
+    active_fact_count: int
+    proposed_fact_count: int
+    episode_count: int
+    failed_episode_count: int
+    active_view: str
+    query: str
+    scope_filter: str
+    status_filter: str
+    outcome_filter: str
+    sort: str
+    page: MemoryPageInfo
+    previous_page_url: str | None
+    next_page_url: str | None
+    reset_url: str
+    facts: tuple[MemoryFactRow, ...]
+    episodes: tuple[MemoryEpisodeRow, ...]
 
 
 def list_tasks(
@@ -781,6 +862,130 @@ def get_dashboard_overview(
         recent_tasks=recent_tasks.items,
         system_health=system_health,
         window_label="Last 7 days",
+    )
+
+
+def get_memory_dashboard(
+    session: Session,
+    *,
+    view: str = "facts",
+    query: str | None = None,
+    scope_filter: str = "all",
+    status_filter: str = "active",
+    outcome_filter: str = "all",
+    sort: str | None = None,
+    page: int = 1,
+    page_size: int = DEFAULT_PAGE_SIZE,
+) -> MemoryDashboard:
+    """Return read-only memory state for the management console."""
+
+    active_view = "episodes" if view == "episodes" else "facts"
+    normalized_query = " ".join((query or "").split())
+    normalized_page = max(page, 1)
+    normalized_size = min(max(page_size, 1), MAX_PAGE_SIZE)
+    normalized_scope = scope_filter if scope_filter in _MEMORY_SCOPES else "all"
+    normalized_status = status_filter if status_filter in _MEMORY_STATUSES else "active"
+    normalized_outcome = outcome_filter if outcome_filter in _MEMORY_OUTCOMES else "all"
+    normalized_sort = _normalize_memory_sort(active_view, sort)
+
+    active_fact_count = (
+        session.scalar(
+            select(func.count())
+            .select_from(WorkspaceState)
+            .where(WorkspaceState.status == "active")
+        )
+        or 0
+    )
+    proposed_fact_count = (
+        session.scalar(
+            select(func.count())
+            .select_from(WorkspaceState)
+            .where(WorkspaceState.status == "proposed")
+        )
+        or 0
+    )
+    episode_count = session.scalar(select(func.count()).select_from(Episode)) or 0
+    failed_episode_count = (
+        session.scalar(
+            select(func.count()).select_from(Episode).where(Episode.outcome == "failed")
+        )
+        or 0
+    )
+
+    facts: tuple[MemoryFactRow, ...] = ()
+    episodes: tuple[MemoryEpisodeRow, ...] = ()
+    if active_view == "facts":
+        total_count, resolved_page, facts = _memory_fact_rows(
+            session,
+            query=normalized_query,
+            scope_filter=normalized_scope,
+            status_filter=normalized_status,
+            sort=normalized_sort,
+            page=normalized_page,
+            page_size=normalized_size,
+        )
+        noun = "facts"
+    else:
+        total_count, resolved_page, episodes = _memory_episode_rows(
+            session,
+            query=normalized_query,
+            outcome_filter=normalized_outcome,
+            sort=normalized_sort,
+            page=normalized_page,
+            page_size=normalized_size,
+        )
+        noun = "episodes"
+
+    page_info = MemoryPageInfo(
+        page=resolved_page,
+        page_size=normalized_size,
+        total_count=total_count,
+        noun=noun,
+    )
+
+    return MemoryDashboard(
+        active_fact_count=int(active_fact_count),
+        proposed_fact_count=int(proposed_fact_count),
+        episode_count=int(episode_count),
+        failed_episode_count=int(failed_episode_count),
+        active_view=active_view,
+        query=normalized_query,
+        scope_filter=normalized_scope,
+        status_filter=normalized_status,
+        outcome_filter=normalized_outcome,
+        sort=normalized_sort,
+        page=page_info,
+        previous_page_url=(
+            _memory_page_url(
+                view=active_view,
+                query=normalized_query,
+                scope_filter=normalized_scope,
+                status_filter=normalized_status,
+                outcome_filter=normalized_outcome,
+                sort=normalized_sort,
+                page=page_info.previous_page,
+                page_size=normalized_size,
+            )
+            if page_info.previous_page is not None
+            else None
+        ),
+        next_page_url=(
+            _memory_page_url(
+                view=active_view,
+                query=normalized_query,
+                scope_filter=normalized_scope,
+                status_filter=normalized_status,
+                outcome_filter=normalized_outcome,
+                sort=normalized_sort,
+                page=page_info.next_page,
+                page_size=normalized_size,
+            )
+            if page_info.next_page is not None
+            else None
+        ),
+        reset_url=f"/memory?view={active_view}",
+        facts=facts,
+        episodes=episodes,
     )
 
 
@@ -1328,6 +1533,391 @@ def _truncate(value: str, max_length: int) -> str:
     if len(normalized) <= max_length:
         return normalized
     return normalized[: max_length - 3].rstrip() + "..."
+
+
+def _memory_fact_identity_keys(
+    facts: Sequence[WorkspaceState],
+) -> tuple[IdentityKey, ...]:
+    keys: list[IdentityKey] = []
+    for fact in facts:
+        if fact.scope_type in {"channel", "user"} and fact.scope_id:
+            keys.append((fact.installation_id, fact.scope_type, fact.scope_id))
+        for user_id in (
+            fact.proposed_by,
+            fact.confirmed_by_user_id,
+            fact.rejected_by_user_id,
+            fact.forgotten_by_user_id,
+        ):
+            if user_id:
+                keys.append((fact.installation_id, "user", user_id))
+    return tuple(keys)
+
+
+_MEMORY_SCOPES = frozenset({"all", "workspace", "channel", "user"})
+_MEMORY_STATUSES = frozenset(
+    {"all", "active", "proposed", "rejected", "superseded", "forgotten"}
+)
+_MEMORY_OUTCOMES = frozenset({"all", "succeeded", "failed", "cancelled"})
+_MEMORY_FACT_SORTS = frozenset({"updated_desc", "created_desc", "key_asc", "scope_asc"})
+_MEMORY_EPISODE_SORTS = frozenset({"created_desc", "created_asc", "outcome_asc"})
+
+
+def _normalize_memory_sort(view: str, sort: str | None) -> str:
+    if view == "episodes":
+        return sort if sort in _MEMORY_EPISODE_SORTS else "created_desc"
+    return sort if sort in _MEMORY_FACT_SORTS else "updated_desc"
+
+
+def _memory_fact_rows(
+    session: Session,
+    *,
+    query: str,
+    scope_filter: str,
+    status_filter: str,
+    sort: str,
+    page: int,
+    page_size: int,
+) -> tuple[int, int, tuple[MemoryFactRow, ...]]:
+    filters = _memory_fact_filters(
+        query=query,
+        scope_filter=scope_filter,
+        status_filter=status_filter,
+    )
+    total_count = (
+        session.scalar(select(func.count()).select_from(WorkspaceState).where(*filters))
+        or 0
+    )
+    resolved_page = _resolved_page(
+        page=page, page_size=page_size, total_count=total_count
+    )
+    facts = tuple(
+        session.scalars(
+            select(WorkspaceState)
+            .where(*filters)
+            .order_by(*_memory_fact_order(sort))
+            .offset((resolved_page - 1) * page_size)
+            .limit(page_size)
+        )
+    )
+    source_tasks = _tasks_by_id(
+        session,
+        [fact.source_task_id for fact in facts if fact.source_task_id],
+    )
+    fact_identities = _identity_map_from_keys(
+        session,
+        _memory_fact_identity_keys(facts),
+    )
+    rows = tuple(
+        MemoryFactRow(
+            fact=fact,
+            scope=_memory_scope_label(fact_identities, fact),
+            value_summary=_memory_value_summary(fact),
+            confirmed_by=_optional_user_label(
+                fact_identities,
+                installation_id=fact.installation_id,
+                slack_id=fact.confirmed_by_user_id,
+            ),
+            proposed_by=_optional_user_label(
+                fact_identities,
+                installation_id=fact.installation_id,
+                slack_id=fact.proposed_by,
+            ),
+            source_task=(
+                source_tasks.get(fact.source_task_id)
+                if fact.source_task_id is not None
+                else None
+            ),
+            tone=_memory_status_tone(fact.status),
+        )
+        for fact in facts
+    )
+    return int(total_count), resolved_page, rows
+
+
+def _memory_fact_filters(
+    *,
+    query: str,
+    scope_filter: str,
+    status_filter: str,
+) -> list[ColumnElement[bool]]:
+    filters: list[ColumnElement[bool]] = []
+    if status_filter != "all":
+        filters.append(WorkspaceState.status == status_filter)
+    if scope_filter != "all":
+        filters.append(WorkspaceState.scope_type == scope_filter)
+    if query:
+        pattern = f"%{query}%"
+        scope_identity_match = (
+            select(SlackIdentity.id)
+            .where(
+                SlackIdentity.installation_id == WorkspaceState.installation_id,
+                SlackIdentity.kind == WorkspaceState.scope_type,
+                SlackIdentity.slack_id == WorkspaceState.scope_id,
+                or_(
+                    SlackIdentity.display_name.ilike(pattern),
+                    SlackIdentity.raw_name.ilike(pattern),
+                ),
+            )
+            .exists()
+        )
+        filters.append(
+            or_(
+                WorkspaceState.key.ilike(pattern),
+                WorkspaceState.scope_id.ilike(pattern),
+                WorkspaceState.value_text.ilike(pattern),
+                cast(WorkspaceState.value_json, Text).ilike(pattern),
+                scope_identity_match,
+            )
+        )
+    return filters
+
+
+def _memory_fact_order(sort: str) -> tuple[Any, ...]:
+    if sort == "created_desc":
+        return (WorkspaceState.created_at.desc(), WorkspaceState.id.desc())
+    if sort == "key_asc":
+        return (WorkspaceState.key.asc(), WorkspaceState.updated_at.desc())
+    if sort == "scope_asc":
+        return (
+            WorkspaceState.scope_type.asc(),
+            WorkspaceState.scope_id.asc().nullsfirst(),
+            WorkspaceState.key.asc(),
+        )
+    return (WorkspaceState.updated_at.desc(), WorkspaceState.created_at.desc())
+
+
+def _memory_episode_rows(
+    session: Session,
+    *,
+    query: str,
+    outcome_filter: str,
+    sort: str,
+    page: int,
+    page_size: int,
+) -> tuple[int, int, tuple[MemoryEpisodeRow, ...]]:
+    filters = _memory_episode_filters(query=query, outcome_filter=outcome_filter)
+    base = select(Episode)
+    count_base = select(func.count()).select_from(Episode)
+    if query:
+        base = base.join(Task, Task.id == Episode.task_id)
+        count_base = count_base.join(Task, Task.id == Episode.task_id)
+    total_count = session.scalar(count_base.where(*filters)) or 0
+    resolved_page = _resolved_page(
+        page=page, page_size=page_size, total_count=total_count
+    )
+    episodes = tuple(
+        session.scalars(
+            base.where(*filters)
+            .order_by(*_memory_episode_order(sort))
+            .offset((resolved_page - 1) * page_size)
+            .limit(page_size)
+        )
+    )
+    episode_tasks = _tasks_by_id(session, [episode.task_id for episode in episodes])
+    episode_identities = _identity_map_from_keys(
+        session,
+        (
+            key
+            for episode in episodes
+            for key in (
+                (episode.installation_id, "channel", episode.channel_id),
+                (episode.installation_id, "user", episode.user_id),
+            )
+        ),
+    )
+    rows = tuple(
+        MemoryEpisodeRow(
+            episode=episode,
+            channel=_identity_label(
+                episode_identities,
+                installation_id=episode.installation_id,
+                kind="channel",
+                slack_id=episode.channel_id,
+            ),
+            user=_identity_label(
+                episode_identities,
+                installation_id=episode.installation_id,
+                kind="user",
+                slack_id=episode.user_id,
+            ),
+            task=episode_tasks.get(episode.task_id),
+            tools_label=_list_count_label(episode.tools_used, "tool"),
+            artifacts_label=_list_count_label(episode.artifacts_created, "artifact"),
+            source_refs_label=_list_count_label(episode.source_refs, "source"),
+            tone=_episode_tone(episode.outcome),
+        )
+        for episode in episodes
+    )
+    return int(total_count), resolved_page, rows
+
+
+def _memory_episode_filters(
+    *,
+    query: str,
+    outcome_filter: str,
+) -> list[ColumnElement[bool]]:
+    filters: list[ColumnElement[bool]] = []
+    if outcome_filter != "all":
+        filters.append(Episode.outcome == outcome_filter)
+    if query:
+        pattern = f"%{query}%"
+        channel_identity_match = (
+            select(SlackIdentity.id)
+            .where(
+                SlackIdentity.installation_id == Episode.installation_id,
+                SlackIdentity.kind == "channel",
+                SlackIdentity.slack_id == Episode.channel_id,
+                or_(
+                    SlackIdentity.display_name.ilike(pattern),
+                    SlackIdentity.raw_name.ilike(pattern),
+                ),
+            )
+            .exists()
+        )
+        user_identity_match = (
+            select(SlackIdentity.id)
+            .where(
+                SlackIdentity.installation_id == Episode.installation_id,
+                SlackIdentity.kind == "user",
+                SlackIdentity.slack_id == Episode.user_id,
+                or_(
+                    SlackIdentity.display_name.ilike(pattern),
+                    SlackIdentity.raw_name.ilike(pattern),
+                ),
+            )
+            .exists()
+        )
+        filters.append(
+            or_(
+                Episode.summary.ilike(pattern),
+                Episode.channel_id.ilike(pattern),
+                Episode.user_id.ilike(pattern),
+                Task.input.ilike(pattern),
+                channel_identity_match,
+                user_identity_match,
+            )
+        )
+    return filters
+
+
+def _memory_episode_order(sort: str) -> tuple[Any, ...]:
+    if sort == "created_asc":
+        return (Episode.created_at.asc(), Episode.id.asc())
+    if sort == "outcome_asc":
+        return (Episode.outcome.asc(), Episode.created_at.desc())
+    return (Episode.created_at.desc(), Episode.id.desc())
+
+
+def _memory_page_url(
+    *,
+    view: str,
+    query: str,
+    scope_filter: str,
+    status_filter: str,
+    outcome_filter: str,
+    sort: str,
+    page: int | None,
+    page_size: int,
+) -> str:
+    params: dict[str, str | int] = {
+        "view": view,
+        "sort": sort,
+        "page": page or 1,
+        "page_size": page_size,
+    }
+    if query:
+        params["q"] = query
+    if view == "facts":
+        if scope_filter != "all":
+            params["scope"] = scope_filter
+        if status_filter != "active":
+            params["status"] = status_filter
+    else:
+        if outcome_filter != "all":
+            params["outcome"] = outcome_filter
+    return f"/memory?{urlencode(params)}"
+
+
+def _resolved_page(*, page: int, page_size: int, total_count: int) -> int:
+    total_pages = max(1, math.ceil(total_count / page_size)) if total_count else 1
+    return min(max(page, 1), total_pages)
+
+
+def _memory_scope_label(
+    identities: dict[IdentityKey, SlackIdentity],
+    fact: WorkspaceState,
+) -> IdentityLabel:
+    if fact.scope_type == "workspace":
+        return IdentityLabel(name="Workspace", slack_id="workspace", found=True)
+    if fact.scope_id is None:
+        return IdentityLabel(name="-", slack_id="-", found=False)
+    return _identity_label(
+        identities,
+        installation_id=fact.installation_id,
+        kind=fact.scope_type,
+        slack_id=fact.scope_id,
+    )
+
+
+def _optional_user_label(
+    identities: dict[IdentityKey, SlackIdentity],
+    *,
+    installation_id: uuid.UUID,
+    slack_id: str | None,
+) -> IdentityLabel | None:
+    if not slack_id:
+        return None
+    return _identity_label(
+        identities,
+        installation_id=installation_id,
+        kind="user",
+        slack_id=slack_id,
+    )
+
+
+def _memory_value_summary(fact: WorkspaceState) -> str:
+    if fact.value_text:
+        return _truncate(fact.value_text, 180)
+    return _truncate(json.dumps(fact.value_json, sort_keys=True, default=str), 180)
+
+
+def _memory_status_tone(status: str) -> str:
+    if status == "active":
+        return "success"
+    if status == "proposed":
+        return "warning"
+    if status in {"rejected", "forgotten"}:
+        return "danger"
+    return "neutral"
+
+
+def _episode_tone(outcome: str) -> str:
+    if outcome == "succeeded":
+        return "success"
+    if outcome == "failed":
+        return "danger"
+    return "warning"
+
+
+def _list_count_label(items: object, singular: str) -> str:
+    if not isinstance(items, list):
+        return f"0 {singular}s"
+    count = len(items)
+    suffix = "" if count == 1 else "s"
+    return f"{count:,} {singular}{suffix}"
+
+
+def _tasks_by_id(
+    session: Session,
+    task_ids: Sequence[uuid.UUID | None],
+) -> dict[uuid.UUID, Task]:
+    normalized = tuple({task_id for task_id in task_ids if task_id is not None})
+    if not normalized:
+        return {}
+    return {
+        task.id: task
+        for task in session.scalars(select(Task).where(Task.id.in_(normalized)))
+    }
 
 
 IdentityKey = tuple[uuid.UUID, str, str]

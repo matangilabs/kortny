@@ -23,6 +23,7 @@ from kortny.dashboard.data import (
     DEFAULT_PAGE_SIZE,
     MAX_PAGE_SIZE,
     get_dashboard_overview,
+    get_memory_dashboard,
     get_system_health,
     get_task_detail,
     get_usage_aggregate,
@@ -228,6 +229,41 @@ def register_routes(app: FastAPI) -> None:
                 "directory": directory,
                 "from_date": from_date or "",
                 "to_date": to_date or "",
+            },
+        )
+
+    @app.get("/memory", response_class=HTMLResponse)
+    def memory(
+        request: Request,
+        username: Annotated[str, Depends(require_user)],
+        session: Annotated[Session, Depends(get_session)],
+        view: Annotated[str, Query()] = "facts",
+        q: Annotated[str | None, Query()] = None,
+        scope: Annotated[str, Query()] = "all",
+        status_filter: Annotated[str, Query(alias="status")] = "active",
+        outcome: Annotated[str, Query()] = "all",
+        sort: Annotated[str | None, Query()] = None,
+        page: Annotated[int, Query(ge=1)] = 1,
+        page_size: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)] = DEFAULT_PAGE_SIZE,
+    ) -> Response:
+        memory_dashboard = get_memory_dashboard(
+            session,
+            view=view,
+            query=q,
+            scope_filter=scope,
+            status_filter=status_filter,
+            outcome_filter=outcome,
+            sort=sort,
+            page=page,
+            page_size=page_size,
+        )
+        return templates.TemplateResponse(
+            request=request,
+            name="memory.html",
+            context={
+                "active_page": "memory",
+                "dashboard_user": username,
+                "memory": memory_dashboard,
             },
         )
 
