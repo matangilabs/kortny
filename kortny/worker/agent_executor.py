@@ -31,8 +31,6 @@ from kortny.slack.reactions import (
     ACK_REACTION_ADDED_MESSAGE,
     ACK_REACTION_REMOVE_FAILED_MESSAGE,
     ACK_REACTION_REMOVED_MESSAGE,
-    COMPLETION_REACTION_ADDED_MESSAGE,
-    COMPLETION_REACTION_FAILED_MESSAGE,
     LibraryReactionProvider,
     ReactionProvider,
 )
@@ -450,7 +448,6 @@ class AgentTaskExecutor:
         channel_id = _payload_str(ack_event.payload, "channel")
         message_ts = _payload_str(ack_event.payload, "message_ts")
         ack_reaction = _payload_str(ack_event.payload, "reaction")
-        source = _payload_str(ack_event.payload, "source") or "worker"
         if channel_id is None or message_ts is None or ack_reaction is None:
             return
 
@@ -466,15 +463,7 @@ class AgentTaskExecutor:
             message_ts=message_ts,
             reaction=ack_reaction,
         )
-        self._add_completion_reaction(
-            client=client,
-            task=task,
-            task_service=task_service,
-            channel_id=channel_id,
-            message_ts=message_ts,
-            source=source,
-            succeeded=succeeded,
-        )
+        del succeeded
 
     def _remove_ack_reaction(
         self,
@@ -527,68 +516,6 @@ class AgentTaskExecutor:
                 "channel": channel_id,
                 "message_ts": message_ts,
                 "reaction": reaction,
-            },
-        )
-
-    def _add_completion_reaction(
-        self,
-        *,
-        client: Any,
-        task: Task,
-        task_service: TaskService,
-        channel_id: str,
-        message_ts: str,
-        source: str,
-        succeeded: bool,
-    ) -> None:
-        reactions_add = getattr(client, "reactions_add", None)
-        if not callable(reactions_add):
-            return
-        choice = self.reaction_provider.completion_reaction(
-            input_text=task.input,
-            source=source,
-            succeeded=succeeded,
-        )
-        try:
-            reactions_add(
-                channel=channel_id,
-                name=choice.name,
-                timestamp=message_ts,
-            )
-        except Exception as exc:
-            logger.info(
-                "slack completion reaction failed task_id=%s channel=%s message_ts=%s reaction=%s error_type=%s error=%s",
-                task.id,
-                channel_id,
-                message_ts,
-                choice.name,
-                type(exc).__name__,
-                exc,
-            )
-            task_service.append_event(
-                task,
-                TaskEventType.log,
-                {
-                    "message": COMPLETION_REACTION_FAILED_MESSAGE,
-                    "channel": channel_id,
-                    "message_ts": message_ts,
-                    "reaction": choice.name,
-                    "reaction_intent": choice.intent,
-                    "error_type": type(exc).__name__,
-                    "error": str(exc),
-                },
-            )
-            return
-
-        task_service.append_event(
-            task,
-            TaskEventType.log,
-            {
-                "message": COMPLETION_REACTION_ADDED_MESSAGE,
-                "channel": channel_id,
-                "message_ts": message_ts,
-                "reaction": choice.name,
-                "reaction_intent": choice.intent,
             },
         )
 

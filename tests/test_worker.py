@@ -33,7 +33,6 @@ from kortny.slack.comments import ARTIFACT_COMMENT_FALLBACK_TEXT
 from kortny.slack.reactions import (
     ACK_REACTION_ADDED_MESSAGE,
     ACK_REACTION_REMOVED_MESSAGE,
-    COMPLETION_REACTION_ADDED_MESSAGE,
 )
 from kortny.tasks import TaskService
 from kortny.tools import ToolResult
@@ -489,7 +488,7 @@ def test_agent_executor_builds_routed_llm_from_task_input(
     )
 
 
-def test_agent_executor_replaces_ack_reaction_after_success(
+def test_agent_executor_removes_ack_reaction_after_success(
     db_session: Session,
     worker_session_factory: sessionmaker[Session],
     tmp_path: Path,
@@ -555,20 +554,9 @@ def test_agent_executor_replaces_ack_reaction_after_success(
             "timestamp": "EvAgentWorkerReaction",
         }
     ]
-    assert slack_client.reaction_adds == [
-        {
-            "channel": "C123",
-            "name": "heavy_check_mark",
-            "timestamp": "EvAgentWorkerReaction",
-        }
-    ]
+    assert slack_client.reaction_adds == []
     assert any(
         event.payload.get("message") == ACK_REACTION_REMOVED_MESSAGE for event in events
-    )
-    assert any(
-        event.payload.get("message") == COMPLETION_REACTION_ADDED_MESSAGE
-        and event.payload.get("reaction") == "heavy_check_mark"
-        for event in events
     )
 
 
@@ -719,13 +707,7 @@ def test_agent_executor_posts_generic_failure_notice_for_setup_errors(
             "timestamp": "EvAgentWorkerMissingSearch",
         }
     ]
-    assert slack_client.reaction_adds == [
-        {
-            "channel": "C123",
-            "name": "warning",
-            "timestamp": "EvAgentWorkerMissingSearch",
-        }
-    ]
+    assert slack_client.reaction_adds == []
     posted_event = next(
         event
         for event in events
