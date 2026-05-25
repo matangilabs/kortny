@@ -18,10 +18,11 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session, sessionmaker
 from starlette.middleware.sessions import SessionMiddleware
 
-from kortny.config import SettingsError, load_settings
+from kortny.config import Settings, SettingsError, load_settings
 from kortny.dashboard.data import (
     DEFAULT_PAGE_SIZE,
     MAX_PAGE_SIZE,
+    get_dashboard_overview,
     get_system_health,
     get_task_detail,
     get_usage_aggregate,
@@ -124,13 +125,38 @@ def register_routes(app: FastAPI) -> None:
         request: Request,
         username: Annotated[str, Depends(require_user)],
         session: Annotated[Session, Depends(get_session)],
+    ) -> Response:
+        settings = cast(DashboardSettings, request.app.state.dashboard_settings)
+        runtime_settings, runtime_error = _load_runtime_settings()
+        system_health = get_system_health(
+            session,
+            dashboard_settings=settings,
+            runtime_settings=runtime_settings,
+            runtime_error=runtime_error,
+        )
+        overview = get_dashboard_overview(session, system_health=system_health)
+        return templates.TemplateResponse(
+            request=request,
+            name="index.html",
+            context={
+                "active_page": "overview",
+                "dashboard_user": username,
+                "overview": overview,
+            },
+        )
+
+    @app.get("/tasks", response_class=HTMLResponse)
+    def tasks(
+        request: Request,
+        username: Annotated[str, Depends(require_user)],
+        session: Annotated[Session, Depends(get_session)],
         page: Annotated[int, Query(ge=1)] = 1,
         page_size: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)] = DEFAULT_PAGE_SIZE,
     ) -> Response:
         task_page = list_tasks(session, page=page, page_size=page_size)
         return templates.TemplateResponse(
             request=request,
-            name="index.html",
+            name="tasks.html",
             context={
                 "active_page": "tasks",
                 "dashboard_user": username,
@@ -243,13 +269,7 @@ def register_routes(app: FastAPI) -> None:
         session: Annotated[Session, Depends(get_session)],
     ) -> Response:
         settings = cast(DashboardSettings, request.app.state.dashboard_settings)
-        runtime_settings = None
-        runtime_error = None
-        try:
-            runtime_settings = load_settings()
-        except SettingsError as exc:
-            runtime_error = str(exc)
-
+        runtime_settings, runtime_error = _load_runtime_settings()
         system_health = get_system_health(
             session,
             dashboard_settings=settings,
@@ -265,12 +285,6 @@ def register_routes(app: FastAPI) -> None:
                 "system": system_health,
             },
         )
-
-    @app.get("/tasks", include_in_schema=False)
-    def tasks_redirect(
-        _username: Annotated[str, Depends(require_user)],
-    ) -> RedirectResponse:
-        return RedirectResponse(url="/", status_code=status.HTTP_303_SEE_OTHER)
 
 
 def require_user(
@@ -293,6 +307,13 @@ def get_session(request: Request) -> Iterator[Session]:
     factory = cast(sessionmaker[Session], request.app.state.session_factory)
     with factory() as session:
         yield session
+
+
+def _load_runtime_settings() -> tuple[Settings | None, str | None]:
+    try:
+        return load_settings(), None
+    except SettingsError as exc:
+        return None, str(exc)
 
 
 def _session_username(request: Request) -> str | None:

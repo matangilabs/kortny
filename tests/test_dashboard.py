@@ -193,6 +193,47 @@ def test_dashboard_system_page_shows_health_and_redacted_config(
     assert "db-system-secret" not in response.text
 
 
+def test_dashboard_homepage_renders_operator_overview(
+    client: tuple[TestClient, Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    test_client, session = client
+    set_runtime_settings_env(monkeypatch)
+    create_dashboard_task(
+        session,
+        created_at=datetime.now(UTC) - timedelta(minutes=12),
+    )
+    failed_task = create_dashboard_task(
+        session,
+        input_text="Investigate failed overview task",
+        status=TaskStatus.failed,
+        cost_usd=Decimal("0.008400"),
+        input_tokens=2400,
+        output_tokens=600,
+        created_at=datetime.now(UTC) - timedelta(minutes=5),
+    )
+    login(test_client)
+
+    response = test_client.get("/")
+
+    assert response.status_code == 200
+    assert "Overview" in response.text
+    assert "Operator snapshot" in response.text
+    assert "Needs Review" in response.text
+    assert "Top Usage Drivers" in response.text
+    assert "Daily Cost" in response.text
+    assert "Task Volume" in response.text
+    assert "Recent Work" in response.text
+    assert "View all tasks" in response.text
+    assert "Today Cost" in response.text
+    assert "$0.012600" in response.text
+    assert "50.0%" in response.text
+    assert "Investigate failed overview task" in response.text
+    assert f"/tasks/{failed_task.id}" in response.text
+    assert 'href="/tasks"' in response.text
+    assert 'class="overview-main-grid"' in response.text
+
+
 def test_dashboard_task_list_shows_cost_models_and_turns(
     client: tuple[TestClient, Session],
 ) -> None:
@@ -200,9 +241,10 @@ def test_dashboard_task_list_shows_cost_models_and_turns(
     task = create_dashboard_task(session)
     login(test_client)
 
-    response = test_client.get("/")
+    response = test_client.get("/tasks")
 
     assert response.status_code == 200
+    assert "Tasks" in response.text
     assert "#ops-desk" in response.text
     assert "CCost" in response.text
     assert "Aneesh Melkot" in response.text
@@ -385,6 +427,23 @@ def login(test_client: TestClient) -> Response:
         "/login",
         data={"username": "admin", "password": "secret", "next": "/"},
         follow_redirects=False,
+    )
+
+
+def set_runtime_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-dashboard-secret")
+    monkeypatch.setenv("SLACK_APP_TOKEN", "xapp-dashboard-secret")
+    monkeypatch.setenv("SLACK_SIGNING_SECRET", "dashboard-signing-secret")
+    monkeypatch.setenv("SLACK_APP_NAME", "kortny")
+    monkeypatch.setenv("LLM_PROVIDER", "openrouter")
+    monkeypatch.setenv("LLM_API_KEY", "llm-dashboard-secret")
+    monkeypatch.setenv("LLM_MODEL", "openai/gpt-5.4-mini")
+    monkeypatch.setenv("LLM_ANALYSIS_MODEL", "anthropic/claude-sonnet-4.6")
+    monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "brave-dashboard-secret")
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://phoenix:4317")
+    monkeypatch.setenv(
+        "POSTGRES_URL",
+        "postgresql://kortny:db-dashboard-secret@localhost/kortny",
     )
 
 

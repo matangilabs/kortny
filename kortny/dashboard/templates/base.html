@@ -17,7 +17,8 @@
           <span class="subtitle">Operator Dashboard</span>
         </div>
         <nav class="sidebar-nav">
-          <a class="nav-item {{ 'active' if active_page == 'tasks' else '' }}" href="/" {% if active_page == 'tasks' %}aria-current="page"{% endif %}>Tasks</a>
+          <a class="nav-item {{ 'active' if active_page == 'overview' else '' }}" href="/" {% if active_page == 'overview' %}aria-current="page"{% endif %}>Overview</a>
+          <a class="nav-item {{ 'active' if active_page == 'tasks' else '' }}" href="/tasks" {% if active_page == 'tasks' %}aria-current="page"{% endif %}>Tasks</a>
           <a class="nav-item {{ 'active' if active_page == 'usage' else '' }}" href="/usage" {% if active_page == 'usage' %}aria-current="page"{% endif %}>Usage</a>
           <a class="nav-item {{ 'active' if active_page == 'users' else '' }}" href="/users" {% if active_page == 'users' %}aria-current="page"{% endif %}>Users</a>
           <a class="nav-item {{ 'active' if active_page == 'system' else '' }}" href="/system" {% if active_page == 'system' %}aria-current="page"{% endif %}>System</a>
@@ -43,7 +44,8 @@
             {% include "_theme_toggle.html" %}
           </div>
           <nav class="mobile-nav">
-            <a class="nav-item {{ 'active' if active_page == 'tasks' else '' }}" href="/" {% if active_page == 'tasks' %}aria-current="page"{% endif %}>Tasks</a>
+            <a class="nav-item {{ 'active' if active_page == 'overview' else '' }}" href="/" {% if active_page == 'overview' %}aria-current="page"{% endif %}>Overview</a>
+            <a class="nav-item {{ 'active' if active_page == 'tasks' else '' }}" href="/tasks" {% if active_page == 'tasks' %}aria-current="page"{% endif %}>Tasks</a>
             <a class="nav-item {{ 'active' if active_page == 'usage' else '' }}" href="/usage" {% if active_page == 'usage' %}aria-current="page"{% endif %}>Usage</a>
             <a class="nav-item {{ 'active' if active_page == 'users' else '' }}" href="/users" {% if active_page == 'users' %}aria-current="page"{% endif %}>Users</a>
             <a class="nav-item {{ 'active' if active_page == 'system' else '' }}" href="/system" {% if active_page == 'system' %}aria-current="page"{% endif %}>System</a>

@@ -1,0 +1,39 @@
+<div class="overflow-x-auto">
+  <table class="table">
+    <caption>Recent Kortny tasks with channel, user, status, models, turns, and cost.</caption>
+    <thead>
+      <tr>
+        <th>Created</th>
+        <th>Channel</th>
+        <th>User</th>
+        <th>Status</th>
+        <th>Models</th>
+        <th>Turns</th>
+        <th class="num">Cost</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for item in task_items %}
+        <tr>
+          <td><a href="/tasks/{{ item.task.id }}">{{ item.task.created_at|datetime }}</a></td>
+          <td>
+            <span class="identity-name">{{ item.channel.name }}</span>
+            {% if item.channel.secondary %}<span class="identity-id">{{ item.channel.secondary }}</span>{% endif %}
+          </td>
+          <td>
+            <span class="identity-name">{{ item.user.name }}</span>
+            {% if item.user.secondary %}<span class="identity-id">{{ item.user.secondary }}</span>{% endif %}
+          </td>
+          <td><span class="badge status-{{ item.task.status.value }}">{{ item.task.status.value }}</span></td>
+          <td>{{ item.models|join(", ") if item.models else "-" }}</td>
+          <td>{{ item.turn_count|number }}</td>
+          <td class="num">{{ item.task.total_cost_usd|money }}</td>
+        </tr>
+      {% else %}
+        <tr>
+          <td colspan="7" class="empty">{{ task_empty_message }}</td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>

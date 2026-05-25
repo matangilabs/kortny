@@ -322,6 +322,28 @@ class SystemHealth:
     config_sections: tuple[SystemConfigSection, ...]
 
 
+@dataclass(frozen=True)
+class OverviewAttentionItem:
+    title: str
+    detail: str
+    tone: str
+    badge: str
+    href: str
+
+
+@dataclass(frozen=True)
+class DashboardOverview:
+    metrics: tuple[SystemMetric, ...]
+    attention_items: tuple[OverviewAttentionItem, ...]
+    charts: UsageCharts
+    top_models: tuple[AggregateRow, ...]
+    top_users: tuple[AggregateRow, ...]
+    top_channels: tuple[AggregateRow, ...]
+    recent_tasks: tuple[TaskListItem, ...]
+    system_health: SystemHealth
+    window_label: str
+
+
 def list_tasks(
     session: Session,
     *,
@@ -343,30 +365,8 @@ def list_tasks(
             .limit(normalized_size)
         )
     )
-    usage_by_task = _usage_by_task(session, [task.id for task in tasks])
-    identities = _identity_map(session, tasks)
-    items = tuple(
-        TaskListItem(
-            task=task,
-            channel=_identity_label(
-                identities,
-                installation_id=task.installation_id,
-                kind="channel",
-                slack_id=task.slack_channel_id,
-            ),
-            user=_identity_label(
-                identities,
-                installation_id=task.installation_id,
-                kind="user",
-                slack_id=task.slack_user_id,
-            ),
-            models=tuple(sorted({usage.model for usage in usage_by_task[task.id]})),
-            turn_count=len(usage_by_task[task.id]),
-        )
-        for task in tasks
-    )
     return TaskListPage(
-        items=items,
+        items=_task_items(session, tasks),
         page=normalized_page,
         page_size=normalized_size,
         total_count=total_count,
@@ -694,6 +694,93 @@ def get_user_detail(
         ),
         usage=usage,
         artifacts=artifacts,
+    )
+
+
+def get_dashboard_overview(
+    session: Session,
+    *,
+    system_health: SystemHealth,
+    now: datetime | None = None,
+) -> DashboardOverview:
+    """Return the operator dashboard home read model."""
+
+    current = now or datetime.now(UTC)
+    current = current.astimezone(UTC)
+    today_start = datetime.combine(current.date(), time.min, tzinfo=UTC)
+    week_start = current - timedelta(days=7)
+    query_end = current + timedelta(seconds=1)
+
+    usage = get_usage_aggregate(session, start=week_start, end=query_end)
+    week_stats = session.execute(
+        select(
+            func.count(Task.id),
+            func.coalesce(func.sum(_failed_task_case()), 0),
+            func.coalesce(func.sum(Task.total_cost_usd), 0),
+        ).where(*_task_filter(start=week_start, end=query_end))
+    ).one()
+    active_tasks = (
+        session.scalar(
+            select(func.count())
+            .select_from(Task)
+            .where(Task.status.in_((TaskStatus.pending, TaskStatus.running)))
+        )
+        or 0
+    )
+    today_cost = session.scalar(
+        select(func.coalesce(func.sum(LLMUsage.cost_usd), 0)).where(
+            LLMUsage.created_at >= today_start,
+            LLMUsage.created_at < query_end,
+        )
+    ) or Decimal("0")
+    last_task_at = session.scalar(select(func.max(Task.created_at)))
+    week_task_count = int(week_stats[0])
+    week_failed_count = int(week_stats[1])
+
+    metrics = (
+        SystemMetric(
+            label="Readiness",
+            value=system_health.overall_label,
+            detail="Worst current system check",
+            tone=system_health.overall_tone,
+        ),
+        SystemMetric(
+            label="Active Tasks",
+            value=f"{active_tasks:,}",
+            detail="Pending or running now",
+            tone="warning" if active_tasks else "neutral",
+        ),
+        SystemMetric(
+            label="Today Cost",
+            value=_format_money(Decimal(today_cost)),
+            detail="LLM usage recorded today",
+        ),
+        SystemMetric(
+            label="7 Day Failures",
+            value=_failure_rate_label(week_task_count, week_failed_count),
+            detail=f"{week_failed_count:,} of {week_task_count:,} tasks",
+            tone="danger" if week_failed_count else "neutral",
+        ),
+        SystemMetric(
+            label="Last Task",
+            value=_datetime_label(last_task_at),
+            detail="Most recent task creation",
+        ),
+    )
+
+    attention_items = _overview_attention_items(session, system_health=system_health)
+    recent_tasks = list_tasks(session, page=1, page_size=10)
+
+    return DashboardOverview(
+        metrics=metrics,
+        attention_items=attention_items,
+        charts=usage.charts,
+        top_models=usage.by_model[:5],
+        top_users=usage.by_user[:5],
+        top_channels=usage.by_channel[:5],
+        recent_tasks=recent_tasks.items,
+        system_health=system_health,
+        window_label="Last 7 days",
     )
 
 
@@ -1165,7 +1252,110 @@ def _redact_url(value: str) -> str:
     return urlunsplit((parsed.scheme, f"{auth}{host}", parsed.path, "", ""))
 
 
+def _failure_rate_label(total: int, failed: int) -> str:
+    if total <= 0:
+        return "0.0%"
+    return f"{(failed / total) * 100:.1f}%"
+
+
+def _overview_attention_items(
+    session: Session,
+    *,
+    system_health: SystemHealth,
+) -> tuple[OverviewAttentionItem, ...]:
+    items: list[OverviewAttentionItem] = []
+    for check in system_health.checks:
+        if check.tone not in {"danger", "warning"}:
+            continue
+        items.append(
+            OverviewAttentionItem(
+                title=f"{check.group}: {check.name}",
+                detail=check.action or check.detail,
+                tone=check.tone,
+                badge=check.status,
+                href="/system",
+            )
+        )
+
+    tasks = tuple(
+        session.scalars(
+            select(Task)
+            .where(
+                Task.status.in_(
+                    (
+                        TaskStatus.failed,
+                        TaskStatus.crashed,
+                        TaskStatus.pending,
+                        TaskStatus.running,
+                    )
+                )
+            )
+            .order_by(
+                case(
+                    (Task.status.in_((TaskStatus.failed, TaskStatus.crashed)), 0),
+                    else_=1,
+                ),
+                Task.created_at.desc(),
+                Task.id.desc(),
+            )
+            .limit(5)
+        )
+    )
+    for item in _task_items(session, tasks):
+        tone = (
+            "danger"
+            if item.task.status in (TaskStatus.failed, TaskStatus.crashed)
+            else "warning"
+        )
+        items.append(
+            OverviewAttentionItem(
+                title=f"{item.task.status.value.capitalize()}: {_truncate(item.task.input, 86)}",
+                detail=(
+                    f"{item.user.name} in {item.channel.name} - "
+                    f"{_datetime_label(item.task.created_at)}"
+                ),
+                tone=tone,
+                badge=item.task.status.value,
+                href=f"/tasks/{item.task.id}",
+            )
+        )
+
+    return tuple(items[:8])
+
+
+def _truncate(value: str, max_length: int) -> str:
+    normalized = " ".join(value.split())
+    if len(normalized) <= max_length:
+        return normalized
+    return normalized[: max_length - 3].rstrip() + "..."
+
+
 IdentityKey = tuple[uuid.UUID, str, str]
+
+
+def _task_items(session: Session, tasks: Sequence[Task]) -> tuple[TaskListItem, ...]:
+    usage_by_task = _usage_by_task(session, [task.id for task in tasks])
+    identities = _identity_map(session, tasks)
+    return tuple(
+        TaskListItem(
+            task=task,
+            channel=_identity_label(
+                identities,
+                installation_id=task.installation_id,
+                kind="channel",
+                slack_id=task.slack_channel_id,
+            ),
+            user=_identity_label(
+                identities,
+                installation_id=task.installation_id,
+                kind="user",
+                slack_id=task.slack_user_id,
+            ),
+            models=tuple(sorted({usage.model for usage in usage_by_task[task.id]})),
+            turn_count=len(usage_by_task[task.id]),
+        )
+        for task in tasks
+    )
 
 
 def _identity_map(

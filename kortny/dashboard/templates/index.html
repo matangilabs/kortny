@@ -1,73 +1,111 @@
 {% extends "base.html" %}
 
-{% block title %}Tasks - Kortny Dashboard{% endblock %}
+{% block title %}Overview - Kortny Dashboard{% endblock %}
 
 {% block content %}
   <section class="page-heading">
     <div>
-      <h1>Tasks</h1>
-      <p>{{ task_page.total_count|number }} tracked Slack task{{ "" if task_page.total_count == 1 else "s" }}</p>
+      <h1>Overview</h1>
+      <p>Operator snapshot for Kortny activity, health, and cost drivers.</p>
     </div>
-    <a class="btn" href="/usage">View Usage</a>
+    <div class="heading-actions">
+      <span class="status-chip badge-{{ overview.system_health.overall_tone }}">{{ overview.system_health.overall_label }}</span>
+      <a class="btn-ghost" href="/system">System</a>
+      <a class="btn" href="/usage">Usage</a>
+    </div>
   </section>
 
-  <section class="card">
-    <header>
-      <h2>Recent Tasks</h2>
-      <p>Tracked Slack work with model usage and cost rollups.</p>
-    </header>
-    <div class="overflow-x-auto">
-    <table class="table">
-      <caption>Recent Kortny tasks with channel, user, status, models, turns, and cost.</caption>
-      <thead>
-        <tr>
-          <th>Created</th>
-          <th>Channel</th>
-          <th>User</th>
-          <th>Status</th>
-          <th>Models</th>
-          <th>Turns</th>
-          <th class="num">Cost</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for item in task_page.items %}
-          <tr>
-            <td><a href="/tasks/{{ item.task.id }}">{{ item.task.created_at|datetime }}</a></td>
-            <td>
-              <span class="identity-name">{{ item.channel.name }}</span>
-              {% if item.channel.secondary %}<span class="identity-id">{{ item.channel.secondary }}</span>{% endif %}
-            </td>
-            <td>
-              <span class="identity-name">{{ item.user.name }}</span>
-              {% if item.user.secondary %}<span class="identity-id">{{ item.user.secondary }}</span>{% endif %}
-            </td>
-            <td><span class="badge status-{{ item.task.status.value }}">{{ item.task.status.value }}</span></td>
-            <td>{{ item.models|join(", ") if item.models else "-" }}</td>
-            <td>{{ item.turn_count|number }}</td>
-            <td class="num">{{ item.task.total_cost_usd|money }}</td>
-          </tr>
+  <section class="summary-grid overview-summary" aria-label="Operator snapshot">
+    {% for metric in overview.metrics %}
+      <div class="card metric-card metric-{{ metric.tone }}">
+        <span>{{ metric.label }}</span>
+        <strong>{{ metric.value }}</strong>
+        {% if metric.detail %}
+          <small>{{ metric.detail }}</small>
+        {% endif %}
+      </div>
+    {% endfor %}
+  </section>
+
+  <section class="overview-main-grid" aria-label="Overview panels">
+    <article class="card attention-card">
+      <header>
+        <h2>Needs Review</h2>
+        <p>Setup checks and task states worth checking before they become noisy.</p>
+      </header>
+      <div class="attention-list">
+        {% for item in overview.attention_items %}
+          <a class="attention-row attention-{{ item.tone }}" href="{{ item.href }}">
+            <span class="attention-copy">
+              <strong>{{ item.title }}</strong>
+              <small>{{ item.detail }}</small>
+            </span>
+            <span class="badge badge-{{ item.tone }}">{{ item.badge }}</span>
+          </a>
         {% else %}
-          <tr>
-            <td colspan="7" class="empty">No tasks yet.</td>
-          </tr>
+          <p class="empty attention-empty">No setup warnings or active failures.</p>
         {% endfor %}
-      </tbody>
-    </table>
-    </div>
+      </div>
+    </article>
+
+    <article class="card top-card">
+      <header>
+        <h2>Top Usage Drivers</h2>
+        <p>{{ overview.window_label }} by recorded LLM cost.</p>
+      </header>
+      <div class="driver-list">
+        <section>
+          <h3>Models</h3>
+          {% set bars = overview.charts.cost_by_model %}
+          {% set chart_label = "Top model spend chart" %}
+          {% set empty_message = "No model usage in this window." %}
+          {% include "_chart_bars.html" with context %}
+        </section>
+        <section>
+          <h3>Users</h3>
+          {% set bars = overview.charts.cost_by_user %}
+          {% set chart_label = "Top user spend chart" %}
+          {% set empty_message = "No user usage in this window." %}
+          {% include "_chart_bars.html" with context %}
+        </section>
+      </div>
+    </article>
   </section>
 
-  <nav class="pager" role="navigation" aria-label="Task pages">
-    {% if task_page.previous_page %}
-      <a class="btn-ghost" href="/?page={{ task_page.previous_page }}&page_size={{ page_size }}">Previous</a>
-    {% else %}
-      <span class="btn-ghost disabled" aria-disabled="true">Previous</span>
-    {% endif %}
-    <strong>Page {{ task_page.page|number }} of {{ task_page.total_pages|number }}</strong>
-    {% if task_page.next_page %}
-      <a class="btn-ghost" href="/?page={{ task_page.next_page }}&page_size={{ page_size }}">Next</a>
-    {% else %}
-      <span class="btn-ghost disabled" aria-disabled="true">Next</span>
-    {% endif %}
-  </nav>
+  <section class="charts-grid overview-charts" aria-label="Recent activity trend">
+    <article class="card chart-card">
+      <header>
+        <h2>Daily Cost</h2>
+        <p>{{ overview.window_label }} spend trend.</p>
+      </header>
+      {% set points = overview.charts.daily_cost %}
+      {% set chart_label = "Overview daily cost chart" %}
+      {% set empty_message = "No cost data in this window." %}
+      {% include "_chart_columns.html" with context %}
+    </article>
+
+    <article class="card chart-card">
+      <header>
+        <h2>Task Volume</h2>
+        <p>{{ overview.window_label }} task count with failures highlighted.</p>
+      </header>
+      {% set points = overview.charts.daily_task_volume %}
+      {% set chart_label = "Overview task volume chart" %}
+      {% set empty_message = "No task data in this window." %}
+      {% include "_chart_columns.html" with context %}
+    </article>
+  </section>
+
+  <section class="card detail-section">
+    <header class="section-header-row">
+      <div>
+        <h2>Recent Work</h2>
+        <p>Latest Slack tasks with trace links, models, turns, and cost.</p>
+      </div>
+      <a class="btn-ghost" href="/tasks">View all tasks</a>
+    </header>
+    {% set task_items = overview.recent_tasks %}
+    {% set task_empty_message = "No tasks yet." %}
+    {% include "_task_table.html" with context %}
+  </section>
 {% endblock %}
