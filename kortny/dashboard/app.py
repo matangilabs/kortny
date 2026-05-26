@@ -1357,8 +1357,49 @@ def _resolve_composio_auth_config_id(
         if auth_config.enabled and auth_config.toolkit_slug == toolkit_slug:
             return auth_config.id, "existing"
 
-    auth_config = client.create_managed_auth_config(toolkit_slug=toolkit_slug)
-    return auth_config.id, "created_managed"
+    toolkit = client.get_toolkit(toolkit_slug)
+    managed_schemes = {_normalize_auth_scheme(scheme) for scheme in toolkit.managed_auth_schemes}
+    if "oauth2" in managed_schemes:
+        auth_config = client.create_managed_auth_config(toolkit_slug=toolkit_slug)
+        return auth_config.id, "created_managed"
+
+    custom_scheme = _hosted_custom_auth_scheme(toolkit.auth_schemes)
+    if custom_scheme is None:
+        raise ComposioConnectionError(
+            "This toolkit does not expose a hosted API-key style auth flow. "
+            "Create an auth config in Composio and select it from Advanced options."
+        )
+    auth_config = client.create_custom_auth_config(
+        toolkit_slug=toolkit_slug,
+        auth_scheme=custom_scheme,
+    )
+    source = f"created_{_normalize_auth_scheme(auth_config.auth_scheme or custom_scheme)}"
+    return auth_config.id, source
+
+
+def _normalize_auth_scheme(value: str) -> str:
+    return value.strip().lower().replace("-", "_")
+
+
+def _hosted_custom_auth_scheme(auth_schemes: tuple[str, ...]) -> str | None:
+    priority = (
+        "api_key",
+        "bearer_token",
+        "bearer",
+        "basic",
+        "basic_auth",
+        "jwt",
+    )
+    normalized_by_scheme = {
+        _normalize_auth_scheme(scheme): scheme.strip().upper()
+        for scheme in auth_schemes
+        if scheme.strip()
+    }
+    for candidate in priority:
+        scheme = normalized_by_scheme.get(candidate)
+        if scheme:
+            return scheme
+    return None
 
 
 def _default_slack_owner_id(session: Session) -> str:

@@ -897,6 +897,97 @@ def test_dashboard_composio_connect_creates_pending_connection(
     assert connection.metadata_json["connect_link_status"] == "pending"
 
 
+def test_dashboard_composio_connect_creates_custom_auth_config_for_api_key_toolkit(
+    client: tuple[TestClient, Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    test_client, session = client
+    task = create_dashboard_task(session)
+    set_runtime_settings_env(monkeypatch)
+    monkeypatch.setenv("COMPOSIO_API_KEY", "composio-dashboard-secret")
+
+    class FakeComposioClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def list_auth_configs(
+            self,
+            *,
+            toolkit_slug: str,
+            limit: int = 20,
+        ) -> tuple[ComposioAuthConfig, ...]:
+            assert toolkit_slug == "firecrawl"
+            assert limit == 20
+            return ()
+
+        def get_toolkit(self, slug: str) -> ComposioToolkit:
+            assert slug == "firecrawl"
+            return _composio_toolkit(
+                slug="firecrawl",
+                name="Firecrawl",
+                auth_schemes=("API_KEY",),
+                managed_auth_schemes=(),
+            )
+
+        def create_custom_auth_config(
+            self,
+            *,
+            toolkit_slug: str,
+            auth_scheme: str,
+        ) -> ComposioAuthConfig:
+            assert toolkit_slug == "firecrawl"
+            assert auth_scheme == "API_KEY"
+            return ComposioAuthConfig(
+                id="ac_firecrawl",
+                name="Firecrawl API key",
+                toolkit_slug="firecrawl",
+                auth_scheme="API_KEY",
+                is_composio_managed=False,
+                enabled=True,
+            )
+
+        def create_connect_link(
+            self,
+            *,
+            user_id: str,
+            auth_config_id: str,
+            callback_url: str,
+        ) -> ComposioConnectionRequest:
+            assert user_id == f"slack:{task.installation_id}:UCost"
+            assert auth_config_id == "ac_firecrawl"
+            assert callback_url.startswith("http://testserver/composio/callback")
+            return ComposioConnectionRequest(
+                id="ln_firecrawl",
+                redirect_url="https://connect.composio.dev/link/firecrawl",
+                status="pending",
+            )
+
+    monkeypatch.setattr("kortny.dashboard.app.ComposioClient", FakeComposioClient)
+    login(test_client)
+
+    response = test_client.post(
+        "/composio/firecrawl/connect",
+        data={
+            "visibility_scope_type": "user",
+            "display_name": "Firecrawl personal",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "https://connect.composio.dev/link/firecrawl"
+    connection = session.scalar(
+        select(ComposioConnection).where(
+            ComposioConnection.toolkit_slug == "firecrawl",
+            ComposioConnection.auth_config_id == "ac_firecrawl",
+        )
+    )
+    assert connection is not None
+    assert connection.status == "pending"
+    assert connection.metadata_json["auth_config_source"] == "created_api_key"
+    assert connection.metadata_json["connect_link_status"] == "pending"
+
+
 def test_dashboard_composio_callback_marks_connection_active(
     client: tuple[TestClient, Session],
     monkeypatch: pytest.MonkeyPatch,
@@ -1031,6 +1122,10 @@ def test_dashboard_member_composio_connect_uses_logged_in_user_scope(
                     enabled=True,
                 ),
             )
+
+        def get_toolkit(self, slug: str) -> ComposioToolkit:
+            assert slug == "notion"
+            return _composio_toolkit(slug="notion", name="Notion")
 
         def create_managed_auth_config(
             self,
@@ -1737,14 +1832,20 @@ def set_runtime_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-def _composio_toolkit(*, slug: str, name: str) -> ComposioToolkit:
+def _composio_toolkit(
+    *,
+    slug: str,
+    name: str,
+    auth_schemes: tuple[str, ...] = ("oauth2",),
+    managed_auth_schemes: tuple[str, ...] = ("oauth2",),
+) -> ComposioToolkit:
     return ComposioToolkit(
         slug=slug,
         name=name,
         description=f"{name} toolkit",
         categories=(),
-        auth_schemes=("oauth2",),
-        managed_auth_schemes=("oauth2",),
+        auth_schemes=auth_schemes,
+        managed_auth_schemes=managed_auth_schemes,
         tools_count=4,
         triggers_count=1,
         logo_url=None,

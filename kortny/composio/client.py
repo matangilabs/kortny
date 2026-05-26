@@ -153,6 +153,35 @@ class ComposioClient:
         normalized_payload.setdefault("is_composio_managed", True)
         return _auth_config_from_payload(normalized_payload)
 
+    def create_custom_auth_config(
+        self,
+        *,
+        toolkit_slug: str,
+        auth_scheme: str,
+    ) -> ComposioAuthConfig:
+        response = self._post(
+            "/api/v3.1/auth_configs",
+            json_payload={
+                "toolkit": {"slug": toolkit_slug},
+                "auth_config": {
+                    "type": "use_custom_auth",
+                    "authScheme": auth_scheme,
+                    "credentials": {},
+                    "restrict_to_following_tools": [],
+                },
+            },
+        )
+        payload = response.json()
+        auth_config = payload.get("auth_config") or payload.get("data") or payload
+        if not isinstance(auth_config, dict):
+            raise ComposioConnectionError("Composio auth config response was invalid")
+        normalized_payload = dict(auth_config)
+        normalized_payload.setdefault("toolkit", toolkit_slug)
+        normalized_payload.setdefault("name", f"{toolkit_slug} {auth_scheme} auth")
+        normalized_payload.setdefault("auth_scheme", auth_scheme)
+        normalized_payload.setdefault("is_composio_managed", False)
+        return _auth_config_from_payload(normalized_payload)
+
     def create_connect_link(
         self,
         *,
@@ -215,6 +244,8 @@ class ComposioClient:
             )
             response.raise_for_status()
             return response
+        except httpx.HTTPStatusError as exc:
+            raise ComposioCatalogError(_http_error_summary(exc)) from exc
         except httpx.HTTPError as exc:
             raise ComposioCatalogError(str(exc)) from exc
         finally:
@@ -232,6 +263,8 @@ class ComposioClient:
             )
             response.raise_for_status()
             return response
+        except httpx.HTTPStatusError as exc:
+            raise ComposioConnectionError(_http_error_summary(exc)) from exc
         except httpx.HTTPError as exc:
             raise ComposioConnectionError(str(exc)) from exc
         finally:
@@ -249,6 +282,8 @@ class ComposioClient:
             )
             response.raise_for_status()
             return response
+        except httpx.HTTPStatusError as exc:
+            raise ComposioConnectionError(_http_error_summary(exc)) from exc
         except httpx.HTTPError as exc:
             raise ComposioConnectionError(str(exc)) from exc
         finally:
@@ -264,7 +299,7 @@ def _toolkit_from_payload(payload: dict[str, Any]) -> ComposioToolkit:
         name=str(payload.get("name") or payload.get("slug") or "Unknown toolkit"),
         description=str(meta.get("description") or payload.get("description") or ""),
         categories=_category_names(meta.get("categories")),
-        auth_schemes=_string_tuple(payload.get("auth_schemes")),
+        auth_schemes=_auth_schemes_from_payload(payload),
         managed_auth_schemes=_string_tuple(payload.get("composio_managed_auth_schemes")),
         tools_count=_optional_int(meta.get("tools_count")) or 0,
         triggers_count=_optional_int(meta.get("triggers_count")) or 0,
@@ -324,6 +359,19 @@ def _string_tuple(value: Any) -> tuple[str, ...]:
     return tuple(str(item) for item in value if item)
 
 
+def _auth_schemes_from_payload(payload: dict[str, Any]) -> tuple[str, ...]:
+    schemes = list(_string_tuple(payload.get("auth_schemes")))
+    details = payload.get("auth_config_details")
+    if isinstance(details, list):
+        for item in details:
+            if not isinstance(item, dict):
+                continue
+            mode = _optional_str(item.get("mode"))
+            if mode:
+                schemes.append(mode)
+    return tuple(dict.fromkeys(schemes))
+
+
 def _optional_str(value: Any) -> str | None:
     if value is None:
         return None
@@ -338,3 +386,35 @@ def _optional_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _http_error_summary(exc: httpx.HTTPStatusError) -> str:
+    response = exc.response
+    detail = _response_error_detail(response)
+    if detail:
+        return f"{exc}; Composio response: {detail}"
+    return str(exc)
+
+
+def _response_error_detail(response: httpx.Response) -> str:
+    try:
+        payload = response.json()
+    except ValueError:
+        text = response.text.strip()
+        return text[:500]
+
+    if isinstance(payload, dict):
+        error = payload.get("error")
+        if isinstance(error, dict):
+            parts = [
+                _optional_str(error.get("message")),
+                _optional_str(error.get("suggested_fix")),
+            ]
+            errors = error.get("errors")
+            if isinstance(errors, list):
+                parts.extend(_optional_str(item) for item in errors)
+            return "; ".join(part for part in parts if part)[:500]
+        message = _optional_str(payload.get("message"))
+        if message:
+            return message[:500]
+    return str(payload)[:500]

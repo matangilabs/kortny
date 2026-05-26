@@ -1,8 +1,9 @@
 import json
 
 import httpx
+import pytest
 
-from kortny.composio import ComposioClient
+from kortny.composio import ComposioClient, ComposioConnectionError
 
 
 def test_composio_client_lists_toolkits_from_catalog_payload() -> None:
@@ -94,6 +95,52 @@ def test_composio_client_gets_toolkit_detail() -> None:
     assert toolkit.base_url == "https://api.github.com"
 
 
+def test_composio_client_derives_auth_scheme_from_auth_config_details() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v3.1/toolkits/firecrawl"
+        return httpx.Response(
+            200,
+            json={
+                "slug": "firecrawl",
+                "name": "Firecrawl",
+                "composio_managed_auth_schemes": [],
+                "auth_config_details": [
+                    {
+                        "name": "firecrawl_api_key",
+                        "mode": "API_KEY",
+                        "fields": {
+                            "auth_config_creation": {
+                                "required": [],
+                                "optional": [],
+                            },
+                            "connected_account_initiation": {
+                                "required": [
+                                    {"name": "full", "displayName": "Base URL"},
+                                    {
+                                        "name": "generic_api_key",
+                                        "displayName": "API Key",
+                                    },
+                                ],
+                                "optional": [],
+                            },
+                        },
+                    }
+                ],
+                "meta": {"description": "Crawl websites.", "tools_count": 29},
+            },
+        )
+
+    client = ComposioClient(
+        api_key="test-key",
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    toolkit = client.get_toolkit("firecrawl")
+
+    assert toolkit.auth_schemes == ("API_KEY",)
+    assert toolkit.managed_auth_schemes == ()
+
+
 def test_composio_client_lists_auth_configs_for_toolkit() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/v3.1/auth_configs"
@@ -161,6 +208,75 @@ def test_composio_client_creates_managed_auth_config() -> None:
     assert auth_config.id == "ac_managed"
     assert auth_config.toolkit_slug == "github"
     assert auth_config.is_composio_managed is True
+
+
+def test_composio_client_creates_custom_auth_config() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v3.1/auth_configs"
+        assert request.method == "POST"
+        payload = json.loads(request.read().decode())
+        assert payload["toolkit"] == {"slug": "firecrawl"}
+        assert payload["auth_config"] == {
+            "type": "use_custom_auth",
+            "authScheme": "API_KEY",
+            "credentials": {},
+            "restrict_to_following_tools": [],
+        }
+        return httpx.Response(
+            200,
+            json={
+                "auth_config": {
+                    "id": "ac_firecrawl",
+                    "toolkit": {"slug": "firecrawl"},
+                    "auth_scheme": "API_KEY",
+                    "is_composio_managed": False,
+                    "enabled": True,
+                }
+            },
+        )
+
+    client = ComposioClient(
+        api_key="test-key",
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    auth_config = client.create_custom_auth_config(
+        toolkit_slug="firecrawl",
+        auth_scheme="API_KEY",
+    )
+
+    assert auth_config.id == "ac_firecrawl"
+    assert auth_config.toolkit_slug == "firecrawl"
+    assert auth_config.auth_scheme == "API_KEY"
+    assert auth_config.is_composio_managed is False
+
+
+def test_composio_client_includes_composio_error_detail() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            json={
+                "error": {
+                    "message": "Auth scheme is required",
+                    "suggested_fix": "Pass auth_scheme for custom auth",
+                }
+            },
+        )
+
+    client = ComposioClient(
+        api_key="test-key",
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    with pytest.raises(ComposioConnectionError) as exc_info:
+        client.create_custom_auth_config(
+            toolkit_slug="firecrawl",
+            auth_scheme="API_KEY",
+        )
+
+    message = str(exc_info.value)
+    assert "Auth scheme is required" in message
+    assert "Pass auth_scheme for custom auth" in message
 
 
 def test_composio_client_creates_connect_link() -> None:
