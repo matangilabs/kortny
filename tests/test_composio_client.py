@@ -133,7 +133,7 @@ def test_composio_client_lists_auth_configs_for_toolkit() -> None:
 
 def test_composio_client_creates_managed_auth_config() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/api/v3/auth_configs"
+        assert request.url.path == "/api/v3.1/auth_configs"
         assert request.method == "POST"
         payload = json.loads(request.read().decode())
         assert payload["toolkit"] == {"slug": "github"}
@@ -165,7 +165,7 @@ def test_composio_client_creates_managed_auth_config() -> None:
 
 def test_composio_client_creates_connect_link() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/api/v3/connected_accounts/link"
+        assert request.url.path == "/api/v3.1/connected_accounts/link"
         assert request.method == "POST"
         payload = json.loads(request.read().decode())
         assert payload["user_id"] == "slack:installation:user"
@@ -174,9 +174,9 @@ def test_composio_client_creates_connect_link() -> None:
         return httpx.Response(
             200,
             json={
-                "id": "conn_req_123",
+                "link_token": "ln_123",
                 "redirect_url": "https://connect.composio.dev/auth",
-                "status": "pending",
+                "connected_account_id": "ca_pending_123",
             },
         )
 
@@ -191,6 +191,7 @@ def test_composio_client_creates_connect_link() -> None:
         callback_url="https://kortny.example/composio/callback",
     )
 
-    assert connect_request.id == "conn_req_123"
+    assert connect_request.id == "ln_123"
     assert connect_request.redirect_url == "https://connect.composio.dev/auth"
     assert connect_request.status == "pending"
+    assert connect_request.connected_account_id == "ca_pending_123"

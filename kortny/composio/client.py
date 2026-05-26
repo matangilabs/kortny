@@ -35,6 +35,7 @@ class ComposioConnectionRequest:
     id: str
     redirect_url: str
     status: str
+    connected_account_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -132,7 +133,7 @@ class ComposioClient:
 
     def create_managed_auth_config(self, *, toolkit_slug: str) -> ComposioAuthConfig:
         response = self._post(
-            "/api/v3/auth_configs",
+            "/api/v3.1/auth_configs",
             json_payload={
                 "toolkit": {"slug": toolkit_slug},
                 "auth_config": {
@@ -160,7 +161,7 @@ class ComposioClient:
         callback_url: str,
     ) -> ComposioConnectionRequest:
         response = self._post(
-            "/api/v3/connected_accounts/link",
+            "/api/v3.1/connected_accounts/link",
             json_payload={
                 "user_id": user_id,
                 "auth_config_id": auth_config_id,
@@ -171,13 +172,22 @@ class ComposioClient:
         redirect_url = _optional_str(
             payload.get("redirect_url") or payload.get("redirectUrl")
         )
-        request_id = _optional_str(payload.get("id") or payload.get("connection_id"))
+        connected_account_id = _optional_str(
+            payload.get("connected_account_id") or payload.get("connectedAccountId")
+        )
+        request_id = _optional_str(
+            payload.get("id")
+            or payload.get("link_token")
+            or payload.get("connection_id")
+            or connected_account_id
+        )
         if not redirect_url or not request_id:
             raise ComposioConnectionError("Composio connect-link response was invalid")
         return ComposioConnectionRequest(
             id=request_id,
             redirect_url=redirect_url,
             status=str(payload.get("status") or "pending").lower(),
+            connected_account_id=connected_account_id,
         )
 
     def _get(self, path: str, *, params: dict[str, str | int]) -> httpx.Response:

@@ -725,6 +725,264 @@ def test_dashboard_composio_callback_marks_connection_active(
     assert updated.metadata_json["callback"]["status"] == "success"
 
 
+def test_dashboard_member_composio_connect_uses_logged_in_user_scope(
+    db_session: Session,
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert TEST_POSTGRES_URL is not None
+    installation = Installation(slack_team_id="TComposioMember", team_name="Member Team")
+    db_session.add(installation)
+    db_session.flush()
+    db_session.add(
+        SlackIdentity(
+            installation_id=installation.id,
+            kind="user",
+            slack_id="UMember",
+            display_name="Member User",
+            raw_name="Member User",
+            raw_json={"id": "UMember", "profile": {"real_name": "Member User"}},
+            refreshed_at=datetime(2026, 5, 24, 11, 59, tzinfo=UTC),
+            last_seen_at=datetime(2026, 5, 24, 11, 59, tzinfo=UTC),
+        )
+    )
+    db_session.add(
+        DashboardUser(
+            installation_id=installation.id,
+            slack_user_id="UMember",
+            email="member@example.com",
+            display_name="Member User",
+            role="member",
+            status="active",
+        )
+    )
+    db_session.add(
+        DashboardOAuthState(
+            provider="slack",
+            state="member-composio-state",
+            redirect_path="/me/integrations/notion",
+            expires_at=datetime.now(UTC) + timedelta(minutes=10),
+        )
+    )
+    db_session.commit()
+    session_factory = make_session_factory(engine=engine)
+    settings = slack_dashboard_settings()
+    set_runtime_settings_env(monkeypatch)
+    monkeypatch.setenv("COMPOSIO_API_KEY", "composio-dashboard-secret")
+
+    class FakeSlackOpenIDClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def exchange_code(self, *, code: str) -> str:
+            assert code == "member-code"
+            return "member-token"
+
+        def user_info(self, *, access_token: str) -> SlackOpenIDProfile:
+            assert access_token == "member-token"
+            return SlackOpenIDProfile(
+                team_id="TComposioMember",
+                user_id="UMember",
+                display_name="Member User",
+                email="member@example.com",
+                avatar_url=None,
+                raw_json={
+                    "name": "Member User",
+                    "https://slack.com/team_id": "TComposioMember",
+                    "https://slack.com/user_id": "UMember",
+                },
+            )
+
+    class FakeComposioClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def list_auth_configs(
+            self,
+            *,
+            toolkit_slug: str,
+            limit: int = 20,
+        ) -> tuple[ComposioAuthConfig, ...]:
+            assert toolkit_slug == "notion"
+            assert limit == 20
+            return (
+                ComposioAuthConfig(
+                    id="ac_member",
+                    name="Notion OAuth",
+                    toolkit_slug="notion",
+                    auth_scheme="OAUTH2",
+                    is_composio_managed=True,
+                    enabled=True,
+                ),
+            )
+
+        def create_connect_link(
+            self,
+            *,
+            user_id: str,
+            auth_config_id: str,
+            callback_url: str,
+        ) -> ComposioConnectionRequest:
+            assert user_id == f"slack:{installation.id}:UMember"
+            assert auth_config_id == "ac_member"
+            callback = urlsplit(callback_url)
+            callback_query = parse_url_qs(callback.query)
+            assert callback.path == "/composio/callback"
+            assert callback_query["connection_id"]
+            assert callback_query["connection_token"]
+            return ComposioConnectionRequest(
+                id="ln_member",
+                redirect_url="https://connect.composio.dev/link/ln_member",
+                status="pending",
+                connected_account_id="ca_pending_member",
+            )
+
+    monkeypatch.setattr(
+        "kortny.dashboard.app.SlackOpenIDClient",
+        FakeSlackOpenIDClient,
+    )
+    monkeypatch.setattr("kortny.dashboard.app.ComposioClient", FakeComposioClient)
+
+    with TestClient(
+        create_app(settings=settings, session_factory=session_factory)
+    ) as test_client:
+        login_response = test_client.get(
+            "/auth/slack/callback?code=member-code&state=member-composio-state",
+            follow_redirects=False,
+        )
+        response = test_client.post(
+            "/composio/notion/connect",
+            data={
+                "owner_slack_user_id": "UOther",
+                "visibility_scope_type": "workspace",
+                "auth_config_id": "ac_override",
+                "display_name": "Notion personal",
+            },
+            follow_redirects=False,
+        )
+
+    assert login_response.status_code == 303
+    assert login_response.headers["location"] == "/me/integrations/notion"
+    assert response.status_code == 303
+    assert response.headers["location"] == "https://connect.composio.dev/link/ln_member"
+    connection = db_session.scalar(
+        select(ComposioConnection).where(
+            ComposioConnection.toolkit_slug == "notion"
+        )
+    )
+    assert connection is not None
+    assert connection.installation_id == installation.id
+    assert connection.owner_slack_user_id == "UMember"
+    assert connection.visibility_scope_type == "user"
+    assert connection.visibility_scope_id == "UMember"
+    assert connection.auth_config_id == "ac_member"
+    assert connection.connected_account_id == "ca_pending_member"
+    assert connection.connection_request_id == "ln_member"
+    assert connection.composio_user_id == f"slack:{installation.id}:UMember"
+    assert connection.metadata_json["dashboard_source"] == "member"
+    assert connection.metadata_json["callback_token"]
+
+
+def test_dashboard_member_composio_callback_returns_to_me_scope(
+    db_session: Session,
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert TEST_POSTGRES_URL is not None
+    installation = Installation(slack_team_id="TComposioCallback", team_name="Member Team")
+    db_session.add(installation)
+    db_session.flush()
+    db_session.add(
+        DashboardUser(
+            installation_id=installation.id,
+            slack_user_id="UMember",
+            email="member@example.com",
+            display_name="Member User",
+            role="member",
+            status="active",
+        )
+    )
+    db_session.add(
+        DashboardOAuthState(
+            provider="slack",
+            state="member-callback-state",
+            redirect_path="/me",
+            expires_at=datetime.now(UTC) + timedelta(minutes=10),
+        )
+    )
+    connection = ComposioConnection(
+        installation_id=installation.id,
+        toolkit_slug="gmail",
+        auth_config_id="ac_gmail",
+        connection_request_id="ln_gmail",
+        composio_user_id=f"slack:{installation.id}:UMember",
+        owner_slack_user_id="UMember",
+        visibility_scope_type="user",
+        visibility_scope_id="UMember",
+        status="pending",
+        display_name="Gmail personal",
+        metadata_json={"callback_token": "callback-secret"},
+    )
+    db_session.add(connection)
+    db_session.commit()
+    connection_id = connection.id
+    session_factory = make_session_factory(engine=engine)
+    settings = slack_dashboard_settings()
+
+    class FakeSlackOpenIDClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def exchange_code(self, *, code: str) -> str:
+            assert code == "member-code"
+            return "member-token"
+
+        def user_info(self, *, access_token: str) -> SlackOpenIDProfile:
+            assert access_token == "member-token"
+            return SlackOpenIDProfile(
+                team_id="TComposioCallback",
+                user_id="UMember",
+                display_name="Member User",
+                email="member@example.com",
+                avatar_url=None,
+                raw_json={
+                    "name": "Member User",
+                    "https://slack.com/team_id": "TComposioCallback",
+                    "https://slack.com/user_id": "UMember",
+                },
+            )
+
+    monkeypatch.setattr(
+        "kortny.dashboard.app.SlackOpenIDClient",
+        FakeSlackOpenIDClient,
+    )
+    with TestClient(
+        create_app(settings=settings, session_factory=session_factory)
+    ) as test_client:
+        login_response = test_client.get(
+            "/auth/slack/callback?code=member-code&state=member-callback-state",
+            follow_redirects=False,
+        )
+        response = test_client.get(
+            "/composio/callback"
+            f"?connection_id={connection_id}"
+            "&connection_token=callback-secret"
+            "&status=success"
+            "&connected_account_id=ca_gmail",
+            follow_redirects=False,
+        )
+
+    assert login_response.status_code == 303
+    assert response.status_code == 303
+    assert response.headers["location"].startswith("/me/integrations/gmail?")
+    db_session.expire_all()
+    updated = db_session.get(ComposioConnection, connection_id)
+    assert updated is not None
+    assert updated.status == "active"
+    assert updated.connected_account_id == "ca_gmail"
+    assert updated.metadata_json["callback"]["connection_token"] == "callback-secret"
+
+
 def test_dashboard_integrations_page_marks_missing_optional_search(
     client: tuple[TestClient, Session],
     monkeypatch: pytest.MonkeyPatch,

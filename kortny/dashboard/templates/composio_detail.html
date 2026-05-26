@@ -81,31 +81,53 @@
     </article>
 
     <aside class="card composio-setup-card">
-      <h2>Setup State</h2>
-      <ul class="setup-list">
-        <li class="{{ 'complete' if detail.configured else '' }}">
-          <strong>Composio API key</strong>
-          <span>{{ "Configured" if detail.configured else "Missing" }}</span>
-        </li>
-        <li class="{{ 'complete' if detail.auth_configs else '' }}">
-          <strong>Auth Config</strong>
-          <span>
-            {% if detail.auth_configs %}
-              {{ detail.auth_configs|length|number }} available
-            {% else %}
-              Auto-create
-            {% endif %}
-          </span>
-        </li>
-        <li class="{{ 'complete' if detail.configured else '' }}">
-          <strong>Connect Link</strong>
-          <span>{{ "Ready" if detail.configured else "Needs API key" }}</span>
-        </li>
-        <li>
-          <strong>Runtime tools</strong>
-          <span>Waiting on scope gate</span>
-        </li>
-      </ul>
+      {% if member_scope %}
+        <h2>Personal Access</h2>
+        <ul class="setup-list">
+          <li class="{{ 'complete' if detail.configured else '' }}">
+            <strong>Connect flow</strong>
+            <span>{{ "Ready" if detail.configured else "Unavailable" }}</span>
+          </li>
+          <li class="complete">
+            <strong>Owner</strong>
+            <span>You</span>
+          </li>
+          <li class="complete">
+            <strong>Scope</strong>
+            <span>Personal</span>
+          </li>
+          <li>
+            <strong>Runtime tools</strong>
+            <span>Waiting on scope gate</span>
+          </li>
+        </ul>
+      {% else %}
+        <h2>Setup State</h2>
+        <ul class="setup-list">
+          <li class="{{ 'complete' if detail.configured else '' }}">
+            <strong>Composio API key</strong>
+            <span>{{ "Configured" if detail.configured else "Missing" }}</span>
+          </li>
+          <li class="{{ 'complete' if detail.auth_configs else '' }}">
+            <strong>Auth Config</strong>
+            <span>
+              {% if detail.auth_configs %}
+                {{ detail.auth_configs|length|number }} available
+              {% else %}
+                Auto-create
+              {% endif %}
+            </span>
+          </li>
+          <li class="{{ 'complete' if detail.configured else '' }}">
+            <strong>Connect Link</strong>
+            <span>{{ "Ready" if detail.configured else "Needs API key" }}</span>
+          </li>
+          <li>
+            <strong>Runtime tools</strong>
+            <span>Waiting on scope gate</span>
+          </li>
+        </ul>
+      {% endif %}
     </aside>
   </section>
 
@@ -114,8 +136,14 @@
       <header class="connect-card-header">
         <div>
           <span class="composio-kicker">Connection</span>
-          <h2>Connect Account</h2>
-          <p>Credentials stay in Composio. Kortny stores owner, scope, and connected-account metadata.</p>
+          <h2>{% if member_scope %}Connect Your Account{% else %}Connect Account{% endif %}</h2>
+          <p>
+            {% if member_scope %}
+              Kortny will send you to Composio to authenticate {{ integration_name }}. The connection stays personal to your Slack account.
+            {% else %}
+              Credentials stay in Composio. Kortny stores owner, scope, and connected-account metadata.
+            {% endif %}
+          </p>
         </div>
         <span class="badge badge-{{ 'success' if detail.configured else 'warning' }}">{{ "Ready" if detail.configured else "Needs API Key" }}</span>
       </header>
@@ -129,7 +157,11 @@
               <div>
                 <strong>Hosted Composio authorization</strong>
                 <p>
-                  Kortny will create or reuse the Composio setup for {{ integration_name }}, then send you to Composio to finish authentication.
+                  {% if member_scope %}
+                    Continue to Composio to finish connecting {{ integration_name }} for your own Kortny tasks.
+                  {% else %}
+                    Kortny will create or reuse the Composio setup for {{ integration_name }}, then send you to Composio to finish authentication.
+                  {% endif %}
                 </p>
                 <div class="connect-defaults">
                   <span>Owner: {{ dashboard_user if member_scope else (default_owner.name if default_owner else "Choose in Advanced") }}</span>
@@ -253,8 +285,14 @@
 
   <section class="card composio-connections-card">
     <header>
-      <h2>Scoped Connections</h2>
-      <p>OAuth credentials stay in Composio. Kortny stores only local visibility and connected-account metadata.</p>
+      <h2>{% if member_scope %}Your Connections{% else %}Scoped Connections{% endif %}</h2>
+      <p>
+        {% if member_scope %}
+          Personal connections available to Kortny when you ask it to use this integration.
+        {% else %}
+          OAuth credentials stay in Composio. Kortny stores only local visibility and connected-account metadata.
+        {% endif %}
+      </p>
     </header>
     {% if detail.connections %}
       <div class="connection-list">
@@ -277,7 +315,13 @@
         {% endfor %}
       </div>
     {% else %}
-      <p class="empty-state">No local scoped connections have been recorded for this toolkit yet.</p>
+      <p class="empty-state">
+        {% if member_scope %}
+          You have not connected this integration yet.
+        {% else %}
+          No local scoped connections have been recorded for this toolkit yet.
+        {% endif %}
+      </p>
     {% endif %}
   </section>
 {% endblock %}

@@ -475,6 +475,10 @@ def register_routes(app: FastAPI) -> None:
         session: Annotated[Session, Depends(get_session)],
         status_text: Annotated[str | None, Query(alias="status")] = None,
         connected_account_id: Annotated[str | None, Query()] = None,
+        connected_account_id_camel: Annotated[
+            str | None, Query(alias="connectedAccountId")
+        ] = None,
+        connection_token: Annotated[str | None, Query()] = None,
     ) -> RedirectResponse:
         connection = session.get(ComposioConnection, connection_id)
         if connection is None:
@@ -485,10 +489,27 @@ def register_routes(app: FastAPI) -> None:
         callback_status = (status_text or "").strip().lower()
         callback_payload = dict(request.query_params)
         metadata = dict(connection.metadata_json or {})
+        expected_token = metadata.get("callback_token")
+        if (
+            isinstance(expected_token, str)
+            and expected_token
+            and (
+                not connection_token
+                or not secrets.compare_digest(connection_token, expected_token)
+            )
+        ):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
         metadata["callback"] = callback_payload
-        if connected_account_id:
-            connection.connected_account_id = connected_account_id
-        if connected_account_id or callback_status in {"success", "active", "connected"}:
+        resolved_connected_account_id = (
+            connected_account_id or connected_account_id_camel
+        )
+        if resolved_connected_account_id:
+            connection.connected_account_id = resolved_connected_account_id
+        if resolved_connected_account_id or callback_status in {
+            "success",
+            "active",
+            "connected",
+        }:
             connection.status = "active"
             notice = "Composio account connected."
             tone = "success"
@@ -570,6 +591,9 @@ def register_routes(app: FastAPI) -> None:
         scope_type = _form_value(form, "visibility_scope_type") or "user"
         channel_scope_id = _form_value(form, "channel_scope_id")
         if principal.role != "admin":
+            if principal.installation_id is None or principal.slack_user_id is None:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
+            auth_config_id = ""
             owner_slack_user_id = principal.slack_user_id or ""
             scope_type = "user"
             channel_scope_id = ""
@@ -594,7 +618,10 @@ def register_routes(app: FastAPI) -> None:
                 tone="danger",
             )
 
-        installation = _installation_for_owner(session, owner_slack_user_id)
+        if principal.role == "admin":
+            installation = _installation_for_owner(session, owner_slack_user_id)
+        else:
+            installation = session.get(Installation, principal.installation_id)
         if installation is None:
             return _redirect_with_notice(
                 next_path,
@@ -635,14 +662,26 @@ def register_routes(app: FastAPI) -> None:
             metadata_json={
                 "created_from": "dashboard",
                 "dashboard_user": request.session.get(SESSION_USER_KEY),
+                "dashboard_source": "member" if principal.role != "admin" else "admin",
             },
         )
         session.add(connection)
         session.flush()
 
+        callback_token = secrets.token_urlsafe(24)
         callback_url = (
-            f"{request.url_for('composio_callback')}?connection_id={connection.id}"
+            f"{request.url_for('composio_callback')}?"
+            + urlencode(
+                {
+                    "connection_id": str(connection.id),
+                    "connection_token": callback_token,
+                }
+            )
         )
+        connection.metadata_json = {
+            **dict(connection.metadata_json or {}),
+            "callback_token": callback_token,
+        }
         client = ComposioClient(
             api_key=runtime_settings.composio_api_key,
             timeout_seconds=runtime_settings.composio_request_timeout_seconds,
@@ -677,11 +716,14 @@ def register_routes(app: FastAPI) -> None:
             )
 
         connection.connection_request_id = connect_request.id
+        if connect_request.connected_account_id:
+            connection.connected_account_id = connect_request.connected_account_id
         connection.metadata_json = {
             **dict(connection.metadata_json or {}),
             "auth_config_source": auth_config_source,
             "connect_link_status": connect_request.status,
             "redirect_url": connect_request.redirect_url,
+            "connected_account_id_from_link": connect_request.connected_account_id,
         }
         session.commit()
         return RedirectResponse(
