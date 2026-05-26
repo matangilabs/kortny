@@ -906,6 +906,34 @@ def test_soft_channel_message_from_bot_is_ignored_before_llm(
     assert client.reactions == []
 
 
+def test_soft_channel_message_with_explicit_app_mention_is_ignored_before_llm(
+    db_session: Session,
+) -> None:
+    client = FakeSlackClient()
+    classifier = FakeIntentClassifier(require_task_id=False)
+
+    result = SlackIngress(
+        session=db_session,
+        client=client,
+        intent_classifier=classifier,
+    ).handle_channel_message(
+        body=message_body(event_id="EvSoftMentionExplicitMention"),
+        event=channel_event(
+            text="<@UBOT> Compare current AI observability tools for Kortny.",
+        ),
+        app_name="kortny",
+    )
+    db_session.commit()
+
+    task_count = db_session.scalar(select(func.count()).select_from(Task))
+
+    assert result is None
+    assert task_count == 0
+    assert classifier.calls == []
+    assert client.calls == []
+    assert client.reactions == []
+
+
 def test_soft_channel_message_preserves_thread_context(
     db_session: Session,
 ) -> None:

@@ -21,6 +21,7 @@ REACTION_ONLY_CLASSIFICATIONS = frozenset(
         IntentClassification.third_person_reference,
     }
 )
+SLACK_USER_MENTION_RE = re.compile(r"<@[A-Z0-9][A-Z0-9._-]*>")
 
 
 def contains_app_name(text: str, *, app_name: str) -> bool:
@@ -54,6 +55,8 @@ def should_classify_channel_message(
         return False
     text = _optional_nonempty_str(event.get("text"))
     if text is None:
+        return False
+    if SLACK_USER_MENTION_RE.search(text):
         return False
     return contains_app_name(text, app_name=app_name)
 

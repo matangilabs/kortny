@@ -237,6 +237,18 @@ def test_channel_message_prefilter_only_selects_soft_name_candidates() -> None:
             {
                 "type": "message",
                 "channel_type": "channel",
+                "user": "U123",
+                "text": "<@UBOT> Compare observability tools for Kortny.",
+            },
+            app_name="kortny",
+        )
+        is False
+    )
+    assert (
+        should_classify_channel_message(
+            {
+                "type": "message",
+                "channel_type": "channel",
                 "bot_id": "B123",
                 "text": "Kortny can you compare these options?",
             },
