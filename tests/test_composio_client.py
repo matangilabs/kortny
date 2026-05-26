@@ -195,3 +195,19 @@ def test_composio_client_creates_connect_link() -> None:
     assert connect_request.redirect_url == "https://connect.composio.dev/auth"
     assert connect_request.status == "pending"
     assert connect_request.connected_account_id == "ca_pending_123"
+
+
+def test_composio_client_disables_connected_account() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v3.1/connected_accounts/ca_123/status"
+        assert request.method == "PATCH"
+        payload = json.loads(request.read().decode())
+        assert payload == {"enabled": False}
+        return httpx.Response(200, json={"success": True})
+
+    client = ComposioClient(
+        api_key="test-key",
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    assert client.set_connected_account_enabled("ca_123", enabled=False) is True

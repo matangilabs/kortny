@@ -531,6 +531,120 @@ def register_routes(app: FastAPI) -> None:
             tone=tone,
         )
 
+    @app.post("/composio/connections/{connection_id}/disconnect")
+    async def composio_disconnect(
+        request: Request,
+        connection_id: UUID,
+        principal: Annotated[DashboardPrincipal, Depends(require_principal)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> RedirectResponse:
+        form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+        default_next_path = "/composio" if principal.role == "admin" else "/me/integrations"
+        next_path = _safe_next_path(form.get("next", [default_next_path])[0])
+        connection = session.get(ComposioConnection, connection_id)
+        if connection is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+        if not _can_manage_composio_connection(principal, connection):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
+
+        if connection.connected_account_id:
+            runtime_settings, runtime_error = _load_runtime_settings()
+            if runtime_error or runtime_settings is None:
+                return _redirect_with_notice(
+                    next_path,
+                    "Runtime settings are invalid. Fix System configuration first.",
+                    tone="danger",
+                )
+            if not runtime_settings.composio_api_key:
+                return _redirect_with_notice(
+                    next_path,
+                    "COMPOSIO_API_KEY is required before disconnecting the account.",
+                    tone="danger",
+                )
+            client = ComposioClient(
+                api_key=runtime_settings.composio_api_key,
+                timeout_seconds=runtime_settings.composio_request_timeout_seconds,
+            )
+            try:
+                disabled = client.set_connected_account_enabled(
+                    connection.connected_account_id,
+                    enabled=False,
+                )
+            except ComposioConnectionError as exc:
+                return _redirect_with_notice(
+                    next_path,
+                    f"Could not disconnect Composio account: {str(exc)}",
+                    tone="danger",
+                )
+            if not disabled:
+                return _redirect_with_notice(
+                    next_path,
+                    "Composio did not confirm the account was disconnected.",
+                    tone="danger",
+                )
+
+        metadata = dict(connection.metadata_json or {})
+        metadata["disconnected_at"] = datetime.now(UTC).isoformat()
+        metadata["disconnected_by"] = principal.display_name
+        connection.status = "disabled"
+        connection.metadata_json = metadata
+        session.commit()
+        return _redirect_with_notice(next_path, "Composio account disconnected.")
+
+    @app.post("/composio/connections/{connection_id}/scope")
+    async def composio_update_scope(
+        request: Request,
+        connection_id: UUID,
+        principal: Annotated[DashboardPrincipal, Depends(require_principal)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> RedirectResponse:
+        form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+        default_next_path = "/composio" if principal.role == "admin" else "/me/integrations"
+        next_path = _safe_next_path(form.get("next", [default_next_path])[0])
+        connection = session.get(ComposioConnection, connection_id)
+        if connection is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+        if not _can_manage_composio_connection(principal, connection):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
+
+        scope_type = _form_value(form, "visibility_scope_type") or "user"
+        channel_scope_id = _form_value(form, "channel_scope_id")
+        if principal.role != "admin":
+            if scope_type != "user":
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
+            channel_scope_id = ""
+
+        if scope_type not in {"user", "channel", "workspace"}:
+            return _redirect_with_notice(
+                next_path,
+                "Visibility scope must be personal, channel, or workspace.",
+                tone="danger",
+            )
+        if scope_type == "channel" and not channel_scope_id:
+            return _redirect_with_notice(
+                next_path,
+                "Choose a Slack channel for channel-scoped connections.",
+                tone="danger",
+            )
+
+        previous_scope = {
+            "type": connection.visibility_scope_type,
+            "id": connection.visibility_scope_id,
+        }
+        connection.visibility_scope_type = scope_type
+        connection.visibility_scope_id = _composio_scope_id(
+            scope_type=scope_type,
+            owner_slack_user_id=connection.owner_slack_user_id,
+            channel_scope_id=channel_scope_id,
+        )
+        metadata = dict(connection.metadata_json or {})
+        metadata["visibility_updated_at"] = datetime.now(UTC).isoformat()
+        metadata["visibility_updated_by"] = principal.display_name
+        metadata["previous_visibility_scope"] = previous_scope
+        connection.metadata_json = metadata
+        session.commit()
+        return _redirect_with_notice(next_path, "Connection visibility updated.")
+
     @app.post("/composio/{toolkit_slug}/auth-configs")
     async def composio_create_auth_config(
         request: Request,

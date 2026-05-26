@@ -14,7 +14,12 @@ from httpx import Response
 from sqlalchemy import Engine, delete, select
 from sqlalchemy.orm import Session
 
-from kortny.composio import ComposioAuthConfig, ComposioConnectionRequest
+from kortny.composio import (
+    ComposioAuthConfig,
+    ComposioCatalog,
+    ComposioConnectionRequest,
+    ComposioToolkit,
+)
 from kortny.dashboard.app import create_app
 from kortny.dashboard.auth import SlackOpenIDProfile
 from kortny.dashboard.settings import DashboardAuthMode, DashboardSettings
@@ -578,6 +583,63 @@ def test_dashboard_composio_page_renders_catalog_shell(
     assert "composio-dashboard-secret" not in response.text
 
 
+def test_dashboard_composio_page_sorts_connected_toolkits_first(
+    client: tuple[TestClient, Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    test_client, session = client
+    task = create_dashboard_task(session)
+    session.add(
+        ComposioConnection(
+            installation_id=task.installation_id,
+            toolkit_slug="notion",
+            auth_config_id="ac_notion",
+            connection_request_id="ln_notion",
+            connected_account_id="ca_notion",
+            composio_user_id=f"slack:{task.installation_id}:UCost",
+            owner_slack_user_id="UCost",
+            visibility_scope_type="user",
+            visibility_scope_id="UCost",
+            status="active",
+            display_name="Notion personal",
+            metadata_json={},
+        )
+    )
+    session.commit()
+    set_runtime_settings_env(monkeypatch)
+    monkeypatch.setenv("COMPOSIO_API_KEY", "composio-dashboard-secret")
+    monkeypatch.setenv("COMPOSIO_CATALOG_ENABLED", "true")
+
+    class FakeComposioClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def list_toolkits(
+            self,
+            *,
+            search: str | None = None,
+            limit: int = 60,
+        ) -> ComposioCatalog:
+            assert search is None
+            assert limit == 60
+            return ComposioCatalog(
+                items=(
+                    _composio_toolkit(slug="github", name="GitHub"),
+                    _composio_toolkit(slug="notion", name="Notion"),
+                ),
+                total_items=2,
+                next_cursor=None,
+            )
+
+    monkeypatch.setattr("kortny.dashboard.data.ComposioClient", FakeComposioClient)
+    login(test_client)
+
+    response = test_client.get("/composio")
+
+    assert response.status_code == 200
+    assert response.text.index("<h3>Notion</h3>") < response.text.index("<h3>GitHub</h3>")
+
+
 def test_dashboard_composio_detail_renders_scope_preview(
     client: tuple[TestClient, Session],
     monkeypatch: pytest.MonkeyPatch,
@@ -599,6 +661,155 @@ def test_dashboard_composio_detail_renders_scope_preview(
     assert "Hosted Composio authorization" in response.text
     assert "Connect github" in response.text
     assert "composio-dashboard-secret" not in response.text
+
+
+def test_dashboard_composio_detail_shows_disconnect_for_active_connection(
+    client: tuple[TestClient, Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    test_client, session = client
+    task = create_dashboard_task(session)
+    connection = ComposioConnection(
+        installation_id=task.installation_id,
+        toolkit_slug="notion",
+        auth_config_id="ac_notion",
+        connection_request_id="ln_notion",
+        connected_account_id="ca_notion",
+        composio_user_id=f"slack:{task.installation_id}:UCost",
+        owner_slack_user_id="UCost",
+        visibility_scope_type="user",
+        visibility_scope_id="UCost",
+        status="active",
+        display_name="Notion personal",
+        metadata_json={},
+    )
+    session.add(connection)
+    session.commit()
+    set_runtime_settings_env(monkeypatch)
+    monkeypatch.setenv("COMPOSIO_API_KEY", "composio-dashboard-secret")
+    login(test_client)
+
+    response = test_client.get("/composio/notion")
+
+    assert response.status_code == 200
+    assert "Connected Account" in response.text
+    assert "Notion personal" in response.text
+    assert f'action="/composio/connections/{connection.id}/scope"' in response.text
+    assert 'name="visibility_scope_type" value="workspace"' in response.text
+    assert "Save Visibility" in response.text
+    assert f'action="/composio/connections/{connection.id}/disconnect"' in response.text
+    assert "Connect notion" not in response.text
+
+
+def test_dashboard_composio_scope_update_changes_visibility(
+    client: tuple[TestClient, Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    test_client, session = client
+    task = create_dashboard_task(session)
+    connection = ComposioConnection(
+        installation_id=task.installation_id,
+        toolkit_slug="notion",
+        auth_config_id="ac_notion",
+        connection_request_id="ln_notion",
+        connected_account_id="ca_notion",
+        composio_user_id=f"slack:{task.installation_id}:UCost",
+        owner_slack_user_id="UCost",
+        visibility_scope_type="user",
+        visibility_scope_id="UCost",
+        status="active",
+        display_name="Notion personal",
+        metadata_json={},
+    )
+    session.add(connection)
+    session.commit()
+    connection_id = connection.id
+    set_runtime_settings_env(monkeypatch)
+    login(test_client)
+
+    response = test_client.post(
+        f"/composio/connections/{connection_id}/scope",
+        data={
+            "next": "/composio/notion",
+            "visibility_scope_type": "channel",
+            "channel_scope_id": "CShared",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"].startswith("/composio/notion?")
+    session.expire_all()
+    updated = session.get(ComposioConnection, connection_id)
+    assert updated is not None
+    assert updated.visibility_scope_type == "channel"
+    assert updated.visibility_scope_id == "CShared"
+    assert updated.metadata_json["visibility_updated_by"] == "admin"
+    assert updated.metadata_json["previous_visibility_scope"] == {
+        "type": "user",
+        "id": "UCost",
+    }
+
+
+def test_dashboard_composio_disconnect_disables_connection(
+    client: tuple[TestClient, Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    test_client, session = client
+    task = create_dashboard_task(session)
+    connection = ComposioConnection(
+        installation_id=task.installation_id,
+        toolkit_slug="notion",
+        auth_config_id="ac_notion",
+        connection_request_id="ln_notion",
+        connected_account_id="ca_notion",
+        composio_user_id=f"slack:{task.installation_id}:UCost",
+        owner_slack_user_id="UCost",
+        visibility_scope_type="user",
+        visibility_scope_id="UCost",
+        status="active",
+        display_name="Notion personal",
+        metadata_json={},
+    )
+    session.add(connection)
+    session.commit()
+    connection_id = connection.id
+    set_runtime_settings_env(monkeypatch)
+    monkeypatch.setenv("COMPOSIO_API_KEY", "composio-dashboard-secret")
+    calls: list[tuple[str, bool]] = []
+
+    class FakeComposioClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def set_connected_account_enabled(
+            self,
+            connected_account_id: str,
+            *,
+            enabled: bool,
+        ) -> bool:
+            calls.append((connected_account_id, enabled))
+            return True
+
+    monkeypatch.setattr("kortny.dashboard.app.ComposioClient", FakeComposioClient)
+    login(test_client)
+
+    response = test_client.post(
+        f"/composio/connections/{connection_id}/disconnect",
+        data={"next": "/composio/notion"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"].startswith("/composio/notion?")
+    assert calls == [("ca_notion", False)]
+    session.expire_all()
+    updated = session.get(ComposioConnection, connection_id)
+    assert updated is not None
+    assert updated.status == "disabled"
+    assert updated.connected_account_id == "ca_notion"
+    assert updated.metadata_json["disconnected_by"] == "admin"
+    assert updated.metadata_json["disconnected_at"]
 
 
 def test_dashboard_composio_connect_creates_pending_connection(
@@ -1518,6 +1729,26 @@ def set_runtime_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(
         "POSTGRES_URL",
         "postgresql://kortny:db-dashboard-secret@localhost/kortny",
+    )
+
+
+def _composio_toolkit(*, slug: str, name: str) -> ComposioToolkit:
+    return ComposioToolkit(
+        slug=slug,
+        name=name,
+        description=f"{name} toolkit",
+        categories=(),
+        auth_schemes=("oauth2",),
+        managed_auth_schemes=("oauth2",),
+        tools_count=4,
+        triggers_count=1,
+        logo_url=None,
+        app_url=None,
+        auth_guide_url=None,
+        base_url=None,
+        enabled=True,
+        no_auth=False,
+        is_local_toolkit=False,
     )
 
 

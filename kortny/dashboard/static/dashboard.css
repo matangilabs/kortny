@@ -1693,6 +1693,15 @@ pre {
   padding: 12px 14px;
 }
 
+.connection-row.with-actions {
+  grid-template-columns:
+    minmax(160px, 1fr)
+    auto
+    minmax(120px, 0.55fr)
+    minmax(120px, 0.55fr)
+    minmax(116px, auto);
+}
+
 .connection-row:last-child {
   border-bottom: 0;
 }
@@ -1708,6 +1717,19 @@ pre {
   display: block;
   font-size: 12px;
   margin-top: 2px;
+}
+
+.connection-actions {
+  justify-self: end;
+}
+
+.connection-actions form {
+  margin: 0;
+}
+
+.compact-action {
+  min-height: 32px;
+  padding: 6px 10px;
 }
 
 .catalog-grid {
@@ -1914,6 +1936,10 @@ pre {
   width: 100%;
 }
 
+.composio-connect-card.connected {
+  border-color: color-mix(in srgb, var(--success) 22%, var(--border));
+}
+
 .composio-kicker {
   color: var(--muted-foreground);
   display: block;
@@ -2002,6 +2028,127 @@ pre {
 .connect-primary {
   min-width: 220px;
   min-height: 42px;
+}
+
+.connected-account-panel {
+  align-items: start;
+  background: color-mix(in srgb, var(--muted) 68%, var(--card));
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  display: grid;
+  gap: 14px;
+  grid-template-columns: minmax(240px, 0.8fr) minmax(320px, 1fr) auto;
+  padding: 16px;
+}
+
+.connected-account-summary,
+.connection-scope-form,
+.connection-scope-note {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  min-width: 0;
+  padding: 13px;
+}
+
+.connected-account-summary {
+  display: grid;
+  gap: 12px;
+}
+
+.connected-account-title {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.connected-account-title strong {
+  color: var(--foreground);
+  display: block;
+  font-size: 16px;
+  line-height: 1.25;
+}
+
+.connected-account-meta {
+  display: grid;
+  gap: 9px;
+  margin: 0;
+}
+
+.connected-account-meta div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.connected-account-meta dt,
+.form-label {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+.connected-account-meta dd {
+  color: var(--foreground);
+  margin: 0;
+  min-width: 0;
+}
+
+.connected-account-meta code {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--muted-foreground);
+  display: inline-block;
+  font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  margin-top: 8px;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  padding: 4px 6px;
+}
+
+.connection-scope-form {
+  display: grid;
+  gap: 12px;
+}
+
+.compact-scope-fieldset {
+  background: transparent;
+  border: 0;
+  gap: 6px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-top: 6px;
+  padding: 0;
+}
+
+.compact-scope-fieldset legend {
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  height: 1px;
+  overflow: hidden;
+  position: absolute;
+  white-space: nowrap;
+  width: 1px;
+}
+
+.connection-scope-form .form-field {
+  text-transform: none;
+}
+
+.connection-scope-note p {
+  margin: 6px 0 0;
+}
+
+.connected-account-actions {
+  justify-self: end;
+}
+
+.connected-account-actions form {
+  margin: 0;
 }
 
 .connect-advanced {
@@ -2790,6 +2937,7 @@ pre {
   .composio-card-grid,
   .composio-detail-grid,
   .connect-hero,
+  .connected-account-panel,
   .connect-form,
   .scope-option-grid,
   .scope-fieldset,
@@ -2808,9 +2956,23 @@ pre {
     justify-content: stretch;
   }
 
+  .connection-actions,
+  .connection-actions form,
+  .connected-account-actions,
+  .connected-account-actions form,
+  .connected-account-panel form {
+    justify-self: stretch;
+    width: 100%;
+  }
+
+  .connected-account-actions .btn-ghost,
+  .connection-scope-form .btn-ghost {
+    width: 100%;
+  }
+
   .connect-submit {
-  width: 100%;
-}
+    width: 100%;
+  }
 
 .compact-input {
   min-width: 120px;

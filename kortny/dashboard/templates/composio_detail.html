@@ -37,6 +37,8 @@
 
   {% set integration_name = detail.toolkit.name if detail.toolkit else detail.slug %}
   {% set default_owner = detail.user_options[0] if detail.user_options else none %}
+  {% set active_connection = detail.active_connection %}
+  {% set detail_base_path = '/me/integrations' if member_scope else '/composio' %}
 
   <section class="composio-detail-grid">
     <article class="card composio-detail-main">
@@ -132,23 +134,108 @@
   </section>
 
   <section class="composio-connect-section">
-    <article class="card composio-action-card composio-connect-card">
+    <article class="card composio-action-card composio-connect-card {{ 'connected' if active_connection else '' }}">
       <header class="connect-card-header">
         <div>
           <span class="composio-kicker">Connection</span>
-          <h2>{% if member_scope %}Connect Your Account{% else %}Connect Account{% endif %}</h2>
+          <h2>
+            {% if active_connection %}
+              Connected Account
+            {% elif member_scope %}
+              Connect Your Account
+            {% else %}
+              Connect Account
+            {% endif %}
+          </h2>
           <p>
-            {% if member_scope %}
+            {% if active_connection %}
+              Kortny can use this {{ integration_name }} account when a request matches its visibility scope.
+            {% elif member_scope %}
               Kortny will send you to Composio to authenticate {{ integration_name }}. The connection stays personal to your Slack account.
             {% else %}
               Credentials stay in Composio. Kortny stores owner, scope, and connected-account metadata.
             {% endif %}
           </p>
         </div>
-        <span class="badge badge-{{ 'success' if detail.configured else 'warning' }}">{{ "Ready" if detail.configured else "Needs API Key" }}</span>
+        {% if active_connection %}
+          <span class="badge badge-success">Connected</span>
+        {% else %}
+          <span class="badge badge-{{ 'success' if detail.configured else 'warning' }}">{{ "Ready" if detail.configured else "Needs API Key" }}</span>
+        {% endif %}
       </header>
 
-      {% if not detail.configured %}
+      {% if active_connection %}
+        <div class="connected-account-panel">
+          <div class="connected-account-summary">
+            <div class="connected-account-title">
+              <span class="badge badge-success">Active</span>
+              <strong>{{ active_connection.display_name }}</strong>
+            </div>
+            <dl class="connected-account-meta">
+              <div>
+                <dt>Owner</dt>
+                <dd>{{ active_connection.owner.name }}</dd>
+              </div>
+              <div>
+                <dt>Visibility</dt>
+                <dd>{{ active_connection.scope_label }}</dd>
+              </div>
+              {% if active_connection.connected_account_id %}
+                <div>
+                  <dt>Composio Account</dt>
+                  <dd><code>{{ active_connection.connected_account_id }}</code></dd>
+                </div>
+              {% endif %}
+            </dl>
+          </div>
+
+          {% if dashboard_is_admin %}
+            <form class="connection-scope-form" method="post" action="/composio/connections/{{ active_connection.id }}/scope">
+              <input type="hidden" name="next" value="{{ detail_base_path }}/{{ detail.slug }}">
+              <div>
+                <span class="form-label">Visibility</span>
+                <fieldset class="scope-fieldset compact-scope-fieldset">
+                  <legend>Visibility</legend>
+                  <label>
+                    <input type="radio" name="visibility_scope_type" value="user" {{ 'checked' if active_connection.visibility_scope_type == 'user' else '' }}>
+                    Personal
+                  </label>
+                  <label>
+                    <input type="radio" name="visibility_scope_type" value="channel" {{ 'checked' if active_connection.visibility_scope_type == 'channel' else '' }}>
+                    Channel
+                  </label>
+                  <label>
+                    <input type="radio" name="visibility_scope_type" value="workspace" {{ 'checked' if active_connection.visibility_scope_type == 'workspace' else '' }}>
+                    Workspace
+                  </label>
+                </fieldset>
+              </div>
+              <label class="form-field">
+                Channel scope
+                <input class="input" name="channel_scope_id" list="slack-channels" value="{{ active_connection.visibility_scope_id if active_connection.visibility_scope_type == 'channel' else '' }}" placeholder="Required for channel visibility">
+                <datalist id="slack-channels">
+                  {% for channel in detail.channel_options %}
+                    <option value="{{ channel.slack_id }}">{{ channel.name }}</option>
+                  {% endfor %}
+                </datalist>
+              </label>
+              <button class="btn-ghost" type="submit">Save Visibility</button>
+            </form>
+          {% else %}
+            <div class="connection-scope-note">
+              <span class="form-label">Visibility</span>
+              <p>Personal to your Slack account. Admins can widen visibility for team or channel use.</p>
+            </div>
+          {% endif %}
+
+          <div class="connected-account-actions">
+            <form method="post" action="/composio/connections/{{ active_connection.id }}/disconnect">
+              <input type="hidden" name="next" value="{{ detail_base_path }}/{{ detail.slug }}">
+              <button class="btn-ghost btn-danger" type="submit">Disconnect</button>
+            </form>
+          </div>
+        </div>
+      {% elif not detail.configured %}
         <p>Add `COMPOSIO_API_KEY` before creating auth configs or Connect Links.</p>
       {% else %}
         <div class="connect-card-body">
@@ -297,7 +384,7 @@
     {% if detail.connections %}
       <div class="connection-list">
         {% for connection in detail.connections %}
-          <article class="connection-row">
+          <article class="connection-row with-actions">
             <div>
               <strong>{{ connection.display_name }}</strong>
               <span>{{ connection.toolkit_slug }}</span>
@@ -310,6 +397,17 @@
             <div>
               <span class="detail-label">Owner</span>
               <p>{{ connection.owner.name }}</p>
+            </div>
+            <div class="connection-actions">
+              {% if connection.status == "active" %}
+                <form method="post" action="/composio/connections/{{ connection.id }}/disconnect">
+                  <input type="hidden" name="next" value="{{ detail_base_path }}/{{ detail.slug }}">
+                  <button class="btn-ghost btn-danger compact-action" type="submit">Disconnect</button>
+                </form>
+              {% else %}
+                <span class="detail-label">Updated</span>
+                <p>{{ connection.updated_at|datetime }}</p>
+              {% endif %}
             </div>
           </article>
         {% endfor %}

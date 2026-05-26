@@ -190,6 +190,20 @@ class ComposioClient:
             connected_account_id=connected_account_id,
         )
 
+    def set_connected_account_enabled(
+        self,
+        connected_account_id: str,
+        *,
+        enabled: bool,
+    ) -> bool:
+        response = self._patch(
+            f"/api/v3.1/connected_accounts/{connected_account_id}/status",
+            json_payload={"enabled": enabled},
+        )
+        payload = response.json()
+        success = payload.get("success")
+        return bool(success) if success is not None else True
+
     def _get(self, path: str, *, params: dict[str, str | int]) -> httpx.Response:
         client = self.http_client or httpx.Client(timeout=self.timeout_seconds)
         close_client = self.http_client is None
@@ -212,6 +226,23 @@ class ComposioClient:
         close_client = self.http_client is None
         try:
             response = client.post(
+                f"{self.base_url}{path}",
+                headers={"x-api-key": self.api_key},
+                json=json_payload,
+            )
+            response.raise_for_status()
+            return response
+        except httpx.HTTPError as exc:
+            raise ComposioConnectionError(str(exc)) from exc
+        finally:
+            if close_client:
+                client.close()
+
+    def _patch(self, path: str, *, json_payload: dict[str, Any]) -> httpx.Response:
+        client = self.http_client or httpx.Client(timeout=self.timeout_seconds)
+        close_client = self.http_client is None
+        try:
+            response = client.patch(
                 f"{self.base_url}{path}",
                 headers={"x-api-key": self.api_key},
                 json=json_payload,

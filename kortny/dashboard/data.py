@@ -475,11 +475,14 @@ class ComposioToolkitRow:
 
 @dataclass(frozen=True)
 class ComposioConnectionRow:
+    id: uuid.UUID
     toolkit_slug: str
     status: str
     tone: str
     display_name: str
     scope_label: str
+    visibility_scope_type: str
+    visibility_scope_id: str | None
     owner: IdentityLabel
     connected_account_id: str | None
     auth_config_id: str | None
@@ -547,6 +550,13 @@ class ComposioToolkitDetail:
     user_options: tuple[IdentityLabel, ...]
     channel_options: tuple[IdentityLabel, ...]
     error: str | None
+
+    @property
+    def active_connection(self) -> ComposioConnectionRow | None:
+        return next(
+            (connection for connection in self.connections if connection.status == "active"),
+            None,
+        )
 
 
 @dataclass(frozen=True)
@@ -2075,7 +2085,13 @@ def _composio_catalog_view(
     connection_statuses = _composio_status_by_toolkit(connections)
     toolkits = tuple(
         _composio_toolkit_row(toolkit, connection_statuses)
-        for toolkit in catalog.items
+        for _index, toolkit in sorted(
+            enumerate(catalog.items),
+            key=lambda item: (
+                connection_statuses.get(item[1].slug) != "active",
+                item[0],
+            ),
+        )
     )
     return ComposioCatalogView(
         enabled=True,
@@ -2138,11 +2154,14 @@ def _composio_connection_row(
         slack_id=row.owner_slack_user_id,
     )
     return ComposioConnectionRow(
+        id=row.id,
         toolkit_slug=row.toolkit_slug,
         status=row.status,
         tone=_composio_connection_tone(row.status),
         display_name=row.display_name or row.external_account_label or row.toolkit_slug,
         scope_label=_composio_scope_label(row, identities),
+        visibility_scope_type=row.visibility_scope_type,
+        visibility_scope_id=row.visibility_scope_id,
         owner=owner,
         connected_account_id=row.connected_account_id,
         auth_config_id=row.auth_config_id,
