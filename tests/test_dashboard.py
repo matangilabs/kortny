@@ -807,13 +807,28 @@ def test_dashboard_member_composio_connect_uses_logged_in_user_scope(
             assert limit == 20
             return (
                 ComposioAuthConfig(
-                    id="ac_member",
-                    name="Notion OAuth",
-                    toolkit_slug="notion",
+                    id="ac_discord",
+                    name="Discord OAuth",
+                    toolkit_slug="discord",
                     auth_scheme="OAUTH2",
                     is_composio_managed=True,
                     enabled=True,
                 ),
+            )
+
+        def create_managed_auth_config(
+            self,
+            *,
+            toolkit_slug: str,
+        ) -> ComposioAuthConfig:
+            assert toolkit_slug == "notion"
+            return ComposioAuthConfig(
+                id="ac_member",
+                name="Notion OAuth",
+                toolkit_slug="notion",
+                auth_scheme="OAUTH2",
+                is_composio_managed=True,
+                enabled=True,
             )
 
         def create_connect_link(

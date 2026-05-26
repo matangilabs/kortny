@@ -125,7 +125,7 @@ class ComposioClient:
     ) -> tuple[ComposioAuthConfig, ...]:
         response = self._get(
             "/api/v3.1/auth_configs",
-            params={"toolkit": toolkit_slug, "limit": limit},
+            params={"toolkit_slug": toolkit_slug, "limit": limit},
         )
         payload = response.json()
         items = payload.get("items") or payload.get("data") or ()

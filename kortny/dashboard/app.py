@@ -1240,7 +1240,7 @@ def _resolve_composio_auth_config_id(
 
     auth_configs = client.list_auth_configs(toolkit_slug=toolkit_slug)
     for auth_config in auth_configs:
-        if auth_config.enabled:
+        if auth_config.enabled and auth_config.toolkit_slug == toolkit_slug:
             return auth_config.id, "existing"
 
     auth_config = client.create_managed_auth_config(toolkit_slug=toolkit_slug)

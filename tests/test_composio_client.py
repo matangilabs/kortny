@@ -97,7 +97,7 @@ def test_composio_client_gets_toolkit_detail() -> None:
 def test_composio_client_lists_auth_configs_for_toolkit() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/v3.1/auth_configs"
-        assert request.url.params["toolkit"] == "github"
+        assert request.url.params["toolkit_slug"] == "github"
         assert request.url.params["limit"] == "20"
         return httpx.Response(
             200,
