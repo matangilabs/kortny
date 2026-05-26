@@ -196,6 +196,11 @@ class ExecutionPlan:
     plan_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     plan_version: int = 1
     mode: ExecutionMode = ExecutionMode.inline
+    planner_source: str = "inline_default"
+    planner_reason: str | None = None
+    missing_inputs: list[str] = field(default_factory=list)
+    fallback_notes: list[str] = field(default_factory=list)
+    risk_notes: list[str] = field(default_factory=list)
     status: ExecutionPlanStatus = ExecutionPlanStatus.pending
     current_step_id: str | None = None
     budget: ExecutionBudgetState = field(default_factory=ExecutionBudgetState)
@@ -248,8 +253,13 @@ class ExecutionPlan:
             "task_id": self.task_id,
             "mode": self.mode.value,
             "status": self.status.value,
+            "planner_source": self.planner_source,
+            "planner_reason": self.planner_reason,
             "user_query_summary": self.user_query_summary,
             "current_step_id": self.current_step_id,
+            "missing_inputs": self.missing_inputs,
+            "fallback_notes": self.fallback_notes,
+            "risk_notes": self.risk_notes,
             "limits": asdict(self.limits),
             "budget": {
                 "tool_call_count": self.budget.tool_call_count,
@@ -272,6 +282,7 @@ def make_default_execution_plan(
         task_id=str(task_id),
         user_query_summary=_summarize_user_input(user_input),
         limits=limits,
+        planner_source="inline_default",
         steps=[
             ExecutionStep(
                 step_id="step-1",

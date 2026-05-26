@@ -32,6 +32,13 @@ from kortny.agent.execution import (
     ExecutionStepStatus,
     ToolAttemptRecord,
 )
+from kortny.agent.planner import (
+    ExecutionPlanner,
+    PlannedExecutionPayload,
+    PlannedStepPayload,
+    PlannerGateDecision,
+    render_execution_plan_context,
+)
 
 __all__ = [
     "AgentCoordinator",
@@ -53,9 +60,14 @@ __all__ = [
     "ExecutionMode",
     "ExecutionPlan",
     "ExecutionPlanStatus",
+    "ExecutionPlanner",
     "ExecutionStep",
     "ExecutionStepStatus",
     "LLMClient",
+    "PlannerGateDecision",
+    "PlannedExecutionPayload",
+    "PlannedStepPayload",
     "RecoveryAction",
     "ToolAttemptRecord",
+    "render_execution_plan_context",
 ]

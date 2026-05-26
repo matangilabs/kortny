@@ -62,7 +62,11 @@ class FakeLLM:
         task_id: uuid.UUID,
         messages: Sequence[ChatMessage],
         tools: Sequence[JsonSchema] = (),
+        response_format: JsonObject | None = None,
+        prompt_name: str | None = None,
+        prompt_source: str = "code",
     ) -> Completion:
+        del response_format, prompt_name, prompt_source
         self.calls.append((task_id, tuple(messages), tuple(tools)))
         if not self.completions:
             raise AssertionError("FakeLLM received more calls than expected")
@@ -212,6 +216,23 @@ class RecordingPdfTool:
                 ),
             ),
         )
+
+
+class RecordingNotionComposioTool:
+    name = "composio_notion_execute"
+    description = "Executes selected Notion tools through Composio."
+    parameters: JsonSchema = {
+        "type": "object",
+        "properties": {
+            "tool_slug": {"type": "string"},
+            "arguments": {"type": "object"},
+        },
+        "required": ["tool_slug"],
+        "additionalProperties": False,
+    }
+
+    def invoke(self, args: JsonObject) -> ToolResult:
+        return ToolResult(output={"received": args})
 
 
 @pytest.fixture(scope="session")
@@ -1525,6 +1546,183 @@ def test_coordinator_records_tool_attempt_metadata(db_session: Session) -> None:
     )
 
 
+def test_coordinator_keeps_simple_tasks_on_inline_plan(db_session: Session) -> None:
+    task = create_task(db_session, input_text="answer this directly")
+    llm = FakeLLM(
+        [
+            Completion(
+                content="Direct answer.",
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=20, output_tokens=4),
+            )
+        ]
+    )
+
+    AgentCoordinator(
+        session=db_session,
+        llm=llm,
+        registry=ToolRegistry([EchoJsonTool()]),
+    ).run(task)
+
+    assert len(llm.calls) == 1
+    assert llm.calls[0][1] == (
+        ChatMessage(role="user", content="answer this directly"),
+    )
+    events = task_events(db_session, task)
+    plan_event = next(
+        event
+        for event in events
+        if event.payload.get("message") == "execution_plan_created"
+    )
+    assert plan_event.payload["mode"] == "inline"
+    assert plan_event.payload["plan"]["planner_source"] == "inline_default"
+    assert plan_event.payload["plan"]["planner_reason"] == "no_intent_signal"
+
+
+def test_coordinator_uses_private_planner_for_complex_tool_tasks(
+    db_session: Session,
+) -> None:
+    task = create_task(
+        db_session,
+        input_text="Check Notion for open action items and summarize the risky ones.",
+    )
+    record_intent_decision(
+        db_session,
+        task,
+        likely_tools=["composio_notion_execute", "web_search"],
+        needs_channel_context=False,
+        model_tier="strong",
+    )
+    llm = FakeLLM(
+        [
+            Completion(
+                content=json.dumps(
+                    {
+                        "objective": (
+                            "Find open Notion action items and summarize risk."
+                        ),
+                        "steps": [
+                            {
+                                "description": (
+                                    "Discover relevant Notion task databases or pages."
+                                ),
+                                "selected_tool_names": ["composio_notion_execute"],
+                            },
+                            {
+                                "description": "Summarize open items and call out risk.",
+                                "selected_tool_names": [],
+                            },
+                        ],
+                        "missing_inputs": [],
+                        "fallback_notes": [
+                            "If a database id is missing, use Notion discovery before asking."
+                        ],
+                        "risk_notes": ["Do not mutate Notion content."],
+                    }
+                ),
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=80, output_tokens=40),
+            ),
+            Completion(
+                content="I found the risky open items.",
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=120, output_tokens=8),
+            ),
+        ]
+    )
+
+    result = AgentCoordinator(
+        session=db_session,
+        llm=llm,
+        registry=ToolRegistry([RecordingNotionComposioTool(), RecordingSearchTool()]),
+    ).run(task)
+
+    assert result.result_summary == "I found the risky open items."
+    assert len(llm.calls) == 2
+    actor_messages = llm.calls[1][1]
+    plan_message = next(
+        message
+        for message in actor_messages
+        if message.content and "<private_execution_plan>" in message.content
+    )
+    assert "Find open Notion action items" in plan_message.content
+    assert "composio_notion_execute" in plan_message.content
+    assert actor_messages[-1] == ChatMessage(role="user", content=task.input)
+
+    events = task_events(db_session, task)
+    plan_event = next(
+        event
+        for event in events
+        if event.payload.get("message") == "execution_plan_created"
+    )
+    assert plan_event.payload["mode"] == "planned"
+    assert plan_event.payload["plan"]["planner_source"] == "llm_planner"
+    assert plan_event.payload["plan"]["planner_reason"] == "intent_likely_multi_tool"
+    assert len(plan_event.payload["plan"]["steps"]) == 2
+    assert plan_event.payload["plan"]["fallback_notes"] == [
+        "If a database id is missing, use Notion discovery before asking."
+    ]
+
+
+def test_coordinator_falls_back_to_inline_plan_when_planner_fails(
+    db_session: Session,
+) -> None:
+    task = create_task(
+        db_session,
+        input_text="Use Notion and web search to compare open action items.",
+    )
+    record_intent_decision(
+        db_session,
+        task,
+        likely_tools=["composio_notion_execute", "web_search"],
+        needs_channel_context=True,
+        model_tier="strong",
+    )
+    llm = FakeLLM(
+        [
+            Completion(
+                content="not json",
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=80, output_tokens=4),
+            ),
+            Completion(
+                content="I can still answer from the inline path.",
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=100, output_tokens=8),
+            ),
+        ]
+    )
+
+    result = AgentCoordinator(
+        session=db_session,
+        llm=llm,
+        registry=ToolRegistry([RecordingNotionComposioTool(), RecordingSearchTool()]),
+    ).run(task)
+
+    assert result.result_summary == "I can still answer from the inline path."
+    assert len(llm.calls) == 2
+    assert not any(
+        message.content and "<private_execution_plan>" in message.content
+        for message in llm.calls[1][1]
+    )
+
+    events = task_events(db_session, task)
+    planner_failure = next(
+        event
+        for event in events
+        if event.payload.get("message") == "execution_planner_failed"
+    )
+    assert planner_failure.payload["reason"] == "intent_likely_multi_tool"
+    plan_event = next(
+        event
+        for event in events
+        if event.payload.get("message") == "execution_plan_created"
+    )
+    assert plan_event.payload["mode"] == "inline"
+    assert plan_event.payload["plan"]["planner_source"] == "planner_fallback"
+    assert plan_event.payload["plan"]["planner_reason"] == "intent_likely_multi_tool"
+
+
 def test_coordinator_classifies_recoverable_tool_result_errors(
     db_session: Session,
 ) -> None:
@@ -1834,6 +2032,40 @@ def create_task(
         task.created_at = created_at
         session.flush()
     return task
+
+
+def record_intent_decision(
+    session: Session,
+    task: Task,
+    *,
+    likely_tools: list[str],
+    needs_channel_context: bool = False,
+    needs_thread_context: bool = False,
+    needs_file_context: bool = False,
+    model_tier: str = "standard",
+) -> None:
+    TaskService(session).append_event(
+        task,
+        TaskEventType.log,
+        {
+            "message": "intent_classification_completed",
+            "source": "test",
+            "decision": {
+                "addressed_to_kortny": True,
+                "classification": "task_request",
+                "confidence": 0.95,
+                "should_create_task": True,
+                "should_ack_with_reaction": True,
+                "suggested_reaction": "eyes",
+                "needs_channel_context": needs_channel_context,
+                "needs_thread_context": needs_thread_context,
+                "needs_file_context": needs_file_context,
+                "likely_tools": likely_tools,
+                "model_tier": model_tier,
+                "reason": "test intent",
+            },
+        },
+    )
 
 
 def create_workspace_fact(

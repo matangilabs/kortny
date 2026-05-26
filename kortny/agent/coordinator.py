@@ -16,6 +16,7 @@ from dataclasses import asdict, dataclass
 from decimal import Decimal
 from typing import Protocol
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from kortny.agent.context import (
@@ -34,13 +35,16 @@ from kortny.agent.error_policy import (
 )
 from kortny.agent.execution import (
     ExecutionGuardrailLimits,
+    ExecutionMode,
     ExecutionPlan,
     ToolAttemptRecord,
     make_default_execution_plan,
 )
+from kortny.agent.planner import ExecutionPlanner, render_execution_plan_context
 from kortny.agent.thread_context import ThreadTranscriptProvider
-from kortny.db.models import Task, TaskEventType
+from kortny.db.models import Task, TaskEvent, TaskEventType
 from kortny.llm import ChatMessage, Completion, ToolCall
+from kortny.llm.routing import latest_intent_decision
 from kortny.observability import (
     log_observation,
     record_span_exception,
@@ -115,6 +119,9 @@ class LLMClient(Protocol):
         task_id: uuid.UUID,
         messages: Sequence[ChatMessage],
         tools: Sequence[JsonSchema] = (),
+        response_format: JsonObject | None = None,
+        prompt_name: str | None = None,
+        prompt_source: str = "code",
     ) -> Completion:
         """Complete one coordinator turn."""
 
@@ -160,6 +167,7 @@ class AgentCoordinator:
         known_facts_max_chars: int = DEFAULT_KNOWN_FACTS_MAX_CHARS,
         context_assembler: ContextAssembler | None = None,
         guardrail_limits: ExecutionGuardrailLimits | None = None,
+        execution_planner: ExecutionPlanner | None = None,
     ) -> None:
         if max_turns < 1:
             raise ValueError("max_turns must be at least 1")
@@ -180,6 +188,7 @@ class AgentCoordinator:
             max_turns=max_turns
         )
         self.max_turns = self.guardrail_limits.max_turns
+        self.execution_planner = execution_planner or ExecutionPlanner()
         self.context_assembler = context_assembler or ContextAssembler(
             session=session,
             task_service=self.task_service,
@@ -198,7 +207,7 @@ class AgentCoordinator:
         messages = self._initial_messages(task_obj)
         schemas = self.registry.schemas()
         artifact_count = 0
-        plan = self._create_execution_plan(task_obj)
+        plan = self._create_execution_plan(task_obj, schemas)
         self._append_execution_log(
             task_obj,
             "execution_plan_created",
@@ -207,6 +216,7 @@ class AgentCoordinator:
                 "plan": plan.to_payload(),
             },
         )
+        messages = self._messages_with_execution_plan(messages, plan)
         step = plan.start()
         self._append_execution_log(
             task_obj,
@@ -683,13 +693,85 @@ class AgentCoordinator:
             artifact_count=artifact_count,
         )
 
-    def _create_execution_plan(self, task: Task) -> ExecutionPlan:
-        return make_default_execution_plan(
+    def _create_execution_plan(
+        self,
+        task: Task,
+        schemas: Sequence[JsonSchema],
+    ) -> ExecutionPlan:
+        default_plan = make_default_execution_plan(
             task_id=task.id,
             user_input=task.input,
             selected_tool_names=list(self.registry.names()),
             limits=self.guardrail_limits,
         )
+        intent_decision = self._latest_intent_decision(task)
+        gate = self.execution_planner.should_plan(
+            task=task,
+            tool_schemas=schemas,
+            intent_decision=intent_decision,
+        )
+        if not gate.should_plan:
+            default_plan.planner_reason = gate.reason
+            return default_plan
+
+        try:
+            return self.execution_planner.create_plan(
+                task=task,
+                llm=self.llm,
+                tool_schemas=schemas,
+                limits=self.guardrail_limits,
+                intent_decision=intent_decision,
+                reason=gate.reason,
+            )
+        except Exception as exc:
+            default_plan.planner_source = "planner_fallback"
+            default_plan.planner_reason = gate.reason
+            self._append_log(
+                task,
+                "execution_planner_failed",
+                {
+                    "reason": gate.reason,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                    "fallback_mode": default_plan.mode.value,
+                },
+            )
+            logger.info(
+                "execution planner failed task_id=%s reason=%s error_type=%s error=%s",
+                task.id,
+                gate.reason,
+                type(exc).__name__,
+                exc,
+            )
+            return default_plan
+
+    def _messages_with_execution_plan(
+        self,
+        messages: list[ChatMessage],
+        plan: ExecutionPlan,
+    ) -> list[ChatMessage]:
+        if plan.mode is not ExecutionMode.planned:
+            return messages
+
+        plan_context = ChatMessage(
+            role="system",
+            content=render_execution_plan_context(plan),
+        )
+        for index in range(len(messages) - 1, -1, -1):
+            if messages[index].role == "user":
+                return [*messages[:index], plan_context, *messages[index:]]
+        return [*messages, plan_context]
+
+    def _latest_intent_decision(self, task: Task) -> JsonObject | None:
+        events = list(
+            self.session.scalars(
+                select(TaskEvent)
+                .where(TaskEvent.task_id == task.id)
+                .order_by(TaskEvent.seq)
+            )
+        )
+        decision = latest_intent_decision(events)
+        return dict(decision) if decision is not None else None
 
     def _record_tool_attempt(
         self,
