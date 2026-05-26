@@ -36,7 +36,13 @@ from kortny.observability import (
 )
 from kortny.tasks import TaskService
 from kortny.tools import ToolRegistry
-from kortny.tools.types import JsonObject, JsonSchema, ToolArtifact, ToolResult
+from kortny.tools.types import (
+    JsonObject,
+    JsonSchema,
+    RecoverableToolError,
+    ToolArtifact,
+    ToolResult,
+)
 
 DEFAULT_MAX_TURNS = 6
 REQUESTED_PAGES_RE = re.compile(r"\b(\d{1,2})\s+pages?\b", re.I)
@@ -69,7 +75,14 @@ DEFAULT_SYSTEM_PROMPT = (
     "longer faithful memory proposal over a short lossy summary. "
     "If a tool result includes error.recoverable=true, keep working with the "
     "context and tool results already available. Retry only when you can change "
-    "the arguments or content to address the tool feedback. "
+    "the arguments or content to address the tool feedback. If a required field "
+    "or identifier is missing, first use a discovery, list, search, or history "
+    "tool that can infer it. If no available tool can infer the missing input, "
+    "ask one concise clarification. Never repeat the same failed tool call with "
+    "the same arguments. Prefer cheap broad search for quick public discovery; "
+    "use richer connected tools when the request needs authenticated workspace "
+    "data, structured app actions, scraping, or deeper page extraction; combine "
+    "tools when discovery and extraction are both useful. "
     "When answering with text, format for Slack mrkdwn rather than GitHub "
     "Markdown: use *bold*, <https://example.com|label> links, simple line-break "
     "lists, and avoid Markdown headings."
@@ -281,6 +294,8 @@ class AgentCoordinator:
                 argument_keys=sorted(arguments),
             )
             started = time.perf_counter()
+            recoverable_error: RecoverableToolError | None = None
+            result: ToolResult
             try:
                 with start_span(
                     "tool.invoke",
@@ -293,7 +308,15 @@ class AgentCoordinator:
                         "tool.argument_keys": sorted(arguments),
                     },
                 ):
-                    result = self.registry.invoke(tool_call.name, arguments)
+                    try:
+                        result = self.registry.invoke(tool_call.name, arguments)
+                    except RecoverableToolError as exc:
+                        recoverable_error = exc
+                        result = _recoverable_tool_error_result(
+                            arguments=arguments,
+                            error=exc,
+                        )
+                        record_span_exception(exc)
                     set_span_attributes(
                         {
                             "tool.latency_ms": _latency_ms(started),
@@ -329,6 +352,20 @@ class AgentCoordinator:
                     },
                 )
                 raise
+
+            if recoverable_error is not None:
+                log_observation(
+                    logger,
+                    "tool_call_recoverable_failed",
+                    level=logging.WARNING,
+                    task=task_obj,
+                    turn=turn,
+                    tool_call_id=tool_call.id,
+                    tool=tool_call.name,
+                    latency_ms=_latency_ms(started),
+                    error_code=recoverable_error.code,
+                    error_summary=recoverable_error.message,
+                )
 
             self.task_service.raise_if_cancelled(
                 task_obj, phase=f"after_tool_{tool_call.name}"
@@ -491,6 +528,20 @@ def _tool_result_payload(tool_name: str, result: ToolResult) -> JsonObject:
         "cost_usd": str(result.cost_usd),
         "artifacts": [_artifact_payload(artifact) for artifact in result.artifacts],
     }
+
+
+def _recoverable_tool_error_result(
+    *,
+    arguments: JsonObject,
+    error: RecoverableToolError,
+) -> ToolResult:
+    return ToolResult(
+        output={
+            "successful": False,
+            "attempted_argument_keys": sorted(arguments),
+            "error": error.to_payload(),
+        }
+    )
 
 
 def _artifact_payload(artifact: ToolArtifact) -> JsonObject:

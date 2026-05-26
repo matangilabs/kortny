@@ -30,7 +30,7 @@ from kortny.db.session import make_engine, make_session_factory, normalize_datab
 from kortny.llm import ChatMessage, Completion, TokenUsage, ToolCall
 from kortny.memory import EpisodeService
 from kortny.tasks import TaskService
-from kortny.tools import ToolArtifact, ToolRegistry, ToolResult
+from kortny.tools import RecoverableToolError, ToolArtifact, ToolRegistry, ToolResult
 from kortny.tools.types import JsonObject, JsonSchema
 
 TEST_POSTGRES_URL = os.environ.get("KORTNY_TEST_POSTGRES_URL")
@@ -89,6 +89,25 @@ class EchoJsonTool:
 
     def invoke(self, args: JsonObject) -> ToolResult:
         return ToolResult(output={"echoed": args["message"]}, cost_usd=Decimal("0.1"))
+
+
+class MissingRequiredContextTool:
+    name = "query_database"
+    description = "Requires a database id."
+    parameters: JsonSchema = {
+        "type": "object",
+        "properties": {"database_id": {"type": "string"}},
+        "required": ["database_id"],
+        "additionalProperties": False,
+    }
+
+    def invoke(self, args: JsonObject) -> ToolResult:
+        raise RecoverableToolError(
+            code="missing_required_arguments",
+            message="query_database is missing required argument(s): database_id.",
+            hint="Use search_database first or ask the user for the database link.",
+            details={"missing_fields": ["database_id"]},
+        )
 
 
 class RecordingSearchTool:
@@ -1306,6 +1325,85 @@ def test_coordinator_invokes_tool_and_repeats_until_final_answer(
     )
     assert tool_result.payload["output"] == {"echoed": "hi"}
     assert tool_result.payload["cost_usd"] == "0.1"
+
+
+def test_coordinator_feeds_recoverable_tool_errors_back_to_llm(
+    db_session: Session,
+) -> None:
+    task = create_task(db_session, input_text="check notion for open items")
+    llm = FakeLLM(
+        [
+            Completion(
+                content=None,
+                tool_calls=(
+                    ToolCall(
+                        id="call-1",
+                        name="query_database",
+                        arguments={"page_size": 10},
+                    ),
+                ),
+                usage=TokenUsage(input_tokens=20, output_tokens=3),
+            ),
+            Completion(
+                content=None,
+                tool_calls=(
+                    ToolCall(
+                        id="call-2",
+                        name="echo_json",
+                        arguments={"message": "used fallback discovery"},
+                    ),
+                ),
+                usage=TokenUsage(input_tokens=30, output_tokens=5),
+            ),
+            Completion(
+                content="I recovered by using the fallback discovery path.",
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=35, output_tokens=8),
+            ),
+        ]
+    )
+
+    result = AgentCoordinator(
+        session=db_session,
+        llm=llm,
+        registry=ToolRegistry([MissingRequiredContextTool(), EchoJsonTool()]),
+    ).run(task)
+
+    assert result.result_summary == "I recovered by using the fallback discovery path."
+    assert result.turns == 3
+
+    second_turn_tool_message = llm.calls[1][1][-1]
+    assert second_turn_tool_message.role == "tool"
+    assert second_turn_tool_message.tool_call_id == "call-1"
+    recoverable_payload = json.loads(second_turn_tool_message.content or "{}")
+    assert recoverable_payload["output"]["successful"] is False
+    assert recoverable_payload["output"]["error"] == {
+        "code": "missing_required_arguments",
+        "message": "query_database is missing required argument(s): database_id.",
+        "recoverable": True,
+        "hint": "Use search_database first or ask the user for the database link.",
+        "details": {"missing_fields": ["database_id"]},
+    }
+    assert recoverable_payload["output"]["attempted_argument_keys"] == ["page_size"]
+
+    events = task_events(db_session, task)
+    assert [event.type for event in events if event.type in tool_event_types()] == [
+        TaskEventType.tool_call,
+        TaskEventType.tool_result,
+        TaskEventType.tool_call,
+        TaskEventType.tool_result,
+    ]
+    first_tool_result = next(
+        event
+        for event in events
+        if event.type is TaskEventType.tool_result
+        and event.payload["tool"] == "query_database"
+    )
+    assert first_tool_result.payload["recoverable"] is True
+    assert first_tool_result.payload["output"]["error"]["code"] == (
+        "missing_required_arguments"
+    )
+    assert not any(event.type is TaskEventType.error for event in events)
 
 
 def test_coordinator_stops_when_tool_returns_artifact(db_session: Session) -> None:

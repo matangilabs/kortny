@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from kortny.composio import ComposioClient, ComposioConnectionResolver, ComposioTool
 from kortny.db.models import Task
 from kortny.observability.events import log_observation
-from kortny.tools.types import JsonObject, JsonSchema, ToolResult
+from kortny.tools.types import JsonObject, JsonSchema, RecoverableToolError, ToolResult
 
 logger = logging.getLogger(__name__)
 MAX_TOOL_NAME_LENGTH = 64
@@ -54,9 +54,22 @@ class ComposioExecuteTool:
 
         connection = self.resolver.best_connection(toolkit_slug=self.tool.toolkit_slug)
         if connection is None:
-            raise ValueError(
-                f"No active Composio {self.tool.toolkit_slug} connection is available "
-                "for this Slack user/channel/workspace."
+            raise RecoverableToolError(
+                code="missing_connection",
+                message=(
+                    f"No active Composio {self.tool.toolkit_slug} connection is "
+                    "available for this Slack user/channel/workspace."
+                ),
+                hint=(
+                    "Use another available tool if the task can be completed without "
+                    f"{self.tool.toolkit_slug}. Otherwise ask the user to connect "
+                    "the integration in Kortny's Integrations dashboard."
+                ),
+                details={
+                    "provider": "composio",
+                    "toolkit_slug": self.tool.toolkit_slug,
+                    "tool_slug": self.tool.slug,
+                },
             )
 
         log_observation(
@@ -157,9 +170,15 @@ def _validate_required_arguments(
     ]
     if missing:
         joined = ", ".join(missing)
-        raise ValueError(
-            f"{tool_name} is missing required argument(s): {joined}. "
-            "Use a discovery tool first or ask the user for the missing context."
+        raise RecoverableToolError(
+            code="missing_required_arguments",
+            message=f"{tool_name} is missing required argument(s): {joined}.",
+            hint=(
+                "Use a discovery/list/search tool first if one can find the missing "
+                "identifier. If no available tool can infer it, ask the user for the "
+                "smallest missing piece of context."
+            ),
+            details={"missing_fields": missing},
         )
 
 

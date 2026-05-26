@@ -21,7 +21,7 @@ from kortny.db.models import ComposioConnection, Installation, Task, TaskEvent
 from kortny.db.session import make_engine, make_session_factory, normalize_database_url
 from kortny.tasks import TaskService
 from kortny.tool_selection import ToolCard, ToolSelection, ToolSelectionResult
-from kortny.tools import ToolResult
+from kortny.tools import RecoverableToolError, ToolResult
 from kortny.tools.composio_execute import (
     ComposioExecuteTool,
     composio_runtime_tool_name,
@@ -183,7 +183,7 @@ def test_composio_execute_tool_uses_scoped_connection(
     }
 
 
-def test_composio_execute_tool_rejects_unapproved_tool(
+def test_composio_execute_tool_reports_missing_required_args_as_recoverable(
     db_session: Session,
 ) -> None:
     task = create_task(db_session, slack_channel_id="CResearch", slack_user_id="UAnalyst")
@@ -202,8 +202,10 @@ def test_composio_execute_tool_rejects_unapproved_tool(
         tool=firecrawl_tools()[0],
     )
 
-    with pytest.raises(ValueError, match="missing required"):
+    with pytest.raises(RecoverableToolError, match="missing required") as exc_info:
         tool.invoke({})
+    assert exc_info.value.code == "missing_required_arguments"
+    assert exc_info.value.details == {"missing_fields": ["url"]}
 
 
 def test_composio_runtime_tool_names_are_specific_and_bounded() -> None:
@@ -385,8 +387,9 @@ def test_worker_registry_exposes_required_fields_for_exact_composio_tool(
 
     tool = registry.get("composio_notion_query_database")
     assert tool.parameters["required"] == ["database_id"]
-    with pytest.raises(ValueError, match="database_id"):
+    with pytest.raises(RecoverableToolError, match="database_id") as exc_info:
         tool.invoke({"page_size": 10})
+    assert exc_info.value.code == "missing_required_arguments"
     assert composio_client.calls == []
 
 
