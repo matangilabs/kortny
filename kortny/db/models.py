@@ -374,7 +374,7 @@ class DashboardUser(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "role in ('owner', 'admin', 'member')",
+            "role in ('admin', 'member')",
             name="ck_dashboard_users_role",
         ),
         CheckConstraint(

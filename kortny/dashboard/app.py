@@ -16,7 +16,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -57,6 +57,7 @@ from kortny.dashboard.settings import DashboardSettings, load_dashboard_settings
 from kortny.db.models import (
     ComposioConnection,
     DashboardOAuthState,
+    DashboardUser,
     Installation,
     SlackIdentity,
 )
@@ -167,7 +168,7 @@ def register_routes(app: FastAPI) -> None:
             request,
             DashboardPrincipal(
                 display_name=settings.username,
-                role="owner",
+                role="admin",
                 source="bootstrap",
             ),
         )
@@ -258,8 +259,11 @@ def register_routes(app: FastAPI) -> None:
                 source="slack",
             ),
         )
+        redirect_path = oauth_state.redirect_path
+        if dashboard_user.role != "admin" and redirect_path == "/":
+            redirect_path = "/me"
         return RedirectResponse(
-            url=oauth_state.redirect_path,
+            url=redirect_path,
             status_code=status.HTTP_303_SEE_OTHER,
         )
 
@@ -271,7 +275,7 @@ def register_routes(app: FastAPI) -> None:
     @app.get("/", response_class=HTMLResponse)
     def index(
         request: Request,
-        username: Annotated[str, Depends(require_user)],
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
         session: Annotated[Session, Depends(get_session)],
     ) -> Response:
         settings = cast(DashboardSettings, request.app.state.dashboard_settings)
@@ -287,8 +291,7 @@ def register_routes(app: FastAPI) -> None:
             request=request,
             name="index.html",
             context={
-                "active_page": "overview",
-                "dashboard_user": username,
+                **_dashboard_context(principal, active_page="overview"),
                 "overview": overview,
             },
         )
@@ -296,7 +299,7 @@ def register_routes(app: FastAPI) -> None:
     @app.get("/tasks", response_class=HTMLResponse)
     def tasks(
         request: Request,
-        username: Annotated[str, Depends(require_user)],
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
         session: Annotated[Session, Depends(get_session)],
         page: Annotated[int, Query(ge=1)] = 1,
         page_size: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)] = DEFAULT_PAGE_SIZE,
@@ -306,8 +309,7 @@ def register_routes(app: FastAPI) -> None:
             request=request,
             name="tasks.html",
             context={
-                "active_page": "tasks",
-                "dashboard_user": username,
+                **_dashboard_context(principal, active_page="tasks"),
                 "task_page": task_page,
                 "page_size": page_size,
             },
@@ -317,7 +319,7 @@ def register_routes(app: FastAPI) -> None:
     def task_detail(
         request: Request,
         task_id: UUID,
-        username: Annotated[str, Depends(require_user)],
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
         session: Annotated[Session, Depends(get_session)],
     ) -> Response:
         detail = get_task_detail(session, task_id)
@@ -327,8 +329,7 @@ def register_routes(app: FastAPI) -> None:
             request=request,
             name="task_detail.html",
             context={
-                "active_page": "tasks",
-                "dashboard_user": username,
+                **_dashboard_context(principal, active_page="tasks"),
                 "detail": detail,
             },
         )
@@ -336,7 +337,7 @@ def register_routes(app: FastAPI) -> None:
     @app.get("/usage", response_class=HTMLResponse)
     def usage(
         request: Request,
-        username: Annotated[str, Depends(require_user)],
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
         session: Annotated[Session, Depends(get_session)],
         from_date: Annotated[str | None, Query(alias="from")] = None,
         to_date: Annotated[str | None, Query(alias="to")] = None,
@@ -348,8 +349,7 @@ def register_routes(app: FastAPI) -> None:
             request=request,
             name="usage.html",
             context={
-                "active_page": "usage",
-                "dashboard_user": username,
+                **_dashboard_context(principal, active_page="usage"),
                 "aggregate": aggregate,
                 "from_date": from_date or "",
                 "to_date": to_date or "",
@@ -359,7 +359,7 @@ def register_routes(app: FastAPI) -> None:
     @app.get("/users", response_class=HTMLResponse)
     def users(
         request: Request,
-        username: Annotated[str, Depends(require_user)],
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
         session: Annotated[Session, Depends(get_session)],
         from_date: Annotated[str | None, Query(alias="from")] = None,
         to_date: Annotated[str | None, Query(alias="to")] = None,
@@ -371,8 +371,7 @@ def register_routes(app: FastAPI) -> None:
             request=request,
             name="users.html",
             context={
-                "active_page": "users",
-                "dashboard_user": username,
+                **_dashboard_context(principal, active_page="users"),
                 "directory": directory,
                 "from_date": from_date or "",
                 "to_date": to_date or "",
@@ -382,7 +381,7 @@ def register_routes(app: FastAPI) -> None:
     @app.get("/memory", response_class=HTMLResponse)
     def memory(
         request: Request,
-        username: Annotated[str, Depends(require_user)],
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
         session: Annotated[Session, Depends(get_session)],
         view: Annotated[str, Query()] = "facts",
         q: Annotated[str | None, Query()] = None,
@@ -410,10 +409,11 @@ def register_routes(app: FastAPI) -> None:
             request=request,
             name="memory.html",
             context={
-                "active_page": "memory",
-                "dashboard_user": username,
+                **_dashboard_context(principal, active_page="memory"),
                 "memory": memory_dashboard,
                 "memory_return_path": _request_path(request),
+                "memory_base_path": "/memory",
+                "memory_actions_enabled": True,
                 "notice": notice,
                 "notice_tone": _notice_tone(notice_tone),
             },
@@ -422,7 +422,7 @@ def register_routes(app: FastAPI) -> None:
     @app.get("/integrations", response_class=HTMLResponse)
     def integrations(
         request: Request,
-        username: Annotated[str, Depends(require_user)],
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
         session: Annotated[Session, Depends(get_session)],
         composio_q: Annotated[str | None, Query(alias="composio_q")] = None,
     ) -> Response:
@@ -437,8 +437,7 @@ def register_routes(app: FastAPI) -> None:
             request=request,
             name="integrations.html",
             context={
-                "active_page": "integrations",
-                "dashboard_user": username,
+                **_dashboard_context(principal, active_page="integrations"),
                 "integrations": integration_dashboard,
                 "composio_q": composio_q or "",
             },
@@ -447,7 +446,7 @@ def register_routes(app: FastAPI) -> None:
     @app.get("/composio", response_class=HTMLResponse)
     def composio_catalog(
         request: Request,
-        username: Annotated[str, Depends(require_user)],
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
         session: Annotated[Session, Depends(get_session)],
         q: Annotated[str | None, Query()] = None,
     ) -> Response:
@@ -461,8 +460,7 @@ def register_routes(app: FastAPI) -> None:
             request=request,
             name="composio.html",
             context={
-                "active_page": "composio",
-                "dashboard_user": username,
+                **_dashboard_context(principal, active_page="composio"),
                 "catalog": catalog,
                 "runtime_error": runtime_error,
                 "q": q or "",
@@ -473,7 +471,7 @@ def register_routes(app: FastAPI) -> None:
     def composio_callback(
         request: Request,
         connection_id: UUID,
-        username: Annotated[str, Depends(require_user)],
+        principal: Annotated[DashboardPrincipal, Depends(require_principal)],
         session: Annotated[Session, Depends(get_session)],
         status_text: Annotated[str | None, Query(alias="status")] = None,
         connected_account_id: Annotated[str | None, Query()] = None,
@@ -481,6 +479,8 @@ def register_routes(app: FastAPI) -> None:
         connection = session.get(ComposioConnection, connection_id)
         if connection is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+        if not _can_manage_composio_connection(principal, connection):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
 
         callback_status = (status_text or "").strip().lower()
         callback_payload = dict(request.query_params)
@@ -499,8 +499,13 @@ def register_routes(app: FastAPI) -> None:
         connection.metadata_json = metadata
         session.commit()
 
+        base_path = (
+            "/composio"
+            if principal.role == "admin"
+            else "/me/integrations"
+        )
         return _redirect_with_notice(
-            f"/composio/{quote(connection.toolkit_slug, safe='')}",
+            f"{base_path}/{quote(connection.toolkit_slug, safe='')}",
             notice,
             tone=tone,
         )
@@ -509,10 +514,10 @@ def register_routes(app: FastAPI) -> None:
     async def composio_create_auth_config(
         request: Request,
         toolkit_slug: str,
-        username: Annotated[str, Depends(require_user)],
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
         session: Annotated[Session, Depends(get_session)],
     ) -> RedirectResponse:
-        del username, session
+        del principal, session
         next_path = f"/composio/{quote(toolkit_slug.strip().lower(), safe='')}"
         runtime_settings, runtime_error = _load_runtime_settings()
         if runtime_error or runtime_settings is None:
@@ -551,10 +556,9 @@ def register_routes(app: FastAPI) -> None:
     async def composio_start_connect(
         request: Request,
         toolkit_slug: str,
-        username: Annotated[str, Depends(require_user)],
+        principal: Annotated[DashboardPrincipal, Depends(require_principal)],
         session: Annotated[Session, Depends(get_session)],
     ) -> RedirectResponse:
-        del username
         normalized_slug = toolkit_slug.strip().lower()
         next_path = f"/composio/{quote(normalized_slug, safe='')}"
         form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
@@ -565,6 +569,11 @@ def register_routes(app: FastAPI) -> None:
         display_name = _form_value(form, "display_name")
         scope_type = _form_value(form, "visibility_scope_type") or "user"
         channel_scope_id = _form_value(form, "channel_scope_id")
+        if principal.role != "admin":
+            owner_slack_user_id = principal.slack_user_id or ""
+            scope_type = "user"
+            channel_scope_id = ""
+            next_path = f"/me/integrations/{quote(normalized_slug, safe='')}"
 
         if not owner_slack_user_id:
             return _redirect_with_notice(
@@ -684,7 +693,7 @@ def register_routes(app: FastAPI) -> None:
     def composio_detail(
         request: Request,
         toolkit_slug: str,
-        username: Annotated[str, Depends(require_user)],
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
         session: Annotated[Session, Depends(get_session)],
         notice: Annotated[str | None, Query()] = None,
         notice_tone: Annotated[str, Query()] = "success",
@@ -701,8 +710,7 @@ def register_routes(app: FastAPI) -> None:
             request=request,
             name="composio_detail.html",
             context={
-                "active_page": "composio",
-                "dashboard_user": username,
+                **_dashboard_context(principal, active_page="composio"),
                 "detail": detail,
                 "runtime_error": runtime_error,
                 "notice": notice,
@@ -710,11 +718,333 @@ def register_routes(app: FastAPI) -> None:
             },
         )
 
+    @app.get("/admin/users", response_class=HTMLResponse)
+    def admin_users(
+        request: Request,
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        session: Annotated[Session, Depends(get_session)],
+        notice: Annotated[str | None, Query()] = None,
+        notice_tone: Annotated[str, Query()] = "success",
+    ) -> Response:
+        users = tuple(
+            session.scalars(
+                select(DashboardUser).order_by(
+                    DashboardUser.role.asc(),
+                    DashboardUser.display_name.asc(),
+                    DashboardUser.created_at.asc(),
+                )
+            )
+        )
+        return templates.TemplateResponse(
+            request=request,
+            name="admin_users.html",
+            context={
+                **_dashboard_context(principal, active_page="admin_users"),
+                "users": users,
+                "notice": notice,
+                "notice_tone": _notice_tone(notice_tone),
+            },
+        )
+
+    @app.post("/admin/users/{dashboard_user_id}/role")
+    async def admin_update_user_role(
+        request: Request,
+        dashboard_user_id: UUID,
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> RedirectResponse:
+        form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+        role = _form_value(form, "role")
+        if role not in {"admin", "member"}:
+            return _redirect_with_notice(
+                "/admin/users",
+                "Role must be admin or member.",
+                tone="danger",
+            )
+        user = session.get(DashboardUser, dashboard_user_id)
+        if user is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+        if (
+            role == "member"
+            and principal.dashboard_user_id == user.id
+            and _active_admin_count(session, installation_id=user.installation_id) <= 1
+        ):
+            return _redirect_with_notice(
+                "/admin/users",
+                "You cannot demote the only active admin.",
+                tone="danger",
+            )
+        user.role = role
+        session.commit()
+        return _redirect_with_notice("/admin/users", "Dashboard user role updated.")
+
+    @app.post("/admin/users/{dashboard_user_id}/status")
+    async def admin_update_user_status(
+        request: Request,
+        dashboard_user_id: UUID,
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> RedirectResponse:
+        form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+        user_status = _form_value(form, "status")
+        if user_status not in {"active", "disabled"}:
+            return _redirect_with_notice(
+                "/admin/users",
+                "Status must be active or disabled.",
+                tone="danger",
+            )
+        user = session.get(DashboardUser, dashboard_user_id)
+        if user is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+        if user_status == "disabled" and principal.dashboard_user_id == user.id:
+            return _redirect_with_notice(
+                "/admin/users",
+                "You cannot disable your own dashboard user.",
+                tone="danger",
+            )
+        if (
+            user_status == "disabled"
+            and user.role == "admin"
+            and _active_admin_count(session, installation_id=user.installation_id) <= 1
+        ):
+            return _redirect_with_notice(
+                "/admin/users",
+                "You cannot disable the only active admin.",
+                tone="danger",
+            )
+        user.status = user_status
+        session.commit()
+        return _redirect_with_notice("/admin/users", "Dashboard user status updated.")
+
+    @app.get("/me", response_class=HTMLResponse)
+    def me_home(
+        request: Request,
+        principal: Annotated[DashboardPrincipal, Depends(require_principal)],
+        session: Annotated[Session, Depends(get_session)],
+        from_date: Annotated[str | None, Query(alias="from")] = None,
+        to_date: Annotated[str | None, Query(alias="to")] = None,
+    ) -> Response:
+        if principal.installation_id is None or principal.slack_user_id is None:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
+        start = parse_date_bound(from_date)
+        end = parse_date_bound(to_date, inclusive_end=True)
+        detail = get_user_detail(
+            session,
+            principal.slack_user_id,
+            start=start,
+            end=end,
+            installation_id=principal.installation_id,
+        )
+        if detail is None:
+            detail = get_user_detail(
+                session,
+                principal.slack_user_id,
+                installation_id=principal.installation_id,
+            )
+        return templates.TemplateResponse(
+            request=request,
+            name="me.html",
+            context={
+                **_dashboard_context(principal, active_page="me"),
+                "detail": detail,
+                "from_date": from_date or "",
+                "to_date": to_date or "",
+            },
+        )
+
+    @app.get("/me/tasks", response_class=HTMLResponse)
+    def me_tasks(
+        request: Request,
+        principal: Annotated[DashboardPrincipal, Depends(require_principal)],
+        session: Annotated[Session, Depends(get_session)],
+        page: Annotated[int, Query(ge=1)] = 1,
+        page_size: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)] = DEFAULT_PAGE_SIZE,
+    ) -> Response:
+        if principal.installation_id is None or principal.slack_user_id is None:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
+        task_page = list_tasks(
+            session,
+            page=page,
+            page_size=page_size,
+            installation_id=principal.installation_id,
+            slack_user_id=principal.slack_user_id,
+        )
+        return templates.TemplateResponse(
+            request=request,
+            name="tasks.html",
+            context={
+                **_dashboard_context(principal, active_page="me_tasks"),
+                "task_page": task_page,
+                "page_size": page_size,
+            },
+        )
+
+    @app.get("/me/tasks/{task_id}", response_class=HTMLResponse)
+    def me_task_detail(
+        request: Request,
+        task_id: UUID,
+        principal: Annotated[DashboardPrincipal, Depends(require_principal)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> Response:
+        if principal.installation_id is None or principal.slack_user_id is None:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
+        detail = get_task_detail(
+            session,
+            task_id,
+            installation_id=principal.installation_id,
+            slack_user_id=principal.slack_user_id,
+        )
+        if detail is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+        return templates.TemplateResponse(
+            request=request,
+            name="task_detail.html",
+            context={
+                **_dashboard_context(principal, active_page="me_tasks"),
+                "detail": detail,
+            },
+        )
+
+    @app.get("/me/usage", response_class=HTMLResponse)
+    def me_usage(
+        request: Request,
+        principal: Annotated[DashboardPrincipal, Depends(require_principal)],
+        session: Annotated[Session, Depends(get_session)],
+        from_date: Annotated[str | None, Query(alias="from")] = None,
+        to_date: Annotated[str | None, Query(alias="to")] = None,
+    ) -> Response:
+        if principal.installation_id is None or principal.slack_user_id is None:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
+        start = parse_date_bound(from_date)
+        end = parse_date_bound(to_date, inclusive_end=True)
+        aggregate = get_usage_aggregate(
+            session,
+            start=start,
+            end=end,
+            installation_id=principal.installation_id,
+            slack_user_id=principal.slack_user_id,
+        )
+        return templates.TemplateResponse(
+            request=request,
+            name="usage.html",
+            context={
+                **_dashboard_context(principal, active_page="me_usage"),
+                "aggregate": aggregate,
+                "from_date": from_date or "",
+                "to_date": to_date or "",
+            },
+        )
+
+    @app.get("/me/memory", response_class=HTMLResponse)
+    def me_memory(
+        request: Request,
+        principal: Annotated[DashboardPrincipal, Depends(require_principal)],
+        session: Annotated[Session, Depends(get_session)],
+        view: Annotated[str, Query()] = "facts",
+        q: Annotated[str | None, Query()] = None,
+        status_filter: Annotated[str, Query(alias="status")] = "active",
+        outcome: Annotated[str, Query()] = "all",
+        sort: Annotated[str | None, Query()] = None,
+        page: Annotated[int, Query(ge=1)] = 1,
+        page_size: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)] = DEFAULT_PAGE_SIZE,
+    ) -> Response:
+        if principal.installation_id is None or principal.slack_user_id is None:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
+        memory_dashboard = get_memory_dashboard(
+            session,
+            view=view,
+            query=q,
+            scope_filter="user",
+            status_filter=status_filter,
+            outcome_filter=outcome,
+            sort=sort,
+            page=page,
+            page_size=page_size,
+            installation_id=principal.installation_id,
+            slack_user_id=principal.slack_user_id,
+            base_path="/me/memory",
+        )
+        return templates.TemplateResponse(
+            request=request,
+            name="memory.html",
+            context={
+                **_dashboard_context(principal, active_page="me_memory"),
+                "memory": memory_dashboard,
+                "memory_return_path": _request_path(request),
+                "memory_base_path": "/me/memory",
+                "memory_actions_enabled": False,
+                "notice": None,
+                "notice_tone": "success",
+            },
+        )
+
+    @app.get("/me/integrations", response_class=HTMLResponse)
+    def me_integrations(
+        request: Request,
+        principal: Annotated[DashboardPrincipal, Depends(require_principal)],
+        session: Annotated[Session, Depends(get_session)],
+        composio_q: Annotated[str | None, Query(alias="composio_q")] = None,
+    ) -> Response:
+        if principal.installation_id is None or principal.slack_user_id is None:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
+        runtime_settings, runtime_error = _load_runtime_settings()
+        integration_dashboard = get_integration_dashboard(
+            session=session,
+            runtime_settings=runtime_settings,
+            runtime_error=runtime_error,
+            composio_query=composio_q,
+            installation_id=principal.installation_id,
+            owner_slack_user_id=principal.slack_user_id,
+        )
+        return templates.TemplateResponse(
+            request=request,
+            name="integrations.html",
+            context={
+                **_dashboard_context(principal, active_page="me_integrations"),
+                "integrations": integration_dashboard,
+                "composio_q": composio_q or "",
+            },
+        )
+
+    @app.get("/me/integrations/{toolkit_slug}", response_class=HTMLResponse)
+    def me_composio_detail(
+        request: Request,
+        toolkit_slug: str,
+        principal: Annotated[DashboardPrincipal, Depends(require_principal)],
+        session: Annotated[Session, Depends(get_session)],
+        notice: Annotated[str | None, Query()] = None,
+        notice_tone: Annotated[str, Query()] = "success",
+    ) -> Response:
+        if principal.installation_id is None or principal.slack_user_id is None:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
+        runtime_settings, runtime_error = _load_runtime_settings()
+        detail = get_composio_toolkit_detail(
+            session,
+            slug=toolkit_slug,
+            runtime_settings=runtime_settings,
+            installation_id=principal.installation_id,
+            owner_slack_user_id=principal.slack_user_id,
+        )
+        if detail.error and "404" in detail.error:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+        return templates.TemplateResponse(
+            request=request,
+            name="composio_detail.html",
+            context={
+                **_dashboard_context(principal, active_page="me_integrations"),
+                "detail": detail,
+                "runtime_error": runtime_error,
+                "notice": notice,
+                "notice_tone": _notice_tone(notice_tone),
+                "member_scope": True,
+            },
+        )
+
     @app.post("/memory/facts/{fact_id}/forget")
     async def memory_forget_fact(
         request: Request,
         fact_id: UUID,
-        username: Annotated[str, Depends(require_user)],
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
         session: Annotated[Session, Depends(get_session)],
     ) -> RedirectResponse:
         form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
@@ -723,7 +1053,7 @@ def register_routes(app: FastAPI) -> None:
             forget_fact(
                 session,
                 fact_id,
-                by_user_id=dashboard_actor(username),
+                by_user_id=dashboard_actor(principal.display_name),
             )
             session.commit()
         except LookupError as exc:
@@ -738,7 +1068,7 @@ def register_routes(app: FastAPI) -> None:
     async def memory_supersede_fact(
         request: Request,
         fact_id: UUID,
-        username: Annotated[str, Depends(require_user)],
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
         session: Annotated[Session, Depends(get_session)],
     ) -> RedirectResponse:
         form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
@@ -749,7 +1079,7 @@ def register_routes(app: FastAPI) -> None:
                 session,
                 fact_id,
                 value_text=value_text,
-                by_user_id=dashboard_actor(username),
+                by_user_id=dashboard_actor(principal.display_name),
             )
             session.commit()
         except LookupError as exc:
@@ -764,7 +1094,7 @@ def register_routes(app: FastAPI) -> None:
     def user_detail(
         request: Request,
         slack_user_id: str,
-        username: Annotated[str, Depends(require_user)],
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
         session: Annotated[Session, Depends(get_session)],
         from_date: Annotated[str | None, Query(alias="from")] = None,
         to_date: Annotated[str | None, Query(alias="to")] = None,
@@ -783,8 +1113,7 @@ def register_routes(app: FastAPI) -> None:
             request=request,
             name="user_detail.html",
             context={
-                "active_page": "users",
-                "dashboard_user": username,
+                **_dashboard_context(principal, active_page="users"),
                 "detail": detail,
                 "from_date": from_date or "",
                 "to_date": to_date or "",
@@ -794,7 +1123,7 @@ def register_routes(app: FastAPI) -> None:
     @app.get("/system", response_class=HTMLResponse)
     def system(
         request: Request,
-        username: Annotated[str, Depends(require_user)],
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
         session: Annotated[Session, Depends(get_session)],
     ) -> Response:
         settings = cast(DashboardSettings, request.app.state.dashboard_settings)
@@ -809,16 +1138,15 @@ def register_routes(app: FastAPI) -> None:
             request=request,
             name="system.html",
             context={
-                "active_page": "system",
-                "dashboard_user": username,
+                **_dashboard_context(principal, active_page="system"),
                 "system": system_health,
             },
         )
 
 
-def require_user(
+def require_principal(
     request: Request,
-) -> str:
+) -> DashboardPrincipal:
     """Require a dashboard login session."""
 
     principal = _session_principal(request)
@@ -827,7 +1155,23 @@ def require_user(
             status_code=status.HTTP_303_SEE_OTHER,
             headers={"Location": _login_url_for(request)},
         )
-    return principal.display_name
+    return principal
+
+
+def require_admin(
+    principal: Annotated[DashboardPrincipal, Depends(require_principal)],
+) -> DashboardPrincipal:
+    """Require an admin dashboard session."""
+
+    if principal.role != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
+    return principal
+
+
+def require_user(request: Request) -> str:
+    """Legacy helper for tests and small call sites that only need a name."""
+
+    return require_principal(request).display_name
 
 
 def get_session(request: Request) -> Iterator[Session]:
@@ -902,6 +1246,37 @@ def _composio_scope_id(
     return owner_slack_user_id
 
 
+def _can_manage_composio_connection(
+    principal: DashboardPrincipal,
+    connection: ComposioConnection,
+) -> bool:
+    if principal.role == "admin":
+        return True
+    return (
+        principal.installation_id == connection.installation_id
+        and principal.slack_user_id == connection.owner_slack_user_id
+    )
+
+
+def _active_admin_count(
+    session: Session,
+    *,
+    installation_id: UUID,
+) -> int:
+    return int(
+        session.scalar(
+            select(func.count())
+            .select_from(DashboardUser)
+            .where(
+                DashboardUser.installation_id == installation_id,
+                DashboardUser.role == "admin",
+                DashboardUser.status == "active",
+            )
+        )
+        or 0
+    )
+
+
 def _load_runtime_settings() -> tuple[Settings | None, str | None]:
     try:
         return load_settings(), None
@@ -918,14 +1293,31 @@ def _session_principal(request: Request) -> DashboardPrincipal | None:
     dashboard_user_id = _session_uuid(request, SESSION_DASHBOARD_USER_ID_KEY)
     installation_id = _session_uuid(request, SESSION_DASHBOARD_INSTALLATION_ID_KEY)
     slack_user_id = request.session.get(SESSION_DASHBOARD_SLACK_USER_ID_KEY)
+    role_value = role if isinstance(role, str) and role else "admin"
+    if role_value == "owner":
+        role_value = "admin"
     return DashboardPrincipal(
         dashboard_user_id=dashboard_user_id,
         installation_id=installation_id,
         slack_user_id=slack_user_id if isinstance(slack_user_id, str) else None,
         display_name=display_name,
-        role=role if isinstance(role, str) and role else "owner",
+        role=role_value,
         source=source if isinstance(source, str) and source else "bootstrap",
     )
+
+
+def _dashboard_context(
+    principal: DashboardPrincipal,
+    *,
+    active_page: str,
+) -> dict[str, object]:
+    return {
+        "active_page": active_page,
+        "dashboard_user": principal.display_name,
+        "dashboard_role": principal.role,
+        "dashboard_is_admin": principal.role == "admin",
+        "dashboard_slack_user_id": principal.slack_user_id or "",
+    }
 
 
 def _set_dashboard_session(request: Request, principal: DashboardPrincipal) -> None:

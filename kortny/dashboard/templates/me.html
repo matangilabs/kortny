@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+
+{% block title %}My Dashboard - Kortny Dashboard{% endblock %}
+
+{% block content %}
+  <section class="page-heading">
+    <div>
+      <h1>My Dashboard</h1>
+      <p>Your tasks, usage, artifacts, and integration access in this workspace.</p>
+    </div>
+    <a class="btn-ghost" href="/me/tasks">View My Tasks</a>
+  </section>
+
+  {% if detail %}
+    <section class="summary-grid">
+      <div class="card metric-card">
+        <span>Tasks</span>
+        <strong>{{ detail.task_count|number }}</strong>
+      </div>
+      <div class="card metric-card">
+        <span>Failures</span>
+        <strong>{{ detail.failed_task_count|number }}</strong>
+      </div>
+      <div class="card metric-card">
+        <span>Cost</span>
+        <strong>{{ detail.total_cost_usd|money }}</strong>
+      </div>
+      <div class="card metric-card">
+        <span>Artifacts</span>
+        <strong>{{ detail.artifact_count|number }}</strong>
+      </div>
+    </section>
+
+    <section class="card detail-section">
+      <header>
+        <h2>Recent Tasks</h2>
+        <p>Most recent work Kortny handled for you.</p>
+      </header>
+      {% if detail.tasks %}
+        <div class="table-wrap">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>Task</th>
+                <th>Channel</th>
+                <th>Status</th>
+                <th>Cost</th>
+                <th>Created</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in detail.tasks %}
+                <tr>
+                  <td><a href="/me/tasks/{{ row.task.id }}">{{ row.task.input }}</a></td>
+                  <td>{{ row.channel.name }}</td>
+                  <td><span class="badge status-{{ row.task.status.value }}">{{ row.task.status.value }}</span></td>
+                  <td>{{ row.task.total_cost_usd|money }}</td>
+                  <td>{{ row.task.created_at|datetime }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% else %}
+        <p class="empty-state">No tasks yet.</p>
+      {% endif %}
+    </section>
+  {% else %}
+    <section class="card empty-card">
+      <h2>No activity yet</h2>
+      <p>Kortny has not recorded any tasks for your Slack user in this workspace yet.</p>
+    </section>
+  {% endif %}
+{% endblock %}

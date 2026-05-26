@@ -157,7 +157,7 @@ def upsert_dashboard_user(
             email=profile.email,
             display_name=profile.display_name,
             avatar_url=profile.avatar_url,
-            role="owner" if user_count == 0 else "member",
+            role="admin" if user_count == 0 else "member",
             status="active",
             last_login_at=now,
         )

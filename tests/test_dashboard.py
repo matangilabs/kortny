@@ -260,7 +260,7 @@ def test_dashboard_slack_login_callback_creates_dashboard_user_and_session(
     assert dashboard_user.installation_id == installation.id
     assert dashboard_user.display_name == "Aneesh Melkot"
     assert dashboard_user.email == "aneesh@example.com"
-    assert dashboard_user.role == "owner"
+    assert dashboard_user.role == "admin"
     assert dashboard_user.status == "active"
     assert dashboard_user.last_login_at is not None
     identity = db_session.scalar(
@@ -311,6 +311,151 @@ def test_dashboard_slack_login_callback_rejects_expired_state(
     assert response.status_code == 303
     assert response.headers["location"].startswith("/login?")
     assert "Slack+login+state+expired." in response.headers["location"]
+
+
+def test_dashboard_member_is_filtered_to_own_tasks(
+    db_session: Session,
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert TEST_POSTGRES_URL is not None
+    installation = Installation(slack_team_id="TMember", team_name="Member Team")
+    db_session.add(installation)
+    db_session.flush()
+    own_task = create_dashboard_task(
+        db_session,
+        installation=installation,
+        slack_channel_id="CMember",
+        slack_user_id="UMember",
+        slack_user_name="Member User",
+        input_text="Member private task",
+    )
+    other_task = create_dashboard_task(
+        db_session,
+        installation=installation,
+        slack_channel_id="COther",
+        slack_user_id="UOther",
+        slack_user_name="Other User",
+        input_text="Other user task",
+    )
+    db_session.add(
+        DashboardUser(
+            installation_id=installation.id,
+            slack_user_id="UMember",
+            email="member@example.com",
+            display_name="Member User",
+            role="member",
+            status="active",
+        )
+    )
+    oauth_state = DashboardOAuthState(
+        provider="slack",
+        state="member-state",
+        redirect_path="/",
+        expires_at=datetime.now(UTC) + timedelta(minutes=10),
+    )
+    db_session.add(oauth_state)
+    db_session.commit()
+    session_factory = make_session_factory(engine=engine)
+    settings = slack_dashboard_settings()
+
+    class FakeSlackOpenIDClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def exchange_code(self, *, code: str) -> str:
+            assert code == "member-code"
+            return "member-token"
+
+        def user_info(self, *, access_token: str) -> SlackOpenIDProfile:
+            assert access_token == "member-token"
+            return SlackOpenIDProfile(
+                team_id="TMember",
+                user_id="UMember",
+                display_name="Member User",
+                email="member@example.com",
+                avatar_url=None,
+                raw_json={
+                    "name": "Member User",
+                    "https://slack.com/team_id": "TMember",
+                    "https://slack.com/user_id": "UMember",
+                },
+            )
+
+    monkeypatch.setattr(
+        "kortny.dashboard.app.SlackOpenIDClient",
+        FakeSlackOpenIDClient,
+    )
+    with TestClient(
+        create_app(settings=settings, session_factory=session_factory)
+    ) as test_client:
+        login_response = test_client.get(
+            "/auth/slack/callback?code=member-code&state=member-state",
+            follow_redirects=False,
+        )
+        admin_tasks_response = test_client.get("/tasks", follow_redirects=False)
+        member_tasks_response = test_client.get("/me/tasks")
+        own_detail_response = test_client.get(f"/me/tasks/{own_task.id}")
+        other_detail_response = test_client.get(f"/me/tasks/{other_task.id}")
+
+    assert login_response.status_code == 303
+    assert login_response.headers["location"] == "/me"
+    assert admin_tasks_response.status_code == 403
+    assert member_tasks_response.status_code == 200
+    assert "Member User" in member_tasks_response.text
+    assert "Other User" not in member_tasks_response.text
+    assert own_detail_response.status_code == 200
+    assert "Member private task" in own_detail_response.text
+    assert other_detail_response.status_code == 404
+
+
+def test_dashboard_admin_can_manage_dashboard_user_role_and_status(
+    client: tuple[TestClient, Session],
+) -> None:
+    test_client, session = client
+    installation = Installation(slack_team_id="TAccess", team_name="Access Team")
+    session.add(installation)
+    session.flush()
+    member = DashboardUser(
+        installation_id=installation.id,
+        slack_user_id="UAccessMember",
+        email="member@example.com",
+        display_name="Access Member",
+        role="member",
+        status="active",
+    )
+    admin = DashboardUser(
+        installation_id=installation.id,
+        slack_user_id="UAccessAdmin",
+        email="admin@example.com",
+        display_name="Access Admin",
+        role="admin",
+        status="active",
+    )
+    session.add_all([member, admin])
+    session.commit()
+    login(test_client)
+
+    page_response = test_client.get("/admin/users")
+    role_response = test_client.post(
+        f"/admin/users/{member.id}/role",
+        data={"role": "admin"},
+        follow_redirects=False,
+    )
+    status_response = test_client.post(
+        f"/admin/users/{member.id}/status",
+        data={"status": "disabled"},
+        follow_redirects=False,
+    )
+
+    assert page_response.status_code == 200
+    assert "Access Member" in page_response.text
+    assert "Access Admin" in page_response.text
+    assert role_response.status_code == 303
+    assert status_response.status_code == 303
+    session.refresh(member)
+    assert member.role == "admin"
+    assert member.status == "disabled"
 
 
 def test_dashboard_renders_theme_toggle(
@@ -1051,6 +1196,20 @@ def login(test_client: TestClient) -> Response:
     )
 
 
+def slack_dashboard_settings() -> DashboardSettings:
+    assert TEST_POSTGRES_URL is not None
+    return DashboardSettings(
+        postgres_url=TEST_POSTGRES_URL,
+        username="admin",
+        password="secret",
+        session_secret="test-dashboard-session-secret",
+        auth_mode=DashboardAuthMode.hybrid,
+        slack_client_id="slack-client",
+        slack_client_secret="slack-secret",
+        slack_redirect_uri="http://testserver/auth/slack/callback",
+    )
+
+
 def assert_safe_dashboard_test_database(database_url: str) -> None:
     parsed = urlsplit(database_url)
     hostname = parsed.hostname or ""
@@ -1092,8 +1251,10 @@ def set_runtime_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
 def create_dashboard_task(
     session: Session,
     *,
+    installation: Installation | None = None,
     slack_channel_id: str = "CCost",
     slack_user_id: str = "UCost",
+    slack_user_name: str = "Aneesh Melkot",
     input_text: str = "Create a usage dashboard",
     created_at: datetime | None = None,
     status: TaskStatus = TaskStatus.succeeded,
@@ -1105,9 +1266,10 @@ def create_dashboard_task(
     task_created_at = created_at or datetime(2026, 5, 24, 12, 0, tzinfo=UTC)
     task_finished_at = task_created_at + timedelta(minutes=1)
     task_cost_usd = cost_usd if cost_usd is not None else Decimal("0.004200")
-    installation = Installation(slack_team_id=f"T{uuid.uuid4().hex}")
-    session.add(installation)
-    session.flush()
+    if installation is None:
+        installation = Installation(slack_team_id=f"T{uuid.uuid4().hex}")
+        session.add(installation)
+        session.flush()
 
     task = Task(
         installation_id=installation.id,
@@ -1133,20 +1295,23 @@ def create_dashboard_task(
             SlackIdentity(
                 installation_id=installation.id,
                 kind="channel",
-                slack_id="CCost",
+                slack_id=slack_channel_id,
                 display_name="#ops-desk",
                 raw_name="ops-desk",
-                raw_json={"id": "CCost", "name": "ops-desk"},
+                raw_json={"id": slack_channel_id, "name": "ops-desk"},
                 refreshed_at=datetime(2026, 5, 24, 11, 59, tzinfo=UTC),
                 last_seen_at=datetime(2026, 5, 24, 11, 59, tzinfo=UTC),
             ),
             SlackIdentity(
                 installation_id=installation.id,
                 kind="user",
-                slack_id="UCost",
-                display_name="Aneesh Melkot",
-                raw_name="Aneesh Melkot",
-                raw_json={"id": "UCost", "profile": {"real_name": "Aneesh Melkot"}},
+                slack_id=slack_user_id,
+                display_name=slack_user_name,
+                raw_name=slack_user_name,
+                raw_json={
+                    "id": slack_user_id,
+                    "profile": {"real_name": slack_user_name},
+                },
                 refreshed_at=datetime(2026, 5, 24, 11, 59, tzinfo=UTC),
                 last_seen_at=datetime(2026, 5, 24, 11, 59, tzinfo=UTC),
             ),

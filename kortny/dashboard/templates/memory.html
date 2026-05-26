@@ -8,7 +8,7 @@
       <h1>Memory</h1>
       <p>Inspect durable facts, manage lifecycle state, and review episodic task memory.</p>
     </div>
-    <a class="btn-ghost" href="/tasks">View Tasks</a>
+    <a class="btn-ghost" href="{{ '/tasks' if dashboard_is_admin else '/me/tasks' }}">View Tasks</a>
   </section>
 
   {% if notice %}
@@ -40,8 +40,8 @@
 
   <section class="memory-toolbar" aria-label="Memory view selector">
     <nav class="segmented-nav">
-      <a class="segmented-item {{ 'active' if memory.active_view == 'facts' else '' }}" href="/memory?view=facts" {% if memory.active_view == 'facts' %}aria-current="page"{% endif %}>Facts</a>
-      <a class="segmented-item {{ 'active' if memory.active_view == 'episodes' else '' }}" href="/memory?view=episodes" {% if memory.active_view == 'episodes' %}aria-current="page"{% endif %}>Episodes</a>
+      <a class="segmented-item {{ 'active' if memory.active_view == 'facts' else '' }}" href="{{ memory_base_path }}?view=facts" {% if memory.active_view == 'facts' %}aria-current="page"{% endif %}>Facts</a>
+      <a class="segmented-item {{ 'active' if memory.active_view == 'episodes' else '' }}" href="{{ memory_base_path }}?view=episodes" {% if memory.active_view == 'episodes' %}aria-current="page"{% endif %}>Episodes</a>
     </nav>
     <p>
       Showing {{ memory.page.first_item|number }}-{{ memory.page.last_item|number }}
@@ -55,7 +55,7 @@
         <h2>Workspace State</h2>
         <p>Facts Kortny can recall, filtered by scope, status, and text search.</p>
       </header>
-      <form class="filters panel-filters memory-filters" method="get" action="/memory">
+      <form class="filters panel-filters memory-filters" method="get" action="{{ memory_base_path }}">
         <input type="hidden" name="view" value="facts">
         <label>
           Search
@@ -107,7 +107,7 @@
                 <span>{{ row.fact.scope_type }}{% if row.scope.secondary %} - {{ row.scope.secondary }}{% endif %}</span>
                 <span>Updated {{ row.fact.updated_at|datetime }}</span>
                 {% if row.source_task %}
-                  <a href="/tasks/{{ row.source_task.id }}">Source task</a>
+                  <a href="{{ '/tasks' if dashboard_is_admin else '/me/tasks' }}/{{ row.source_task.id }}">Source task</a>
                 {% elif row.fact.source_url %}
                   <a href="{{ row.fact.source_url }}">Source</a>
                 {% else %}
@@ -147,9 +147,10 @@
                 </div>
               </section>
 
-              <section class="memory-fact-panel memory-fact-actions">
-                <h3>Actions</h3>
-                {% if row.fact.status == "active" %}
+              {% if memory_actions_enabled %}
+                <section class="memory-fact-panel memory-fact-actions">
+                  <h3>Actions</h3>
+                  {% if row.fact.status == "active" %}
                   <form method="post" action="/memory/facts/{{ row.fact.id }}/forget" onsubmit="return confirm('Forget this memory fact? Kortny will stop using it, but the audit history will remain.');">
                     <input type="hidden" name="next" value="{{ memory_return_path }}">
                     <button class="btn-ghost btn-danger" type="submit">Forget</button>
@@ -165,10 +166,11 @@
                       <button class="btn" type="submit">Save Replacement</button>
                     </form>
                   </details>
-                {% else %}
-                  <span class="identity-id">No active controls</span>
-                {% endif %}
-              </section>
+                  {% else %}
+                    <span class="identity-id">No active controls</span>
+                  {% endif %}
+                </section>
+              {% endif %}
             </aside>
           </article>
         {% else %}
@@ -182,7 +184,7 @@
         <h2>Episodes</h2>
         <p>Task memories retained for follow-up context and future retrieval.</p>
       </header>
-      <form class="filters panel-filters memory-filters" method="get" action="/memory">
+      <form class="filters panel-filters memory-filters" method="get" action="{{ memory_base_path }}">
         <input type="hidden" name="view" value="episodes">
         <label>
           Search
@@ -215,7 +217,7 @@
               <div class="episode-title">
                 <span class="badge badge-{{ row.tone }}">{{ row.episode.outcome }}</span>
                 {% if row.task %}
-                  <a href="/tasks/{{ row.task.id }}">{{ row.task.input }}</a>
+                  <a href="{{ '/tasks' if dashboard_is_admin else '/me/tasks' }}/{{ row.task.id }}">{{ row.task.input }}</a>
                 {% else %}
                   <strong>{{ row.episode.task_id }}</strong>
                 {% endif %}

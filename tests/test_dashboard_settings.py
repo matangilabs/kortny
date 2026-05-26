@@ -5,6 +5,7 @@ from kortny.dashboard.settings import DashboardAuthMode, DashboardSettings
 
 def test_dashboard_settings_defaults_to_bootstrap_login() -> None:
     settings = DashboardSettings(
+        _env_file=None,
         postgres_url="postgresql://kortny:kortny@localhost/kortny",
         session_secret="test-dashboard-session-secret",
     )
@@ -17,6 +18,7 @@ def test_dashboard_settings_defaults_to_bootstrap_login() -> None:
 
 def test_dashboard_settings_enables_slack_login_when_configured() -> None:
     settings = DashboardSettings(
+        _env_file=None,
         postgres_url="postgresql://kortny:kortny@localhost/kortny",
         session_secret="test-dashboard-session-secret",
         auth_mode=DashboardAuthMode.hybrid,
@@ -33,6 +35,7 @@ def test_dashboard_settings_enables_slack_login_when_configured() -> None:
 def test_dashboard_settings_rejects_invalid_state_ttl() -> None:
     with pytest.raises(ValueError):
         DashboardSettings(
+            _env_file=None,
             postgres_url="postgresql://kortny:kortny@localhost/kortny",
             session_secret="test-dashboard-session-secret",
             slack_oauth_state_ttl_minutes=0,

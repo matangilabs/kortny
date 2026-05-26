@@ -582,17 +582,26 @@ def list_tasks(
     *,
     page: int = 1,
     page_size: int = DEFAULT_PAGE_SIZE,
+    installation_id: uuid.UUID | None = None,
+    slack_user_id: str | None = None,
 ) -> TaskListPage:
     """Return a paginated dashboard task list."""
 
     normalized_page = max(page, 1)
     normalized_size = min(max(page_size, 1), MAX_PAGE_SIZE)
     offset = (normalized_page - 1) * normalized_size
+    task_filter = _task_scope_filter(
+        installation_id=installation_id,
+        slack_user_id=slack_user_id,
+    )
 
-    total_count = session.scalar(select(func.count()).select_from(Task)) or 0
+    total_count = (
+        session.scalar(select(func.count()).select_from(Task).where(*task_filter)) or 0
+    )
     tasks = tuple(
         session.scalars(
             select(Task)
+            .where(*task_filter)
             .order_by(Task.created_at.desc(), Task.id.desc())
             .offset(offset)
             .limit(normalized_size)
@@ -606,11 +615,21 @@ def list_tasks(
     )
 
 
-def get_task_detail(session: Session, task_id: uuid.UUID) -> TaskDetail | None:
+def get_task_detail(
+    session: Session,
+    task_id: uuid.UUID,
+    *,
+    installation_id: uuid.UUID | None = None,
+    slack_user_id: str | None = None,
+) -> TaskDetail | None:
     """Return one task and its child rows."""
 
     task = session.get(Task, task_id)
     if task is None:
+        return None
+    if installation_id is not None and task.installation_id != installation_id:
+        return None
+    if slack_user_id is not None and task.slack_user_id != slack_user_id:
         return None
     events = tuple(
         session.scalars(
@@ -660,14 +679,28 @@ def get_usage_aggregate(
     *,
     start: datetime | None = None,
     end: datetime | None = None,
+    installation_id: uuid.UUID | None = None,
+    slack_user_id: str | None = None,
 ) -> UsageAggregate:
     """Return dashboard usage rollups."""
 
     usage_filter = _usage_filter(start=start, end=end)
+    scoped_task_filter = _task_scope_filter(
+        installation_id=installation_id,
+        slack_user_id=slack_user_id,
+    )
     by_model_rows = session.execute(
-        _aggregate_query(LLMUsage.model, usage_filter).order_by(
-            func.sum(LLMUsage.cost_usd).desc()
+        select(
+            LLMUsage.model,
+            func.count(LLMUsage.id),
+            func.coalesce(func.sum(LLMUsage.input_tokens), 0),
+            func.coalesce(func.sum(LLMUsage.output_tokens), 0),
+            func.coalesce(func.sum(LLMUsage.cost_usd), 0),
         )
+        .join(Task, Task.id == LLMUsage.task_id)
+        .where(*usage_filter, *scoped_task_filter)
+        .group_by(LLMUsage.model)
+        .order_by(func.sum(LLMUsage.cost_usd).desc())
     ).all()
     by_user_raw_rows = session.execute(
         select(
@@ -679,7 +712,7 @@ def get_usage_aggregate(
             func.coalesce(func.sum(LLMUsage.cost_usd), 0),
         )
         .join(Task, Task.id == LLMUsage.task_id)
-        .where(*usage_filter)
+        .where(*usage_filter, *scoped_task_filter)
         .group_by(Task.installation_id, Task.slack_user_id)
         .order_by(func.sum(LLMUsage.cost_usd).desc())
     ).all()
@@ -713,7 +746,7 @@ def get_usage_aggregate(
             func.coalesce(func.sum(LLMUsage.cost_usd), 0),
         )
         .join(Task, Task.id == LLMUsage.task_id)
-        .where(*usage_filter, ~Task.slack_channel_id.startswith("D"))
+        .where(*usage_filter, *scoped_task_filter, ~Task.slack_channel_id.startswith("D"))
         .group_by(Task.installation_id, Task.slack_channel_id)
         .order_by(func.sum(LLMUsage.cost_usd).desc())
     ).all()
@@ -746,7 +779,8 @@ def get_usage_aggregate(
             func.coalesce(func.sum(LLMUsage.output_tokens), 0),
             func.coalesce(func.sum(LLMUsage.cost_usd), 0),
         )
-        .where(*usage_filter)
+        .join(Task, Task.id == LLMUsage.task_id)
+        .where(*usage_filter, *scoped_task_filter)
         .group_by(day_bucket)
         .order_by(day_bucket.desc())
     ).all()
@@ -757,7 +791,10 @@ def get_usage_aggregate(
             func.count(Task.id),
             func.coalesce(func.sum(_failed_task_case()), 0),
         )
-        .where(*_task_filter(start=start, end=end))
+        .where(
+            *_task_filter(start=start, end=end),
+            *scoped_task_filter,
+        )
         .group_by(task_day_bucket)
         .order_by(task_day_bucket.desc())
     ).all()
@@ -834,11 +871,13 @@ def get_user_detail(
     *,
     start: datetime | None = None,
     end: datetime | None = None,
+    installation_id: uuid.UUID | None = None,
 ) -> UserDetail | None:
     """Return one user's tasks, usage, and artifacts."""
 
     task_filter = [
         Task.slack_user_id == slack_user_id,
+        *_task_scope_filter(installation_id=installation_id),
         *_task_filter(start=start, end=end),
     ]
     stats = session.execute(
@@ -875,6 +914,7 @@ def get_user_detail(
 
     usage_filter = [
         Task.slack_user_id == slack_user_id,
+        *_task_scope_filter(installation_id=installation_id),
         *_usage_filter(start=start, end=end),
     ]
     usage = tuple(
@@ -1028,6 +1068,9 @@ def get_memory_dashboard(
     sort: str | None = None,
     page: int = 1,
     page_size: int = DEFAULT_PAGE_SIZE,
+    installation_id: uuid.UUID | None = None,
+    slack_user_id: str | None = None,
+    base_path: str = "/memory",
 ) -> MemoryDashboard:
     """Return read-only memory state for the management console."""
 
@@ -1039,12 +1082,20 @@ def get_memory_dashboard(
     normalized_status = status_filter if status_filter in _MEMORY_STATUSES else "active"
     normalized_outcome = outcome_filter if outcome_filter in _MEMORY_OUTCOMES else "all"
     normalized_sort = _normalize_memory_sort(active_view, sort)
+    memory_fact_scope = _workspace_state_scope_filter(
+        installation_id=installation_id,
+        slack_user_id=slack_user_id,
+    )
+    memory_episode_scope = _episode_scope_filter(
+        installation_id=installation_id,
+        slack_user_id=slack_user_id,
+    )
 
     active_fact_count = (
         session.scalar(
             select(func.count())
             .select_from(WorkspaceState)
-            .where(WorkspaceState.status == "active")
+            .where(WorkspaceState.status == "active", *memory_fact_scope)
         )
         or 0
     )
@@ -1052,14 +1103,19 @@ def get_memory_dashboard(
         session.scalar(
             select(func.count())
             .select_from(WorkspaceState)
-            .where(WorkspaceState.status == "proposed")
+            .where(WorkspaceState.status == "proposed", *memory_fact_scope)
         )
         or 0
     )
-    episode_count = session.scalar(select(func.count()).select_from(Episode)) or 0
+    episode_count = (
+        session.scalar(select(func.count()).select_from(Episode).where(*memory_episode_scope))
+        or 0
+    )
     failed_episode_count = (
         session.scalar(
-            select(func.count()).select_from(Episode).where(Episode.outcome == "failed")
+            select(func.count())
+            .select_from(Episode)
+            .where(Episode.outcome == "failed", *memory_episode_scope)
         )
         or 0
     )
@@ -1075,6 +1131,8 @@ def get_memory_dashboard(
             sort=normalized_sort,
             page=normalized_page,
             page_size=normalized_size,
+            installation_id=installation_id,
+            slack_user_id=slack_user_id,
         )
         noun = "facts"
     else:
@@ -1085,6 +1143,8 @@ def get_memory_dashboard(
             sort=normalized_sort,
             page=normalized_page,
             page_size=normalized_size,
+            installation_id=installation_id,
+            slack_user_id=slack_user_id,
         )
         noun = "episodes"
 
@@ -1117,6 +1177,7 @@ def get_memory_dashboard(
                 sort=normalized_sort,
                 page=page_info.previous_page,
                 page_size=normalized_size,
+                base_path=base_path,
             )
             if page_info.previous_page is not None
             else None
@@ -1131,11 +1192,12 @@ def get_memory_dashboard(
                 sort=normalized_sort,
                 page=page_info.next_page,
                 page_size=normalized_size,
+                base_path=base_path,
             )
             if page_info.next_page is not None
             else None
         ),
-        reset_url=f"/memory?view={active_view}",
+        reset_url=f"{base_path}?view={active_view}",
         facts=facts,
         episodes=episodes,
     )
@@ -1241,6 +1303,8 @@ def get_integration_dashboard(
     runtime_error: str | None = None,
     composio_query: str | None = None,
     composio_client: ComposioClient | None = None,
+    installation_id: uuid.UUID | None = None,
+    owner_slack_user_id: str | None = None,
 ) -> IntegrationDashboard:
     """Return configured integration and tool-registry state."""
 
@@ -1250,6 +1314,8 @@ def get_integration_dashboard(
         settings=runtime_settings,
         query=composio_query,
         client=composio_client,
+        installation_id=installation_id,
+        owner_slack_user_id=owner_slack_user_id,
     )
     tool_groups = _tool_capability_groups(runtime_settings)
     configured_count = sum(1 for card in integrations if card.tone == "success")
@@ -1304,6 +1370,8 @@ def get_composio_catalog_dashboard(
     runtime_settings: Settings | None = None,
     query: str | None = None,
     composio_client: ComposioClient | None = None,
+    installation_id: uuid.UUID | None = None,
+    owner_slack_user_id: str | None = None,
 ) -> ComposioCatalogView:
     """Return the Composio catalog view for the dedicated management page."""
 
@@ -1312,6 +1380,8 @@ def get_composio_catalog_dashboard(
         settings=runtime_settings,
         query=query,
         client=composio_client,
+        installation_id=installation_id,
+        owner_slack_user_id=owner_slack_user_id,
     )
 
 
@@ -1321,13 +1391,19 @@ def get_composio_toolkit_detail(
     slug: str,
     runtime_settings: Settings | None = None,
     composio_client: ComposioClient | None = None,
+    installation_id: uuid.UUID | None = None,
+    owner_slack_user_id: str | None = None,
 ) -> ComposioToolkitDetail:
     """Return one Composio toolkit and local scoped connection metadata."""
 
     normalized_slug = slug.strip().lower()
     connections = tuple(
         connection
-        for connection in _composio_connection_rows(session)
+        for connection in _composio_connection_rows(
+            session,
+            installation_id=installation_id,
+            owner_slack_user_id=owner_slack_user_id,
+        )
         if connection.toolkit_slug == normalized_slug
     )
     user_options = _slack_identity_options(session, kind="user")
@@ -1930,9 +2006,15 @@ def _composio_catalog_view(
     settings: Settings | None,
     query: str | None,
     client: ComposioClient | None,
+    installation_id: uuid.UUID | None = None,
+    owner_slack_user_id: str | None = None,
 ) -> ComposioCatalogView:
     normalized_query = (query or "").strip()
-    connections = _composio_connection_rows(session)
+    connections = _composio_connection_rows(
+        session,
+        installation_id=installation_id,
+        owner_slack_user_id=owner_slack_user_id,
+    )
     active_count = sum(1 for connection in connections if connection.status == "active")
     if settings is None or not settings.composio_api_key:
         return ComposioCatalogView(
@@ -2011,12 +2093,24 @@ def _composio_catalog_view(
     )
 
 
-def _composio_connection_rows(session: Session | None) -> tuple[ComposioConnectionRow, ...]:
+def _composio_connection_rows(
+    session: Session | None,
+    *,
+    installation_id: uuid.UUID | None = None,
+    owner_slack_user_id: str | None = None,
+) -> tuple[ComposioConnectionRow, ...]:
     if session is None:
         return ()
+    filters: list[ColumnElement[bool]] = []
+    if installation_id is not None:
+        filters.append(ComposioConnection.installation_id == installation_id)
+    if owner_slack_user_id:
+        filters.append(ComposioConnection.owner_slack_user_id == owner_slack_user_id)
     rows = tuple(
         session.scalars(
-            select(ComposioConnection).order_by(
+            select(ComposioConnection)
+            .where(*filters)
+            .order_by(
                 ComposioConnection.updated_at.desc(),
                 ComposioConnection.id.desc(),
             )
@@ -2528,11 +2622,15 @@ def _memory_fact_rows(
     sort: str,
     page: int,
     page_size: int,
+    installation_id: uuid.UUID | None = None,
+    slack_user_id: str | None = None,
 ) -> tuple[int, int, tuple[MemoryFactRow, ...]]:
     filters = _memory_fact_filters(
         query=query,
         scope_filter=scope_filter,
         status_filter=status_filter,
+        installation_id=installation_id,
+        slack_user_id=slack_user_id,
     )
     total_count = (
         session.scalar(select(func.count()).select_from(WorkspaceState).where(*filters))
@@ -2600,8 +2698,13 @@ def _memory_fact_filters(
     query: str,
     scope_filter: str,
     status_filter: str,
+    installation_id: uuid.UUID | None = None,
+    slack_user_id: str | None = None,
 ) -> list[ColumnElement[bool]]:
-    filters: list[ColumnElement[bool]] = []
+    filters = _workspace_state_scope_filter(
+        installation_id=installation_id,
+        slack_user_id=slack_user_id,
+    )
     if status_filter != "all":
         filters.append(WorkspaceState.status == status_filter)
     if scope_filter != "all":
@@ -2655,8 +2758,15 @@ def _memory_episode_rows(
     sort: str,
     page: int,
     page_size: int,
+    installation_id: uuid.UUID | None = None,
+    slack_user_id: str | None = None,
 ) -> tuple[int, int, tuple[MemoryEpisodeRow, ...]]:
-    filters = _memory_episode_filters(query=query, outcome_filter=outcome_filter)
+    filters = _memory_episode_filters(
+        query=query,
+        outcome_filter=outcome_filter,
+        installation_id=installation_id,
+        slack_user_id=slack_user_id,
+    )
     base = select(Episode)
     count_base = select(func.count()).select_from(Episode)
     if query:
@@ -2716,8 +2826,13 @@ def _memory_episode_filters(
     *,
     query: str,
     outcome_filter: str,
+    installation_id: uuid.UUID | None = None,
+    slack_user_id: str | None = None,
 ) -> list[ColumnElement[bool]]:
-    filters: list[ColumnElement[bool]] = []
+    filters = _episode_scope_filter(
+        installation_id=installation_id,
+        slack_user_id=slack_user_id,
+    )
     if outcome_filter != "all":
         filters.append(Episode.outcome == outcome_filter)
     if query:
@@ -2779,6 +2894,7 @@ def _memory_page_url(
     sort: str,
     page: int | None,
     page_size: int,
+    base_path: str = "/memory",
 ) -> str:
     params: dict[str, str | int] = {
         "view": view,
@@ -2796,7 +2912,7 @@ def _memory_page_url(
     else:
         if outcome_filter != "all":
             params["outcome"] = outcome_filter
-    return f"/memory?{urlencode(params)}"
+    return f"{base_path}?{urlencode(params)}"
 
 
 def _resolved_page(*, page: int, page_size: int, total_count: int) -> int:
@@ -3359,6 +3475,46 @@ def _task_filter(
         filters.append(Task.created_at >= start)
     if end is not None:
         filters.append(Task.created_at < end)
+    return filters
+
+
+def _task_scope_filter(
+    *,
+    installation_id: uuid.UUID | None = None,
+    slack_user_id: str | None = None,
+) -> list[ColumnElement[bool]]:
+    filters: list[ColumnElement[bool]] = []
+    if installation_id is not None:
+        filters.append(Task.installation_id == installation_id)
+    if slack_user_id:
+        filters.append(Task.slack_user_id == slack_user_id)
+    return filters
+
+
+def _workspace_state_scope_filter(
+    *,
+    installation_id: uuid.UUID | None = None,
+    slack_user_id: str | None = None,
+) -> list[ColumnElement[bool]]:
+    filters: list[ColumnElement[bool]] = []
+    if installation_id is not None:
+        filters.append(WorkspaceState.installation_id == installation_id)
+    if slack_user_id:
+        filters.append(WorkspaceState.scope_type == "user")
+        filters.append(WorkspaceState.scope_id == slack_user_id)
+    return filters
+
+
+def _episode_scope_filter(
+    *,
+    installation_id: uuid.UUID | None = None,
+    slack_user_id: str | None = None,
+) -> list[ColumnElement[bool]]:
+    filters: list[ColumnElement[bool]] = []
+    if installation_id is not None:
+        filters.append(Episode.installation_id == installation_id)
+    if slack_user_id:
+        filters.append(Episode.user_id == slack_user_id)
     return filters
 
 

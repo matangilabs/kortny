@@ -8,7 +8,7 @@
       <h1>Tasks</h1>
       <p>{{ task_page.total_count|number }} tracked Slack task{{ "" if task_page.total_count == 1 else "s" }}</p>
     </div>
-    <a class="btn" href="/usage">View Usage</a>
+    <a class="btn" href="{{ '/usage' if dashboard_is_admin else '/me/usage' }}">View Usage</a>
   </section>
 
   <section class="card">
@@ -18,18 +18,19 @@
     </header>
     {% set task_items = task_page.items %}
     {% set task_empty_message = "No tasks yet." %}
+    {% set tasks_base_path = '/tasks' if dashboard_is_admin else '/me/tasks' %}
     {% include "_task_table.html" with context %}
   </section>
 
   <nav class="pager" role="navigation" aria-label="Task pages">
     {% if task_page.previous_page %}
-      <a class="btn-ghost" href="/tasks?page={{ task_page.previous_page }}&page_size={{ page_size }}">Previous</a>
+      <a class="btn-ghost" href="{{ tasks_base_path }}?page={{ task_page.previous_page }}&page_size={{ page_size }}">Previous</a>
     {% else %}
       <span class="btn-ghost disabled" aria-disabled="true">Previous</span>
     {% endif %}
     <strong>Page {{ task_page.page|number }} of {{ task_page.total_pages|number }}</strong>
     {% if task_page.next_page %}
-      <a class="btn-ghost" href="/tasks?page={{ task_page.next_page }}&page_size={{ page_size }}">Next</a>
+      <a class="btn-ghost" href="{{ tasks_base_path }}?page={{ task_page.next_page }}&page_size={{ page_size }}">Next</a>
     {% else %}
       <span class="btn-ghost disabled" aria-disabled="true">Next</span>
     {% endif %}

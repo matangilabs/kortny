@@ -15,7 +15,7 @@
     <tbody>
       {% for item in task_items %}
         <tr>
-          <td><a href="/tasks/{{ item.task.id }}">{{ item.task.created_at|datetime }}</a></td>
+          <td><a href="{{ tasks_base_path|default('/tasks') }}/{{ item.task.id }}">{{ item.task.created_at|datetime }}</a></td>
           <td>
             <span class="identity-name">{{ item.channel.name }}</span>
             {% if item.channel.secondary %}<span class="identity-id">{{ item.channel.secondary }}</span>{% endif %}

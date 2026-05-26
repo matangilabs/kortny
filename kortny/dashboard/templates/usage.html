@@ -8,7 +8,7 @@
       <h1>Usage</h1>
       <p>Cost and token rollups from recorded LLM calls.</p>
     </div>
-    <form class="filters" method="get" action="/usage">
+    <form class="filters" method="get" action="{{ '/usage' if dashboard_is_admin else '/me/usage' }}">
       <label>
         From
         <input class="input" type="date" name="from" value="{{ from_date }}">

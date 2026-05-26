@@ -163,7 +163,7 @@
       {% if integrations.composio_catalog.toolkits %}
         <div class="catalog-grid">
           {% for toolkit in integrations.composio_catalog.toolkits %}
-            <article class="catalog-toolkit">
+            <a class="catalog-toolkit" href="{{ '/composio' if dashboard_is_admin else '/me/integrations' }}/{{ toolkit.slug }}">
               <header>
                 <h3>{{ toolkit.name }}</h3>
                 {% if toolkit.connected %}
@@ -189,7 +189,7 @@
                   {% endfor %}
                 </div>
               {% endif %}
-            </article>
+            </a>
           {% endfor %}
         </div>
       {% elif integrations.composio_catalog.configured and integrations.composio_catalog.enabled and not integrations.composio_catalog.error %}

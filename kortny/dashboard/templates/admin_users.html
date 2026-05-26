@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+
+{% block title %}Access - Kortny Dashboard{% endblock %}
+
+{% block content %}
+  <section class="page-heading">
+    <div>
+      <h1>Access</h1>
+      <p>Manage who can use the dashboard and what they can see.</p>
+    </div>
+  </section>
+
+  {% if notice %}
+    <div class="notice notice-{{ notice_tone }}" role="status">{{ notice }}</div>
+  {% endif %}
+
+  <section class="card detail-section">
+    <header>
+      <h2>Dashboard Users</h2>
+      <p>Admins can view workspace-wide data. Members can only view their own data and manage their own integrations.</p>
+    </header>
+
+    <div class="table-wrap">
+      <table class="table access-table">
+        <thead>
+          <tr>
+            <th>User</th>
+            <th>Slack ID</th>
+            <th>Role</th>
+            <th>Status</th>
+            <th>Last Login</th>
+            <th>Controls</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for user in users %}
+            <tr>
+              <td>
+                <strong>{{ user.display_name }}</strong>
+                {% if user.email %}
+                  <span class="identity-id">{{ user.email }}</span>
+                {% endif %}
+              </td>
+              <td><code class="inline-code">{{ user.slack_user_id }}</code></td>
+              <td><span class="badge badge-{{ 'success' if user.role == 'admin' else 'neutral' }}">{{ user.role }}</span></td>
+              <td><span class="badge badge-{{ 'success' if user.status == 'active' else 'danger' }}">{{ user.status }}</span></td>
+              <td>{{ user.last_login_at|datetime }}</td>
+              <td>
+                <div class="access-controls">
+                  <form method="post" action="/admin/users/{{ user.id }}/role">
+                    <select class="input compact-input" name="role" aria-label="Role for {{ user.display_name }}">
+                      <option value="admin" {{ "selected" if user.role == "admin" else "" }}>Admin</option>
+                      <option value="member" {{ "selected" if user.role == "member" else "" }}>Member</option>
+                    </select>
+                    <button class="btn-ghost" type="submit">Update Role</button>
+                  </form>
+                  <form method="post" action="/admin/users/{{ user.id }}/status">
+                    <select class="input compact-input" name="status" aria-label="Status for {{ user.display_name }}">
+                      <option value="active" {{ "selected" if user.status == "active" else "" }}>Active</option>
+                      <option value="disabled" {{ "selected" if user.status == "disabled" else "" }}>Disabled</option>
+                    </select>
+                    <button class="btn-ghost" type="submit">Update Status</button>
+                  </form>
+                </div>
+              </td>
+            </tr>
+          {% else %}
+            <tr>
+              <td colspan="6">No dashboard users have logged in yet.</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+{% endblock %}

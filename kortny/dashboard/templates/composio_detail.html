@@ -14,7 +14,7 @@
       </h1>
       <p>Integration details, connection state, and Slack visibility options.</p>
     </div>
-    <a class="btn-ghost" href="/composio">Back to Catalog</a>
+    <a class="btn-ghost" href="{{ '/composio' if dashboard_is_admin else '/me/integrations' }}">Back to Catalog</a>
   </section>
 
   {% if runtime_error %}
@@ -132,116 +132,124 @@
                   Kortny will create or reuse the Composio setup for {{ integration_name }}, then send you to Composio to finish authentication.
                 </p>
                 <div class="connect-defaults">
-                  <span>Owner: {{ default_owner.name if default_owner else "Choose in Advanced" }}</span>
+                  <span>Owner: {{ dashboard_user if member_scope else (default_owner.name if default_owner else "Choose in Advanced") }}</span>
                   <span>Scope: Personal</span>
                 </div>
-                {% if not default_owner %}
+                {% if not member_scope and not default_owner %}
                   <p class="connect-warning">No Slack user identity is available yet. Open Advanced and enter the owner Slack user ID before connecting.</p>
                 {% endif %}
               </div>
               <button class="btn connect-primary" type="submit">Connect {{ integration_name }}</button>
             </div>
 
-            <details class="connect-advanced">
-              <summary>Advanced connection options</summary>
-              <div class="connect-form">
-                <label class="form-field">
-                  Owner
-                  <input class="input" name="owner_slack_user_id" list="slack-users" value="{{ default_owner.slack_id if default_owner else '' }}" placeholder="Slack user ID">
-                  <datalist id="slack-users">
-                    {% for user in detail.user_options %}
-                      <option value="{{ user.slack_id }}">{{ user.name }}</option>
-                    {% endfor %}
-                  </datalist>
-                </label>
-
-                <label class="form-field">
-                  Display name
-                  <input class="input" name="display_name" value="{{ integration_name }} connection">
-                </label>
-
-                <fieldset class="scope-fieldset">
-                  <legend>Visibility</legend>
-                  <label>
-                    <input type="radio" name="visibility_scope_type" value="user" checked>
-                    Personal
+            {% if member_scope %}
+              <input type="hidden" name="owner_slack_user_id" value="{{ dashboard_slack_user_id }}">
+              <input type="hidden" name="visibility_scope_type" value="user">
+              <input type="hidden" name="display_name" value="{{ integration_name }} connection">
+            {% else %}
+              <details class="connect-advanced">
+                <summary>Advanced connection options</summary>
+                <div class="connect-form">
+                  <label class="form-field">
+                    Owner
+                    <input class="input" name="owner_slack_user_id" list="slack-users" value="{{ default_owner.slack_id if default_owner else '' }}" placeholder="Slack user ID">
+                    <datalist id="slack-users">
+                      {% for user in detail.user_options %}
+                        <option value="{{ user.slack_id }}">{{ user.name }}</option>
+                      {% endfor %}
+                    </datalist>
                   </label>
-                  <label>
-                    <input type="radio" name="visibility_scope_type" value="channel">
-                    Channel
+
+                  <label class="form-field">
+                    Display name
+                    <input class="input" name="display_name" value="{{ integration_name }} connection">
                   </label>
-                  <label>
-                    <input type="radio" name="visibility_scope_type" value="workspace">
-                    Workspace
+
+                  <fieldset class="scope-fieldset">
+                    <legend>Visibility</legend>
+                    <label>
+                      <input type="radio" name="visibility_scope_type" value="user" checked>
+                      Personal
+                    </label>
+                    <label>
+                      <input type="radio" name="visibility_scope_type" value="channel">
+                      Channel
+                    </label>
+                    <label>
+                      <input type="radio" name="visibility_scope_type" value="workspace">
+                      Workspace
+                    </label>
+                  </fieldset>
+
+                  <label class="form-field">
+                    Channel scope
+                    <input class="input" name="channel_scope_id" list="slack-channels" placeholder="Only required for channel scope">
+                    <datalist id="slack-channels">
+                      {% for channel in detail.channel_options %}
+                        <option value="{{ channel.slack_id }}">{{ channel.name }}</option>
+                      {% endfor %}
+                    </datalist>
                   </label>
-                </fieldset>
 
-                <label class="form-field">
-                  Channel scope
-                  <input class="input" name="channel_scope_id" list="slack-channels" placeholder="Only required for channel scope">
-                  <datalist id="slack-channels">
-                    {% for channel in detail.channel_options %}
-                      <option value="{{ channel.slack_id }}">{{ channel.name }}</option>
-                    {% endfor %}
-                  </datalist>
-                </label>
-
-                <label class="form-field">
-                  Auth config override
-                  <input class="input" name="auth_config_id" list="auth-configs" placeholder="Optional ac_...">
-                  <datalist id="auth-configs">
-                    {% for auth_config in detail.auth_configs %}
-                      <option value="{{ auth_config.id }}">{{ auth_config.name }}</option>
-                    {% endfor %}
-                  </datalist>
-                </label>
-              </div>
-
-              {% if detail.auth_configs %}
-                <div class="auth-config-list" aria-label="Auth configs">
-                  {% for auth_config in detail.auth_configs %}
-                    <article class="auth-config-row">
-                      <div>
-                        <strong>{{ auth_config.name }}</strong>
-                        <code>{{ auth_config.id }}</code>
-                      </div>
-                      <span class="badge badge-{{ auth_config.tone }}">{{ auth_config.status_label }}</span>
-                      <small>{{ auth_config.managed_label }}{% if auth_config.auth_scheme %} - {{ auth_config.auth_scheme }}{% endif %}</small>
-                    </article>
-                  {% endfor %}
+                  <label class="form-field">
+                    Auth config override
+                    <input class="input" name="auth_config_id" list="auth-configs" placeholder="Optional ac_...">
+                    <datalist id="auth-configs">
+                      {% for auth_config in detail.auth_configs %}
+                        <option value="{{ auth_config.id }}">{{ auth_config.name }}</option>
+                      {% endfor %}
+                    </datalist>
+                  </label>
                 </div>
-              {% endif %}
-            </details>
+
+                {% if detail.auth_configs %}
+                  <div class="auth-config-list" aria-label="Auth configs">
+                    {% for auth_config in detail.auth_configs %}
+                      <article class="auth-config-row">
+                        <div>
+                          <strong>{{ auth_config.name }}</strong>
+                          <code>{{ auth_config.id }}</code>
+                        </div>
+                        <span class="badge badge-{{ auth_config.tone }}">{{ auth_config.status_label }}</span>
+                        <small>{{ auth_config.managed_label }}{% if auth_config.auth_scheme %} - {{ auth_config.auth_scheme }}{% endif %}</small>
+                      </article>
+                    {% endfor %}
+                  </div>
+                {% endif %}
+              </details>
+            {% endif %}
           </form>
         </div>
       {% endif %}
     </article>
   </section>
 
-  <section class="composio-full-section">
-    <article class="card scope-options-card">
-      <header>
-        <h2>Visibility Scope</h2>
-        <p>New connections should default to personal scope. Wider scopes need explicit intent.</p>
-      </header>
-      <div class="scope-option-grid">
-        {% for option in detail.scope_options %}
-          <article class="scope-option {{ 'default' if option.default else '' }}">
-            <div>
-              <h3>{{ option.name }}</h3>
-              {% if option.default %}
-                <span class="badge badge-success">Default</span>
+  {% if dashboard_is_admin %}
+    <section class="composio-full-section">
+      <article class="card scope-options-card">
+        <header>
+          <h2>Visibility Scope</h2>
+          <p>New connections should default to personal scope. Wider scopes need explicit intent.</p>
+        </header>
+        <div class="scope-option-grid">
+          {% for option in detail.scope_options %}
+            <article class="scope-option {{ 'default' if option.default else '' }}">
+              <div>
+                <h3>{{ option.name }}</h3>
+                {% if option.default %}
+                  <span class="badge badge-success">Default</span>
+                {% endif %}
+              </div>
+              <p>{{ option.description }}</p>
+              {% if option.risk %}
+                <small>{{ option.risk }}</small>
               {% endif %}
-            </div>
-            <p>{{ option.description }}</p>
-            {% if option.risk %}
-              <small>{{ option.risk }}</small>
-            {% endif %}
-          </article>
-        {% endfor %}
-      </div>
-    </article>
-  </section>
+            </article>
+          {% endfor %}
+        </div>
+      </article>
+    </section>
+  {% endif %}
 
   <section class="card composio-connections-card">
     <header>

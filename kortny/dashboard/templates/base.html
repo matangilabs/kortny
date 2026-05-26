@@ -17,20 +17,30 @@
           <span class="subtitle">Operator Dashboard</span>
         </div>
         <nav class="sidebar-nav">
-          <a class="nav-item {{ 'active' if active_page == 'overview' else '' }}" href="/" {% if active_page == 'overview' %}aria-current="page"{% endif %}>Overview</a>
-          <a class="nav-item {{ 'active' if active_page == 'tasks' else '' }}" href="/tasks" {% if active_page == 'tasks' %}aria-current="page"{% endif %}>Tasks</a>
-          <a class="nav-item {{ 'active' if active_page == 'usage' else '' }}" href="/usage" {% if active_page == 'usage' %}aria-current="page"{% endif %}>Usage</a>
-          <a class="nav-item {{ 'active' if active_page == 'users' else '' }}" href="/users" {% if active_page == 'users' %}aria-current="page"{% endif %}>Users</a>
-          <a class="nav-item {{ 'active' if active_page == 'memory' else '' }}" href="/memory" {% if active_page == 'memory' %}aria-current="page"{% endif %}>Memory</a>
-          <a class="nav-item {{ 'active' if active_page == 'integrations' else '' }}" href="/integrations" {% if active_page == 'integrations' %}aria-current="page"{% endif %}>Integrations</a>
-          <a class="nav-item {{ 'active' if active_page == 'composio' else '' }}" href="/composio" {% if active_page == 'composio' %}aria-current="page"{% endif %}>Composio</a>
-          <a class="nav-item {{ 'active' if active_page == 'system' else '' }}" href="/system" {% if active_page == 'system' %}aria-current="page"{% endif %}>System</a>
+          {% if dashboard_is_admin %}
+            <a class="nav-item {{ 'active' if active_page == 'overview' else '' }}" href="/" {% if active_page == 'overview' %}aria-current="page"{% endif %}>Overview</a>
+            <a class="nav-item {{ 'active' if active_page == 'tasks' else '' }}" href="/tasks" {% if active_page == 'tasks' %}aria-current="page"{% endif %}>Tasks</a>
+            <a class="nav-item {{ 'active' if active_page == 'usage' else '' }}" href="/usage" {% if active_page == 'usage' %}aria-current="page"{% endif %}>Usage</a>
+            <a class="nav-item {{ 'active' if active_page == 'users' else '' }}" href="/users" {% if active_page == 'users' %}aria-current="page"{% endif %}>Users</a>
+            <a class="nav-item {{ 'active' if active_page == 'admin_users' else '' }}" href="/admin/users" {% if active_page == 'admin_users' %}aria-current="page"{% endif %}>Access</a>
+            <a class="nav-item {{ 'active' if active_page == 'memory' else '' }}" href="/memory" {% if active_page == 'memory' %}aria-current="page"{% endif %}>Memory</a>
+            <a class="nav-item {{ 'active' if active_page == 'integrations' else '' }}" href="/integrations" {% if active_page == 'integrations' %}aria-current="page"{% endif %}>Integrations</a>
+            <a class="nav-item {{ 'active' if active_page == 'composio' else '' }}" href="/composio" {% if active_page == 'composio' %}aria-current="page"{% endif %}>Composio</a>
+            <a class="nav-item {{ 'active' if active_page == 'system' else '' }}" href="/system" {% if active_page == 'system' %}aria-current="page"{% endif %}>System</a>
+          {% else %}
+            <a class="nav-item {{ 'active' if active_page == 'me' else '' }}" href="/me" {% if active_page == 'me' %}aria-current="page"{% endif %}>My Dashboard</a>
+            <a class="nav-item {{ 'active' if active_page == 'me_tasks' else '' }}" href="/me/tasks" {% if active_page == 'me_tasks' %}aria-current="page"{% endif %}>My Tasks</a>
+            <a class="nav-item {{ 'active' if active_page == 'me_usage' else '' }}" href="/me/usage" {% if active_page == 'me_usage' %}aria-current="page"{% endif %}>My Usage</a>
+            <a class="nav-item {{ 'active' if active_page == 'me_memory' else '' }}" href="/me/memory" {% if active_page == 'me_memory' %}aria-current="page"{% endif %}>My Memory</a>
+            <a class="nav-item {{ 'active' if active_page == 'me_integrations' else '' }}" href="/me/integrations" {% if active_page == 'me_integrations' %}aria-current="page"{% endif %}>My Integrations</a>
+          {% endif %}
         </nav>
         <div class="sidebar-footer">
           {% include "_theme_toggle.html" %}
           <div class="user-pill">
             <span>Signed in as</span>
             <strong>{{ dashboard_user }}</strong>
+            <small>{{ dashboard_role }}</small>
           </div>
           <form method="post" action="/logout">
             <button class="btn-ghost sidebar-logout" type="submit">Log out</button>
@@ -47,14 +57,23 @@
             {% include "_theme_toggle.html" %}
           </div>
           <nav class="mobile-nav">
-            <a class="nav-item {{ 'active' if active_page == 'overview' else '' }}" href="/" {% if active_page == 'overview' %}aria-current="page"{% endif %}>Overview</a>
-            <a class="nav-item {{ 'active' if active_page == 'tasks' else '' }}" href="/tasks" {% if active_page == 'tasks' %}aria-current="page"{% endif %}>Tasks</a>
-            <a class="nav-item {{ 'active' if active_page == 'usage' else '' }}" href="/usage" {% if active_page == 'usage' %}aria-current="page"{% endif %}>Usage</a>
-            <a class="nav-item {{ 'active' if active_page == 'users' else '' }}" href="/users" {% if active_page == 'users' %}aria-current="page"{% endif %}>Users</a>
-            <a class="nav-item {{ 'active' if active_page == 'memory' else '' }}" href="/memory" {% if active_page == 'memory' %}aria-current="page"{% endif %}>Memory</a>
-            <a class="nav-item {{ 'active' if active_page == 'integrations' else '' }}" href="/integrations" {% if active_page == 'integrations' %}aria-current="page"{% endif %}>Integrations</a>
-            <a class="nav-item {{ 'active' if active_page == 'composio' else '' }}" href="/composio" {% if active_page == 'composio' %}aria-current="page"{% endif %}>Composio</a>
-            <a class="nav-item {{ 'active' if active_page == 'system' else '' }}" href="/system" {% if active_page == 'system' %}aria-current="page"{% endif %}>System</a>
+            {% if dashboard_is_admin %}
+              <a class="nav-item {{ 'active' if active_page == 'overview' else '' }}" href="/" {% if active_page == 'overview' %}aria-current="page"{% endif %}>Overview</a>
+              <a class="nav-item {{ 'active' if active_page == 'tasks' else '' }}" href="/tasks" {% if active_page == 'tasks' %}aria-current="page"{% endif %}>Tasks</a>
+              <a class="nav-item {{ 'active' if active_page == 'usage' else '' }}" href="/usage" {% if active_page == 'usage' %}aria-current="page"{% endif %}>Usage</a>
+              <a class="nav-item {{ 'active' if active_page == 'users' else '' }}" href="/users" {% if active_page == 'users' %}aria-current="page"{% endif %}>Users</a>
+              <a class="nav-item {{ 'active' if active_page == 'admin_users' else '' }}" href="/admin/users" {% if active_page == 'admin_users' %}aria-current="page"{% endif %}>Access</a>
+              <a class="nav-item {{ 'active' if active_page == 'memory' else '' }}" href="/memory" {% if active_page == 'memory' %}aria-current="page"{% endif %}>Memory</a>
+              <a class="nav-item {{ 'active' if active_page == 'integrations' else '' }}" href="/integrations" {% if active_page == 'integrations' %}aria-current="page"{% endif %}>Integrations</a>
+              <a class="nav-item {{ 'active' if active_page == 'composio' else '' }}" href="/composio" {% if active_page == 'composio' %}aria-current="page"{% endif %}>Composio</a>
+              <a class="nav-item {{ 'active' if active_page == 'system' else '' }}" href="/system" {% if active_page == 'system' %}aria-current="page"{% endif %}>System</a>
+            {% else %}
+              <a class="nav-item {{ 'active' if active_page == 'me' else '' }}" href="/me" {% if active_page == 'me' %}aria-current="page"{% endif %}>My Dashboard</a>
+              <a class="nav-item {{ 'active' if active_page == 'me_tasks' else '' }}" href="/me/tasks" {% if active_page == 'me_tasks' %}aria-current="page"{% endif %}>My Tasks</a>
+              <a class="nav-item {{ 'active' if active_page == 'me_usage' else '' }}" href="/me/usage" {% if active_page == 'me_usage' %}aria-current="page"{% endif %}>My Usage</a>
+              <a class="nav-item {{ 'active' if active_page == 'me_memory' else '' }}" href="/me/memory" {% if active_page == 'me_memory' %}aria-current="page"{% endif %}>My Memory</a>
+              <a class="nav-item {{ 'active' if active_page == 'me_integrations' else '' }}" href="/me/integrations" {% if active_page == 'me_integrations' %}aria-current="page"{% endif %}>My Integrations</a>
+            {% endif %}
           </nav>
         </header>
         <main id="main" class="shell" tabindex="-1">
