@@ -25,6 +25,13 @@ from kortny.agent.context import (
     DEFAULT_THREAD_TRANSCRIPT_LIMIT,
     ContextAssembler,
 )
+from kortny.agent.error_policy import (
+    ClassifiedToolError,
+    classify_exception,
+    classify_recoverable_tool_error,
+    classify_tool_error_payload,
+    enrich_error_payload,
+)
 from kortny.agent.execution import (
     ExecutionGuardrailLimits,
     ExecutionPlan,
@@ -80,15 +87,19 @@ DEFAULT_SYSTEM_PROMPT = (
     "colors, placement, formats, conditions, and exceptions. Prefer a slightly "
     "longer faithful memory proposal over a short lossy summary. "
     "If a tool result includes error.recoverable=true, keep working with the "
-    "context and tool results already available. Retry only when you can change "
-    "the arguments or content to address the tool feedback. If a required field "
-    "or identifier is missing, first use a discovery, list, search, or history "
-    "tool that can infer it. If no available tool can infer the missing input, "
-    "ask one concise clarification. Never repeat the same failed tool call with "
-    "the same arguments. Prefer cheap broad search for quick public discovery; "
-    "use richer connected tools when the request needs authenticated workspace "
-    "data, structured app actions, scraping, or deeper page extraction; combine "
-    "tools when discovery and extraction are both useful. "
+    "context and tool results already available. Read error.category and "
+    "error.recovery_action before deciding the next move: patch_arguments means "
+    "change the arguments or content, resolve_reference means use a discovery, "
+    "list, search, history, or file lookup tool first, wait_auth means ask the "
+    "user to connect the integration only if no alternate tool can finish the "
+    "task, retry_with_backoff means switch tools or narrow the retry rather than "
+    "hammering the same call, and stop_safely means explain the blocker. If no "
+    "available tool can infer missing input, ask one concise clarification. Never "
+    "repeat the same failed tool call with the same arguments. Prefer cheap broad "
+    "search for quick public discovery; use richer connected tools when the "
+    "request needs authenticated workspace data, structured app actions, scraping, "
+    "or deeper page extraction; combine tools when discovery and extraction are "
+    "both useful. "
     "When answering with text, format for Slack mrkdwn rather than GitHub "
     "Markdown: use *bold*, <https://example.com|label> links, simple line-break "
     "lists, and avoid Markdown headings."
@@ -359,6 +370,7 @@ class AgentCoordinator:
             started = time.perf_counter()
             recoverable_error: RecoverableToolError | None = None
             recoverable_budget_exceeded = False
+            error_classification: ClassifiedToolError | None = None
             result: ToolResult
             try:
                 with start_span(
@@ -378,18 +390,39 @@ class AgentCoordinator:
                         result = self.registry.invoke(tool_call.name, arguments)
                     except RecoverableToolError as exc:
                         recoverable_error = exc
+                        error_classification = classify_recoverable_tool_error(exc)
                         result = _recoverable_tool_error_result(
                             arguments=arguments,
                             error=exc,
+                            classification=error_classification,
                         )
                         record_span_exception(exc)
+                    if error_classification is None:
+                        error_classification = _classify_recoverable_result_error(
+                            result.output
+                        )
+                    if error_classification is not None:
+                        result = _with_classified_error(result, error_classification)
+                    span_attributes: JsonObject = {
+                        "tool.latency_ms": _latency_ms(started),
+                        "tool.artifact_count": len(result.artifacts),
+                        "tool.recoverable": _recoverable_tool_result(result.output),
+                        "tool.cost_usd": str(result.cost_usd),
+                    }
+                    if error_classification is not None:
+                        span_attributes.update(
+                            {
+                                "tool.error_code": error_classification.code,
+                                "tool.error_category": (
+                                    error_classification.category.value
+                                ),
+                                "tool.recovery_action": (
+                                    error_classification.recovery_action.value
+                                ),
+                            }
+                        )
                     set_span_attributes(
-                        {
-                            "tool.latency_ms": _latency_ms(started),
-                            "tool.artifact_count": len(result.artifacts),
-                            "tool.recoverable": _recoverable_tool_result(result.output),
-                            "tool.cost_usd": str(result.cost_usd),
-                        }
+                        span_attributes
                     )
             except Exception as exc:
                 latency_ms = _latency_ms(started)
@@ -419,15 +452,16 @@ class AgentCoordinator:
                 )
                 raise
 
-            if recoverable_error is not None:
+            if error_classification is not None:
                 recoverable_budget_exceeded = self._record_recoverable_failure(
                     task_obj=task_obj,
                     plan=plan,
                     attempt=attempt,
-                    error=recoverable_error,
+                    classification=error_classification,
                     turn=turn,
                     tool_call_id=tool_call.id,
                 )
+            if recoverable_error is not None and error_classification is not None:
                 log_observation(
                     logger,
                     "tool_call_recoverable_failed",
@@ -440,8 +474,10 @@ class AgentCoordinator:
                     normalized_args_hash=attempt.normalized_args_hash,
                     attempt_no=attempt.attempt_no,
                     latency_ms=_latency_ms(started),
-                    error_code=recoverable_error.code,
-                    error_summary=recoverable_error.message,
+                    error_code=error_classification.code,
+                    error_category=error_classification.category.value,
+                    recovery_action=error_classification.recovery_action.value,
+                    error_summary=error_classification.message,
                 )
 
             self.task_service.raise_if_cancelled(
@@ -450,6 +486,11 @@ class AgentCoordinator:
             latency_ms = _latency_ms(started)
             artifact_count += len(result.artifacts)
             result_payload = _tool_result_payload(tool_call.name, result)
+            classification_payload = (
+                error_classification.to_payload()
+                if error_classification is not None
+                else None
+            )
             self.task_service.append_event(
                 task_obj,
                 TaskEventType.tool_result,
@@ -464,6 +505,17 @@ class AgentCoordinator:
                     "output_shape": _output_shape(result.output),
                     "artifact_count": len(result.artifacts),
                     "recoverable": _recoverable_tool_result(result.output),
+                    **(
+                        {
+                            "error_classification": classification_payload,
+                            "error_category": error_classification.category.value,
+                            "recovery_action": (
+                                error_classification.recovery_action.value
+                            ),
+                        }
+                        if error_classification is not None
+                        else {}
+                    ),
                     **result_payload,
                 },
             )
@@ -478,6 +530,16 @@ class AgentCoordinator:
                 output_shape=_output_shape(result.output),
                 artifact_count=len(result.artifacts),
                 recoverable=_recoverable_tool_result(result.output),
+                error_category=(
+                    error_classification.category.value
+                    if error_classification is not None
+                    else None
+                ),
+                recovery_action=(
+                    error_classification.recovery_action.value
+                    if error_classification is not None
+                    else None
+                ),
                 cost_usd=str(result.cost_usd),
             )
             messages.append(
@@ -487,10 +549,10 @@ class AgentCoordinator:
                     tool_call_id=tool_call.id,
                 )
             )
-            if recoverable_budget_exceeded and recoverable_error is not None:
+            if recoverable_budget_exceeded and error_classification is not None:
                 error = AgentExecutionGuardrailError(
                     "Recoverable tool failure budget exceeded for "
-                    f"{tool_call.name}:{recoverable_error.code}"
+                    f"{tool_call.name}:{error_classification.code}"
                 )
                 self._fail_execution_plan(
                     task_obj,
@@ -500,7 +562,11 @@ class AgentCoordinator:
                         "reason": "recoverable_failure_budget_exceeded",
                         "tool": tool_call.name,
                         "tool_call_id": tool_call.id,
-                        "error_code": recoverable_error.code,
+                        "error_code": error_classification.code,
+                        "error_category": error_classification.category.value,
+                        "recovery_action": (
+                            error_classification.recovery_action.value
+                        ),
                         "normalized_args_hash": attempt.normalized_args_hash,
                         "attempt_no": attempt.attempt_no,
                         "budget_remaining": plan.budget.remaining(plan.limits),
@@ -513,7 +579,8 @@ class AgentCoordinator:
                         "phase": "tool_invoke",
                         "tool": tool_call.name,
                         "tool_call_id": tool_call.id,
-                        "error_code": recoverable_error.code,
+                        "error_code": error_classification.code,
+                        "error_category": error_classification.category.value,
                     },
                 )
                 raise error
@@ -743,7 +810,7 @@ class AgentCoordinator:
         task_obj: Task,
         plan: ExecutionPlan,
         attempt: ToolAttemptRecord,
-        error: RecoverableToolError,
+        classification: ClassifiedToolError,
         turn: int,
         tool_call_id: str,
     ) -> bool:
@@ -751,10 +818,11 @@ class AgentCoordinator:
         same_error_count = plan.budget.record_recoverable_failure(
             tool_name=attempt.tool_name,
             normalized_args_hash=attempt.normalized_args_hash,
-            error_code=error.code,
+            error_code=classification.code,
+            error_category=classification.category.value,
         )
         step.recoverable_failure_count += 1
-        step.observations.append(error.message)
+        step.observations.append(classification.message)
         self._append_execution_log(
             task_obj,
             "execution_recoverable_failure_recorded",
@@ -766,7 +834,11 @@ class AgentCoordinator:
                 "tool": attempt.tool_name,
                 "normalized_args_hash": attempt.normalized_args_hash,
                 "attempt_no": attempt.attempt_no,
-                "error_code": error.code,
+                "error_code": classification.code,
+                "error_category": classification.category.value,
+                "recovery_action": classification.recovery_action.value,
+                "retryable": classification.retryable,
+                "user_action_required": classification.user_action_required,
                 "recoverable": True,
                 "same_error_count": same_error_count,
                 "recoverable_failure_count": plan.budget.recoverable_failure_count,
@@ -795,7 +867,9 @@ class AgentCoordinator:
                     "tool": attempt.tool_name,
                     "normalized_args_hash": attempt.normalized_args_hash,
                     "attempt_no": attempt.attempt_no,
-                    "error_code": error.code,
+                    "error_code": classification.code,
+                    "error_category": classification.category.value,
+                    "recovery_action": classification.recovery_action.value,
                     "same_error_count": same_error_count,
                     "recoverable_failure_count": plan.budget.recoverable_failure_count,
                     "budget_remaining": plan.budget.remaining(plan.limits),
@@ -868,12 +942,16 @@ class AgentCoordinator:
         error: Exception,
         payload: JsonObject | None = None,
     ) -> None:
+        classification = classify_exception(error)
         self.task_service.append_event(
             task,
             TaskEventType.error,
             {
                 "type": type(error).__name__,
                 "message": str(error),
+                "error_classification": classification.to_payload(),
+                "error_category": classification.category.value,
+                "recovery_action": classification.recovery_action.value,
                 **(payload or {}),
             },
         )
@@ -903,13 +981,38 @@ def _recoverable_tool_error_result(
     *,
     arguments: JsonObject,
     error: RecoverableToolError,
+    classification: ClassifiedToolError,
 ) -> ToolResult:
     return ToolResult(
         output={
             "successful": False,
             "attempted_argument_keys": sorted(arguments),
-            "error": error.to_payload(),
+            "error": enrich_error_payload(error.to_payload(), classification),
         }
+    )
+
+
+def _classify_recoverable_result_error(
+    output: JsonObject,
+) -> ClassifiedToolError | None:
+    error = _tool_error_payload(output)
+    if error is None or error.get("recoverable") is not True:
+        return None
+    return classify_tool_error_payload(error)
+
+
+def _with_classified_error(
+    result: ToolResult,
+    classification: ClassifiedToolError,
+) -> ToolResult:
+    output = dict(result.output)
+    error = _tool_error_payload(output)
+    if error is not None:
+        output["error"] = enrich_error_payload(error, classification)
+    return ToolResult(
+        output=output,
+        cost_usd=result.cost_usd,
+        artifacts=result.artifacts,
     )
 
 
@@ -943,11 +1046,16 @@ def _output_shape(output: JsonObject) -> JsonObject:
 
 
 def _recoverable_tool_result(output: JsonObject) -> bool | None:
-    error = output.get("error")
-    if not isinstance(error, dict):
+    error = _tool_error_payload(output)
+    if error is None:
         return None
     recoverable = error.get("recoverable")
     return recoverable if isinstance(recoverable, bool) else None
+
+
+def _tool_error_payload(output: JsonObject) -> JsonObject | None:
+    error = output.get("error")
+    return error if isinstance(error, dict) else None
 
 
 def _json_default(value: object) -> object:

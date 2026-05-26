@@ -16,7 +16,9 @@ from kortny.agent import (
     AgentExecutionGuardrailError,
     AgentTurnLimitError,
     ContextAssembler,
+    ExecutionErrorCategory,
     ExecutionGuardrailLimits,
+    RecoveryAction,
 )
 from kortny.agent.thread_context import ThreadTranscriptMessage
 from kortny.db.models import (
@@ -132,6 +134,34 @@ class RecordingSearchTool:
     def invoke(self, args: JsonObject) -> ToolResult:
         self.calls.append(args)
         return ToolResult(output={"results": []})
+
+
+class RecoverableResultTool:
+    name = "slack_file_read"
+    description = "Returns a recoverable result error."
+    parameters: JsonSchema = {
+        "type": "object",
+        "properties": {"file_id": {"type": "string"}},
+        "required": ["file_id"],
+        "additionalProperties": False,
+    }
+
+    def __init__(self, code: str = "invalid_file_id") -> None:
+        self.code = code
+        self.calls: list[JsonObject] = []
+
+    def invoke(self, args: JsonObject) -> ToolResult:
+        self.calls.append(args)
+        return ToolResult(
+            output={
+                "file_id": args["file_id"],
+                "error": {
+                    "code": self.code,
+                    "message": f"Recoverable {self.code}",
+                    "recoverable": True,
+                },
+            }
+        )
 
 
 class ArtifactTool:
@@ -1400,6 +1430,10 @@ def test_coordinator_feeds_recoverable_tool_errors_back_to_llm(
         "recoverable": True,
         "hint": "Use search_database first or ask the user for the database link.",
         "details": {"missing_fields": ["database_id"]},
+        "category": "schema_argument_validation",
+        "recovery_action": "patch_arguments",
+        "retryable": False,
+        "user_action_required": False,
     }
     assert recoverable_payload["output"]["attempted_argument_keys"] == ["page_size"]
 
@@ -1419,6 +1453,23 @@ def test_coordinator_feeds_recoverable_tool_errors_back_to_llm(
     assert first_tool_result.payload["recoverable"] is True
     assert first_tool_result.payload["output"]["error"]["code"] == (
         "missing_required_arguments"
+    )
+    assert first_tool_result.payload["error_category"] == (
+        ExecutionErrorCategory.schema_argument_validation.value
+    )
+    assert first_tool_result.payload["recovery_action"] == (
+        RecoveryAction.patch_arguments.value
+    )
+    recoverable_event = next(
+        event
+        for event in events
+        if event.payload.get("message") == "execution_recoverable_failure_recorded"
+    )
+    assert recoverable_event.payload["error_category"] == (
+        ExecutionErrorCategory.schema_argument_validation.value
+    )
+    assert recoverable_event.payload["recovery_action"] == (
+        RecoveryAction.patch_arguments.value
     )
     assert not any(event.type is TaskEventType.error for event in events)
 
@@ -1472,6 +1523,67 @@ def test_coordinator_records_tool_attempt_metadata(db_session: Session) -> None:
     assert tool_call_event.payload["normalized_args_hash"] == (
         budget_event.payload["attempt"]["normalized_args_hash"]
     )
+
+
+def test_coordinator_classifies_recoverable_tool_result_errors(
+    db_session: Session,
+) -> None:
+    task = create_task(db_session, input_text="summarize the attached report")
+    file_tool = RecoverableResultTool(code="invalid_file_id")
+    llm = FakeLLM(
+        [
+            Completion(
+                content=None,
+                tool_calls=(
+                    ToolCall(
+                        id="call-1",
+                        name="slack_file_read",
+                        arguments={"file_id": "1716400000.123456"},
+                    ),
+                ),
+                usage=TokenUsage(input_tokens=20, output_tokens=3),
+            ),
+            Completion(
+                content="I need the actual Slack file ID or attachment.",
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=25, output_tokens=6),
+            ),
+        ]
+    )
+
+    result = AgentCoordinator(
+        session=db_session,
+        llm=llm,
+        registry=ToolRegistry([file_tool]),
+    ).run(task)
+
+    assert result.result_summary == "I need the actual Slack file ID or attachment."
+    second_turn_tool_message = llm.calls[1][1][-1]
+    tool_payload = json.loads(second_turn_tool_message.content or "{}")
+    error = tool_payload["output"]["error"]
+    assert error["category"] == ExecutionErrorCategory.reference_resolution.value
+    assert error["recovery_action"] == RecoveryAction.resolve_reference.value
+    assert error["retryable"] is False
+    assert file_tool.calls == [{"file_id": "1716400000.123456"}]
+
+    events = task_events(db_session, task)
+    tool_result = next(
+        event for event in events if event.type is TaskEventType.tool_result
+    )
+    recoverable_event = next(
+        event
+        for event in events
+        if event.payload.get("message") == "execution_recoverable_failure_recorded"
+    )
+    assert tool_result.payload["error_category"] == (
+        ExecutionErrorCategory.reference_resolution.value
+    )
+    assert tool_result.payload["recovery_action"] == (
+        RecoveryAction.resolve_reference.value
+    )
+    assert recoverable_event.payload["error_code"] == "invalid_file_id"
+    assert recoverable_event.payload["recoverable_failure_count"] == 1
+    assert not any(event.type is TaskEventType.error for event in events)
 
 
 def test_coordinator_trips_circuit_breaker_for_repeated_tool_call(

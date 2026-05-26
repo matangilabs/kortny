@@ -95,6 +95,8 @@ class ToolAttemptRecord:
     status: str
     recoverable: bool = False
     error_code: str | None = None
+    error_category: str | None = None
+    recovery_action: str | None = None
     idempotency_key: str | None = None
 
     def to_payload(self) -> JsonObject:
@@ -150,6 +152,7 @@ class ExecutionBudgetState:
         tool_name: str,
         normalized_args_hash: str,
         error_code: str,
+        error_category: str,
     ) -> int:
         """Track a recoverable failure and return same-error attempt count."""
 
@@ -157,6 +160,7 @@ class ExecutionBudgetState:
             tool_name=tool_name,
             normalized_args_hash=normalized_args_hash,
             error_code=error_code,
+            error_category=error_category,
         )
         count = self.recoverable_error_counts.get(error_key, 0) + 1
         self.recoverable_error_counts[error_key] = count
@@ -301,10 +305,11 @@ def recoverable_error_key(
     tool_name: str,
     normalized_args_hash: str,
     error_code: str,
+    error_category: str,
 ) -> str:
     """Return the signature key used for repeated recoverable failures."""
 
-    return f"{tool_name}:{error_code}:{normalized_args_hash}"
+    return f"{tool_name}:{error_category}:{error_code}:{normalized_args_hash}"
 
 
 def _idempotency_key(

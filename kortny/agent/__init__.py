@@ -18,6 +18,11 @@ from kortny.agent.coordinator import (
     AgentTurnLimitError,
     LLMClient,
 )
+from kortny.agent.error_policy import (
+    ClassifiedToolError,
+    ExecutionErrorCategory,
+    RecoveryAction,
+)
 from kortny.agent.execution import (
     ExecutionGuardrailLimits,
     ExecutionMode,
@@ -33,6 +38,7 @@ __all__ = [
     "AgentExecutionGuardrailError",
     "AgentLoopError",
     "AgentRunResult",
+    "ClassifiedToolError",
     "AgentTurnLimitError",
     "ContextAcknowledgement",
     "ContextArtifact",
@@ -43,11 +49,13 @@ __all__ = [
     "ContextPackage",
     "ContextTask",
     "ExecutionGuardrailLimits",
+    "ExecutionErrorCategory",
     "ExecutionMode",
     "ExecutionPlan",
     "ExecutionPlanStatus",
     "ExecutionStep",
     "ExecutionStepStatus",
     "LLMClient",
+    "RecoveryAction",
     "ToolAttemptRecord",
 ]
