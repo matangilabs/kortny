@@ -53,23 +53,25 @@ class ComposioExternalToolProvider:
     def tool_cards(self) -> tuple[ToolCard, ...]:
         cards: list[ToolCard] = []
         for entry in self._load_catalog():
-            cards.append(_tool_card(entry))
+            cards.extend(_tool_cards(entry))
         return tuple(cards)
 
     def runtime_tools(self) -> tuple[Tool, ...]:
         tools: list[Tool] = []
         for entry in self._load_catalog():
-            toolkit_slug = entry.connection.toolkit_slug
-            tools.append(
-                ComposioExecuteTool(
-                    session=self.session,
-                    task=self.task,
-                    client=self.client,
-                    allowed_tools=entry.tools,
-                    toolkit_slug=toolkit_slug,
-                    name=composio_runtime_tool_name(toolkit_slug),
+            for tool in entry.tools:
+                tools.append(
+                    ComposioExecuteTool(
+                        session=self.session,
+                        task=self.task,
+                        client=self.client,
+                        tool=tool,
+                        name=composio_runtime_tool_name(
+                            entry.connection.toolkit_slug,
+                            tool.slug,
+                        ),
+                    )
                 )
-            )
         return tuple(tools)
 
     def _load_catalog(self) -> tuple[_ToolkitCatalog, ...]:
@@ -139,34 +141,35 @@ def _merge_tools(
     return tuple(tools_by_slug.values())
 
 
-def _tool_card(entry: _ToolkitCatalog) -> ToolCard:
+def _tool_cards(entry: _ToolkitCatalog) -> tuple[ToolCard, ...]:
+    return tuple(_tool_card(entry, tool) for tool in entry.tools)
+
+
+def _tool_card(entry: _ToolkitCatalog, tool: ComposioTool) -> ToolCard:
     toolkit_slug = entry.connection.toolkit_slug
-    tool_slugs = tuple(tool.slug for tool in entry.tools)
-    capabilities = _capabilities(toolkit_slug=toolkit_slug, tools=entry.tools)
+    capabilities = _capabilities(toolkit_slug=toolkit_slug, tools=(tool,))
     return ToolCard(
-        registry_name=composio_runtime_tool_name(toolkit_slug),
+        registry_name=composio_runtime_tool_name(toolkit_slug, tool.slug),
         provider="composio",
-        display_name=f"{toolkit_slug.title()} via Composio",
-        description=_card_description(toolkit_slug=toolkit_slug, tools=entry.tools),
+        display_name=f"{tool.name} via Composio",
+        description=_card_description(toolkit_slug=toolkit_slug, tool=tool),
         capabilities=capabilities,
         side_effect="read",
         toolkit_slug=toolkit_slug,
-        tool_slugs=tool_slugs,
-        tool_count=len(tool_slugs),
+        tool_slugs=(tool.slug,),
+        tool_count=1,
+        required_fields=_required_fields(tool.input_parameters),
         visibility_scope_type=entry.connection.visibility_scope_type,
         visibility_scope_id=entry.connection.visibility_scope_id,
         can_replace_native_tools=_native_replacements(capabilities),
     )
 
 
-def _card_description(*, toolkit_slug: str, tools: tuple[ComposioTool, ...]) -> str:
-    examples = "; ".join(
-        f"{tool.slug}: {tool.description or tool.name}" for tool in tools[:4]
-    )
-    suffix = " Additional matching tools are available." if len(tools) > 4 else ""
+def _card_description(*, toolkit_slug: str, tool: ComposioTool) -> str:
+    required = ", ".join(_required_fields(tool.input_parameters)) or "none"
     return (
-        f"Scoped read-only Composio tools from {toolkit_slug}. "
-        f"Candidate tools: {examples}.{suffix}"
+        f"Scoped read-only Composio tool from {toolkit_slug}: {tool.slug}. "
+        f"{tool.description or tool.name} Required fields: {required}."
     )
 
 
@@ -196,6 +199,13 @@ def _native_replacements(capabilities: tuple[str, ...]) -> tuple[str, ...]:
     if "web_search" in capabilities or "current_research" in capabilities:
         return ("web_search",)
     return ()
+
+
+def _required_fields(parameters: dict) -> tuple[str, ...]:
+    required = parameters.get("required")
+    if not isinstance(required, list):
+        return ()
+    return tuple(str(item) for item in required if isinstance(item, str) and item)
 
 
 def _is_read_only(tool: ComposioTool) -> bool:

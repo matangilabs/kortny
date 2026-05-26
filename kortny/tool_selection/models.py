@@ -18,6 +18,7 @@ class ToolCard:
     toolkit_slug: str | None = None
     tool_slugs: tuple[str, ...] = ()
     tool_count: int | None = None
+    required_fields: tuple[str, ...] = ()
     visibility_scope_type: str | None = None
     visibility_scope_id: str | None = None
     can_replace_native_tools: tuple[str, ...] = ()
@@ -35,6 +36,7 @@ class ToolCard:
             "toolkit_slug": self.toolkit_slug,
             "tool_slugs": list(self.tool_slugs),
             "tool_count": self.tool_count,
+            "required_fields": list(self.required_fields),
             "visibility_scope_type": self.visibility_scope_type,
             "can_replace_native_tools": list(self.can_replace_native_tools),
         }

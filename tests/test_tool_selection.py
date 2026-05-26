@@ -20,7 +20,7 @@ def test_heuristic_selector_selects_firecrawl_for_current_research() -> None:
     )
 
     assert [selection.registry_name for selection in result.selected_tools] == [
-        "composio_execute"
+        "composio_firecrawl_search"
     ]
     assert result.suppressed_native_tools == ("web_search",)
     assert result.fallback_used is True
@@ -36,7 +36,7 @@ def test_heuristic_selector_rejects_irrelevant_external_tool() -> None:
 
     assert result.selected_tools == ()
     assert result.suppressed_native_tools == ()
-    assert result.rejected_tools[0].registry_name == "composio_execute"
+    assert result.rejected_tools[0].registry_name == "composio_firecrawl_search"
 
 
 def test_llm_selector_filters_to_allowed_tools_and_native_suppressions() -> None:
@@ -44,7 +44,7 @@ def test_llm_selector_filters_to_allowed_tools_and_native_suppressions() -> None
         content="""
         {
           "selected_tools": [
-            {"registry_name": "composio_execute", "confidence": 0.91, "reason": "Needs current web search"},
+            {"registry_name": "composio_firecrawl_search", "confidence": 0.91, "reason": "Needs current web search"},
             {"registry_name": "unknown_external", "confidence": 0.99, "reason": "Not allowed"}
           ],
           "suppressed_native_tools": ["web_search", "unknown_native"],
@@ -62,7 +62,7 @@ def test_llm_selector_filters_to_allowed_tools_and_native_suppressions() -> None
     )
 
     assert [selection.registry_name for selection in result.selected_tools] == [
-        "composio_execute"
+        "composio_firecrawl_search"
     ]
     assert result.suppressed_native_tools == ("web_search",)
     assert result.route_reason == "needs_current_web_research"
@@ -82,14 +82,15 @@ def native_web_search_card() -> ToolCard:
 
 def firecrawl_card() -> ToolCard:
     return ToolCard(
-        registry_name="composio_execute",
+        registry_name="composio_firecrawl_search",
         provider="composio",
         display_name="Firecrawl web research",
         description="Search or scrape current web content.",
         capabilities=("web_search", "web_scrape", "current_research"),
         side_effect="read",
         toolkit_slug="firecrawl",
-        tool_slugs=("FIRECRAWL_SEARCH", "FIRECRAWL_SCRAPE"),
+        tool_slugs=("FIRECRAWL_SEARCH",),
+        required_fields=("q",),
         visibility_scope_type="user",
         visibility_scope_id="U123",
         can_replace_native_tools=("web_search",),

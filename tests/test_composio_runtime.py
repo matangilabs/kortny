@@ -22,7 +22,10 @@ from kortny.db.session import make_engine, make_session_factory, normalize_datab
 from kortny.tasks import TaskService
 from kortny.tool_selection import ToolCard, ToolSelection, ToolSelectionResult
 from kortny.tools import ToolResult
-from kortny.tools.composio_execute import ComposioExecuteTool
+from kortny.tools.composio_execute import (
+    ComposioExecuteTool,
+    composio_runtime_tool_name,
+)
 from kortny.tools.types import JsonObject, JsonSchema
 from kortny.worker import AgentTaskExecutor
 
@@ -154,18 +157,12 @@ def test_composio_execute_tool_uses_scoped_connection(
         session=db_session,
         task=task,
         client=client,
-        allowed_tools=firecrawl_tools(),
-        toolkit_slug="firecrawl",
+        tool=firecrawl_tools()[0],
     )
 
-    assert tool.has_available_connections is True
-    result = tool.invoke(
-        {
-            "toolkit_slug": "firecrawl",
-            "tool_slug": "FIRECRAWL_SCRAPE",
-            "arguments": {"url": "https://example.com"},
-        }
-    )
+    assert tool.has_available_connection is True
+    assert tool.parameters["required"] == ["url"]
+    result = tool.invoke({"url": "https://example.com"})
 
     assert client.calls == [
         {
@@ -202,18 +199,24 @@ def test_composio_execute_tool_rejects_unapproved_tool(
         session=db_session,
         task=task,
         client=FakeComposioClient(),
-        allowed_tools=firecrawl_tools(),
-        toolkit_slug="firecrawl",
+        tool=firecrawl_tools()[0],
     )
 
-    with pytest.raises(ValueError, match="not approved"):
-        tool.invoke(
-            {
-                "toolkit_slug": "firecrawl",
-                "tool_slug": "FIRECRAWL_MAP",
-                "arguments": {"url": "https://example.com"},
-            }
-        )
+    with pytest.raises(ValueError, match="missing required"):
+        tool.invoke({})
+
+
+def test_composio_runtime_tool_names_are_specific_and_bounded() -> None:
+    assert (
+        composio_runtime_tool_name("notion", "NOTION_SEARCH_NOTION_PAGE")
+        == "composio_notion_search_notion_page"
+    )
+    long_name = composio_runtime_tool_name(
+        "affinda",
+        "AFFINDA_CREATE_JOB_DESCRIPTION_SEARCH_EMBED_URL",
+    )
+    assert len(long_name) <= 64
+    assert long_name.startswith("composio_affinda_create_job_description")
 
 
 def test_worker_registry_adds_composio_tool_for_scoped_connection(
@@ -239,7 +242,7 @@ def test_worker_registry_adds_composio_tool_for_scoped_connection(
             ToolSelectionResult(
                 selected_tools=(
                     ToolSelection(
-                        registry_name="composio_firecrawl_execute",
+                        registry_name="composio_firecrawl_scrape",
                         confidence=0.9,
                         reason="Firecrawl is scoped and relevant.",
                     ),
@@ -256,7 +259,7 @@ def test_worker_registry_adds_composio_tool_for_scoped_connection(
         working_dir=tmp_path,
     )
 
-    assert "composio_firecrawl_execute" in registry.names()
+    assert "composio_firecrawl_scrape" in registry.names()
     assert "web_search" not in registry.names()
     event = next(
         event
@@ -265,7 +268,7 @@ def test_worker_registry_adds_composio_tool_for_scoped_connection(
     )
     assert (
         event.payload["selected_tools"][0]["registry_name"]
-        == "composio_firecrawl_execute"
+        == "composio_firecrawl_scrape"
     )
     assert event.payload["suppressed_native_tools"] == ["web_search"]
 
@@ -313,7 +316,7 @@ def test_worker_registry_uses_dynamic_composio_toolkit_catalog(
             ToolSelectionResult(
                 selected_tools=(
                     ToolSelection(
-                        registry_name="composio_notion_execute",
+                        registry_name="composio_notion_search",
                         confidence=0.9,
                         reason="Notion has scoped matching docs.",
                     ),
@@ -329,9 +332,62 @@ def test_worker_registry_uses_dynamic_composio_toolkit_catalog(
         working_dir=tmp_path,
     )
 
-    assert "composio_notion_execute" in registry.names()
+    assert "composio_notion_search" in registry.names()
+    tool = registry.get("composio_notion_search")
+    assert tool.parameters["properties"]["query"]["type"] == "string"
     assert composio_client.list_tool_calls[0]["toolkit_slug"] == "notion"
     assert composio_client.list_tool_calls[0]["query"] == task.input
+
+
+def test_worker_registry_exposes_required_fields_for_exact_composio_tool(
+    db_session: Session,
+    tmp_path: Path,
+) -> None:
+    task = create_task(db_session, slack_channel_id="CResearch", slack_user_id="UAnalyst")
+    task.input = "Are there any actionable items in the connected docs?"
+    add_connection(
+        db_session,
+        task,
+        connected_account_id="ca_notion",
+        scope_type="workspace",
+        scope_id=None,
+        toolkit_slug="notion",
+    )
+    db_session.commit()
+    settings = build_settings(composio_api_key="composio-key")
+    composio_client = FakeComposioClient(
+        tools_by_toolkit={"notion": notion_tools()},
+    )
+
+    registry = AgentTaskExecutor(
+        settings=settings,
+        web_search_tool=StaticWebSearchTool(),
+        composio_client=composio_client,
+        tool_selector=StaticToolSelector(
+            ToolSelectionResult(
+                selected_tools=(
+                    ToolSelection(
+                        registry_name="composio_notion_query_database",
+                        confidence=0.9,
+                        reason="Database query is relevant only after discovery.",
+                    ),
+                ),
+                route_reason="test_selection",
+            )
+        ),
+    )._build_registry(
+        settings=settings,
+        session=db_session,
+        task=task,
+        task_service=TaskService(db_session),
+        working_dir=tmp_path,
+    )
+
+    tool = registry.get("composio_notion_query_database")
+    assert tool.parameters["required"] == ["database_id"]
+    with pytest.raises(ValueError, match="database_id"):
+        tool.invoke({"page_size": 10})
+    assert composio_client.calls == []
 
 
 def cleanup_database(session: Session) -> None:
@@ -485,6 +541,7 @@ def firecrawl_tools() -> tuple[ComposioTool, ...]:
             input_parameters={
                 "type": "object",
                 "properties": {"url": {"type": "string"}},
+                "required": ["url"],
             },
             tags=("readOnlyHint",),
             version=None,
@@ -497,6 +554,40 @@ def firecrawl_tools() -> tuple[ComposioTool, ...]:
             input_parameters={
                 "type": "object",
                 "properties": {"q": {"type": "string"}},
+                "required": ["q"],
+            },
+            tags=("readOnlyHint",),
+            version=None,
+        ),
+    )
+
+
+def notion_tools() -> tuple[ComposioTool, ...]:
+    return (
+        ComposioTool(
+            slug="NOTION_SEARCH_NOTION_PAGE",
+            name="Search Notion pages and databases",
+            description="Search Notion pages and databases by title.",
+            toolkit_slug="notion",
+            input_parameters={
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+            },
+            tags=("readOnlyHint",),
+            version=None,
+        ),
+        ComposioTool(
+            slug="NOTION_QUERY_DATABASE",
+            name="Query database",
+            description="Query a Notion database by ID.",
+            toolkit_slug="notion",
+            input_parameters={
+                "type": "object",
+                "properties": {
+                    "database_id": {"type": "string"},
+                    "page_size": {"type": "integer"},
+                },
+                "required": ["database_id"],
             },
             tags=("readOnlyHint",),
             version=None,
