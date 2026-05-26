@@ -229,6 +229,47 @@ def test_dashboard_integrations_page_shows_providers_tools_and_redacts_secrets(
     assert "brave-dashboard-secret" not in response.text
     assert "composio-dashboard-secret" not in response.text
     assert 'href="/integrations" aria-current="page"' in response.text
+    assert 'href="/composio"' in response.text
+
+
+def test_dashboard_composio_page_renders_catalog_shell(
+    client: tuple[TestClient, Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    test_client, _session = client
+    set_runtime_settings_env(monkeypatch)
+    monkeypatch.setenv("COMPOSIO_API_KEY", "composio-dashboard-secret")
+    login(test_client)
+
+    response = test_client.get("/composio")
+
+    assert response.status_code == 200
+    assert "Composio" in response.text
+    assert "Integration Catalog" in response.text
+    assert "Catalog not available" in response.text
+    assert 'href="/composio" aria-current="page"' in response.text
+    assert "composio-dashboard-secret" not in response.text
+
+
+def test_dashboard_composio_detail_renders_scope_preview(
+    client: tuple[TestClient, Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    test_client, _session = client
+    set_runtime_settings_env(monkeypatch)
+    monkeypatch.setenv("COMPOSIO_API_KEY", "composio-dashboard-secret")
+    login(test_client)
+
+    response = test_client.get("/composio/github")
+
+    assert response.status_code == 200
+    assert "github" in response.text
+    assert "Visibility Scope" in response.text
+    assert "Personal" in response.text
+    assert "Channel" in response.text
+    assert "Workspace" in response.text
+    assert "Connect flow pending" in response.text
+    assert "composio-dashboard-secret" not in response.text
 
 
 def test_dashboard_integrations_page_marks_missing_optional_search(

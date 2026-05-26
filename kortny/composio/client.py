@@ -28,6 +28,9 @@ class ComposioToolkit:
     triggers_count: int
     logo_url: str | None
     app_url: str | None
+    auth_guide_url: str | None
+    base_url: str | None
+    enabled: bool
     no_auth: bool
     is_local_toolkit: bool
 
@@ -78,10 +81,19 @@ class ComposioClient:
         response = self._get("/api/v3.1/toolkits", params=params)
         payload = response.json()
         return ComposioCatalog(
-            items=tuple(_toolkit_from_payload(item) for item in payload.get("items", ())),
+            items=tuple(
+                _toolkit_from_payload(item) for item in payload.get("items", ())
+            ),
             total_items=_optional_int(payload.get("total_items")),
             next_cursor=_optional_str(payload.get("next_cursor")),
         )
+
+    def get_toolkit(self, slug: str) -> ComposioToolkit:
+        response = self._get(f"/api/v3.1/toolkits/{slug}", params={})
+        payload = response.json()
+        if isinstance(payload.get("toolkit"), dict):
+            payload = payload["toolkit"]
+        return _toolkit_from_payload(payload)
 
     def _get(self, path: str, *, params: dict[str, str | int]) -> httpx.Response:
         client = self.http_client or httpx.Client(timeout=self.timeout_seconds)
@@ -115,6 +127,9 @@ def _toolkit_from_payload(payload: dict[str, Any]) -> ComposioToolkit:
         triggers_count=_optional_int(meta.get("triggers_count")) or 0,
         logo_url=_optional_str(meta.get("logo")),
         app_url=_optional_str(meta.get("app_url")),
+        auth_guide_url=_optional_str(payload.get("auth_guide_url")),
+        base_url=_optional_str(payload.get("base_url")),
+        enabled=bool(payload.get("enabled", True)),
         no_auth=bool(payload.get("no_auth")),
         is_local_toolkit=bool(payload.get("is_local_toolkit")),
     )

@@ -22,6 +22,8 @@ from kortny.config import Settings, SettingsError, load_settings
 from kortny.dashboard.data import (
     DEFAULT_PAGE_SIZE,
     MAX_PAGE_SIZE,
+    get_composio_catalog_dashboard,
+    get_composio_toolkit_detail,
     get_dashboard_overview,
     get_integration_dashboard,
     get_memory_dashboard,
@@ -300,6 +302,57 @@ def register_routes(app: FastAPI) -> None:
                 "dashboard_user": username,
                 "integrations": integration_dashboard,
                 "composio_q": composio_q or "",
+            },
+        )
+
+    @app.get("/composio", response_class=HTMLResponse)
+    def composio_catalog(
+        request: Request,
+        username: Annotated[str, Depends(require_user)],
+        session: Annotated[Session, Depends(get_session)],
+        q: Annotated[str | None, Query()] = None,
+    ) -> Response:
+        runtime_settings, runtime_error = _load_runtime_settings()
+        catalog = get_composio_catalog_dashboard(
+            session,
+            runtime_settings=runtime_settings,
+            query=q,
+        )
+        return templates.TemplateResponse(
+            request=request,
+            name="composio.html",
+            context={
+                "active_page": "composio",
+                "dashboard_user": username,
+                "catalog": catalog,
+                "runtime_error": runtime_error,
+                "q": q or "",
+            },
+        )
+
+    @app.get("/composio/{toolkit_slug}", response_class=HTMLResponse)
+    def composio_detail(
+        request: Request,
+        toolkit_slug: str,
+        username: Annotated[str, Depends(require_user)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> Response:
+        runtime_settings, runtime_error = _load_runtime_settings()
+        detail = get_composio_toolkit_detail(
+            session,
+            slug=toolkit_slug,
+            runtime_settings=runtime_settings,
+        )
+        if detail.error and "404" in detail.error:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+        return templates.TemplateResponse(
+            request=request,
+            name="composio_detail.html",
+            context={
+                "active_page": "composio",
+                "dashboard_user": username,
+                "detail": detail,
+                "runtime_error": runtime_error,
             },
         )
 

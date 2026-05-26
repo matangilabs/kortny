@@ -1,0 +1,114 @@
+{% extends "base.html" %}
+
+{% block title %}Composio - Kortny Dashboard{% endblock %}
+
+{% block content %}
+  <section class="page-heading">
+    <div>
+      <h1>Composio</h1>
+      <p>Browse supported app integrations and manage the local Slack visibility policy for connected accounts.</p>
+    </div>
+    <a class="btn-ghost" href="/integrations">Integration Registry</a>
+  </section>
+
+  <section class="summary-grid integration-summary" aria-label="Composio overview">
+    <div class="card metric-card metric-{{ catalog.tone }}">
+      <span>Status</span>
+      <strong>{{ catalog.status }}</strong>
+      <small>Catalog and scoped account metadata</small>
+    </div>
+    <div class="card metric-card">
+      <span>Supported</span>
+      <strong>
+        {% if catalog.total_items is not none %}
+          {{ catalog.total_items|number }}
+        {% else %}
+          -
+        {% endif %}
+      </strong>
+      <small>Toolkits returned by Composio</small>
+    </div>
+    <div class="card metric-card">
+      <span>Connections</span>
+      <strong>{{ catalog.active_connection_count|number }} / {{ catalog.connection_count|number }}</strong>
+      <small>Active scoped connections</small>
+    </div>
+    <div class="card metric-card">
+      <span>Shown</span>
+      <strong>{{ catalog.visible_count|number }}</strong>
+      <small>Current catalog results</small>
+    </div>
+  </section>
+
+  {% if runtime_error %}
+    <div class="notice notice-danger">
+      Runtime settings could not be fully loaded. Fix System configuration before connecting apps.
+    </div>
+  {% endif %}
+
+  {% if catalog.error %}
+    <div class="notice notice-warning">
+      {{ catalog.error }}
+    </div>
+  {% endif %}
+
+  <section class="composio-directory" aria-label="Composio integration catalog">
+    <div class="section-header-row">
+      <div>
+        <h2>Integration Catalog</h2>
+        <p>Search Composio-supported apps. Connection actions will use hosted Connect Links in the next slice.</p>
+      </div>
+      <form class="catalog-search" method="get" action="/composio">
+        <label>
+          Search
+          <input type="search" name="q" value="{{ q }}" placeholder="github, gmail, notion..." autocomplete="off">
+        </label>
+        <button class="btn-ghost" type="submit">Search</button>
+        {% if q %}
+          <a class="btn-ghost" href="/composio">Clear</a>
+        {% endif %}
+      </form>
+    </div>
+
+    {% if catalog.toolkits %}
+      <div class="composio-card-grid">
+        {% for toolkit in catalog.toolkits %}
+          <a class="composio-card" href="/composio/{{ toolkit.slug }}">
+            <header>
+              <h3>{{ toolkit.name }}</h3>
+              {% if toolkit.connected %}
+                <span class="badge badge-success">Connected</span>
+              {% endif %}
+            </header>
+            {% if toolkit.description %}
+              <p>{{ toolkit.description }}</p>
+            {% endif %}
+            <div class="catalog-meta">
+              <span class="catalog-pill catalog-pill-count">{{ toolkit.tools_count|number }} tools</span>
+              <span class="catalog-pill catalog-pill-trigger">{{ toolkit.triggers_count|number }} triggers</span>
+              {% if toolkit.no_auth %}
+                <span class="catalog-pill catalog-pill-noauth">No auth</span>
+              {% elif toolkit.auth_schemes %}
+                <span class="catalog-pill catalog-pill-auth">{{ toolkit.auth_schemes|join(", ") }}</span>
+              {% endif %}
+            </div>
+            {% if toolkit.categories %}
+              <div class="catalog-tags">
+                {% for category in toolkit.categories[:3] %}
+                  <span class="catalog-pill catalog-pill-category">{{ category }}</span>
+                {% endfor %}
+              </div>
+            {% endif %}
+          </a>
+        {% endfor %}
+      </div>
+    {% elif catalog.configured and catalog.enabled and not catalog.error %}
+      <p class="empty-state">No Composio toolkits matched the current search.</p>
+    {% else %}
+      <article class="card empty-panel">
+        <h2>Catalog not available</h2>
+        <p>Add `COMPOSIO_API_KEY` and keep `COMPOSIO_CATALOG_ENABLED=true` to browse supported integrations.</p>
+      </article>
+    {% endif %}
+  </section>
+{% endblock %}

@@ -468,6 +468,7 @@ class ComposioToolkitRow:
     no_auth: bool
     connection_status: str
     connection_tone: str
+    connected: bool
 
 
 @dataclass(frozen=True)
@@ -497,6 +498,28 @@ class ComposioCatalogView:
     error: str | None
     toolkits: tuple[ComposioToolkitRow, ...]
     connections: tuple[ComposioConnectionRow, ...]
+
+
+@dataclass(frozen=True)
+class ComposioScopeOption:
+    name: str
+    key: str
+    description: str
+    default: bool = False
+    risk: str | None = None
+
+
+@dataclass(frozen=True)
+class ComposioToolkitDetail:
+    slug: str
+    configured: bool
+    status: str
+    tone: str
+    toolkit: ComposioToolkitRow | None
+    raw_toolkit: ComposioToolkit | None
+    connections: tuple[ComposioConnectionRow, ...]
+    scope_options: tuple[ComposioScopeOption, ...]
+    error: str | None
 
 
 @dataclass(frozen=True)
@@ -1248,6 +1271,95 @@ def get_integration_dashboard(
     )
 
 
+def get_composio_catalog_dashboard(
+    session: Session,
+    *,
+    runtime_settings: Settings | None = None,
+    query: str | None = None,
+    composio_client: ComposioClient | None = None,
+) -> ComposioCatalogView:
+    """Return the Composio catalog view for the dedicated management page."""
+
+    return _composio_catalog_view(
+        session=session,
+        settings=runtime_settings,
+        query=query,
+        client=composio_client,
+    )
+
+
+def get_composio_toolkit_detail(
+    session: Session,
+    *,
+    slug: str,
+    runtime_settings: Settings | None = None,
+    composio_client: ComposioClient | None = None,
+) -> ComposioToolkitDetail:
+    """Return one Composio toolkit and local scoped connection metadata."""
+
+    normalized_slug = slug.strip().lower()
+    connections = tuple(
+        connection
+        for connection in _composio_connection_rows(session)
+        if connection.toolkit_slug == normalized_slug
+    )
+    if runtime_settings is None or not runtime_settings.composio_api_key:
+        return ComposioToolkitDetail(
+            slug=normalized_slug,
+            configured=False,
+            status="Not configured",
+            tone="neutral",
+            toolkit=None,
+            raw_toolkit=None,
+            connections=connections,
+            scope_options=_composio_scope_options(),
+            error=None,
+        )
+    if not runtime_settings.composio_catalog_enabled:
+        return ComposioToolkitDetail(
+            slug=normalized_slug,
+            configured=True,
+            status="Catalog disabled",
+            tone="warning",
+            toolkit=None,
+            raw_toolkit=None,
+            connections=connections,
+            scope_options=_composio_scope_options(),
+            error="COMPOSIO_CATALOG_ENABLED is false.",
+        )
+
+    client = composio_client or ComposioClient(
+        api_key=runtime_settings.composio_api_key,
+        timeout_seconds=runtime_settings.composio_request_timeout_seconds,
+    )
+    try:
+        toolkit = client.get_toolkit(normalized_slug)
+    except ComposioCatalogError as exc:
+        return ComposioToolkitDetail(
+            slug=normalized_slug,
+            configured=True,
+            status="Unavailable",
+            tone="danger",
+            toolkit=None,
+            raw_toolkit=None,
+            connections=connections,
+            scope_options=_composio_scope_options(),
+            error=_short_error(str(exc)),
+        )
+    status_map = _composio_status_by_toolkit(connections)
+    return ComposioToolkitDetail(
+        slug=normalized_slug,
+        configured=True,
+        status="Connected" if status_map.get(toolkit.slug) == "active" else "Available",
+        tone="success" if status_map.get(toolkit.slug) == "active" else "neutral",
+        toolkit=_composio_toolkit_row(toolkit, status_map),
+        raw_toolkit=toolkit,
+        connections=connections,
+        scope_options=_composio_scope_options(),
+        error=None,
+    )
+
+
 def parse_date_bound(
     value: str | None, *, inclusive_end: bool = False
 ) -> datetime | None:
@@ -1946,6 +2058,30 @@ def _composio_toolkit_row(
         no_auth=toolkit.no_auth,
         connection_status=connection_status,
         connection_tone=connection_tone,
+        connected=status == "active",
+    )
+
+
+def _composio_scope_options() -> tuple[ComposioScopeOption, ...]:
+    return (
+        ComposioScopeOption(
+            name="Personal",
+            key="user",
+            description="Only the Slack user who connected the account can use it.",
+            default=True,
+        ),
+        ComposioScopeOption(
+            name="Channel",
+            key="channel",
+            description="Tasks in one Slack channel can use the connected account.",
+            risk="Good for shared project apps; risky for personal inboxes or calendars.",
+        ),
+        ComposioScopeOption(
+            name="Workspace",
+            key="workspace",
+            description="Any task in the Slack workspace can use the connected account.",
+            risk="Requires explicit admin-level intent before enabling.",
+        ),
     )
 
 

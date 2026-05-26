@@ -165,28 +165,27 @@
           {% for toolkit in integrations.composio_catalog.toolkits %}
             <article class="catalog-toolkit">
               <header>
-                <div>
-                  <h3>{{ toolkit.name }}</h3>
-                  <code>{{ toolkit.slug }}</code>
-                </div>
-                <span class="badge badge-{{ toolkit.connection_tone }}">{{ toolkit.connection_status }}</span>
+                <h3>{{ toolkit.name }}</h3>
+                {% if toolkit.connected %}
+                  <span class="badge badge-success">Connected</span>
+                {% endif %}
               </header>
               {% if toolkit.description %}
                 <p>{{ toolkit.description }}</p>
               {% endif %}
               <div class="catalog-meta">
-                <span>{{ toolkit.tools_count|number }} tools</span>
-                <span>{{ toolkit.triggers_count|number }} triggers</span>
+                <span class="catalog-pill catalog-pill-count">{{ toolkit.tools_count|number }} tools</span>
+                <span class="catalog-pill catalog-pill-trigger">{{ toolkit.triggers_count|number }} triggers</span>
                 {% if toolkit.no_auth %}
-                  <span>No auth</span>
+                  <span class="catalog-pill catalog-pill-noauth">No auth</span>
                 {% elif toolkit.auth_schemes %}
-                  <span>{{ toolkit.auth_schemes|join(", ") }}</span>
+                  <span class="catalog-pill catalog-pill-auth">{{ toolkit.auth_schemes|join(", ") }}</span>
                 {% endif %}
               </div>
               {% if toolkit.categories %}
                 <div class="catalog-tags">
                   {% for category in toolkit.categories[:3] %}
-                    <span>{{ category }}</span>
+                    <span class="catalog-pill catalog-pill-category">{{ category }}</span>
                   {% endfor %}
                 </div>
               {% endif %}

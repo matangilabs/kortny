@@ -37,6 +37,12 @@
   --chart-danger-end: rgb(180 35 24 / 38%);
   --chart-mix-start: rgb(37 99 235 / 78%);
   --chart-mix-end: rgb(20 125 79 / 62%);
+  --pill-auth: #7e22ce;
+  --pill-auth-bg: rgb(126 34 206 / 10%);
+  --pill-auth-border: rgb(126 34 206 / 24%);
+  --pill-category: #0e7490;
+  --pill-category-bg: rgb(14 116 144 / 10%);
+  --pill-category-border: rgb(14 116 144 / 24%);
   --login-glow: rgb(37 99 235 / 10%);
 }
 
@@ -78,6 +84,12 @@
   --chart-danger-end: rgb(255 138 128 / 30%);
   --chart-mix-start: rgb(122 162 255 / 78%);
   --chart-mix-end: rgb(121 214 159 / 54%);
+  --pill-auth: #d8b4fe;
+  --pill-auth-bg: rgb(216 180 254 / 14%);
+  --pill-auth-border: rgb(216 180 254 / 28%);
+  --pill-category: #67e8f9;
+  --pill-category-bg: rgb(103 232 249 / 12%);
+  --pill-category-border: rgb(103 232 249 / 26%);
   --login-glow: rgb(122 162 255 / 12%);
 }
 
@@ -472,8 +484,12 @@ p {
   display: inline-flex;
   font-size: 12px;
   font-weight: 700;
+  line-height: 1.25;
+  max-width: 100%;
   min-height: 22px;
+  overflow-wrap: anywhere;
   padding: 2px 8px;
+  white-space: normal;
 }
 
 .status-succeeded {
@@ -1729,15 +1745,251 @@ pre {
   gap: 6px;
 }
 
-.catalog-meta span,
-.catalog-tags span {
+.catalog-pill {
+  align-items: center;
+  border: 1px solid;
+  border-radius: 999px;
+  display: inline-flex;
+  flex: 0 1 auto;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.2;
+  max-width: 100%;
+  min-width: 0;
+  min-height: 24px;
+  overflow-wrap: anywhere;
+  padding: 4px 8px;
+  white-space: normal;
+  word-break: break-word;
+}
+
+.catalog-pill-count {
+  background: var(--accent-bg);
+  border-color: var(--accent-border);
+  color: var(--accent-strong);
+}
+
+.catalog-pill-trigger {
+  background: color-mix(in srgb, var(--warning-bg) 74%, var(--card));
+  border-color: color-mix(in srgb, var(--warning) 24%, transparent);
+  color: var(--warning);
+}
+
+.catalog-pill-auth {
+  background: var(--pill-auth-bg);
+  border-color: var(--pill-auth-border);
+  color: var(--pill-auth);
+}
+
+.catalog-pill-noauth {
+  background: var(--success-bg);
+  border-color: color-mix(in srgb, var(--success) 28%, transparent);
+  color: var(--success);
+}
+
+.catalog-pill-category {
+  background: var(--pill-category-bg);
+  border-color: var(--pill-category-border);
+  color: var(--pill-category);
+}
+
+.composio-directory {
+  display: grid;
+  gap: 16px;
+}
+
+.composio-card-grid {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.composio-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  color: inherit;
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  padding: 14px;
+  position: relative;
+  text-decoration: none;
+  transition: border-color 160ms ease, transform 160ms ease;
+}
+
+.composio-card:hover {
+  border-color: var(--accent-border);
+  text-decoration: none;
+  transform: translateY(-1px);
+}
+
+.composio-card header,
+.composio-detail-head {
+  align-items: start;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.composio-card h3 {
+  color: var(--foreground);
+  font-size: 15px;
+  line-height: 1.25;
+  margin: 0;
+}
+
+.composio-card code,
+.composio-detail-main code {
+  color: var(--muted-foreground);
+  display: inline-block;
+  font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  margin-top: 3px;
+  overflow-wrap: anywhere;
+}
+
+.composio-card p {
+  margin-top: 0;
+}
+
+.empty-panel {
+  padding: 18px;
+}
+
+.empty-state {
+  color: var(--muted-foreground);
+  margin: 0;
+  padding: 14px 0;
+}
+
+.composio-detail-grid {
+  display: grid;
+  gap: 20px;
+  grid-template-columns: minmax(0, 1.35fr) minmax(280px, 0.65fr);
+  margin-bottom: 20px;
+}
+
+.composio-detail-main,
+.composio-setup-card,
+.scope-options-card,
+.composio-action-card,
+.composio-connections-card {
+  min-width: 0;
+  padding: 16px;
+}
+
+.composio-detail-main {
+  display: grid;
+  gap: 14px;
+}
+
+.composio-kicker {
+  color: var(--muted-foreground);
+  display: block;
+  font-size: 11px;
+  font-weight: 800;
+  margin-bottom: 4px;
+  text-transform: uppercase;
+}
+
+.composio-detail-head h2,
+.scope-options-card h2,
+.composio-action-card h2,
+.composio-connections-card h2,
+.composio-setup-card h2 {
+  margin: 0;
+}
+
+.setup-list {
+  display: grid;
+  gap: 8px;
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+}
+
+.setup-list li {
+  align-items: center;
   background: var(--muted);
   border: 1px solid var(--border);
-  border-radius: 999px;
+  border-radius: var(--radius);
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  padding: 10px 11px;
+}
+
+.setup-list li.complete {
+  background: var(--success-bg);
+  border-color: color-mix(in srgb, var(--success) 28%, var(--border));
+}
+
+.setup-list strong {
+  color: var(--foreground);
+}
+
+.setup-list span {
   color: var(--muted-foreground);
   font-size: 12px;
+  font-weight: 750;
+}
+
+.scope-options-card header {
+  margin-bottom: 14px;
+}
+
+.scope-option-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.scope-option {
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 13px;
+}
+
+.scope-option.default {
+  background: var(--success-bg);
+  border-color: color-mix(in srgb, var(--success) 28%, var(--border));
+}
+
+.scope-option > div {
+  align-items: start;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.scope-option h3 {
+  color: var(--foreground);
+  font-size: 14px;
   line-height: 1.25;
-  padding: 4px 7px;
+  margin: 0;
+}
+
+.scope-option p,
+.scope-option small,
+.composio-action-card p {
+  margin-top: 0;
+}
+
+.scope-option small {
+  color: var(--warning);
+}
+
+.composio-connections-card {
+  margin-bottom: 20px;
+}
+
+.composio-connections-card > header {
+  margin-bottom: 12px;
 }
 
 .tool-list {
@@ -2254,6 +2506,9 @@ pre {
   .catalog-toolbar,
   .catalog-stats,
   .catalog-grid,
+  .composio-card-grid,
+  .composio-detail-grid,
+  .scope-option-grid,
   .connection-row,
   .tool-card-grid,
   .tool-details-panel {

@@ -55,3 +55,38 @@ def test_composio_client_lists_toolkits_from_catalog_payload() -> None:
     assert toolkit.managed_auth_schemes == ("oauth2",)
     assert toolkit.tools_count == 12
     assert toolkit.triggers_count == 5
+
+
+def test_composio_client_gets_toolkit_detail() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v3.1/toolkits/github"
+        return httpx.Response(
+            200,
+            json={
+                "slug": "github",
+                "name": "GitHub",
+                "enabled": True,
+                "auth_guide_url": "https://composio.dev/auth/github",
+                "base_url": "https://api.github.com",
+                "auth_schemes": ["oauth2"],
+                "composio_managed_auth_schemes": ["oauth2"],
+                "meta": {
+                    "description": "Manage GitHub repositories.",
+                    "tools_count": 12,
+                    "triggers_count": 5,
+                    "categories": [{"name": "Developer Tools"}],
+                },
+            },
+        )
+
+    client = ComposioClient(
+        api_key="test-key",
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    toolkit = client.get_toolkit("github")
+
+    assert toolkit.slug == "github"
+    assert toolkit.enabled is True
+    assert toolkit.auth_guide_url == "https://composio.dev/auth/github"
+    assert toolkit.base_url == "https://api.github.com"

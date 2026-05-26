@@ -1,0 +1,157 @@
+{% extends "base.html" %}
+
+{% block title %}{{ detail.slug }} - Composio - Kortny Dashboard{% endblock %}
+
+{% block content %}
+  <section class="page-heading">
+    <div>
+      <h1>
+        {% if detail.toolkit %}
+          {{ detail.toolkit.name }}
+        {% else %}
+          {{ detail.slug }}
+        {% endif %}
+      </h1>
+      <p>Integration details, connection state, and Slack visibility options.</p>
+    </div>
+    <a class="btn-ghost" href="/composio">Back to Catalog</a>
+  </section>
+
+  {% if runtime_error %}
+    <div class="notice notice-danger">
+      Runtime settings could not be fully loaded. Fix System configuration before connecting apps.
+    </div>
+  {% endif %}
+
+  {% if detail.error %}
+    <div class="notice notice-warning">
+      {{ detail.error }}
+    </div>
+  {% endif %}
+
+  <section class="composio-detail-grid">
+    <article class="card composio-detail-main">
+      <div class="composio-detail-head">
+        <div>
+          <span class="composio-kicker">Toolkit</span>
+          <h2>
+            {% if detail.toolkit %}
+              {{ detail.toolkit.name }}
+            {% else %}
+              {{ detail.slug }}
+            {% endif %}
+          </h2>
+          <code>{{ detail.slug }}</code>
+        </div>
+        <span class="badge badge-{{ detail.tone }}">{{ detail.status }}</span>
+      </div>
+
+      {% if detail.toolkit %}
+        {% if detail.toolkit.description %}
+          <p>{{ detail.toolkit.description }}</p>
+        {% endif %}
+        <div class="catalog-meta">
+          <span class="catalog-pill catalog-pill-count">{{ detail.toolkit.tools_count|number }} tools</span>
+          <span class="catalog-pill catalog-pill-trigger">{{ detail.toolkit.triggers_count|number }} triggers</span>
+          {% if detail.toolkit.no_auth %}
+            <span class="catalog-pill catalog-pill-noauth">No auth required</span>
+          {% elif detail.toolkit.auth_schemes %}
+            <span class="catalog-pill catalog-pill-auth">{{ detail.toolkit.auth_schemes|join(", ") }}</span>
+          {% endif %}
+        </div>
+        {% if detail.toolkit.categories %}
+          <div class="catalog-tags">
+            {% for category in detail.toolkit.categories %}
+              <span class="catalog-pill catalog-pill-category">{{ category }}</span>
+            {% endfor %}
+          </div>
+        {% endif %}
+      {% else %}
+        <p>Toolkit metadata is not loaded yet.</p>
+      {% endif %}
+    </article>
+
+    <aside class="card composio-setup-card">
+      <h2>Setup State</h2>
+      <ul class="setup-list">
+        <li class="{{ 'complete' if detail.configured else '' }}">
+          <strong>Composio API key</strong>
+          <span>{{ "Configured" if detail.configured else "Missing" }}</span>
+        </li>
+        <li>
+          <strong>Auth Config</strong>
+          <span>Mapping not wired yet</span>
+        </li>
+        <li>
+          <strong>Connect Link</strong>
+          <span>Next slice</span>
+        </li>
+        <li>
+          <strong>Runtime tools</strong>
+          <span>Waiting on scope gate</span>
+        </li>
+      </ul>
+    </aside>
+  </section>
+
+  <section class="composio-detail-grid">
+    <article class="card scope-options-card">
+      <header>
+        <h2>Visibility Scope</h2>
+        <p>New connections should default to personal scope. Wider scopes need explicit intent.</p>
+      </header>
+      <div class="scope-option-grid">
+        {% for option in detail.scope_options %}
+          <article class="scope-option {{ 'default' if option.default else '' }}">
+            <div>
+              <h3>{{ option.name }}</h3>
+              {% if option.default %}
+                <span class="badge badge-success">Default</span>
+              {% endif %}
+            </div>
+            <p>{{ option.description }}</p>
+            {% if option.risk %}
+              <small>{{ option.risk }}</small>
+            {% endif %}
+          </article>
+        {% endfor %}
+      </div>
+    </article>
+
+    <aside class="card composio-action-card">
+      <h2>Connect</h2>
+      <p>Hosted Connect Link creation will be enabled after auth-config mapping is added.</p>
+      <span class="btn-ghost disabled" aria-disabled="true">Connect flow pending</span>
+    </aside>
+  </section>
+
+  <section class="card composio-connections-card">
+    <header>
+      <h2>Scoped Connections</h2>
+      <p>OAuth credentials stay in Composio. Kortny stores only local visibility and connected-account metadata.</p>
+    </header>
+    {% if detail.connections %}
+      <div class="connection-list">
+        {% for connection in detail.connections %}
+          <article class="connection-row">
+            <div>
+              <strong>{{ connection.display_name }}</strong>
+              <span>{{ connection.toolkit_slug }}</span>
+            </div>
+            <span class="badge badge-{{ connection.tone }}">{{ connection.status }}</span>
+            <div>
+              <span class="detail-label">Scope</span>
+              <p>{{ connection.scope_label }}</p>
+            </div>
+            <div>
+              <span class="detail-label">Owner</span>
+              <p>{{ connection.owner.name }}</p>
+            </div>
+          </article>
+        {% endfor %}
+      </div>
+    {% else %}
+      <p class="empty-state">No local scoped connections have been recorded for this toolkit yet.</p>
+    {% endif %}
+  </section>
+{% endblock %}
