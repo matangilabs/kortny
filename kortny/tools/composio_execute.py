@@ -30,7 +30,10 @@ class ComposioExecuteTool:
         "web content through a connected integration. Available tool slugs: "
         "FIRECRAWL_SCRAPE with arguments like {'url': 'https://example.com', "
         "'formats': ['markdown']}; FIRECRAWL_SEARCH with arguments like "
-        "{'q': 'search query', 'limit': 5}. Do not use this for write actions."
+        "{'q': 'search query', 'limit': 5}. For current/recent/latest web "
+        "research or finding sources, use FIRECRAWL_SEARCH. For reading, "
+        "auditing, scraping, or crawling a specific URL or website, use "
+        "FIRECRAWL_SCRAPE. Do not use this for write actions."
     )
     parameters: JsonSchema = {
         "type": "object",

@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import Engine, delete
+from sqlalchemy import Engine, delete, select
 from sqlalchemy.orm import Session
 
 from kortny.composio import (
@@ -19,6 +19,7 @@ from kortny.config.settings import Settings
 from kortny.db.models import ComposioConnection, Installation, Task, TaskEvent
 from kortny.db.session import make_engine, make_session_factory, normalize_database_url
 from kortny.tasks import TaskService
+from kortny.tool_selection import ToolCard, ToolSelection, ToolSelectionResult
 from kortny.tools import ToolResult
 from kortny.tools.composio_execute import ComposioExecuteTool
 from kortny.tools.types import JsonObject, JsonSchema
@@ -224,6 +225,19 @@ def test_worker_registry_adds_composio_tool_for_scoped_connection(
     registry = AgentTaskExecutor(
         settings=settings,
         web_search_tool=StaticWebSearchTool(),
+        tool_selector=StaticToolSelector(
+            ToolSelectionResult(
+                selected_tools=(
+                    ToolSelection(
+                        registry_name="composio_execute",
+                        confidence=0.9,
+                        reason="Firecrawl is scoped and relevant.",
+                    ),
+                ),
+                suppressed_native_tools=("web_search",),
+                route_reason="test_selection",
+            )
+        ),
     )._build_registry(
         settings=settings,
         session=db_session,
@@ -233,6 +247,14 @@ def test_worker_registry_adds_composio_tool_for_scoped_connection(
     )
 
     assert "composio_execute" in registry.names()
+    assert "web_search" not in registry.names()
+    event = next(
+        event
+        for event in task_events(db_session, task)
+        if event.payload.get("message") == "tool_selection_completed"
+    )
+    assert event.payload["selected_tools"][0]["registry_name"] == "composio_execute"
+    assert event.payload["suppressed_native_tools"] == ["web_search"]
 
 
 def cleanup_database(session: Session) -> None:
@@ -262,6 +284,15 @@ def create_task(
         slack_message_ts="1779660000.000001",
         slack_user_id=slack_user_id,
         input="Use Firecrawl to inspect this website",
+    )
+
+
+def task_events(session: Session, task: Task) -> list[TaskEvent]:
+    session.flush()
+    return list(
+        session.scalars(
+            select(TaskEvent).where(TaskEvent.task_id == task.id).order_by(TaskEvent.seq)
+        )
     )
 
 
@@ -351,3 +382,27 @@ class StaticWebSearchTool:
     def invoke(self, args: JsonObject) -> ToolResult:
         del args
         return ToolResult(output={"results": []})
+
+
+class StaticToolSelector:
+    def __init__(self, result: ToolSelectionResult) -> None:
+        self.result = result
+        self.calls: list[dict[str, object]] = []
+
+    def select(
+        self,
+        *,
+        task_id: uuid.UUID,
+        task_input: str,
+        native_cards: tuple[ToolCard, ...],
+        external_cards: tuple[ToolCard, ...],
+    ) -> ToolSelectionResult:
+        self.calls.append(
+            {
+                "task_id": task_id,
+                "task_input": task_input,
+                "native_cards": native_cards,
+                "external_cards": external_cards,
+            }
+        )
+        return self.result

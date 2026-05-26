@@ -20,7 +20,9 @@ from kortny.db.models import Artifact, Task, TaskEvent, TaskEventType
 from kortny.db.models import LLMProvider as DbLLMProvider
 from kortny.execution import task_workspace
 from kortny.llm import LLMProvider, LLMService, ModelRouter, create_llm_provider
+from kortny.llm.routing import ModelRouteTier
 from kortny.memory import WorkspaceStateService
+from kortny.observability import log_observation
 from kortny.slack import SlackPoster, SlackThread
 from kortny.slack.comments import (
     ArtifactCommentGenerator,
@@ -37,6 +39,13 @@ from kortny.slack.reactions import (
 )
 from kortny.slack.thread_context import SlackThreadTranscriptProvider
 from kortny.tasks import TaskCancelledError, TaskService
+from kortny.tool_selection import (
+    HeuristicToolSelector,
+    LLMToolSelector,
+    ToolCatalogService,
+    ToolSelectionResult,
+    ToolSelector,
+)
 from kortny.tools import (
     ComposioExecuteTool,
     ForgetFactTool,
@@ -94,6 +103,7 @@ class AgentTaskExecutor:
         workspace_base_dir: Path | str | None = None,
         system_prompt: str | None = DEFAULT_SYSTEM_PROMPT,
         reaction_provider: ReactionProvider | None = None,
+        tool_selector: ToolSelector | None = None,
     ) -> None:
         self.settings = settings
         self.llm_provider = llm_provider
@@ -105,6 +115,7 @@ class AgentTaskExecutor:
         self.workspace_base_dir = workspace_base_dir
         self.system_prompt = system_prompt
         self.reaction_provider = reaction_provider or LibraryReactionProvider()
+        self.tool_selector = tool_selector
 
     def execute(
         self,
@@ -285,7 +296,7 @@ class AgentTaskExecutor:
         recall_fact = RecallFactTool(service=memory_service, task=task)
         inspect_memory = InspectMemoryTool(service=memory_service, task=task)
         forget_fact = ForgetFactTool(service=memory_service, task=task)
-        tools: list[Tool] = [
+        native_tools: list[Tool] = [
             web_search,
             pdf_generator,
             slack_channel_history,
@@ -295,14 +306,154 @@ class AgentTaskExecutor:
             inspect_memory,
             forget_fact,
         ]
+        external_tools: list[Tool] = []
         composio_execute = self._build_composio_execute_tool(
             settings=settings,
             session=session,
             task=task,
         )
         if composio_execute is not None:
-            tools.append(composio_execute)
+            external_tools.append(composio_execute)
+        tools = self._select_runtime_tools(
+            settings=settings,
+            session=session,
+            task=task,
+            task_service=task_service,
+            native_tools=native_tools,
+            external_tools=external_tools,
+        )
         return ToolRegistry(tools)
+
+    def _select_runtime_tools(
+        self,
+        *,
+        settings: Settings,
+        session: Session,
+        task: Task,
+        task_service: TaskService,
+        native_tools: list[Tool],
+        external_tools: list[Tool],
+    ) -> list[Tool]:
+        if not external_tools:
+            return native_tools
+
+        catalog = ToolCatalogService()
+        native_cards = catalog.native_cards(native_tools)
+        external_cards = catalog.external_cards(external_tools)
+        if not external_cards:
+            return native_tools
+
+        selector = self.tool_selector or self._build_tool_selector(
+            settings=settings,
+            session=session,
+            task_service=task_service,
+        )
+        try:
+            selection = selector.select(
+                task_id=task.id,
+                task_input=task.input,
+                native_cards=native_cards,
+                external_cards=external_cards,
+            )
+        except Exception as exc:
+            logger.exception("tool selector failed task_id=%s", task.id)
+            task_service.append_event(
+                task,
+                TaskEventType.error,
+                {
+                    "message": "tool_selection_failed",
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                },
+            )
+            selection = HeuristicToolSelector().select(
+                task_id=task.id,
+                task_input=task.input,
+                native_cards=native_cards,
+                external_cards=external_cards,
+            )
+
+        self._record_tool_selection(
+            task=task,
+            task_service=task_service,
+            selection=selection,
+            candidate_count=len(external_cards),
+        )
+        selected_external_names = set(selection.selected_names)
+        suppressed_native_names = set(selection.suppressed_native_tools)
+        return [
+            tool for tool in native_tools if tool.name not in suppressed_native_names
+        ] + [tool for tool in external_tools if tool.name in selected_external_names]
+
+    def _build_tool_selector(
+        self,
+        *,
+        settings: Settings,
+        session: Session,
+        task_service: TaskService,
+    ) -> ToolSelector:
+        if self.llm_provider is not None:
+            return HeuristicToolSelector()
+
+        model_route = ModelRouter(settings).route_for_tier(
+            ModelRouteTier.cheap_fast,
+            reason="tool_selection",
+        )
+        return LLMToolSelector(
+            LLMService(
+                session=session,
+                provider=create_llm_provider(settings, model=model_route.model),
+                provider_name=self.provider_name
+                or DbLLMProvider(settings.llm_provider.value),
+                task_service=task_service,
+                model_route=model_route,
+            )
+        )
+
+    def _record_tool_selection(
+        self,
+        *,
+        task: Task,
+        task_service: TaskService,
+        selection: ToolSelectionResult,
+        candidate_count: int,
+    ) -> None:
+        payload = {
+            "message": "tool_selection_completed",
+            "candidate_count": candidate_count,
+            "selected_tools": [
+                {
+                    "registry_name": item.registry_name,
+                    "confidence": item.confidence,
+                    "reason": item.reason,
+                }
+                for item in selection.selected_tools
+            ],
+            "suppressed_native_tools": list(selection.suppressed_native_tools),
+            "rejected_tools": [
+                {
+                    "registry_name": item.registry_name,
+                    "confidence": item.confidence,
+                    "reason": item.reason,
+                }
+                for item in selection.rejected_tools
+            ],
+            "route_reason": selection.route_reason,
+            "fallback_used": selection.fallback_used,
+        }
+        task_service.append_event(task, TaskEventType.log, payload)
+        log_observation(
+            logger,
+            "tool_selection_completed",
+            task=task,
+            candidate_count=candidate_count,
+            selected_tools=[
+                item.registry_name for item in selection.selected_tools
+            ],
+            suppressed_native_tools=list(selection.suppressed_native_tools),
+            route_reason=selection.route_reason,
+            fallback_used=selection.fallback_used,
+        )
 
     def _build_composio_execute_tool(
         self,
