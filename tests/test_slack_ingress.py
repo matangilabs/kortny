@@ -32,6 +32,7 @@ from kortny.intent import (
     IntentSurface,
     ModelTier,
 )
+from kortny.observe.assessment import CHANNEL_ASSESSMENT_REQUESTED_MESSAGE
 from kortny.slack import SlackIngress, acknowledge_then_handle
 from kortny.slack.ingress import INTENT_CLASSIFIED_MESSAGE, is_bare_app_mention
 from kortny.slack.reactions import ACK_REACTION_ADDED_MESSAGE, ReactionChoice
@@ -860,6 +861,14 @@ def test_member_joined_channel_records_onboarding_and_posts_intro(
     installation = db_session.scalar(select(Installation))
     policy = db_session.scalar(select(ObservePolicy))
     membership = db_session.scalar(select(SlackChannelMembership))
+    assessment_task = db_session.scalar(
+        select(Task)
+        .join(TaskEvent, TaskEvent.task_id == Task.id)
+        .where(
+            TaskEvent.payload["message"].as_string()
+            == CHANNEL_ASSESSMENT_REQUESTED_MESSAGE
+        )
+    )
     observations = list(
         db_session.scalars(
             select(ObservationEvent).order_by(ObservationEvent.event_type)
@@ -884,6 +893,13 @@ def test_member_joined_channel_records_onboarding_and_posts_intro(
     assert membership.onboarding_status == "posted"
     assert membership.onboarding_message_ts == "1716400000.000001"
     assert membership.last_event_id == "EvObserveJoin"
+    assert membership.metadata_json["assessment_status"] == "queued"
+    assert assessment_task is not None
+    assert membership.metadata_json["assessment_task_id"] == str(assessment_task.id)
+    assert assessment_task.slack_thread_ts == "1716400000.000001"
+    assert assessment_task.slack_message_ts == "1716400000.000001"
+    assert assessment_task.slack_user_id == "U123"
+    assert "channel onboarding assessment" in assessment_task.input
     assert [event.event_type for event in observations] == [
         "channel_join",
         "channel_onboarding_intro",
@@ -895,6 +911,17 @@ def test_member_joined_channel_records_onboarding_and_posts_intro(
             "thread_ts": None,
         }
     ]
+    assert (
+        db_session.scalar(
+            select(func.count())
+            .select_from(TaskEvent)
+            .where(
+                TaskEvent.payload["message"].as_string()
+                == CHANNEL_ASSESSMENT_REQUESTED_MESSAGE
+            )
+        )
+        == 1
+    )
 
 
 def test_member_joined_channel_resolves_bot_from_authorization_when_auth_test_lacks_user_id(
@@ -1016,6 +1043,14 @@ def test_app_mention_can_trigger_channel_onboarding_when_join_event_missing(
     installation = db_session.scalar(select(Installation))
     policy = db_session.scalar(select(ObservePolicy))
     membership = db_session.scalar(select(SlackChannelMembership))
+    assessment_task = db_session.scalar(
+        select(Task)
+        .join(TaskEvent, TaskEvent.task_id == Task.id)
+        .where(
+            TaskEvent.payload["message"].as_string()
+            == CHANNEL_ASSESSMENT_REQUESTED_MESSAGE
+        )
+    )
     observations = list(
         db_session.scalars(
             select(ObservationEvent).order_by(ObservationEvent.event_type)
@@ -1040,6 +1075,10 @@ def test_app_mention_can_trigger_channel_onboarding_when_join_event_missing(
     assert membership.added_by_user_id == "U123"
     assert membership.onboarding_status == "posted"
     assert membership.onboarding_message_ts == "1716400000.000001"
+    assert membership.metadata_json["assessment_status"] == "queued"
+    assert assessment_task is not None
+    assert membership.metadata_json["assessment_task_id"] == str(assessment_task.id)
+    assert assessment_task.slack_thread_ts == "1716400000.000001"
     assert [event.event_type for event in observations] == [
         "channel_join",
         "channel_onboarding_intro",

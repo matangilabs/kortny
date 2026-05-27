@@ -25,6 +25,7 @@ from kortny.db.models import (
     TaskEventType,
 )
 from kortny.db.session import make_engine, make_session_factory, normalize_database_url
+from kortny.observe.assessment import CHANNEL_ASSESSMENT_REQUESTED_MESSAGE
 from kortny.tasks import TaskService
 from kortny.tool_selection import ToolCard, ToolSelection, ToolSelectionResult
 from kortny.tools import RecoverableToolError, ToolResult
@@ -456,6 +457,56 @@ def test_worker_registry_skips_composio_catalog_for_ignored_intent(
     assert any(
         event.payload.get("message") == "external_tool_selection_skipped"
         and event.payload.get("classification") == "ignore"
+        for event in task_events(db_session, task)
+    )
+
+
+def test_worker_registry_skips_composio_catalog_for_channel_assessment_task(
+    db_session: Session,
+    tmp_path: Path,
+) -> None:
+    task = create_task(db_session, slack_channel_id="CObserve", slack_user_id="UInvite")
+    task.input = "Run Kortny's channel onboarding assessment for this Slack channel."
+    add_connection(
+        db_session,
+        task,
+        connected_account_id="ca_firecrawl",
+        scope_type="workspace",
+        scope_id=None,
+    )
+    task_service = TaskService(db_session)
+    task_service.append_event(
+        task,
+        TaskEventType.log,
+        {
+            "message": CHANNEL_ASSESSMENT_REQUESTED_MESSAGE,
+            "source": "member_joined_channel",
+            "channel_id": "CObserve",
+            "membership_id": "membership-id",
+        },
+    )
+    db_session.commit()
+    settings = build_settings(composio_api_key="composio-key")
+    composio_client = FakeComposioClient()
+
+    registry = AgentTaskExecutor(
+        settings=settings,
+        web_search_tool=StaticWebSearchTool(),
+        composio_client=composio_client,
+    )._build_registry(
+        settings=settings,
+        session=db_session,
+        task=task,
+        task_service=task_service,
+        working_dir=tmp_path,
+    )
+
+    assert composio_client.list_tool_calls == []
+    assert "slack_channel_history" in registry.names()
+    assert all(not name.startswith("composio_") for name in registry.names())
+    assert any(
+        event.payload.get("message") == "external_tool_selection_skipped"
+        and event.payload.get("reason") == "system_observe_channel_assessment"
         for event in task_events(db_session, task)
     )
 

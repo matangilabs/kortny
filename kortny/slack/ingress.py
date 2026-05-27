@@ -35,6 +35,11 @@ from kortny.observe import (
     ObservationResult,
     ObserveService,
 )
+from kortny.observe.assessment import (
+    CHANNEL_ASSESSMENT_REQUESTED_MESSAGE,
+    assessment_event_id_for_membership,
+    build_channel_assessment_input,
+)
 from kortny.slack.acknowledgement import (
     AcknowledgementGenerator,
     StaticAcknowledgementGenerator,
@@ -371,6 +376,13 @@ class SlackIngress:
             membership_result=membership_result,
             result=result,
         )
+        self._queue_channel_assessment_if_needed(
+            installation=installation,
+            membership_service=membership_service,
+            membership_result=membership_result,
+            event=event,
+            source="app_mention",
+        )
         if result.observed:
             logger.info(
                 "slack app_mention channel onboarding observed event_id=%s channel=%s reason=%s",
@@ -471,6 +483,13 @@ class SlackIngress:
             membership_service=membership_service,
             membership_result=membership_result,
             result=result,
+        )
+        self._queue_channel_assessment_if_needed(
+            installation=installation,
+            membership_service=membership_service,
+            membership_result=membership_result,
+            event=event,
+            source="member_joined_channel",
         )
         if result.intro_text and result.policy is not None:
             pass
@@ -589,6 +608,62 @@ class SlackIngress:
             result.reason,
         )
         return result
+
+    def _queue_channel_assessment_if_needed(
+        self,
+        *,
+        installation: Installation,
+        membership_service: SlackChannelMembershipService,
+        membership_result: ChannelMembershipResult,
+        event: Mapping[str, Any],
+        source: str,
+    ) -> Task | None:
+        membership = membership_result.membership
+        metadata = membership.metadata_json or {}
+        if metadata.get("assessment_task_id"):
+            return None
+        if membership.onboarding_status != "posted":
+            return None
+        if not membership.onboarding_message_ts:
+            return None
+
+        task = self.task_service.create_task(
+            installation_id=installation.id,
+            slack_event_id=assessment_event_id_for_membership(membership.id),
+            slack_channel_id=membership.channel_id,
+            slack_thread_ts=membership.onboarding_message_ts,
+            slack_message_ts=membership.onboarding_message_ts,
+            slack_user_id=(
+                membership.added_by_user_id
+                or _optional_str(event.get("user"))
+                or installation.bot_user_id
+                or "system"
+            ),
+            input=build_channel_assessment_input(channel_id=membership.channel_id),
+        )
+        self.task_service.append_event(
+            task,
+            TaskEventType.log,
+            {
+                "message": CHANNEL_ASSESSMENT_REQUESTED_MESSAGE,
+                "source": source,
+                "channel_id": membership.channel_id,
+                "membership_id": str(membership.id),
+                "onboarding_message_ts": membership.onboarding_message_ts,
+            },
+        )
+        membership_service.mark_assessment_queued(
+            membership=membership,
+            task_id=task.id,
+        )
+        logger.info(
+            "slack channel assessment queued task_id=%s channel=%s membership_id=%s source=%s",
+            task.id,
+            membership.channel_id,
+            membership.id,
+            source,
+        )
+        return task
 
     def handle_reaction_added(
         self,

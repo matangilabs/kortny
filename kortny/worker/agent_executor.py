@@ -24,6 +24,11 @@ from kortny.llm import LLMProvider, LLMService, ModelRouter, create_llm_provider
 from kortny.llm.routing import ModelRouteTier
 from kortny.memory import WorkspaceStateService
 from kortny.observability import log_observation
+from kortny.observe.assessment import (
+    CHANNEL_ASSESSMENT_COMPLETED_MESSAGE,
+    CHANNEL_ASSESSMENT_FAILED_MESSAGE,
+    is_channel_assessment_task,
+)
 from kortny.slack import SlackPoster, SlackThread
 from kortny.slack.comments import (
     ArtifactCommentGenerator,
@@ -36,6 +41,7 @@ from kortny.slack.humanizer import (
     StaticResponseSynthesizer,
     synthesize_response,
 )
+from kortny.slack.membership import SlackChannelMembershipService
 from kortny.slack.posting import SlackPostingClient
 from kortny.slack.reactions import (
     ACK_REACTION_ADDED_MESSAGE,
@@ -175,6 +181,12 @@ class AgentTaskExecutor:
                     task_service=task_service,
                     result_summary=agent_result.result_summary,
                 )
+                self._mark_channel_assessment_completed(
+                    session=session,
+                    task=task,
+                    task_service=task_service,
+                    result_summary=agent_result.result_summary,
+                )
                 self._complete_ack_reaction(
                     settings=settings,
                     session=session,
@@ -191,13 +203,20 @@ class AgentTaskExecutor:
         except TaskCancelledError:
             logger.info("agent executor cancelled task_id=%s", task.id)
             raise
-        except Exception:
+        except Exception as exc:
             logger.exception("agent executor failed task_id=%s", task.id)
             self._post_failure_notice(
                 settings=settings,
                 session=session,
                 task=task,
                 task_service=task_service,
+            )
+            self._mark_channel_assessment_failed(
+                session=session,
+                task=task,
+                task_service=task_service,
+                error_type=type(exc).__name__,
+                error=str(exc),
             )
             self._complete_ack_reaction(
                 settings=settings,
@@ -617,6 +636,62 @@ class AgentTaskExecutor:
                 title=artifact.filename,
             )
 
+    def _mark_channel_assessment_completed(
+        self,
+        *,
+        session: Session,
+        task: Task,
+        task_service: TaskService,
+        result_summary: str,
+    ) -> None:
+        membership_service = SlackChannelMembershipService(session)
+        membership = membership_service.find_by_assessment_task_id(task_id=task.id)
+        if membership is None:
+            return
+        membership_service.mark_assessment_completed(
+            membership=membership,
+            result_summary=result_summary,
+        )
+        task_service.append_event(
+            task,
+            TaskEventType.log,
+            {
+                "message": CHANNEL_ASSESSMENT_COMPLETED_MESSAGE,
+                "channel_id": membership.channel_id,
+                "membership_id": str(membership.id),
+            },
+        )
+
+    def _mark_channel_assessment_failed(
+        self,
+        *,
+        session: Session,
+        task: Task,
+        task_service: TaskService,
+        error_type: str,
+        error: str,
+    ) -> None:
+        membership_service = SlackChannelMembershipService(session)
+        membership = membership_service.find_by_assessment_task_id(task_id=task.id)
+        if membership is None:
+            return
+        membership_service.mark_assessment_failed(
+            membership=membership,
+            error_type=error_type,
+            error=error,
+        )
+        task_service.append_event(
+            task,
+            TaskEventType.log,
+            {
+                "message": CHANNEL_ASSESSMENT_FAILED_MESSAGE,
+                "channel_id": membership.channel_id,
+                "membership_id": str(membership.id),
+                "error_type": error_type,
+                "error": error,
+            },
+        )
+
     def _has_memory_confirmation_prompt(
         self,
         *,
@@ -797,6 +872,12 @@ def _external_tool_skip_reason(
     session: Session,
     task: Task,
 ) -> dict[str, Any] | None:
+    if is_channel_assessment_task(session, task):
+        return {
+            "reason": "system_observe_channel_assessment",
+            "classification": None,
+        }
+
     decision = _latest_intent_decision(session, task)
     if decision is None:
         return None

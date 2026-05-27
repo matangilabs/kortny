@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
+from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -121,6 +122,73 @@ class SlackChannelMembershipService:
         membership.onboarding_message_ts = message_ts
         membership.updated_at = now
         self.session.flush()
+
+    def mark_assessment_queued(
+        self,
+        *,
+        membership: SlackChannelMembership,
+        task_id: UUID,
+    ) -> None:
+        """Record that the channel assessment follow-up has been queued."""
+
+        now = datetime.now(UTC)
+        metadata = dict(membership.metadata_json or {})
+        metadata["assessment_task_id"] = str(task_id)
+        metadata["assessment_status"] = "queued"
+        metadata["assessment_requested_at"] = now.isoformat()
+        membership.metadata_json = metadata
+        membership.updated_at = now
+        self.session.flush()
+
+    def mark_assessment_completed(
+        self,
+        *,
+        membership: SlackChannelMembership,
+        result_summary: str,
+    ) -> None:
+        """Record that the channel assessment task completed successfully."""
+
+        now = datetime.now(UTC)
+        metadata = dict(membership.metadata_json or {})
+        metadata["assessment_status"] = "posted"
+        metadata["assessment_completed_at"] = now.isoformat()
+        metadata["assessment_summary"] = result_summary[:2000]
+        membership.metadata_json = metadata
+        membership.updated_at = now
+        self.session.flush()
+
+    def mark_assessment_failed(
+        self,
+        *,
+        membership: SlackChannelMembership,
+        error_type: str,
+        error: str,
+    ) -> None:
+        """Record that the channel assessment task failed."""
+
+        now = datetime.now(UTC)
+        metadata = dict(membership.metadata_json or {})
+        metadata["assessment_status"] = "failed"
+        metadata["assessment_failed_at"] = now.isoformat()
+        metadata["assessment_error_type"] = error_type
+        metadata["assessment_error"] = error[:1000]
+        membership.metadata_json = metadata
+        membership.updated_at = now
+        self.session.flush()
+
+    def find_by_assessment_task_id(
+        self,
+        *,
+        task_id: UUID,
+    ) -> SlackChannelMembership | None:
+        """Return the channel membership tied to an assessment task."""
+
+        return self.session.scalar(
+            select(SlackChannelMembership).where(
+                SlackChannelMembership.metadata_json["assessment_task_id"].as_string()
+                == str(task_id)
+            )
+        )
 
     def get(
         self,
