@@ -14,6 +14,27 @@ def test_sanitize_humanized_response_normalizes_slack_mrkdwn() -> None:
     ) == "*Findings*\nRead <https://docs.slack.dev|Slack docs>."
 
 
+def test_sanitize_humanized_response_accepts_json_message_contract() -> None:
+    assert sanitize_humanized_response(
+        '{"message":"**Ready:** I can help with research."}',
+        fallback="fallback",
+    ) == "*Ready:* I can help with research."
+
+
+def test_sanitize_humanized_response_falls_back_on_humanizer_leak() -> None:
+    leaked = (
+        "_mode is quick_answer, so we just present the answer.\n\n"
+        "Let me write:\n\n"
+        "*Search & Research*\n"
+        "• Web search"
+    )
+
+    assert sanitize_humanized_response(
+        leaked,
+        fallback="*Search & Research*\n• Web search",
+    ) == "*Search & Research*\n• Web search"
+
+
 def test_sanitize_humanized_response_golden_slack_cases() -> None:
     cases = [
         (

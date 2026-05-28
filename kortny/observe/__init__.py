@@ -1,5 +1,6 @@
 """Kortny Observe policy and event capture."""
 
+from kortny.observe.profiles import ObserveChannelProfileService
 from kortny.observe.service import (
     ChannelJoinObservationResult,
     ObservationResult,
@@ -9,5 +10,6 @@ from kortny.observe.service import (
 __all__ = [
     "ChannelJoinObservationResult",
     "ObservationResult",
+    "ObserveChannelProfileService",
     "ObserveService",
 ]

@@ -2,6 +2,7 @@
 
 from kortny.tools.composio_execute import ComposioExecuteTool
 from kortny.tools.echo import EchoTool
+from kortny.tools.list_integrations import ListIntegrationsTool
 from kortny.tools.pdf_generator import PdfGeneratorTool
 from kortny.tools.registry import DuplicateToolError, ToolNotFoundError, ToolRegistry
 from kortny.tools.slack_channel_history import (
@@ -33,6 +34,7 @@ __all__ = [
     "InspectMemoryTool",
     "JsonObject",
     "JsonSchema",
+    "ListIntegrationsTool",
     "PdfGeneratorTool",
     "RecallFactTool",
     "RecoverableToolError",

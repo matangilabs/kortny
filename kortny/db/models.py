@@ -704,6 +704,96 @@ class ObservationEvent(Base):
     )
 
 
+class ObserveChannelProfile(Base):
+    __tablename__ = "observe_channel_profiles"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    installation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("installations.id", ondelete="CASCADE"), nullable=False
+    )
+    channel_id: Mapped[str] = mapped_column(String, nullable=False)
+    profile_status: Mapped[str] = mapped_column(
+        String, nullable=False, server_default=text("'active'")
+    )
+    profile_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("1")
+    )
+    summary: Mapped[str | None] = mapped_column(Text)
+    profile_json: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    assumptions_json: Mapped[list] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    evidence_refs_json: Mapped[list] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    confidence_score: Mapped[Decimal | None] = mapped_column(Numeric(4, 3))
+    confidence_reason: Mapped[str | None] = mapped_column(Text)
+    fresh_window_days: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("30")
+    )
+    archive_window_days: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("365")
+    )
+    observed_range_start_ts: Mapped[str | None] = mapped_column(String)
+    observed_range_end_ts: Mapped[str | None] = mapped_column(String)
+    message_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    file_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    last_scanned_message_ts: Mapped[str | None] = mapped_column(String)
+    last_profiled_at: Mapped[datetime | None] = mapped_column(TZ)
+    source_task_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("tasks.id", ondelete="SET NULL")
+    )
+    metadata_json: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "profile_status in ('active', 'stale', 'disabled', 'failed')",
+            name="ck_observe_channel_profiles_status",
+        ),
+        CheckConstraint(
+            "fresh_window_days > 0",
+            name="ck_observe_channel_profiles_fresh_window",
+        ),
+        CheckConstraint(
+            "archive_window_days >= fresh_window_days",
+            name="ck_observe_channel_profiles_archive_window",
+        ),
+        UniqueConstraint(
+            "installation_id",
+            "channel_id",
+            name="idx_observe_channel_profiles_unique",
+        ),
+        Index(
+            "idx_observe_channel_profiles_lookup",
+            "installation_id",
+            "channel_id",
+            "profile_status",
+        ),
+        Index(
+            "idx_observe_channel_profiles_last_profiled",
+            "installation_id",
+            "last_profiled_at",
+        ),
+        Index("idx_observe_channel_profiles_source_task", "source_task_id"),
+    )
+
+
 class ProceduralSkill(Base):
     __tablename__ = "procedural_skills"
 

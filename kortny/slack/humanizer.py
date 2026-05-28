@@ -33,9 +33,15 @@ from kortny.tasks import TaskService
 from kortny.tools.types import JsonObject
 
 RESPONSE_HUMANIZER_PROMPT_NAME = "kortny.response_humanizer"
+RESPONSE_HUMANIZER_RESPONSE_FORMAT: JsonObject = {"type": "json_object"}
 RESPONSE_HUMANIZER_SYSTEM_PROMPT = """You write Kortny's final Slack response from a typed ResponseRecord.
 
-Return only the Slack-ready message. Do not explain your rewrite.
+Return exactly one JSON object:
+{"message":"Slack-ready message"}
+
+The message value must contain only the Slack-ready response. Do not include
+notes, reasoning, draft analysis, labels like final_mode, or explanations of
+your rewrite.
 
 Rules:
 - Use only facts, actions, artifacts, failures, uncertainties, links, and the raw
@@ -62,6 +68,18 @@ Rules:
 MAX_RAW_ANSWER_CHARS = 8000
 MAX_TRACE_OUTPUT_CHARS = 1200
 MAX_HUMANIZED_CHARS = 12000
+HUMANIZER_LEAK_MARKERS = frozenset(
+    {
+        "_mode is",
+        "answer_shape",
+        "final_mode",
+        "let me check",
+        "let me write",
+        "raw_answer",
+        "renderer_constraints",
+        "response_record",
+    }
+)
 logger = logging.getLogger(__name__)
 
 
@@ -424,6 +442,7 @@ class LLMResponseSynthesizer:
                 ),
             ),
             prompt_name=RESPONSE_HUMANIZER_PROMPT_NAME,
+            response_format=RESPONSE_HUMANIZER_RESPONSE_FORMAT,
         )
         text = sanitize_humanized_response(
             completion.content,
@@ -523,12 +542,35 @@ def sanitize_humanized_response(text: str | None, *, fallback: str) -> str:
 
     if text is None:
         return normalize_slack_mrkdwn(fallback)
-    normalized = text.strip().strip('"').strip("'").strip()
+    message = _json_message(text)
+    normalized = (message if message is not None else text).strip().strip('"').strip(
+        "'"
+    ).strip()
     if not normalized:
+        return normalize_slack_mrkdwn(fallback)
+    if _looks_like_humanizer_leak(normalized):
         return normalize_slack_mrkdwn(fallback)
     if len(normalized) > MAX_HUMANIZED_CHARS:
         normalized = normalized[: MAX_HUMANIZED_CHARS - 1].rstrip() + "."
     return normalize_slack_mrkdwn(normalized)
+
+
+def _json_message(text: str) -> str | None:
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    message = payload.get("message")
+    if isinstance(message, str) and message.strip():
+        return message
+    return None
+
+
+def _looks_like_humanizer_leak(text: str) -> bool:
+    normalized = text.casefold()
+    return any(marker in normalized for marker in HUMANIZER_LEAK_MARKERS)
 
 
 def build_response_record(

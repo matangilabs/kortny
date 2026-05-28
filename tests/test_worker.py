@@ -23,7 +23,9 @@ from kortny.db.models import (
     LLMProvider,
     LLMUsage,
     ModelPricing,
+    ObserveChannelProfile,
     ProceduralSkillInvocation,
+    SlackChannelMembership,
     Task,
     TaskEvent,
     TaskEventType,
@@ -31,6 +33,10 @@ from kortny.db.models import (
 )
 from kortny.db.session import make_engine, make_session_factory, normalize_database_url
 from kortny.llm import ChatMessage, Completion, TokenUsage, ToolCall
+from kortny.observe.assessment import (
+    CHANNEL_ASSESSMENT_COMPLETED_MESSAGE,
+    CHANNEL_ASSESSMENT_REQUESTED_MESSAGE,
+)
 from kortny.slack.comments import ARTIFACT_COMMENT_FALLBACK_TEXT
 from kortny.slack.reactions import (
     ACK_REACTION_ADDED_MESSAGE,
@@ -1087,9 +1093,104 @@ def test_agent_executor_posts_generic_failure_notice_for_setup_errors(
     assert posted_event.payload["text"] == GENERIC_FAILURE_TEXT
 
 
+def test_agent_executor_records_channel_profile_when_assessment_completes(
+    db_session: Session,
+) -> None:
+    task = create_task(db_session, event_id="EvChannelAssessment")
+    task.slack_channel_id = "CObserve"
+    membership = SlackChannelMembership(
+        installation_id=task.installation_id,
+        channel_id="CObserve",
+        channel_name="observe",
+        channel_type="public_channel",
+        membership_status="active",
+        discovered_via="member_joined_channel",
+        added_by_user_id="UInvite",
+        onboarding_status="posted",
+        onboarding_message_ts="1779900000.000000",
+        metadata_json={
+            "assessment_task_id": str(task.id),
+            "assessment_status": "queued",
+        },
+    )
+    db_session.add(membership)
+    db_session.flush()
+    task_service = TaskService(db_session)
+    task_service.append_event(
+        task,
+        TaskEventType.log,
+        {
+            "message": CHANNEL_ASSESSMENT_REQUESTED_MESSAGE,
+            "source": "member_joined_channel",
+            "channel_id": "CObserve",
+            "membership_id": str(membership.id),
+        },
+    )
+    task_service.append_event(
+        task,
+        TaskEventType.tool_result,
+        {
+            "tool": "slack_channel_history",
+            "tool_call_id": "call-history",
+            "output": {
+                "channel_id": "CObserve",
+                "message_count": 2,
+                "messages": [
+                    {
+                        "ts": "1779900001.000001",
+                        "user": "U1",
+                        "text": "Daily report posted.",
+                    },
+                    {
+                        "ts": "1779900002.000002",
+                        "user": "U2",
+                        "text": "Please review the attached file.",
+                        "files": [{"id": "F1", "name": "report.pdf"}],
+                    },
+                ],
+            },
+            "cost_usd": "0",
+            "artifacts": [],
+        },
+    )
+    db_session.commit()
+
+    AgentTaskExecutor()._mark_channel_assessment_completed(
+        session=db_session,
+        task=task,
+        task_service=task_service,
+        result_summary="This channel appears to handle daily report review.",
+    )
+    db_session.commit()
+
+    db_session.refresh(membership)
+    profile = db_session.scalar(
+        select(ObserveChannelProfile).where(
+            ObserveChannelProfile.installation_id == task.installation_id,
+            ObserveChannelProfile.channel_id == "CObserve",
+        )
+    )
+    completed_event = next(
+        event
+        for event in task_events(db_session, task)
+        if event.payload.get("message") == CHANNEL_ASSESSMENT_COMPLETED_MESSAGE
+    )
+
+    assert membership.metadata_json["assessment_status"] == "posted"
+    assert profile is not None
+    assert profile.summary == "This channel appears to handle daily report review."
+    assert profile.message_count == 2
+    assert profile.file_count == 1
+    assert profile.source_task_id == task.id
+    assert completed_event.payload["profile_id"] == str(profile.id)
+    assert completed_event.payload["profile_version"] == 1
+
+
 def cleanup_database(session: Session) -> None:
     for model in (
         Episode,
+        ObserveChannelProfile,
+        SlackChannelMembership,
         Artifact,
         LLMUsage,
         TaskEvent,

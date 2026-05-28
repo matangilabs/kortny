@@ -461,6 +461,149 @@ def test_worker_registry_skips_composio_catalog_for_ignored_intent(
     )
 
 
+def test_worker_registry_skips_composio_catalog_for_simple_no_tool_intent(
+    db_session: Session,
+    tmp_path: Path,
+) -> None:
+    task = create_task(db_session, slack_channel_id="DUser", slack_user_id="UAneesh")
+    task.input = "Are you up?"
+    add_connection(
+        db_session,
+        task,
+        connected_account_id="ca_firecrawl",
+        scope_type="user",
+        scope_id="UAneesh",
+    )
+    task_service = TaskService(db_session)
+    task_service.append_event(
+        task,
+        TaskEventType.log,
+        {
+            "message": "intent_classification_completed",
+            "source": "dm",
+            "decision": {
+                "addressed_to_kortny": True,
+                "classification": "task_request",
+                "confidence": 0.9,
+                "should_create_task": True,
+                "should_ack_with_reaction": True,
+                "needs_channel_context": False,
+                "needs_thread_context": False,
+                "needs_file_context": False,
+                "likely_tools": [],
+                "model_tier": "cheap",
+                "reason": "Simple availability check.",
+            },
+        },
+    )
+    db_session.commit()
+    settings = build_settings(composio_api_key="composio-key")
+    composio_client = FakeComposioClient()
+
+    registry = AgentTaskExecutor(
+        settings=settings,
+        web_search_tool=StaticWebSearchTool(),
+        composio_client=composio_client,
+    )._build_registry(
+        settings=settings,
+        session=db_session,
+        task=task,
+        task_service=task_service,
+        working_dir=tmp_path,
+    )
+
+    assert composio_client.list_tool_calls == []
+    assert "web_search" in registry.names()
+    assert all(not name.startswith("composio_") for name in registry.names())
+    assert any(
+        event.payload.get("message") == "external_tool_selection_skipped"
+        and event.payload.get("reason") == "intent_no_external_tools"
+        and event.payload.get("classification") == "task_request"
+        for event in task_events(db_session, task)
+    )
+
+
+def test_worker_registry_exposes_integration_inventory_for_capability_lookup(
+    db_session: Session,
+    tmp_path: Path,
+) -> None:
+    task = create_task(db_session, slack_channel_id="CAlpha", slack_user_id="UAneesh")
+    task.input = "What integrations do you have?"
+    add_connection(
+        db_session,
+        task,
+        connected_account_id="ca_notion",
+        scope_type="workspace",
+        scope_id=None,
+        toolkit_slug="notion",
+        display_name="Notion workspace",
+    )
+    add_connection(
+        db_session,
+        task,
+        connected_account_id="ca_firecrawl",
+        scope_type="user",
+        scope_id="UAneesh",
+        toolkit_slug="firecrawl",
+        display_name="Firecrawl personal",
+    )
+    task_service = TaskService(db_session)
+    task_service.append_event(
+        task,
+        TaskEventType.log,
+        {
+            "message": "intent_classification_completed",
+            "source": "app_mention",
+            "decision": {
+                "addressed_to_kortny": True,
+                "classification": "task_request",
+                "confidence": 0.95,
+                "should_create_task": True,
+                "should_ack_with_reaction": False,
+                "needs_channel_context": False,
+                "needs_thread_context": False,
+                "needs_file_context": False,
+                "likely_tools": ["list_integrations", "tool_metadata_lookup"],
+                "model_tier": "cheap",
+                "reason": "Capability lookup.",
+            },
+        },
+    )
+    db_session.commit()
+    settings = build_settings(composio_api_key="composio-key")
+    composio_client = FakeComposioClient()
+
+    registry = AgentTaskExecutor(
+        settings=settings,
+        web_search_tool=StaticWebSearchTool(),
+        composio_client=composio_client,
+    )._build_registry(
+        settings=settings,
+        session=db_session,
+        task=task,
+        task_service=task_service,
+        working_dir=tmp_path,
+    )
+    result = registry.invoke("list_integrations", {})
+
+    assert composio_client.list_tool_calls == []
+    assert {tool["name"] for tool in result.output["native_tools"]} >= {
+        "web_search",
+        "slack_channel_history",
+        "slack_file_read",
+    }
+    assert {
+        connection["toolkit_slug"]
+        for connection in result.output["connected_integrations"]
+    } == {"firecrawl", "notion"}
+    assert any(
+        event.payload.get("message") == "external_tool_selection_skipped"
+        and event.payload.get("reason") == "intent_no_external_tools"
+        and event.payload.get("classification") == "task_request"
+        for event in task_events(db_session, task)
+    )
+
+
 def test_worker_registry_skips_composio_catalog_for_channel_assessment_task(
     db_session: Session,
     tmp_path: Path,

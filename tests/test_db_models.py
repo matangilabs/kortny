@@ -15,6 +15,7 @@ def test_mvp_schema_declares_all_core_tables() -> None:
         "composio_connections",
         "observe_policies",
         "observation_events",
+        "observe_channel_profiles",
         "procedural_skills",
         "procedural_skill_versions",
         "procedural_skill_invocations",
@@ -121,6 +122,24 @@ def test_slack_channel_membership_table_has_presence_constraints_and_indexes() -
         "idx_slack_channel_memberships_lookup",
         "idx_slack_channel_memberships_status",
         "idx_slack_channel_memberships_onboarding",
+    } <= index_names
+
+
+def test_observe_channel_profile_table_has_staleness_constraints_and_indexes() -> None:
+    profiles = Base.metadata.tables["observe_channel_profiles"]
+    constraint_names = {constraint.name for constraint in profiles.constraints}
+    index_names = {index.name for index in profiles.indexes}
+
+    assert {
+        "ck_observe_channel_profiles_status",
+        "ck_observe_channel_profiles_fresh_window",
+        "ck_observe_channel_profiles_archive_window",
+        "idx_observe_channel_profiles_unique",
+    } <= constraint_names
+    assert {
+        "idx_observe_channel_profiles_lookup",
+        "idx_observe_channel_profiles_last_profiled",
+        "idx_observe_channel_profiles_source_task",
     } <= index_names
 
 

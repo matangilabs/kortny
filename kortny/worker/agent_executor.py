@@ -29,6 +29,7 @@ from kortny.observe.assessment import (
     CHANNEL_ASSESSMENT_FAILED_MESSAGE,
     is_channel_assessment_task,
 )
+from kortny.observe.profiles import ObserveChannelProfileService
 from kortny.slack import SlackPoster, SlackThread
 from kortny.slack.comments import (
     ArtifactCommentGenerator,
@@ -63,6 +64,7 @@ from kortny.tool_selection import (
 from kortny.tools import (
     ForgetFactTool,
     InspectMemoryTool,
+    ListIntegrationsTool,
     PdfGeneratorTool,
     RecallFactTool,
     RememberFactTool,
@@ -350,6 +352,13 @@ class AgentTaskExecutor:
             inspect_memory,
             forget_fact,
         ]
+        native_tools.append(
+            ListIntegrationsTool(
+                session=session,
+                task=task,
+                native_tools=tuple(native_tools),
+            )
+        )
         skip_external_reason = _external_tool_skip_reason(session, task)
         if skip_external_reason is not None:
             task_service.append_event(
@@ -652,6 +661,11 @@ class AgentTaskExecutor:
             membership=membership,
             result_summary=result_summary,
         )
+        profile = ObserveChannelProfileService(session).upsert_from_assessment(
+            task=task,
+            membership=membership,
+            result_summary=result_summary,
+        )
         task_service.append_event(
             task,
             TaskEventType.log,
@@ -659,6 +673,8 @@ class AgentTaskExecutor:
                 "message": CHANNEL_ASSESSMENT_COMPLETED_MESSAGE,
                 "channel_id": membership.channel_id,
                 "membership_id": str(membership.id),
+                "profile_id": str(profile.id),
+                "profile_version": profile.profile_version,
             },
         )
 
@@ -896,6 +912,12 @@ def _external_tool_skip_reason(
             "classification": classification,
         }
 
+    if _intent_needs_no_external_tools(decision):
+        return {
+            "reason": "intent_no_external_tools",
+            "classification": classification,
+        }
+
     return None
 
 
@@ -919,11 +941,40 @@ def _latest_intent_decision(session: Session, task: Task) -> dict[str, Any] | No
     return decision
 
 
+def _intent_needs_no_external_tools(decision: dict[str, Any]) -> bool:
+    """Return whether the intent record is a cheap, no-tool conversational turn."""
+
+    if _payload_str(decision, "model_tier") != "cheap":
+        return False
+    classification = _payload_str(decision, "classification")
+    if classification not in {"task_request", "follow_up"}:
+        return False
+    if _truthy_bool(decision.get("needs_channel_context")):
+        return False
+    if _truthy_bool(decision.get("needs_thread_context")):
+        return False
+    if _truthy_bool(decision.get("needs_file_context")):
+        return False
+    likely_tools = _likely_tools(decision)
+    return not likely_tools or likely_tools <= NO_EXTERNAL_TOOL_HINTS
+
+
+def _truthy_bool(value: object) -> bool:
+    return isinstance(value, bool) and value
+
+
 def _payload_str(payload: dict[str, Any], key: str) -> str | None:
     value = payload.get(key)
     if isinstance(value, str) and value:
         return value
     return None
+
+
+def _likely_tools(decision: dict[str, Any]) -> set[str]:
+    value = decision.get("likely_tools")
+    if not isinstance(value, list):
+        return set()
+    return {item for item in value if isinstance(item, str) and item}
 
 
 EXTERNAL_TOOL_SKIP_CLASSIFICATIONS = frozenset(
@@ -934,5 +985,16 @@ EXTERNAL_TOOL_SKIP_CLASSIFICATIONS = frozenset(
         "ignore",
         "memory_candidate",
         "third_person_reference",
+    }
+)
+
+NO_EXTERNAL_TOOL_HINTS = frozenset(
+    {
+        "capability_lookup",
+        "list_capabilities",
+        "list_integrations",
+        "native_tool_registry",
+        "tool_metadata_lookup",
+        "tool_registry",
     }
 )
