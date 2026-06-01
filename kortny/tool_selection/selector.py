@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import Sequence
+from dataclasses import replace
 from typing import Protocol
 
 from pydantic import BaseModel, Field, ValidationError
@@ -19,6 +20,9 @@ from kortny.tool_selection.models import (
 from kortny.tools.types import JsonObject, JsonSchema
 
 TOOL_SELECTOR_RESPONSE_FORMAT: JsonObject = {"type": "json_object"}
+DEFAULT_TOOL_SELECTOR_MAX_PROMPT_CHARS = 12000
+MIN_PROMPT_DESCRIPTION_CHARS = 80
+MIN_PROMPT_TASK_CHARS = 300
 TOOL_SELECTOR_SYSTEM_PROMPT = """You are Kortny's tool selection preflight.
 
 Select external tools only when they are materially useful for the user's Slack task.
@@ -70,8 +74,16 @@ class ToolSelector(Protocol):
 class LLMToolSelector:
     """Cheap-model selector with deterministic fallback outside this class."""
 
-    def __init__(self, llm: SelectorLLMClient) -> None:
+    def __init__(
+        self,
+        llm: SelectorLLMClient,
+        *,
+        max_prompt_chars: int = DEFAULT_TOOL_SELECTOR_MAX_PROMPT_CHARS,
+    ) -> None:
+        if max_prompt_chars < 1000:
+            raise ValueError("max_prompt_chars must be at least 1000")
         self.llm = llm
+        self.max_prompt_chars = max_prompt_chars
 
     def select(
         self,
@@ -84,26 +96,12 @@ class LLMToolSelector:
         if not external_cards:
             return ToolSelectionResult(route_reason="no_external_candidates")
 
-        payload = {
-            "task_input": task_input,
-            "native_tools": [
-                card.prompt_payload(
-                    max_description_chars=DEFAULT_PROMPT_DESCRIPTION_CHARS
-                )
-                for card in native_cards
-            ],
-            "external_candidates": [
-                card.prompt_payload(
-                    max_description_chars=DEFAULT_PROMPT_DESCRIPTION_CHARS
-                )
-                for card in external_cards
-            ],
-            "rules": {
-                "read_tools_can_run_automatically": True,
-                "write_or_destructive_tools_require_approval": True,
-                "max_selected_tools": 3,
-            },
-        }
+        payload, budget = _fit_selector_payload(
+            task_input=task_input,
+            native_cards=native_cards,
+            external_cards=external_cards,
+            max_prompt_chars=self.max_prompt_chars,
+        )
         completion = self.llm.complete(
             task_id=task_id,
             messages=(
@@ -113,10 +111,21 @@ class LLMToolSelector:
             response_format=TOOL_SELECTOR_RESPONSE_FORMAT,
             prompt_name="kortny.tool_selector",
         )
-        return _parse_selector_payload(
+        parsed = _parse_selector_payload(
             completion.content,
-            allowed_external_names={card.registry_name for card in external_cards},
+            allowed_external_names={
+                _payload_registry_name(candidate)
+                for candidate in payload["external_candidates"]
+                if isinstance(candidate, dict)
+            },
             allowed_native_names={card.registry_name for card in native_cards},
+        )
+        return replace(
+            parsed,
+            route_reason=_budgeted_route_reason(parsed.route_reason, budget),
+            prompt_chars=budget.prompt_chars,
+            prompt_char_budget=budget.prompt_char_budget,
+            budget_omitted_candidate_names=budget.omitted_candidate_names,
         )
 
 
@@ -247,6 +256,125 @@ def _score_tool_card(task_input: str, card: ToolCard) -> float:
     return min(1.0, score)
 
 
+class _SelectorPromptBudget(BaseModel):
+    prompt_chars: int
+    prompt_char_budget: int
+    original_candidate_count: int
+    selected_candidate_count: int
+    omitted_candidate_names: tuple[str, ...] = ()
+
+    @property
+    def trimmed(self) -> bool:
+        return bool(self.omitted_candidate_names)
+
+
+def _fit_selector_payload(
+    *,
+    task_input: str,
+    native_cards: Sequence[ToolCard],
+    external_cards: Sequence[ToolCard],
+    max_prompt_chars: int,
+) -> tuple[JsonObject, _SelectorPromptBudget]:
+    candidates = list(external_cards)
+    description_chars = DEFAULT_PROMPT_DESCRIPTION_CHARS
+    prompt_task_input = task_input
+    payload = _selector_payload(
+        task_input=prompt_task_input,
+        native_cards=native_cards,
+        external_cards=candidates,
+        max_description_chars=description_chars,
+    )
+    prompt_chars = _selector_prompt_chars(payload)
+    while prompt_chars > max_prompt_chars:
+        if len(candidates) > 1:
+            candidates.pop()
+        elif description_chars > MIN_PROMPT_DESCRIPTION_CHARS:
+            description_chars = max(
+                MIN_PROMPT_DESCRIPTION_CHARS, description_chars // 2
+            )
+        elif candidates:
+            candidates.pop()
+        elif len(prompt_task_input) > MIN_PROMPT_TASK_CHARS:
+            prompt_task_input = _truncate_text(
+                prompt_task_input,
+                max_chars=max(MIN_PROMPT_TASK_CHARS, len(prompt_task_input) // 2),
+            )
+        else:
+            break
+        payload = _selector_payload(
+            task_input=prompt_task_input,
+            native_cards=native_cards,
+            external_cards=candidates,
+            max_description_chars=description_chars,
+        )
+        prompt_chars = _selector_prompt_chars(payload)
+
+    selected_names = {card.registry_name for card in candidates}
+    omitted_names = tuple(
+        card.registry_name
+        for card in external_cards
+        if card.registry_name not in selected_names
+    )
+    return payload, _SelectorPromptBudget(
+        prompt_chars=prompt_chars,
+        prompt_char_budget=max_prompt_chars,
+        original_candidate_count=len(external_cards),
+        selected_candidate_count=len(candidates),
+        omitted_candidate_names=omitted_names,
+    )
+
+
+def _selector_payload(
+    *,
+    task_input: str,
+    native_cards: Sequence[ToolCard],
+    external_cards: Sequence[ToolCard],
+    max_description_chars: int,
+) -> JsonObject:
+    return {
+        "task_input": task_input,
+        "native_tools": [
+            card.prompt_payload(max_description_chars=max_description_chars)
+            for card in native_cards
+        ],
+        "external_candidates": [
+            card.prompt_payload(max_description_chars=max_description_chars)
+            for card in external_cards
+        ],
+        "rules": {
+            "read_tools_can_run_automatically": True,
+            "write_or_destructive_tools_require_approval": True,
+            "max_selected_tools": 3,
+        },
+    }
+
+
+def _selector_prompt_chars(payload: JsonObject) -> int:
+    return len(TOOL_SELECTOR_SYSTEM_PROMPT) + len(json.dumps(payload, sort_keys=True))
+
+
+def _payload_registry_name(payload: JsonObject) -> str:
+    registry_name = payload.get("registry_name")
+    return registry_name if isinstance(registry_name, str) else ""
+
+
+def _budgeted_route_reason(
+    route_reason: str,
+    budget: _SelectorPromptBudget,
+) -> str:
+    if not budget.trimmed:
+        return route_reason
+    return f"{route_reason}+prompt_budget_trimmed"
+
+
+def _truncate_text(value: str, *, max_chars: int) -> str:
+    if len(value) <= max_chars:
+        return value
+    if max_chars <= 3:
+        return value[:max_chars]
+    return value[: max_chars - 3].rstrip() + "..."
+
+
 def _words(text: str) -> set[str]:
     return {
         "".join(char for char in raw.casefold() if char.isalnum())
@@ -289,7 +417,6 @@ FIRECRAWL_SEARCH_WORDS = frozenset(
         "search",
         "source",
         "sources",
-        "summarize",
         "trend",
         "trends",
         "web",

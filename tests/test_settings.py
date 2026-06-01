@@ -19,6 +19,7 @@ SETTINGS_ENV_VARS = {
     "COMPOSIO_CATALOG_ENABLED",
     "COMPOSIO_CATALOG_LIMIT",
     "COMPOSIO_REQUEST_TIMEOUT_SECONDS",
+    "TOOL_SELECTOR_MAX_PROMPT_CHARS",
     "BRAVE_SEARCH_API_KEY",
     "OBSERVABILITY_ENABLED",
     "OBSERVABILITY_CAPTURE_CONTENT",
@@ -69,6 +70,7 @@ def test_settings_loads_required_environment(monkeypatch: pytest.MonkeyPatch) ->
     assert settings.composio_catalog_limit == 60
     assert settings.composio_request_timeout_seconds == 10.0
     assert settings.tool_selector_max_external_candidates == 24
+    assert settings.tool_selector_max_prompt_chars == 12000
     assert settings.tool_result_prompt_max_chars == 8000
     assert settings.observability_enabled is True
     assert settings.observability_capture_content == "metadata"
@@ -84,6 +86,7 @@ def test_settings_loads_optional_environment(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("COMPOSIO_CATALOG_LIMIT", "120")
     monkeypatch.setenv("COMPOSIO_REQUEST_TIMEOUT_SECONDS", "2.5")
     monkeypatch.setenv("TOOL_SELECTOR_MAX_EXTERNAL_CANDIDATES", "12")
+    monkeypatch.setenv("TOOL_SELECTOR_MAX_PROMPT_CHARS", "6000")
     monkeypatch.setenv("TOOL_RESULT_PROMPT_MAX_CHARS", "4000")
     monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "brave-key")
     monkeypatch.setenv("SLACK_FILE_READ_MAX_BYTES", "1024")
@@ -110,6 +113,7 @@ def test_settings_loads_optional_environment(monkeypatch: pytest.MonkeyPatch) ->
     assert settings.composio_catalog_limit == 120
     assert settings.composio_request_timeout_seconds == 2.5
     assert settings.tool_selector_max_external_candidates == 12
+    assert settings.tool_selector_max_prompt_chars == 6000
     assert settings.tool_result_prompt_max_chars == 4000
     assert settings.brave_search_api_key == "brave-key"
     assert settings.slack_file_read_max_bytes == 1024

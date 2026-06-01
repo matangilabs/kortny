@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Protocol, cast
 
@@ -598,7 +598,8 @@ class AgentTaskExecutor:
                 or DbLLMProvider(settings.llm_provider.value),
                 task_service=task_service,
                 model_route=model_route,
-            )
+            ),
+            max_prompt_chars=settings.tool_selector_max_prompt_chars,
         )
 
     def _record_tool_selection(
@@ -633,6 +634,27 @@ class AgentTaskExecutor:
             ],
             "route_reason": selection.route_reason,
             "fallback_used": selection.fallback_used,
+            **(
+                {
+                    "selector_prompt_chars": selection.prompt_chars,
+                    "selector_prompt_char_budget": selection.prompt_char_budget,
+                }
+                if selection.prompt_chars is not None
+                and selection.prompt_char_budget is not None
+                else {}
+            ),
+            **(
+                {
+                    "budget_omitted_candidate_names": list(
+                        selection.budget_omitted_candidate_names
+                    ),
+                    "budget_omitted_candidate_count": len(
+                        selection.budget_omitted_candidate_names
+                    ),
+                }
+                if selection.budget_omitted_candidate_names
+                else {}
+            ),
         }
         task_service.append_event(task, TaskEventType.log, payload)
         log_observation(
@@ -645,6 +667,11 @@ class AgentTaskExecutor:
             suppressed_native_tools=list(selection.suppressed_native_tools),
             route_reason=selection.route_reason,
             fallback_used=selection.fallback_used,
+            selector_prompt_chars=selection.prompt_chars,
+            selector_prompt_char_budget=selection.prompt_char_budget,
+            budget_omitted_candidate_count=len(
+                selection.budget_omitted_candidate_names
+            ),
         )
 
     def _build_external_tool_providers(
@@ -1175,7 +1202,8 @@ def _expand_related_tool_selection(
     route_reason = selection.route_reason
     if "related_tool_expansion" not in route_reason:
         route_reason = f"{route_reason}+related_tool_expansion"
-    return ToolSelectionResult(
+    return replace(
+        selection,
         selected_tools=selection.selected_tools + tuple(additions),
         suppressed_native_tools=selection.suppressed_native_tools,
         rejected_tools=rejected,

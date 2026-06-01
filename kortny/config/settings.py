@@ -63,6 +63,9 @@ class Settings(BaseSettings):
     tool_selector_max_external_candidates: int = Field(
         default=24, validation_alias="TOOL_SELECTOR_MAX_EXTERNAL_CANDIDATES"
     )
+    tool_selector_max_prompt_chars: int = Field(
+        default=12000, validation_alias="TOOL_SELECTOR_MAX_PROMPT_CHARS"
+    )
     tool_result_prompt_max_chars: int = Field(
         default=8000, validation_alias="TOOL_RESULT_PROMPT_MAX_CHARS"
     )
@@ -204,6 +207,15 @@ class Settings(BaseSettings):
         if value < 1 or value > 200:
             raise ValueError(
                 "TOOL_SELECTOR_MAX_EXTERNAL_CANDIDATES must be between 1 and 200"
+            )
+        return value
+
+    @field_validator("tool_selector_max_prompt_chars")
+    @classmethod
+    def _valid_tool_selector_max_prompt_chars(cls, value: int) -> int:
+        if value < 1000 or value > 100000:
+            raise ValueError(
+                "TOOL_SELECTOR_MAX_PROMPT_CHARS must be between 1000 and 100000"
             )
         return value
 

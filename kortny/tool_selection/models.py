@@ -69,6 +69,9 @@ class ToolSelectionResult:
     rejected_tools: tuple[ToolSelection, ...] = ()
     route_reason: str = "no_external_tool_needed"
     fallback_used: bool = False
+    prompt_chars: int | None = None
+    prompt_char_budget: int | None = None
+    budget_omitted_candidate_names: tuple[str, ...] = ()
 
     @property
     def selected_names(self) -> tuple[str, ...]:
