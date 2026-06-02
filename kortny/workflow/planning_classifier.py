@@ -14,7 +14,7 @@ from enum import StrEnum
 from typing import Any
 
 from kortny.db.models import Task, TaskEvent
-from kortny.llm.routing import latest_intent_decision
+from kortny.llm.routing import effective_intent_decision, latest_intent_decision
 from kortny.tools.types import JsonObject
 
 
@@ -74,7 +74,7 @@ def classify_planned_workflow(
     """
 
     normalized_input = _normalize(task.input)
-    intent_decision = latest_intent_decision(events)
+    intent_decision = effective_intent_decision(latest_intent_decision(events))
     likely_tools = _likely_tools(intent_decision)
     needs_context = _context_requirements(intent_decision, normalized_input)
     integrations = _detected_integrations(normalized_input, likely_tools)
@@ -219,7 +219,10 @@ def _estimated_subtask_count(
         count += 1
     if "write_or_destructive_intent" in reason_set:
         count += 1
-    if "scheduled_or_recurring" in reason_set or "scheduled_task_identity" in reason_set:
+    if (
+        "scheduled_or_recurring" in reason_set
+        or "scheduled_task_identity" in reason_set
+    ):
         count += 1
     count += min(3, len(detected_integrations))
     count += min(2, len(likely_tools))
@@ -245,7 +248,10 @@ def _planned_confidence(reason_codes: tuple[str, ...]) -> float:
 def _planned_reason(reason_codes: tuple[str, ...]) -> str:
     if "write_or_destructive_intent" in reason_codes:
         return "Task may require write, destructive, or approval-sensitive steps; mark as a planned workflow candidate."
-    if "scheduled_or_recurring" in reason_codes or "scheduled_task_identity" in reason_codes:
+    if (
+        "scheduled_or_recurring" in reason_codes
+        or "scheduled_task_identity" in reason_codes
+    ):
         return "Recurring or scheduled work should eventually enter the durable planned workflow path."
     if "two_or_more_integration_scopes" in reason_codes:
         return "Task mentions multiple integration scopes and should eventually be planned before execution."

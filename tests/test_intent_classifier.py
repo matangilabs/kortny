@@ -159,6 +159,93 @@ def test_intent_classifier_overrides_memory_forget_as_task_request() -> None:
     assert decision.likely_tools == ["inspect_memory", "forget_fact"]
 
 
+def test_intent_classifier_preserves_mixed_follow_up_and_memory() -> None:
+    provider = FakeIntentProvider(
+        """
+        {
+          "addressed_to_kortny": true,
+          "classification": "memory_candidate",
+          "confidence": 0.9,
+          "should_create_task": false,
+          "should_ack_with_reaction": true,
+          "suggested_reaction": "brain",
+          "needs_channel_context": false,
+          "needs_thread_context": true,
+          "needs_file_context": false,
+          "likely_tools": ["set_memory", "manage_memory"],
+          "model_tier": "cheap",
+          "reason": "User wants Kortny to remember a stable preference."
+        }
+        """
+    )
+
+    decision = LLMIntentClassifier(provider=provider).classify(
+        request=IntentRequest(
+            text=(
+                "Yeah lets do that. In the future remember to use the tools "
+                "necessary and don't wait to be told."
+            ),
+            surface=IntentSurface.app_mention,
+            is_thread_follow_up=True,
+        )
+    )
+
+    assert decision.classification is IntentClassification.follow_up
+    assert decision.should_create_task is True
+    assert decision.routing_classification() is IntentClassification.follow_up
+    assert decision.primary_intent is not None
+    assert decision.primary_intent.type is IntentClassification.follow_up
+    assert decision.primary_intent.needs_thread_context is True
+    assert decision.secondary_intents[0].type is IntentClassification.memory_candidate
+    assert decision.secondary_intents[0].route == "memory_confirmation"
+
+
+def test_parse_intent_decision_accepts_explicit_decomposition() -> None:
+    decision = parse_intent_decision(
+        """
+        {
+          "addressed_to_kortny": true,
+          "classification": "follow_up",
+          "confidence": 0.91,
+          "should_create_task": true,
+          "should_ack_with_reaction": true,
+          "suggested_reaction": "eyes",
+          "needs_channel_context": false,
+          "needs_thread_context": true,
+          "needs_file_context": false,
+          "likely_tools": ["slack_channel_history"],
+          "model_tier": "standard",
+          "reason": "User has a follow-up plus memory instruction.",
+          "primary_intent": {
+            "type": "follow_up",
+            "objective": "Continue the prior request.",
+            "should_execute": true,
+            "likely_tools": ["alpha_vantage"],
+            "route": "tool_worker",
+            "needs_channel_context": false,
+            "needs_thread_context": true,
+            "needs_file_context": false
+          },
+          "secondary_intents": [
+            {
+              "type": "memory_candidate",
+              "objective": "Remember the user's tool-use preference.",
+              "should_execute": true,
+              "likely_tools": ["remember_fact"],
+              "route": "memory_confirmation",
+              "needs_channel_context": false,
+              "needs_thread_context": false,
+              "needs_file_context": false
+            }
+          ]
+        }
+        """
+    )
+
+    assert decision.routing_likely_tools() == ["alpha_vantage"]
+    assert decision.secondary_intents[0].likely_tools == ["remember_fact"]
+
+
 def test_parse_intent_decision_rejects_invalid_content() -> None:
     with pytest.raises(IntentClassificationError):
         parse_intent_decision("not json")

@@ -64,7 +64,7 @@ class ModelRouter:
     ) -> ModelRoute:
         """Select a route using intent metadata first, then task text fallback."""
 
-        decision = latest_intent_decision(events)
+        decision = effective_intent_decision(latest_intent_decision(events))
         tier = _tier_from_intent_decision(decision)
         if tier is not None:
             return self.route_for_tier(
@@ -118,6 +118,46 @@ def latest_intent_decision(events: Sequence[TaskEvent]) -> Mapping[str, Any] | N
     return None
 
 
+def effective_intent_decision(
+    decision: Mapping[str, Any] | None,
+) -> Mapping[str, Any] | None:
+    """Return the execution-driving view of a possibly decomposed intent."""
+
+    if decision is None:
+        return None
+    primary = decision.get("primary_intent")
+    if not isinstance(primary, Mapping):
+        return decision
+    should_execute = primary.get("should_execute")
+    if isinstance(should_execute, bool) and not should_execute:
+        return decision
+
+    effective = dict(decision)
+    classification = _optional_str(primary.get("type"))
+    if classification:
+        effective["classification"] = classification
+    effective["should_create_task"] = True
+
+    likely_tools = _string_list(primary.get("likely_tools"))
+    if likely_tools:
+        effective["likely_tools"] = likely_tools
+
+    for key in (
+        "needs_channel_context",
+        "needs_thread_context",
+        "needs_file_context",
+    ):
+        value = primary.get(key)
+        if isinstance(value, bool):
+            effective[key] = value
+
+    objective = _optional_str(primary.get("objective"))
+    if objective:
+        effective["reason"] = objective
+    effective["effective_intent_source"] = "primary_intent"
+    return effective
+
+
 def _tier_from_intent_decision(
     decision: Mapping[str, Any] | None,
 ) -> ModelRouteTier | None:
@@ -166,6 +206,12 @@ def _string_set(value: object) -> set[str]:
     if not isinstance(value, Iterable) or isinstance(value, str | bytes):
         return set()
     return {item for item in value if isinstance(item, str)}
+
+
+def _string_list(value: object) -> list[str]:
+    if not isinstance(value, Iterable) or isinstance(value, str | bytes):
+        return []
+    return [item for item in value if isinstance(item, str) and item]
 
 
 def _optional_str(value: object) -> str | None:

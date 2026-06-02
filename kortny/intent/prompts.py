@@ -15,7 +15,29 @@ Return exactly one JSON object matching this schema:
   "needs_file_context": boolean,
   "likely_tools": string[],
   "model_tier": "cheap" | "standard" | "strong",
-  "reason": string
+  "reason": string,
+  "primary_intent": {
+    "type": "task_request" | "follow_up" | "memory_candidate" | "clarification" | "cancel_or_retry" | "third_person_reference" | "ambient_observation" | "ignore",
+    "objective": string,
+    "should_execute": boolean,
+    "likely_tools": string[],
+    "route": string | null,
+    "needs_channel_context": boolean | null,
+    "needs_thread_context": boolean | null,
+    "needs_file_context": boolean | null
+  } | null,
+  "secondary_intents": [
+    {
+      "type": "task_request" | "follow_up" | "memory_candidate" | "clarification" | "cancel_or_retry" | "third_person_reference" | "ambient_observation" | "ignore",
+      "objective": string,
+      "should_execute": boolean,
+      "likely_tools": string[],
+      "route": string | null,
+      "needs_channel_context": boolean | null,
+      "needs_thread_context": boolean | null,
+      "needs_file_context": boolean | null
+    }
+  ]
 }
 
 Classification guidance:
@@ -27,6 +49,13 @@ Classification guidance:
 - third_person_reference: user talks about Kortny to another human, not to Kortny.
 - ambient_observation: message may be useful background but is not a direct request.
 - ignore: not relevant to Kortny.
+
+Multi-intent guidance:
+- If one Slack message contains more than one actionable request, set primary_intent to the request Kortny should execute first and put the rest in secondary_intents.
+- The top-level classification, should_create_task, context flags, likely_tools, model_tier, and reason should describe primary_intent.
+- For messages like "yeah lets do that" plus "remember this in the future", classify the top-level and primary_intent as follow_up, and include a secondary memory_candidate intent.
+- Do not let a memory instruction hide a concrete task request or follow-up.
+- If there is only one intent, primary_intent may be null and secondary_intents should be empty.
 
 Important memory-control distinction:
 - "forget/remove/delete/clear my memory/preference/fact/rule" is a task_request with likely_tools ["inspect_memory", "forget_fact"], not cancel_or_retry.

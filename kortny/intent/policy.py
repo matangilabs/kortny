@@ -70,9 +70,9 @@ def should_create_task_from_soft_mention(
 
     return (
         decision.addressed_to_kortny
-        and decision.classification in TASK_CREATING_CLASSIFICATIONS
+        and decision.routing_classification() in TASK_CREATING_CLASSIFICATIONS
         and decision.confidence >= threshold
-        and decision.should_create_task
+        and decision.routing_should_create_task()
     )
 
 

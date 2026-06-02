@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from kortny.intent.models import (
     IntentClassification,
     IntentDecision,
+    IntentFragment,
     IntentRequest,
     ModelTier,
 )
@@ -109,7 +110,8 @@ class LLMIntentClassifier:
                 response_format=INTENT_RESPONSE_FORMAT,
             )
         decision = parse_intent_decision(completion.content)
-        return _with_deterministic_overrides(request, decision)
+        decision = _with_deterministic_overrides(request, decision)
+        return _with_mixed_follow_up_memory_override(request, decision)
 
 
 def parse_intent_decision(content: str | None) -> IntentDecision:
@@ -167,6 +169,63 @@ def _with_deterministic_overrides(
     )
 
 
+def _with_mixed_follow_up_memory_override(
+    request: IntentRequest,
+    decision: IntentDecision,
+) -> IntentDecision:
+    if decision.primary_intent is not None:
+        return decision
+    if decision.classification is not IntentClassification.memory_candidate:
+        return decision
+    if not _has_memory_instruction(request.text):
+        return decision
+    if not _has_follow_up_instruction(request):
+        return decision
+
+    primary = IntentFragment(
+        type=IntentClassification.follow_up,
+        objective=(
+            "Continue the prior Slack thread task before handling the memory "
+            "preference."
+        ),
+        should_execute=True,
+        likely_tools=["slack_channel_history", "list_integrations"],
+        route="tool_worker",
+        needs_channel_context=False,
+        needs_thread_context=True,
+        needs_file_context=request.has_files,
+    )
+    secondary = IntentFragment(
+        type=IntentClassification.memory_candidate,
+        objective=decision.reason,
+        should_execute=True,
+        likely_tools=decision.likely_tools or ["remember_fact"],
+        route="memory_confirmation",
+        needs_channel_context=False,
+        needs_thread_context=False,
+        needs_file_context=False,
+    )
+    return decision.model_copy(
+        update={
+            "classification": IntentClassification.follow_up,
+            "should_create_task": True,
+            "needs_thread_context": True,
+            "likely_tools": list(primary.likely_tools),
+            "model_tier": (
+                ModelTier.standard
+                if decision.model_tier is ModelTier.cheap
+                else decision.model_tier
+            ),
+            "reason": (
+                "Mixed follow-up plus memory instruction; execute the follow-up "
+                "as primary and preserve the memory request as secondary."
+            ),
+            "primary_intent": primary,
+            "secondary_intents": [secondary],
+        }
+    )
+
+
 def _is_memory_forget_request(text: str) -> bool:
     normalized = f" {text.casefold()} "
     has_forget_action = any(
@@ -193,5 +252,47 @@ def _is_memory_forget_request(text: str) -> bool:
             " rules",
             " remembered",
             " stored",
+        )
+    )
+
+
+def _has_memory_instruction(text: str) -> bool:
+    normalized = f" {text.casefold()} "
+    return any(
+        phrase in normalized
+        for phrase in (
+            " remember ",
+            " keep in mind ",
+            " going forward ",
+            " from now on ",
+            " in the future ",
+            " preference ",
+        )
+    )
+
+
+def _has_follow_up_instruction(request: IntentRequest) -> bool:
+    normalized = f" {request.text.casefold()} "
+    if request.is_thread_follow_up and any(
+        phrase in normalized
+        for phrase in (
+            " do that",
+            " lets do that",
+            " let's do that",
+            " go ahead",
+            " continue",
+            " yes",
+            " yeah",
+            " yup",
+        )
+    ):
+        return True
+    return any(
+        phrase in normalized
+        for phrase in (
+            " do that",
+            " lets do that",
+            " let's do that",
+            " continue with that",
         )
     )

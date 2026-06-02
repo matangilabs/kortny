@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Protocol, cast
@@ -22,11 +23,11 @@ from kortny.approvals import (
 from kortny.composio import ComposioClient
 from kortny.composio.provider import ComposioExternalToolProvider
 from kortny.config import Settings, load_settings
-from kortny.db.models import Artifact, Task, TaskEvent, TaskEventType
+from kortny.db.models import Artifact, Task, TaskEvent, TaskEventType, TaskStatus
 from kortny.db.models import LLMProvider as DbLLMProvider
 from kortny.execution import task_workspace
 from kortny.llm import LLMProvider, LLMService, ModelRouter, create_llm_provider
-from kortny.llm.routing import ModelRouteTier
+from kortny.llm.routing import ModelRouteTier, effective_intent_decision
 from kortny.memory import WorkspaceStateService
 from kortny.observability import log_observation
 from kortny.observe.assessment import (
@@ -382,9 +383,8 @@ class AgentTaskExecutor:
             reason_codes=list(handoff.reason_codes),
             fallback_reason=handoff.fallback_reason,
         )
-        if (
-            handoff.configured_backend == "temporal"
-            and (handoff.durable_candidate or planned_workflow_candidate)
+        if handoff.configured_backend == "temporal" and (
+            handoff.durable_candidate or planned_workflow_candidate
         ):
             self._shadow_start_temporal_workflow(
                 settings=settings,
@@ -632,9 +632,17 @@ class AgentTaskExecutor:
                 native_tools=tuple(native_tools),
             )
         )
+        raw_intent_decision = _latest_intent_decision(session, task)
+        _record_deferred_secondary_intents(
+            session=session,
+            task=task,
+            task_service=task_service,
+            decision=raw_intent_decision,
+        )
         skip_external_reason = _external_tool_skip_reason(
             session,
             task,
+            decision=raw_intent_decision,
             native_web_search_available=web_search is not None,
         )
         if skip_external_reason is not None:
@@ -729,7 +737,11 @@ class AgentTaskExecutor:
             return native_tools
 
         selector_cards, compaction = compact_tool_cards(
-            task_input=task.input,
+            task_input=_tool_selection_task_input(
+                session=session,
+                task=task,
+                base_input=task.input,
+            ),
             cards=external_cards,
             max_candidates=settings.tool_selector_max_external_candidates,
         )
@@ -761,7 +773,11 @@ class AgentTaskExecutor:
         try:
             selection = selector.select(
                 task_id=task.id,
-                task_input=task.input,
+                task_input=_tool_selection_task_input(
+                    session=session,
+                    task=task,
+                    base_input=task.input,
+                ),
                 native_cards=native_cards,
                 external_cards=selector_cards,
             )
@@ -779,7 +795,11 @@ class AgentTaskExecutor:
             )
             selection = HeuristicToolSelector().select(
                 task_id=task.id,
-                task_input=task.input,
+                task_input=_tool_selection_task_input(
+                    session=session,
+                    task=task,
+                    base_input=task.input,
+                ),
                 native_cards=native_cards,
                 external_cards=selector_cards,
             )
@@ -1379,6 +1399,7 @@ def _external_tool_skip_reason(
     session: Session,
     task: Task,
     *,
+    decision: dict[str, Any] | None = None,
     native_web_search_available: bool = True,
 ) -> dict[str, Any] | None:
     if is_channel_assessment_task(session, task):
@@ -1387,9 +1408,13 @@ def _external_tool_skip_reason(
             "classification": None,
         }
 
-    decision = _latest_intent_decision(session, task)
-    if decision is None:
+    raw_decision = (
+        decision if decision is not None else _latest_intent_decision(session, task)
+    )
+    effective_decision = effective_intent_decision(raw_decision)
+    if effective_decision is None:
         return None
+    decision = dict(effective_decision)
 
     classification = _payload_str(decision, "classification")
     should_create_task = decision.get("should_create_task")
@@ -1444,6 +1469,110 @@ def _latest_intent_decision(session: Session, task: Task) -> dict[str, Any] | No
     if not isinstance(decision, dict):
         return None
     return decision
+
+
+def _tool_selection_task_input(
+    *,
+    session: Session,
+    task: Task,
+    base_input: str,
+) -> str:
+    decision = effective_intent_decision(_latest_intent_decision(session, task))
+    if not _should_include_prior_context_for_tool_selection(decision):
+        return base_input
+    if not task.slack_thread_ts:
+        return base_input
+
+    prior_tasks = tuple(
+        session.scalars(
+            select(Task)
+            .where(
+                Task.installation_id == task.installation_id,
+                Task.slack_channel_id == task.slack_channel_id,
+                Task.slack_thread_ts == task.slack_thread_ts,
+                Task.id != task.id,
+                Task.status == TaskStatus.succeeded,
+                Task.result_summary.is_not(None),
+            )
+            .order_by(Task.created_at.desc(), Task.id.desc())
+            .limit(2)
+        )
+    )
+    if not prior_tasks:
+        return base_input
+
+    lines = [base_input, "", "Prior Slack thread context for tool selection:"]
+    for prior in reversed(prior_tasks):
+        lines.append(f"- User asked: {_compact_tool_selection_text(prior.input)}")
+        if prior.result_summary:
+            lines.append(
+                f"  Kortny answered: "
+                f"{_compact_tool_selection_text(prior.result_summary)}"
+            )
+    return "\n".join(lines)
+
+
+def _should_include_prior_context_for_tool_selection(
+    decision: Mapping[str, Any] | None,
+) -> bool:
+    if decision is None:
+        return False
+    classification = _payload_str(decision, "classification")
+    if classification == "follow_up":
+        return True
+    return _truthy_bool(decision.get("needs_thread_context"))
+
+
+def _compact_tool_selection_text(value: str, *, max_chars: int = 500) -> str:
+    compact = " ".join(value.split())
+    if len(compact) <= max_chars:
+        return compact
+    return f"{compact[: max_chars - 3].rstrip()}..."
+
+
+def _record_deferred_secondary_intents(
+    *,
+    session: Session,
+    task: Task,
+    task_service: TaskService,
+    decision: dict[str, Any] | None,
+) -> None:
+    if decision is None:
+        return
+    secondary_intents = decision.get("secondary_intents")
+    if not isinstance(secondary_intents, list):
+        return
+    memory_intents = [
+        intent
+        for intent in secondary_intents
+        if isinstance(intent, dict) and intent.get("type") == "memory_candidate"
+    ]
+    if not memory_intents:
+        return
+    existing = session.scalar(
+        select(TaskEvent.id)
+        .where(
+            TaskEvent.task_id == task.id,
+            TaskEvent.type == TaskEventType.log,
+            TaskEvent.payload["message"].as_string() == "secondary_intent_deferred",
+            TaskEvent.payload["intent_type"].as_string() == "memory_candidate",
+        )
+        .limit(1)
+    )
+    if existing is not None:
+        return
+    task_service.append_event(
+        task,
+        TaskEventType.log,
+        {
+            "message": "secondary_intent_deferred",
+            "intent_type": "memory_candidate",
+            "route": _payload_str(memory_intents[0], "route") or "memory_confirmation",
+            "objective": _payload_str(memory_intents[0], "objective")
+            or "Memory candidate preserved for later confirmation.",
+            "reason": "primary_task_execution_first",
+        },
+    )
 
 
 def _expand_related_tool_selection(
@@ -1583,14 +1712,14 @@ def _truthy_bool(value: object) -> bool:
     return isinstance(value, bool) and value
 
 
-def _payload_str(payload: dict[str, Any], key: str) -> str | None:
+def _payload_str(payload: Mapping[str, Any], key: str) -> str | None:
     value = payload.get(key)
     if isinstance(value, str) and value:
         return value
     return None
 
 
-def _likely_tools(decision: dict[str, Any]) -> set[str]:
+def _likely_tools(decision: Mapping[str, Any]) -> set[str]:
     value = decision.get("likely_tools")
     if not isinstance(value, list):
         return set()

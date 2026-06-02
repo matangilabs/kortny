@@ -36,6 +36,34 @@ class ModelTier(StrEnum):
     strong = "strong"
 
 
+class IntentFragment(BaseModel):
+    """One actionable intent inside a single Slack message."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: IntentClassification
+    objective: str = Field(min_length=1, max_length=500)
+    should_execute: bool = True
+    likely_tools: list[str] = Field(default_factory=list)
+    route: str | None = None
+    needs_channel_context: bool | None = None
+    needs_thread_context: bool | None = None
+    needs_file_context: bool | None = None
+
+    @field_validator("objective")
+    @classmethod
+    def normalize_objective(cls, value: str) -> str:
+        return " ".join(value.split())
+
+    @field_validator("route")
+    @classmethod
+    def normalize_route(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+
 class IntentRequest(BaseModel):
     """Input sent to the intent classifier."""
 
@@ -73,6 +101,33 @@ class IntentDecision(BaseModel):
     likely_tools: list[str] = Field(default_factory=list)
     model_tier: ModelTier
     reason: str = Field(min_length=1, max_length=500)
+    primary_intent: IntentFragment | None = None
+    secondary_intents: list[IntentFragment] = Field(default_factory=list)
+
+    def routing_classification(self) -> IntentClassification:
+        """Return the intent classification that should drive execution."""
+
+        if self.primary_intent is not None and self.primary_intent.should_execute:
+            return self.primary_intent.type
+        return self.classification
+
+    def routing_should_create_task(self) -> bool:
+        """Return whether the execution-driving intent should create work."""
+
+        if self.primary_intent is not None:
+            return self.primary_intent.should_execute
+        return self.should_create_task
+
+    def routing_likely_tools(self) -> list[str]:
+        """Return likely tools for the execution-driving intent."""
+
+        if (
+            self.primary_intent is not None
+            and self.primary_intent.should_execute
+            and self.primary_intent.likely_tools
+        ):
+            return list(self.primary_intent.likely_tools)
+        return list(self.likely_tools)
 
     @field_validator("reason")
     @classmethod

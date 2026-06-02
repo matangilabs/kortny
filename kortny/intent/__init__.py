@@ -9,6 +9,7 @@ from kortny.intent.classifier import (
 from kortny.intent.models import (
     IntentClassification,
     IntentDecision,
+    IntentFragment,
     IntentRequest,
     IntentSurface,
     ModelTier,
@@ -25,6 +26,7 @@ __all__ = [
     "IntentClassificationError",
     "IntentClassifier",
     "IntentDecision",
+    "IntentFragment",
     "IntentRequest",
     "IntentSurface",
     "LLMIntentClassifier",

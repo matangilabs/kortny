@@ -23,6 +23,7 @@ from kortny.db.models import (
     Task,
     TaskEvent,
     TaskEventType,
+    TaskStatus,
 )
 from kortny.db.session import make_engine, make_session_factory, normalize_database_url
 from kortny.observe.assessment import CHANNEL_ASSESSMENT_REQUESTED_MESSAGE
@@ -567,6 +568,127 @@ def test_worker_registry_expands_linear_project_selection_to_issue_lookup(
         "composio_linear_list_linear_issues",
     ]
     assert event.payload["route_reason"] == "test_selection+related_tool_expansion"
+
+
+def test_worker_registry_uses_primary_intent_for_mixed_follow_up_memory(
+    db_session: Session,
+    tmp_path: Path,
+) -> None:
+    task = create_task(db_session, slack_channel_id="CTrades", slack_user_id="UAneesh")
+    task.input = (
+        "Yeah lets do that. In the future remember to use the tools necessary "
+        "and don't wait to be told."
+    )
+    prior = TaskService(db_session).create_task(
+        installation_id=task.installation_id,
+        slack_event_id=f"Ev{uuid.uuid4().hex}",
+        slack_channel_id=task.slack_channel_id,
+        slack_thread_ts=task.slack_thread_ts,
+        slack_message_ts="1779660000.000000",
+        slack_user_id=task.slack_user_id,
+        input="Can you analyze these trades?",
+    )
+    prior.status = TaskStatus.succeeded
+    prior.result_summary = (
+        "I analyzed the CSV trade blotter and can pull current prices using "
+        "Alpha Vantage for the new tickers."
+    )
+    add_connection(
+        db_session,
+        task,
+        connected_account_id="ca_alpha",
+        scope_type="user",
+        scope_id="UAneesh",
+        toolkit_slug="alpha_vantage",
+    )
+    task_service = TaskService(db_session)
+    task_service.append_event(
+        task,
+        TaskEventType.log,
+        {
+            "message": "intent_classification_completed",
+            "source": "app_mention",
+            "decision": {
+                "addressed_to_kortny": True,
+                "classification": "memory_candidate",
+                "confidence": 0.9,
+                "should_create_task": False,
+                "should_ack_with_reaction": True,
+                "needs_channel_context": False,
+                "needs_thread_context": True,
+                "needs_file_context": False,
+                "likely_tools": ["set_memory", "manage_memory"],
+                "model_tier": "cheap",
+                "reason": "User asked to remember a stable preference.",
+                "primary_intent": {
+                    "type": "follow_up",
+                    "objective": "Continue the prior market-price follow-up.",
+                    "should_execute": True,
+                    "likely_tools": ["alpha_vantage", "slack_channel_history"],
+                    "route": "tool_worker",
+                    "needs_channel_context": False,
+                    "needs_thread_context": True,
+                    "needs_file_context": False,
+                },
+                "secondary_intents": [
+                    {
+                        "type": "memory_candidate",
+                        "objective": "Remember the user's proactive tool-use preference.",
+                        "should_execute": True,
+                        "likely_tools": ["remember_fact"],
+                        "route": "memory_confirmation",
+                        "needs_channel_context": False,
+                        "needs_thread_context": False,
+                        "needs_file_context": False,
+                    }
+                ],
+            },
+        },
+    )
+    db_session.commit()
+    settings = build_settings(composio_api_key="composio-key")
+    composio_client = FakeComposioClient(
+        tools_by_toolkit={"alpha_vantage": alpha_vantage_tools(count=1)}
+    )
+    selector = StaticToolSelector(
+        ToolSelectionResult(
+            selected_tools=(
+                ToolSelection(
+                    registry_name="composio_alpha_vantage_search_0",
+                    confidence=0.92,
+                    reason="Market data follow-up should use Alpha Vantage.",
+                ),
+            ),
+            route_reason="test_mixed_intent_selection",
+        )
+    )
+
+    registry = AgentTaskExecutor(
+        settings=settings,
+        web_search_tool=StaticWebSearchTool(),
+        composio_client=composio_client,
+        tool_selector=selector,
+    )._build_registry(
+        settings=settings,
+        session=db_session,
+        task=task,
+        task_service=task_service,
+        working_dir=tmp_path,
+    )
+
+    assert "composio_alpha_vantage_search_0" in registry.names()
+    assert len(selector.calls) == 1
+    assert "Alpha Vantage" in str(selector.calls[0]["task_input"])
+    assert any(
+        event.payload.get("message") == "secondary_intent_deferred"
+        and event.payload.get("intent_type") == "memory_candidate"
+        and event.payload.get("reason") == "primary_task_execution_first"
+        for event in task_events(db_session, task)
+    )
+    assert not any(
+        event.payload.get("message") == "external_tool_selection_skipped"
+        for event in task_events(db_session, task)
+    )
 
 
 def test_worker_registry_compacts_external_tool_candidates_before_selection(
