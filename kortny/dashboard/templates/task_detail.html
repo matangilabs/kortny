@@ -172,13 +172,41 @@
   </section>
 
   <section class="detail-section">
-    <header class="section-header">
-      <h2>Task Events</h2>
-      <p>Ordered execution timeline with expandable raw payloads.</p>
+    <header class="section-header timeline-header-row">
+      <div>
+        <h2>Task Events</h2>
+        <p>Ordered execution timeline with expandable raw payloads.</p>
+      </div>
     </header>
+
+    <div class="timeline-toolbar card">
+      <div class="timeline-search-box">
+        <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+          <circle cx="11" cy="11" r="8"></circle>
+          <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+        </svg>
+        <input type="text" id="timeline-search" class="input timeline-search-input" placeholder="Search event titles, summaries, payloads, metrics...">
+      </div>
+      <div class="timeline-filters-row">
+        <div class="timeline-filter-tabs" role="tablist" aria-label="Filter events">
+          <button class="filter-tab active" data-filter="all" role="tab" aria-selected="true">All</button>
+          <button class="filter-tab" data-filter="error" role="tab" aria-selected="false">Errors</button>
+          <button class="filter-tab" data-filter="llm" role="tab" aria-selected="false">LLMs</button>
+          <button class="filter-tab" data-filter="tool" role="tab" aria-selected="false">Tools</button>
+          <button class="filter-tab" data-filter="slack" role="tab" aria-selected="false">Slack</button>
+          <button class="filter-tab" data-filter="log" role="tab" aria-selected="false">Logs</button>
+        </div>
+        <div class="timeline-bulk-actions">
+          <button id="btn-expand-all" class="btn-text">Expand visible</button>
+          <span class="action-divider" aria-hidden="true">|</span>
+          <button id="btn-collapse-all" class="btn-text">Collapse all</button>
+        </div>
+      </div>
+    </div>
+
     <ol class="timeline" aria-label="Task event timeline">
       {% for event in detail.timeline %}
-        <li class="timeline-item timeline-{{ event.tone }}">
+        <li class="timeline-item timeline-{{ event.tone }}" data-type="{{ event.event_type }}" data-tone="{{ event.tone }}" data-badges="{% for badge in event.badges %}{{ badge.label|lower }} {% endfor %}">
           <div class="timeline-marker" aria-hidden="true">{{ event.seq }}</div>
           <article class="card timeline-card">
             <header class="timeline-card-header">
@@ -193,7 +221,9 @@
                 </div>
                 <p>{{ event.summary }}</p>
               </div>
-              <time datetime="{{ event.created_at.isoformat() }}">{{ event.created_at|datetime }}</time>
+              <div class="timeline-time-col">
+                <time datetime="{{ event.created_at.isoformat() }}">{{ event.created_at|datetime }}</time>
+              </div>
             </header>
             {% if event.metrics %}
               <dl class="event-metrics" aria-label="Event metrics">
@@ -216,4 +246,155 @@
       {% endfor %}
     </ol>
   </section>
+
+  <script>
+    (function() {
+      const items = document.querySelectorAll('.timeline-item');
+      
+      // 1. Calculate time deltas
+      let prevTime = null;
+      items.forEach((item) => {
+        const timeEl = item.querySelector('time');
+        if (!timeEl) return;
+        const currentStr = timeEl.getAttribute('datetime');
+        if (!currentStr) return;
+        const currentTime = new Date(currentStr);
+        
+        const deltaEl = document.createElement('span');
+        deltaEl.className = 'timeline-time-delta';
+        
+        if (prevTime) {
+          const diffMs = currentTime - prevTime;
+          const formattedDiff = formatDuration(diffMs);
+          deltaEl.textContent = `+${formattedDiff}`;
+          deltaEl.title = `Duration since previous step: ${formattedDiff}`;
+          if (diffMs > 3000) {
+            deltaEl.classList.add('delta-slow');
+          }
+        } else {
+          deltaEl.textContent = 'Start';
+          deltaEl.classList.add('delta-start');
+        }
+        
+        timeEl.parentNode.appendChild(deltaEl);
+        prevTime = currentTime;
+      });
+
+      function formatDuration(ms) {
+        if (ms < 1000) return `${ms}ms`;
+        const secs = ms / 1000;
+        if (secs < 60) return `${secs.toFixed(1)}s`;
+        const mins = Math.floor(secs / 60);
+        const remainingSecs = Math.round(secs % 60);
+        return `${mins}m ${remainingSecs}s`;
+      }
+
+      // 2. Filter & Search logic
+      const searchInput = document.getElementById('timeline-search');
+      const filterTabs = document.querySelectorAll('.filter-tab');
+      
+      let currentFilter = 'all';
+      let currentQuery = '';
+
+      function updateTimeline() {
+        let lastVisibleItem = null;
+        
+        items.forEach(item => {
+          item.classList.remove('is-last-visible');
+          
+          const type = item.getAttribute('data-type') || '';
+          const tone = item.getAttribute('data-tone') || '';
+          const title = (item.querySelector('h3')?.textContent || '').toLowerCase();
+          const summary = (item.querySelector('.timeline-title-stack p')?.textContent || '').toLowerCase();
+          const badges = (item.getAttribute('data-badges') || '').toLowerCase();
+          const metrics = Array.from(item.querySelectorAll('.event-metrics dd, .event-metrics dt'))
+            .map(el => el.textContent.toLowerCase())
+            .join(' ');
+          const payload = (item.querySelector('.event-payload pre')?.textContent || '').toLowerCase();
+          
+          // Match query
+          const matchesQuery = !currentQuery || 
+            title.includes(currentQuery) || 
+            summary.includes(currentQuery) || 
+            badges.includes(currentQuery) || 
+            metrics.includes(currentQuery) || 
+            payload.includes(currentQuery);
+            
+          // Match filter
+          let matchesFilter = false;
+          if (currentFilter === 'all') {
+            matchesFilter = true;
+          } else if (currentFilter === 'error') {
+            matchesFilter = (tone === 'danger' || type === 'error');
+          } else if (currentFilter === 'llm') {
+            matchesFilter = (type === 'llm_call' || title.includes('llm') || badges.includes('model') || badges.includes('provider'));
+          } else if (currentFilter === 'tool') {
+            matchesFilter = (type === 'tool_call' || type === 'tool_result' || badges.includes('tool'));
+          } else if (currentFilter === 'slack') {
+            matchesFilter = (type === 'message_posted' || title.includes('slack') || badges.includes('slack'));
+          } else if (currentFilter === 'log') {
+            matchesFilter = (type === 'log');
+          }
+          
+          if (matchesQuery && matchesFilter) {
+            item.style.display = '';
+            lastVisibleItem = item;
+          } else {
+            item.style.display = 'none';
+          }
+        });
+        
+        if (lastVisibleItem) {
+          lastVisibleItem.classList.add('is-last-visible');
+        }
+      }
+
+      if (searchInput) {
+        searchInput.addEventListener('input', (e) => {
+          currentQuery = e.target.value.toLowerCase().trim();
+          updateTimeline();
+        });
+      }
+
+      filterTabs.forEach(tab => {
+        tab.addEventListener('click', () => {
+          filterTabs.forEach(t => {
+            t.classList.remove('active');
+            t.setAttribute('aria-selected', 'false');
+          });
+          tab.classList.add('active');
+          tab.setAttribute('aria-selected', 'true');
+          currentFilter = tab.getAttribute('data-filter');
+          updateTimeline();
+        });
+      });
+
+      // 3. Bulk Payload expansion
+      const btnExpandAll = document.getElementById('btn-expand-all');
+      const btnCollapseAll = document.getElementById('btn-collapse-all');
+      
+      if (btnExpandAll) {
+        btnExpandAll.addEventListener('click', () => {
+          items.forEach(item => {
+            if (item.style.display !== 'none') {
+              const details = item.querySelector('.event-payload');
+              if (details) details.open = true;
+            }
+          });
+        });
+      }
+      
+      if (btnCollapseAll) {
+        btnCollapseAll.addEventListener('click', () => {
+          items.forEach(item => {
+            const details = item.querySelector('.event-payload');
+            if (details) details.open = false;
+          });
+        });
+      }
+      
+      // Initial run to set last visible item class
+      updateTimeline();
+    })();
+  </script>
 {% endblock %}
