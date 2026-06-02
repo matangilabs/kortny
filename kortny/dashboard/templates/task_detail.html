@@ -143,7 +143,7 @@
 
       <ol class="timeline" aria-label="Task event timeline">
         {% for event in detail.timeline %}
-          <li class="timeline-item timeline-{{ event.tone }}" data-type="{{ event.event_type }}" data-tone="{{ event.tone }}" data-badges="{% for badge in event.badges %}{{ badge.label|lower }} {% endfor %}">
+          <li class="timeline-item timeline-{{ event.tone }}" data-seq="{{ event.seq }}" data-type="{{ event.event_type }}" data-tone="{{ event.tone }}" data-badges="{% for badge in event.badges %}{{ badge.label|lower }} {% endfor %}">
             <div class="timeline-marker" aria-hidden="true">{{ event.seq }}</div>
             <article class="card timeline-card">
               <header class="timeline-card-header">
@@ -182,6 +182,15 @@
           <li class="empty">No events recorded.</li>
         {% endfor %}
       </ol>
+      <div class="timeline-footer">
+        <button id="btn-scroll-top" class="btn-ghost btn-sm">
+          <svg class="icon-arrow-up" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="width: 12px; height: 12px; margin-right: 6px; display: inline-block; vertical-align: text-bottom;" aria-hidden="true">
+            <line x1="12" y1="19" x2="12" y2="5"></line>
+            <polyline points="5 12 12 5 19 12"></polyline>
+          </svg>
+          Scroll to top
+        </button>
+      </div>
     </section>
   </div>
 
@@ -293,8 +302,123 @@
         activateTab(initialHash);
       }
 
-      // 2. Timeline Step Latency Deltas
+      // 2. Calculate Nesting Hierarchy & Depth
       const items = document.querySelectorAll('.timeline-item');
+      const stack = [];
+      
+      items.forEach((item) => {
+        const type = item.getAttribute('data-type') || '';
+        const badgesStr = item.getAttribute('data-badges') || '';
+        const title = (item.querySelector('h3')?.textContent || '').toLowerCase();
+        
+        // Current item's depth is the size of stack before new pushes
+        const depth = stack.length;
+        item.setAttribute('data-depth', depth);
+        item.style.setProperty('--depth', depth);
+        
+        // Push boundaries to stack
+        const isStartAgent = title.includes('agent executor started') || title.includes('worker started task');
+        const isStartTool = title.includes('tool call started') || type === 'tool_call';
+        const isStartLlm = title.includes('llm_call_started') || title.includes('llm call started');
+        
+        if (isStartAgent) {
+          stack.push({ kind: 'agent', item });
+          item.classList.add('is-thread-parent');
+        } else if (isStartTool) {
+          stack.push({ kind: 'tool', item });
+          item.classList.add('is-thread-parent');
+        } else if (isStartLlm) {
+          stack.push({ kind: 'llm', item });
+          item.classList.add('is-thread-parent');
+        }
+
+        // Pop corresponding blocks from stack if ending (at end of iteration)
+        const isEndAgent = title.includes('agent executor completed');
+        const isEndTool = title.includes('tool call completed') || title.includes('tool call failed') || type === 'tool_result';
+        const isEndLlm = type === 'llm_call' || title.includes('llm call failed');
+        
+        if (isEndAgent && stack.length > 0 && stack[stack.length - 1].kind === 'agent') {
+          stack.pop();
+        } else if (isEndTool && stack.length > 0 && stack[stack.length - 1].kind === 'tool') {
+          stack.pop();
+        } else if (isEndLlm && stack.length > 0 && stack[stack.length - 1].kind === 'llm') {
+          stack.pop();
+        }
+      });
+
+      // 3. Attach Click-to-Collapse listeners to parent markers once
+      items.forEach((item) => {
+        if (item.classList.contains('is-thread-parent')) {
+          const marker = item.querySelector('.timeline-marker');
+          if (marker) {
+            marker.classList.add('thread-parent-marker');
+            marker.title = 'Click to collapse/expand thread';
+            
+            const toggleIcon = document.createElement('span');
+            toggleIcon.className = 'thread-toggle';
+            toggleIcon.textContent = '−';
+            marker.appendChild(toggleIcon);
+            
+            marker.addEventListener('click', (e) => {
+              e.stopPropagation();
+              toggleThread(item);
+            });
+          }
+        }
+      });
+
+      function toggleThread(parentItem, forceCollapse) {
+        const parentSeq = parentItem.getAttribute('data-seq');
+        const parentDepth = parseInt(parentItem.getAttribute('data-depth') || '0');
+        const isCollapsing = forceCollapse !== undefined ? forceCollapse : !parentItem.classList.contains('is-collapsed');
+        
+        parentItem.classList.toggle('is-collapsed', isCollapsing);
+        
+        const toggleEl = parentItem.querySelector('.thread-toggle');
+        if (toggleEl) {
+          toggleEl.textContent = isCollapsing ? '+' : '−';
+        }
+        
+        let next = parentItem.nextElementSibling;
+        while (next) {
+          const nextDepth = parseInt(next.getAttribute('data-depth') || '0');
+          if (nextDepth <= parentDepth) {
+            break;
+          }
+          
+          if (isCollapsing) {
+            next.setAttribute('data-collapsed-by', parentSeq);
+            next.style.display = 'none';
+          } else {
+            if (next.getAttribute('data-collapsed-by') === parentSeq) {
+              next.removeAttribute('data-collapsed-by');
+              next.style.display = '';
+              
+              if (next.classList.contains('is-collapsed')) {
+                // If the child itself is collapsed, hide its sub-children
+                const childSeq = next.getAttribute('data-seq');
+                let childNext = next.nextElementSibling;
+                while (childNext) {
+                  const childNextDepth = parseInt(childNext.getAttribute('data-depth') || '0');
+                  if (childNextDepth <= nextDepth) {
+                    break;
+                  }
+                  childNext.setAttribute('data-collapsed-by', childSeq);
+                  childNext.style.display = 'none';
+                  childNext = childNext.nextElementSibling;
+                }
+                next = childNext;
+                continue;
+              }
+            }
+          }
+          next = next.nextElementSibling;
+        }
+        
+        updateTimeline();
+      }
+
+      // 4. Timeline Step Latency Deltas
       let prevTime = null;
       items.forEach((item) => {
         const timeEl = item.querySelector('time');
@@ -332,7 +456,7 @@
         return `${mins}m ${remainingSecs}s`;
       }
 
-      // 3. Timeline Filter & Search logic
+      // 5. Timeline Filter & Search logic
       const searchInput = document.getElementById('timeline-search');
       const filterTabs = document.querySelectorAll('.filter-tab');
       
@@ -341,9 +465,17 @@
 
       function updateTimeline() {
         let lastVisibleItem = null;
+        const visibleItems = [];
         
         items.forEach(item => {
           item.classList.remove('is-last-visible');
+          // Clear any dynamic guidelines
+          item.querySelectorAll('.thread-line').forEach(el => el.remove());
+          
+          if (item.getAttribute('data-collapsed-by')) {
+            item.style.display = 'none';
+            return;
+          }
           
           const type = item.getAttribute('data-type') || '';
           const tone = item.getAttribute('data-tone') || '';
@@ -381,6 +513,7 @@
           
           if (matchesQuery && matchesFilter) {
             item.style.display = '';
+            visibleItems.push(item);
             lastVisibleItem = item;
           } else {
             item.style.display = 'none';
@@ -390,6 +523,52 @@
         if (lastVisibleItem) {
           lastVisibleItem.classList.add('is-last-visible');
         }
+
+        // Draw guidelines dynamically for visible items!
+        visibleItems.forEach((item, idx) => {
+          const depth = parseInt(item.getAttribute('data-depth') || '0');
+          const next = visibleItems[idx + 1];
+          const nextDepth = next ? parseInt(next.getAttribute('data-depth') || '0') : 0;
+          
+          // 1. Background thread lines (levels 0 to depth-1)
+          for (let i = 0; i < depth; i++) {
+            const line = document.createElement('div');
+            line.className = 'thread-line';
+            line.style.left = `calc(var(--depth-step) * ${i} + 16px)`;
+            line.title = 'Click to collapse this thread level';
+            
+            // If the thread line for level i terminates at this item
+            if (i >= nextDepth) {
+              line.classList.add('is-terminal');
+            }
+            
+            line.addEventListener('click', (e) => {
+              e.stopPropagation();
+              // Find parent item at depth `i`
+              let prev = item;
+              while (prev) {
+                if (parseInt(prev.getAttribute('data-depth') || '0') === i && prev.classList.contains('is-thread-parent')) {
+                  toggleThread(prev);
+                  break;
+                }
+                prev = prev.previousElementSibling;
+              }
+            });
+            item.appendChild(line);
+          }
+          
+          // 2. Self connector line (connecting this marker downwards)
+          const selfLine = document.createElement('div');
+          selfLine.className = 'thread-line self-connect';
+          selfLine.style.left = `calc(var(--depth-step) * ${depth} + 16px)`;
+          selfLine.style.top = '34px';
+          
+          if (nextDepth <= depth) {
+            selfLine.classList.add('is-terminal');
+          }
+          
+          item.appendChild(selfLine);
+        });
       }
 
       if (searchInput) {
@@ -412,7 +591,7 @@
         });
       });
 
-      // 4. Bulk Payload expansion
+      // 6. Bulk Payload expansion
       const btnExpandAll = document.getElementById('btn-expand-all');
       const btnCollapseAll = document.getElementById('btn-collapse-all');
       
@@ -433,6 +612,14 @@
             const details = item.querySelector('.event-payload');
             if (details) details.open = false;
           });
+        });
+      }
+
+      // 7. Scroll to top handler
+      const btnScrollTop = document.getElementById('btn-scroll-top');
+      if (btnScrollTop) {
+        btnScrollTop.addEventListener('click', () => {
+          window.scrollTo({ top: 0, behavior: 'smooth' });
         });
       }
       

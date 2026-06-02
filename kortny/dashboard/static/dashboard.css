@@ -4259,3 +4259,146 @@ pre {
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.04);
 }
 
+/* Reddit-style nested timeline tracing */
+:root {
+  --depth-step: 28px;
+}
+
+@media (max-width: 760px) {
+  :root {
+    --depth-step: 14px;
+  }
+}
+
+.timeline {
+  position: relative;
+}
+
+/* Remove default vertical connector */
+.timeline-item::before {
+  display: none !important;
+}
+
+.timeline-item {
+  position: relative;
+  padding-left: calc(var(--depth) * var(--depth-step));
+  transition: padding-left 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.thread-line {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--border);
+  opacity: 0.35;
+  cursor: pointer;
+  z-index: 2;
+  transition: background-color 0.15s ease, opacity 0.15s ease, width 0.15s ease, transform 0.15s ease;
+}
+
+.thread-line:hover {
+  background: var(--accent);
+  opacity: 0.95;
+  width: 3px;
+  transform: translateX(-0.5px);
+}
+
+.thread-line.self-connect {
+  bottom: 0;
+}
+
+.timeline-item.is-last-visible .thread-line.self-connect {
+  display: none !important;
+}
+
+.thread-line.is-terminal {
+  bottom: 14px;
+}
+
+/* Terminal endpoint dots */
+.thread-line.is-terminal::after {
+  content: "";
+  position: absolute;
+  bottom: 0;
+  left: 50%;
+  transform: translate(-50%, 50%);
+  width: 6px;
+  height: 6px;
+  border-radius: 99px;
+  background: var(--border);
+  border: 1px solid var(--card);
+  box-shadow: 0 0 0 1px var(--border);
+  z-index: 4;
+  transition: background-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.thread-line.is-terminal:hover::after {
+  background: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+/* Clickable markers for parent events */
+.thread-parent-marker {
+  cursor: pointer;
+  position: relative;
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.thread-parent-marker:hover {
+  background: var(--accent-bg) !important;
+  border-color: var(--accent-border) !important;
+  color: var(--accent-strong) !important;
+}
+
+.thread-toggle {
+  position: absolute;
+  right: -5px;
+  top: -5px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 99px;
+  width: 14px;
+  height: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  font-weight: 900;
+  color: var(--muted-foreground);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+  z-index: 3;
+  pointer-events: none; /* Let click bubble to marker */
+  transition: all 0.15s ease;
+}
+
+.thread-parent-marker:hover .thread-toggle {
+  color: var(--accent-strong);
+  border-color: var(--accent-border);
+  background: var(--card);
+}
+
+/* Collapsed Parent Card Styles */
+.timeline-item.is-collapsed .timeline-card {
+  border-style: dashed;
+  border-color: var(--accent-border);
+  background: var(--muted);
+  opacity: 0.75;
+}
+
+.timeline-item.is-collapsed .timeline-card-header {
+  background: transparent;
+  padding: 10px 14px;
+}
+
+.timeline-item.is-collapsed .timeline-card .event-metrics,
+.timeline-item.is-collapsed .timeline-card .event-payload {
+  display: none !important;
+}
+
+.timeline-footer {
+  display: flex;
+  justify-content: center;
+  margin-top: 24px;
+}
+
