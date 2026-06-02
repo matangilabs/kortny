@@ -8,14 +8,19 @@ import os
 import uuid
 from collections.abc import Callable
 from contextlib import contextmanager
+from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 
 from google.adk.agents import Agent
+from google.adk.agents.callback_context import CallbackContext
 from google.adk.models.lite_llm import LiteLlm
+from google.adk.models.llm_response import LlmResponse
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.adk.tools import AgentTool
 from google.genai import types as genai_types
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from kortny.agent.adk_tools import KortnyRegistryToolset, adk_tools_from_registry
@@ -24,8 +29,12 @@ from kortny.agent.coordinator import AgentLoopError, AgentRunResult
 from kortny.agent.thread_context import ThreadTranscriptProvider
 from kortny.approvals import ToolApprovalPolicy
 from kortny.config import LLMProvider, Settings
-from kortny.db.models import Task, TaskEventType
+from kortny.db.models import LLMProvider as DbLLMProvider
+from kortny.db.models import ModelPricing, Task, TaskEventType
 from kortny.llm import ChatMessage
+from kortny.llm.routing import ModelRoute, ModelRouter, ModelRouteTier
+from kortny.llm.service import calculate_cost_usd
+from kortny.llm.types import TokenUsage
 from kortny.observability import log_observation
 from kortny.tasks import TaskService
 from kortny.tools import ToolRegistry
@@ -34,6 +43,11 @@ ADK_APP_NAME = "kortny"
 ADK_TEXT_ONLY_RUNTIME_MODE = "text_only"
 ADK_TOOL_RUNTIME_MODE = "tool_enabled"
 ADK_ORCHESTRATED_RUNTIME_MODE = "orchestrated"
+ADK_QUICK_SPECIALIST_MODEL_TIER = ModelRouteTier.cheap_fast
+ADK_CLARIFICATION_SPECIALIST_MODEL_TIER = ModelRouteTier.cheap_fast
+ADK_INTENT_SPECIALIST_MODEL_TIER = ModelRouteTier.cheap_fast
+ADK_HUMANIZER_SPECIALIST_MODEL_TIER = ModelRouteTier.standard
+ADK_EVAL_SPECIALIST_MODEL_TIER = ModelRouteTier.high_reasoning
 ADK_TEXT_ONLY_SYSTEM_PROMPT = """You are Kortny, a Slack-native AI coworker answering inside Slack.
 
 Current runtime mode: ADK text-only migration.
@@ -149,6 +163,7 @@ class AdkAgentRuntime:
         registry: ToolRegistry | None = None,
         registry_factory: Callable[[], ToolRegistry] | None = None,
         model: str | None = None,
+        model_route: ModelRoute | None = None,
         system_prompt: str | None = None,
         thread_transcript_provider: ThreadTranscriptProvider | None = None,
         context_assembler: ContextAssembler | None = None,
@@ -160,7 +175,8 @@ class AdkAgentRuntime:
         self.task_service = task_service
         self.registry = registry
         self.registry_factory = registry_factory
-        self.model = model
+        self.model_route = model_route
+        self.model = model if model is not None else model_route.model if model_route else None
         self.system_prompt = system_prompt
         self.thread_transcript_provider = thread_transcript_provider
         self.context_assembler = context_assembler
@@ -173,6 +189,7 @@ class AdkAgentRuntime:
         task_obj = self._resolve_task(task)
         runtime_mode = self._runtime_mode()
         tool_names = self._tool_names()
+        specialist_models = self._specialist_model_routes()
         self.task_service.append_event(
             task_obj,
             TaskEventType.log,
@@ -183,6 +200,7 @@ class AdkAgentRuntime:
                 "tool_count": len(tool_names),
                 "tool_names": list(tool_names),
                 "model": self._adk_model_name(),
+                "specialist_models": specialist_models,
             },
         )
         log_observation(
@@ -194,10 +212,13 @@ class AdkAgentRuntime:
             tool_count=len(tool_names),
             tool_names=list(tool_names),
             model=self._adk_model_name(),
+            specialist_models=specialist_models,
         )
 
         try:
-            final_text, event_count = asyncio.run(self._run_adk_async(task_obj))
+            final_text, event_count, final_author, authors = asyncio.run(
+                self._run_adk_async(task_obj)
+            )
         except Exception as exc:
             self.task_service.append_event(
                 task_obj,
@@ -219,6 +240,8 @@ class AdkAgentRuntime:
                 "runtime": "adk",
                 "mode": runtime_mode,
                 "event_count": event_count,
+                "final_author": final_author,
+                "authors": authors,
                 "result_chars": len(final_text),
             },
         )
@@ -229,7 +252,9 @@ class AdkAgentRuntime:
             artifact_count=0,
         )
 
-    async def _run_adk_async(self, task: Task) -> tuple[str, int]:
+    async def _run_adk_async(
+        self, task: Task
+    ) -> tuple[str, int, str | None, list[str]]:
         context_package = self._assemble_context(task)
         session_service = InMemorySessionService()
         user_id = _safe_adk_id(task.slack_user_id, fallback="unknown_user")
@@ -271,7 +296,9 @@ class AdkAgentRuntime:
         )
 
         final_text = ""
+        final_author: str | None = None
         event_count = 0
+        authors: list[str] = []
         with _temporary_model_api_key(self.settings):
             events = runner.run_async(
                 user_id=user_id,
@@ -280,15 +307,19 @@ class AdkAgentRuntime:
             )
             async for event in events:
                 event_count += 1
+                author = _string_or_none(getattr(event, "author", None))
+                if author is not None and author not in authors:
+                    authors.append(author)
                 self._record_adk_event(task, event=event, event_count=event_count)
                 if event.is_final_response():
+                    final_author = author
                     final_text = _event_text(event)
 
         if not final_text.strip():
             raise AgentLoopError(
                 f"ADK runtime returned no final text for task {task.id}"
             )
-        return final_text.strip(), event_count
+        return final_text.strip(), event_count, final_author, authors
 
     def _build_agent(
         self,
@@ -306,6 +337,7 @@ class AdkAgentRuntime:
             instruction=self._instruction(context_package=context_package),
             description="Routes Slack requests to Kortny specialist agents.",
             tools=[AgentTool(agent=agent) for agent in specialist_agents],
+            after_model_callback=self._record_adk_model_usage,
             mode="chat",
         )
 
@@ -334,18 +366,21 @@ class AdkAgentRuntime:
                 description="Classifies nontrivial Slack requests and recommends a route.",
                 prompt=ADK_INTENT_TRIAGE_PROMPT,
                 context=context,
+                model=self._adk_model_for_tier(ADK_INTENT_SPECIALIST_MODEL_TIER),
             ),
             self._specialist_agent(
                 name="quick_response_agent",
                 description="Handles lightweight replies that do not require tools.",
                 prompt=ADK_QUICK_RESPONSE_PROMPT,
                 context=context,
+                model=self._adk_model_for_tier(ADK_QUICK_SPECIALIST_MODEL_TIER),
             ),
             self._specialist_agent(
                 name="clarification_agent",
                 description="Asks a concise follow-up question when required context is missing.",
                 prompt=ADK_CLARIFICATION_PROMPT,
                 context=context,
+                model=self._adk_model_for_tier(ADK_CLARIFICATION_SPECIALIST_MODEL_TIER),
             ),
         ]
         if task is not None and (
@@ -361,6 +396,7 @@ class AdkAgentRuntime:
                     ),
                     prompt=ADK_EVAL_PROMPT,
                     context=context,
+                    model=self._adk_model_for_tier(ADK_EVAL_SPECIALIST_MODEL_TIER),
                 ),
                 self._specialist_agent(
                     name="humanizer_agent",
@@ -369,6 +405,7 @@ class AdkAgentRuntime:
                     ),
                     prompt=ADK_HUMANIZER_PROMPT,
                     context=context,
+                    model=self._adk_model_for_tier(ADK_HUMANIZER_SPECIALIST_MODEL_TIER),
                 ),
             ]
         )
@@ -381,12 +418,14 @@ class AdkAgentRuntime:
         description: str,
         prompt: str,
         context: str | None,
+        model: str,
     ) -> Agent:
         return Agent(
             name=name,
-            model=LiteLlm(model=self._adk_model_name()),
+            model=LiteLlm(model=model),
             instruction=_instruction_with_optional_context(prompt, context),
             description=description,
+            after_model_callback=self._record_adk_model_usage,
             mode="chat",
         )
 
@@ -427,6 +466,7 @@ class AdkAgentRuntime:
                 "web/current data, documents, integrations, and multi-step work."
             ),
             tools=tools,
+            after_model_callback=self._record_adk_model_usage,
             mode="chat",
         )
 
@@ -443,6 +483,156 @@ class AdkAgentRuntime:
 
     def _adk_model_name(self) -> str:
         return adk_litellm_model_name(self.settings, model=self.model)
+
+    def _record_adk_model_usage(
+        self,
+        callback_context: CallbackContext,
+        llm_response: LlmResponse,
+    ) -> LlmResponse | None:
+        """Persist LiteLLM-backed ADK model usage into Kortny's usage tables."""
+
+        usage = llm_response.usage_metadata
+        task_id = _task_id_from_context(callback_context)
+        if usage is None or task_id is None:
+            return None
+
+        task = self.task_service.get_task(task_id)
+        agent_name = callback_context.agent_name
+        model = _normalized_litellm_model_name(
+            llm_response.model_version or self._adk_model_name_for_agent(agent_name)
+        )
+        input_tokens = _token_count(usage.prompt_token_count) + _token_count(
+            usage.tool_use_prompt_token_count
+        )
+        output_tokens = _token_count(usage.candidates_token_count)
+        token_usage = TokenUsage(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+        )
+        cost_usd, pricing_missing = self._calculate_adk_cost_usd(
+            model=model,
+            usage=token_usage,
+        )
+        model_tier = self._adk_model_tier_for_agent(agent_name)
+        route_reason = self._adk_route_reason_for_agent(agent_name)
+        metadata = {
+            "runtime": "adk",
+            "prompt_name": f"kortny.adk.{agent_name}",
+            "prompt_source": "adk",
+            "model_tier": model_tier,
+            "route_reason": route_reason,
+            "adk_agent_name": agent_name,
+            "adk_invocation_id": callback_context.invocation_id,
+            "adk_model_version": llm_response.model_version,
+            "total_tokens": _token_count(usage.total_token_count)
+            or input_tokens + output_tokens,
+            "thoughts_token_count": _token_count(usage.thoughts_token_count),
+            "tool_use_prompt_token_count": _token_count(
+                usage.tool_use_prompt_token_count
+            ),
+            "cached_content_token_count": _token_count(
+                usage.cached_content_token_count
+            ),
+            "pricing_missing": pricing_missing,
+        }
+        self.task_service.record_llm_usage(
+            task_id,
+            provider=DbLLMProvider(self.settings.llm_provider.value),
+            model=model,
+            model_tier=model_tier,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cost_usd=cost_usd,
+            metadata=metadata,
+        )
+        if task is not None:
+            log_observation(
+                logger,
+                "adk_llm_usage_recorded",
+                task=task,
+                runtime="adk",
+                provider=self.settings.llm_provider.value,
+                model=model,
+                model_tier=model_tier,
+                route_reason=route_reason,
+                adk_agent_name=agent_name,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cost_usd=str(cost_usd),
+                pricing_missing=pricing_missing,
+            )
+        return None
+
+    def _calculate_adk_cost_usd(
+        self,
+        *,
+        model: str,
+        usage: TokenUsage,
+    ) -> tuple[Decimal, bool]:
+        provider = DbLLMProvider(self.settings.llm_provider.value)
+        effective_at = datetime.now(UTC)
+        for candidate in _pricing_model_candidates(model):
+            pricing = self.session.scalar(
+                select(ModelPricing)
+                .where(
+                    ModelPricing.provider == provider,
+                    ModelPricing.model == candidate,
+                    ModelPricing.effective_from <= effective_at,
+                )
+                .order_by(ModelPricing.effective_from.desc())
+                .limit(1)
+            )
+            if pricing is not None:
+                return calculate_cost_usd(usage, pricing), False
+        return Decimal("0"), True
+
+    def _adk_model_name_for_agent(self, agent_name: str) -> str:
+        if agent_name in {"kortny_root_orchestrator", "tool_worker_agent"}:
+            return self._adk_model_name()
+        tier = _adk_specialist_tier(agent_name)
+        if tier is not None:
+            return self._adk_model_for_tier(tier)
+        return self._adk_model_name()
+
+    def _adk_model_tier_for_agent(self, agent_name: str) -> str | None:
+        if agent_name in {"kortny_root_orchestrator", "tool_worker_agent"}:
+            if self.model_route is not None:
+                return self.model_route.tier.value
+            return None
+        tier = _adk_specialist_tier(agent_name)
+        return tier.value if tier is not None else None
+
+    def _adk_route_reason_for_agent(self, agent_name: str) -> str | None:
+        if agent_name in {"kortny_root_orchestrator", "tool_worker_agent"}:
+            return self.model_route.reason if self.model_route is not None else None
+        tier = _adk_specialist_tier(agent_name)
+        return f"adk_specialist:{tier.value}" if tier is not None else None
+
+    def _adk_model_for_tier(self, tier: ModelRouteTier) -> str:
+        route = ModelRouter(self.settings).route_for_tier(
+            tier,
+            reason=f"adk_specialist:{tier.value}",
+        )
+        return adk_litellm_model_name(self.settings, model=route.model)
+
+    def _specialist_model_routes(self) -> dict[str, str]:
+        return {
+            "root_orchestrator": self._adk_model_name(),
+            "intent_triage_agent": self._adk_model_for_tier(
+                ADK_INTENT_SPECIALIST_MODEL_TIER
+            ),
+            "quick_response_agent": self._adk_model_for_tier(
+                ADK_QUICK_SPECIALIST_MODEL_TIER
+            ),
+            "clarification_agent": self._adk_model_for_tier(
+                ADK_CLARIFICATION_SPECIALIST_MODEL_TIER
+            ),
+            "tool_worker_agent": self._adk_model_name(),
+            "eval_agent": self._adk_model_for_tier(ADK_EVAL_SPECIALIST_MODEL_TIER),
+            "humanizer_agent": self._adk_model_for_tier(
+                ADK_HUMANIZER_SPECIALIST_MODEL_TIER
+            ),
+        }
 
     def _runtime_mode(self) -> str:
         if self.registry_factory is not None or self.registry is not None:
@@ -574,3 +764,48 @@ def _string_or_none(value: object) -> str | None:
     if value is None:
         return None
     return str(value)
+
+
+def _task_id_from_context(callback_context: CallbackContext) -> uuid.UUID | None:
+    raw_task_id = callback_context.state.get("task_id")
+    if not isinstance(raw_task_id, str):
+        return None
+    try:
+        return uuid.UUID(raw_task_id)
+    except ValueError:
+        return None
+
+
+def _token_count(value: object) -> int:
+    if value is None:
+        return 0
+    try:
+        count = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, count)
+
+
+def _normalized_litellm_model_name(model: str) -> str:
+    if model.startswith("openrouter/"):
+        return model.removeprefix("openrouter/")
+    return model
+
+
+def _pricing_model_candidates(model: str) -> tuple[str, ...]:
+    normalized = _normalized_litellm_model_name(model)
+    return tuple(dict.fromkeys((model, normalized)))
+
+
+def _adk_specialist_tier(agent_name: str) -> ModelRouteTier | None:
+    if agent_name == "intent_triage_agent":
+        return ADK_INTENT_SPECIALIST_MODEL_TIER
+    if agent_name == "quick_response_agent":
+        return ADK_QUICK_SPECIALIST_MODEL_TIER
+    if agent_name == "clarification_agent":
+        return ADK_CLARIFICATION_SPECIALIST_MODEL_TIER
+    if agent_name == "eval_agent":
+        return ADK_EVAL_SPECIALIST_MODEL_TIER
+    if agent_name == "humanizer_agent":
+        return ADK_HUMANIZER_SPECIALIST_MODEL_TIER
+    return None

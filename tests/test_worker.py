@@ -10,9 +10,12 @@ from typing import Any
 import pytest
 from alembic import command
 from alembic.config import Config
+from google.adk.models.llm_response import LlmResponse
+from google.genai import types as genai_types
 from sqlalchemy import Engine, delete, select
 from sqlalchemy.orm import Session, sessionmaker
 
+from kortny.agent.adk_runtime import AdkAgentRuntime
 from kortny.agent.coordinator import AgentRunResult
 from kortny.approvals import (
     TOOL_APPROVAL_PROMPT_PURPOSE,
@@ -40,6 +43,7 @@ from kortny.db.models import (
 )
 from kortny.db.session import make_engine, make_session_factory, normalize_database_url
 from kortny.llm import ChatMessage, Completion, TokenUsage, ToolCall
+from kortny.llm.routing import ModelRoute, ModelRouteTier
 from kortny.observe.assessment import (
     CHANNEL_ASSESSMENT_COMPLETED_MESSAGE,
     CHANNEL_ASSESSMENT_REQUESTED_MESSAGE,
@@ -690,6 +694,8 @@ def test_agent_executor_passes_routed_model_to_adk_runtime(
 
     assert result.result_summary == "Yep, up."
     assert captured["model"] == "deepseek/deepseek-v4-flash"
+    assert captured["model_route"].model == "deepseek/deepseek-v4-flash"
+    assert captured["model_route"].tier is ModelRouteTier.cheap_fast
     assert captured["registry_factory"] is not None
     assert any(
         event.payload.get("message") == "model_route_selected"
@@ -697,6 +703,153 @@ def test_agent_executor_passes_routed_model_to_adk_runtime(
         and event.payload.get("tier") == "cheap_fast"
         and event.payload.get("model") == "deepseek/deepseek-v4-flash"
         for event in events
+    )
+
+
+def test_adk_model_callback_records_llm_usage(
+    db_session: Session,
+) -> None:
+    task = create_task(db_session, event_id="EvAdkUsage")
+    task_service = TaskService(db_session)
+    db_session.add(
+        ModelPricing(
+            provider=LLMProvider.openrouter,
+            model="anthropic/claude-sonnet-4.6",
+            input_price_per_mtok=Decimal("3.00"),
+            output_price_per_mtok=Decimal("15.00"),
+            effective_from=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+    )
+    db_session.commit()
+    settings = Settings.model_validate(
+        {
+            "SLACK_BOT_TOKEN": "xoxb-test",
+            "SLACK_APP_TOKEN": "xapp-test",
+            "SLACK_SIGNING_SECRET": "signing-secret",
+            "LLM_PROVIDER": SettingsLLMProvider.openrouter,
+            "LLM_API_KEY": "openrouter-key",
+            "LLM_MODEL": "anthropic/sonnet-default",
+            "POSTGRES_URL": "postgresql://kortny:kortny@localhost/kortny",
+            "AGENT_RUNTIME": "adk",
+        }
+    )
+    runtime = AdkAgentRuntime(
+        settings=settings,
+        session=db_session,
+        task_service=task_service,
+        model_route=ModelRoute(
+            tier=ModelRouteTier.analysis,
+            model="anthropic/claude-sonnet-4.6",
+            reason="intent_classifier",
+        ),
+    )
+    context = FakeAdkContext(
+        agent_name="kortny_root_orchestrator",
+        invocation_id="adk-invocation-1",
+        task_id=str(task.id),
+    )
+    response = LlmResponse(
+        model_version="openrouter/anthropic/claude-sonnet-4.6",
+        usage_metadata=genai_types.GenerateContentResponseUsageMetadata(
+            prompt_token_count=100,
+            tool_use_prompt_token_count=10,
+            candidates_token_count=20,
+            total_token_count=130,
+        ),
+    )
+
+    runtime._record_adk_model_usage(callback_context=context, llm_response=response)
+    usage = db_session.scalar(select(LLMUsage).where(LLMUsage.task_id == task.id))
+
+    assert usage is not None
+    assert usage.provider is LLMProvider.openrouter
+    assert usage.model == "anthropic/claude-sonnet-4.6"
+    assert usage.model_tier == "analysis"
+    assert usage.input_tokens == 110
+    assert usage.output_tokens == 20
+    assert usage.cost_usd == Decimal("0.000630")
+    db_session.refresh(task)
+    assert task.total_input_tokens == 110
+    assert task.total_output_tokens == 20
+    assert task.total_cost_usd == Decimal("0.000630")
+    event = next(
+        event
+        for event in task_events(db_session, task)
+        if event.payload.get("prompt_name") == "kortny.adk.kortny_root_orchestrator"
+    )
+    assert event.payload["runtime"] == "adk"
+    assert event.payload["route_reason"] == "intent_classifier"
+    assert event.payload["pricing_missing"] is False
+
+
+def test_agent_executor_skips_humanizer_for_adk_quick_fast_path(
+    db_session: Session,
+) -> None:
+    task = create_task(db_session, event_id="EvAdkQuickSkipHumanizer")
+    task.input = "are you up?"
+    task_service = TaskService(db_session)
+    task_service.append_event(
+        task,
+        TaskEventType.log,
+        {
+            "message": "model_route_selected",
+            "runtime": "adk",
+            "tier": "cheap_fast",
+            "model": "deepseek/deepseek-v4-flash",
+            "reason": "intent_classifier",
+        },
+    )
+    task_service.append_event(
+        task,
+        TaskEventType.log,
+        {
+            "message": "adk_runtime_completed",
+            "runtime": "adk",
+            "mode": "orchestrated",
+            "event_count": 3,
+            "final_author": "quick_response_agent",
+            "authors": ["kortny_root_orchestrator", "quick_response_agent"],
+            "result_chars": 21,
+        },
+    )
+    settings = Settings.model_validate(
+        {
+            "SLACK_BOT_TOKEN": "xoxb-test",
+            "SLACK_APP_TOKEN": "xapp-test",
+            "SLACK_SIGNING_SECRET": "signing-secret",
+            "LLM_PROVIDER": SettingsLLMProvider.openrouter,
+            "LLM_API_KEY": "openrouter-key",
+            "LLM_MODEL": "anthropic/sonnet-default",
+            "LLM_CHEAP_MODEL": "deepseek/deepseek-v4-flash",
+            "POSTGRES_URL": "postgresql://kortny:kortny@localhost/kortny",
+            "AGENT_RUNTIME": "adk",
+            "RESPONSE_HUMANIZER_ENABLED": True,
+        }
+    )
+    slack_client = FakeSlackClient()
+
+    AgentTaskExecutor(
+        settings=settings,
+        llm_provider=FakeAgentProvider([]),
+        slack_client=slack_client,
+    )._post_outputs(
+        settings=settings,
+        session=db_session,
+        task=task,
+        task_service=task_service,
+        result_summary="Yep, up and ready!",
+    )
+
+    events = task_events(db_session, task)
+
+    assert slack_client.messages[-1]["text"] == "Yep, up and ready!"
+    assert any(
+        event.payload.get("message") == "response_humanizer_skipped"
+        and event.payload.get("reason") == "adk_quick_fast_path"
+        for event in events
+    )
+    assert not any(
+        event.payload.get("message") == "response_humanizer_started" for event in events
     )
 
 
@@ -1533,6 +1686,13 @@ def create_task(session: Session, *, event_id: str) -> Task:
         slack_user_id="U123",
         input=f"task {event_id}",
     )
+
+
+class FakeAdkContext:
+    def __init__(self, *, agent_name: str, invocation_id: str, task_id: str) -> None:
+        self.agent_name = agent_name
+        self.invocation_id = invocation_id
+        self.state = {"task_id": task_id}
 
 
 class FakeAgentProvider:

@@ -41,6 +41,7 @@ from kortny.slack.comments import (
     LLMArtifactCommentGenerator,
     generate_artifact_comment,
 )
+from kortny.slack.formatting import normalize_slack_mrkdwn
 from kortny.slack.humanizer import (
     LLMResponseSynthesizer,
     ResponseSynthesizer,
@@ -88,6 +89,12 @@ GENERIC_FAILURE_TEXT = (
     "Something went wrong while I was working on this. Please try again soon."
 )
 MEMORY_CONFIRMATION_PURPOSE = "memory_confirmation"
+ADK_QUICK_FINAL_AUTHORS = frozenset(
+    {
+        "quick_response_agent",
+        "kortny_root_orchestrator",
+    }
+)
 logger = logging.getLogger(__name__)
 
 
@@ -368,6 +375,7 @@ class AgentTaskExecutor:
                 task_service=task_service,
                 registry_factory=registry_factory,
                 model=model_route.model,
+                model_route=model_route,
                 thread_transcript_provider=self._build_thread_transcript_provider(
                     settings
                 ),
@@ -836,13 +844,32 @@ class AgentTaskExecutor:
                 )
                 return
             logger.info("posting final message task_id=%s", task.id)
-            response_text = synthesize_response(
-                self._build_response_synthesizer(settings),
+            if _should_skip_response_humanizer(
+                settings=settings,
                 session=session,
                 task=task,
                 raw_text=result_summary,
-                task_service=task_service,
-            )
+            ):
+                response_text = normalize_slack_mrkdwn(result_summary)
+                task_service.append_event(
+                    task,
+                    TaskEventType.log,
+                    {
+                        "message": "response_humanizer_skipped",
+                        "reason": "adk_quick_fast_path",
+                        "runtime": "adk",
+                        "raw_chars": len(result_summary),
+                        "output_chars": len(response_text),
+                    },
+                )
+            else:
+                response_text = synthesize_response(
+                    self._build_response_synthesizer(settings),
+                    session=session,
+                    task=task,
+                    raw_text=result_summary,
+                    task_service=task_service,
+                )
             poster.post_message(thread, response_text)
             return
 
@@ -1156,6 +1183,60 @@ def _task_events(session: Session, task: Task) -> tuple[TaskEvent, ...]:
             .order_by(TaskEvent.seq)
         )
     )
+
+
+def _should_skip_response_humanizer(
+    *,
+    settings: Settings,
+    session: Session,
+    task: Task,
+    raw_text: str,
+) -> bool:
+    """Return whether a trivial ADK response can bypass final synthesis."""
+
+    if settings.agent_runtime != "adk":
+        return False
+    if len(raw_text.strip()) >= settings.response_humanizer_min_chars:
+        return False
+
+    events = _task_events(session, task)
+    if any(
+        event.type in {TaskEventType.tool_call, TaskEventType.tool_result}
+        for event in events
+    ):
+        return False
+
+    route = _latest_payload_event(
+        events,
+        message="model_route_selected",
+    )
+    if route is None or route.get("runtime") != "adk":
+        return False
+    if route.get("tier") != ModelRouteTier.cheap_fast.value:
+        return False
+
+    completed = _latest_payload_event(
+        events,
+        message="adk_runtime_completed",
+    )
+    if completed is None:
+        return False
+    final_author = completed.get("final_author")
+    return final_author in ADK_QUICK_FINAL_AUTHORS
+
+
+def _latest_payload_event(
+    events: tuple[TaskEvent, ...],
+    *,
+    message: str,
+) -> dict[str, Any] | None:
+    for event in reversed(events):
+        if event.type is not TaskEventType.log:
+            continue
+        if event.payload.get("message") != message:
+            continue
+        return event.payload
+    return None
 
 
 def _external_tool_skip_reason(

@@ -168,6 +168,53 @@ def test_adk_runtime_builds_orchestrator_with_registry_worker(
     assert [getattr(tool, "name", None) for tool in worker_agent.tools] == ["echo_tool"]
 
 
+def test_adk_runtime_uses_cheaper_models_for_lightweight_specialists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    set_required_settings_env(monkeypatch)
+    monkeypatch.setenv("LLM_MODEL", "anthropic/sonnet-default")
+    monkeypatch.setenv("LLM_CHEAP_MODEL", "deepseek/deepseek-v4-flash")
+    monkeypatch.setenv("LLM_STANDARD_MODEL", "openai/gpt-5.4-mini")
+    monkeypatch.setenv("LLM_HIGH_REASONING_MODEL", "anthropic/opus-review")
+    settings = load_settings(env_file=None)
+    task = Task(
+        id=uuid.UUID("4c53f4e1-9d72-468d-ab18-5021d9e15dad"),
+        installation_id=uuid.UUID("1c53f4e1-9d72-468d-ab18-5021d9e15dad"),
+        slack_channel_id="C123",
+        slack_thread_ts="123.456",
+        slack_user_id="U123",
+        input="research this",
+    )
+    runtime = AdkAgentRuntime(
+        settings=settings,
+        session=cast(Any, None),
+        task_service=cast(Any, None),
+        registry=ToolRegistry([_EchoTool()]),
+        model="anthropic/sonnet-routed",
+    )
+
+    agent = runtime._build_agent(task=task)
+    agent_by_name = {getattr(tool, "name", None): tool.agent for tool in agent.tools}
+
+    assert agent.model.model == "openrouter/anthropic/sonnet-routed"
+    assert (
+        agent_by_name["quick_response_agent"].model.model
+        == "openrouter/deepseek/deepseek-v4-flash"
+    )
+    assert (
+        agent_by_name["clarification_agent"].model.model
+        == "openrouter/deepseek/deepseek-v4-flash"
+    )
+    assert (
+        agent_by_name["tool_worker_agent"].model.model
+        == "openrouter/anthropic/sonnet-routed"
+    )
+    assert (
+        agent_by_name["humanizer_agent"].model.model == "openrouter/openai/gpt-5.4-mini"
+    )
+    assert agent_by_name["eval_agent"].model.model == "openrouter/anthropic/opus-review"
+
+
 def test_adk_runtime_registry_factory_is_lazy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
