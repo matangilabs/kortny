@@ -11,6 +11,10 @@
     <a class="btn-ghost" href="/memory">View Memory</a>
   </section>
 
+  {% if notice %}
+    <div class="notice notice-{{ notice_tone }}" role="status">{{ notice }}</div>
+  {% endif %}
+
   <section class="summary-grid graph-summary" aria-label="Knowledge graph overview">
     <div class="card metric-card metric-success">
       <span>Entities</span>
@@ -31,6 +35,21 @@
       <span>Evidence</span>
       <strong>{{ graph.evidence_count|number }}</strong>
       <small>Traceable source rows backing the graph</small>
+    </div>
+    <div class="card metric-card metric-success">
+      <span>Runtime Eligible</span>
+      <strong>{{ (graph.runtime_eligible_entity_count + graph.runtime_eligible_edge_count)|number }}</strong>
+      <small>Confirmed or active rows with evidence</small>
+    </div>
+    <div class="card metric-card metric-warning">
+      <span>Stale Rows</span>
+      <strong>{{ (graph.stale_entity_count + graph.stale_edge_count)|number }}</strong>
+      <small>{{ graph.stale_entity_count|number }} entities, {{ graph.stale_edge_count|number }} relationships</small>
+    </div>
+    <div class="card metric-card metric-danger">
+      <span>Evidence Gaps</span>
+      <strong>{{ (graph.unbacked_current_entity_count + graph.unbacked_current_edge_count)|number }}</strong>
+      <small>Current rows withheld from runtime context</small>
     </div>
   </section>
 
@@ -149,6 +168,23 @@
                   <span>{{ row.target_edge_count|number }} incoming</span>
                 </div>
               </section>
+              <section class="graph-panel graph-actions">
+                <h3>Review</h3>
+                {% if row.entity.lifecycle_state in ["candidate", "active", "stale"] %}
+                  <form method="post" action="/knowledge-graph/entities/{{ row.entity.id }}/confirm" onsubmit="return confirm('Confirm this graph entity for scoped runtime context?');">
+                    <input type="hidden" name="next" value="{{ graph_return_path }}">
+                    <button class="btn" type="submit">Confirm</button>
+                  </form>
+                {% endif %}
+                {% if row.entity.lifecycle_state not in ["archived", "forgotten", "superseded"] %}
+                  <form method="post" action="/knowledge-graph/entities/{{ row.entity.id }}/archive" onsubmit="return confirm('Archive this graph entity? Connected current relationships will also be archived.');">
+                    <input type="hidden" name="next" value="{{ graph_return_path }}">
+                    <button class="btn-ghost btn-danger" type="submit">Archive</button>
+                  </form>
+                {% else %}
+                  <span class="identity-id">No active controls</span>
+                {% endif %}
+              </section>
             </aside>
           </article>
         {% else %}
@@ -193,6 +229,23 @@
                 {% else %}
                   <span class="identity-id">No evidence rows loaded</span>
                 {% endfor %}
+              </section>
+              <section class="graph-panel graph-actions">
+                <h3>Review</h3>
+                {% if row.edge.lifecycle_state in ["candidate", "active", "stale"] %}
+                  <form method="post" action="/knowledge-graph/edges/{{ row.edge.id }}/confirm" onsubmit="return confirm('Confirm this graph relationship for scoped runtime context?');">
+                    <input type="hidden" name="next" value="{{ graph_return_path }}">
+                    <button class="btn" type="submit">Confirm</button>
+                  </form>
+                {% endif %}
+                {% if row.edge.lifecycle_state not in ["archived", "forgotten", "superseded"] %}
+                  <form method="post" action="/knowledge-graph/edges/{{ row.edge.id }}/archive" onsubmit="return confirm('Archive this graph relationship?');">
+                    <input type="hidden" name="next" value="{{ graph_return_path }}">
+                    <button class="btn-ghost btn-danger" type="submit">Archive</button>
+                  </form>
+                {% else %}
+                  <span class="identity-id">No active controls</span>
+                {% endif %}
               </section>
             </aside>
           </article>

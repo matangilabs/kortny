@@ -50,6 +50,12 @@ from kortny.dashboard.data import (
     list_users,
     parse_date_bound,
 )
+from kortny.dashboard.knowledge_graph_actions import (
+    archive_edge,
+    archive_entity,
+    confirm_edge,
+    confirm_entity,
+)
 from kortny.dashboard.memory_actions import (
     dashboard_actor,
     forget_fact,
@@ -494,6 +500,8 @@ def register_routes(app: FastAPI) -> None:
         sort: Annotated[str | None, Query()] = None,
         page: Annotated[int, Query(ge=1)] = 1,
         page_size: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)] = DEFAULT_PAGE_SIZE,
+        notice: Annotated[str | None, Query()] = None,
+        notice_tone: Annotated[str, Query()] = "success",
     ) -> Response:
         graph = get_knowledge_graph_dashboard(
             session,
@@ -512,7 +520,120 @@ def register_routes(app: FastAPI) -> None:
             context={
                 **_dashboard_context(principal, active_page="knowledge_graph"),
                 "graph": graph,
+                "graph_return_path": _request_path(request),
+                "notice": notice,
+                "notice_tone": _notice_tone(notice_tone),
             },
+        )
+
+    @app.post("/knowledge-graph/entities/{entity_id}/confirm")
+    async def knowledge_graph_confirm_entity(
+        request: Request,
+        entity_id: UUID,
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> RedirectResponse:
+        form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+        next_path = _safe_next_path(form.get("next", ["/knowledge-graph"])[0])
+        try:
+            confirm_entity(
+                session,
+                entity_id,
+                by_user_id=dashboard_actor(principal.display_name),
+            )
+            session.commit()
+        except LookupError as exc:
+            session.rollback()
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND) from exc
+        except ValueError as exc:
+            session.rollback()
+            return _redirect_with_notice(next_path, str(exc), tone="danger")
+        return _redirect_with_notice(next_path, "Graph entity confirmed.")
+
+    @app.post("/knowledge-graph/entities/{entity_id}/archive")
+    async def knowledge_graph_archive_entity(
+        request: Request,
+        entity_id: UUID,
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> RedirectResponse:
+        form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+        next_path = _safe_next_path(form.get("next", ["/knowledge-graph"])[0])
+        try:
+            result = archive_entity(
+                session,
+                entity_id,
+                by_user_id=dashboard_actor(principal.display_name),
+            )
+            session.commit()
+        except LookupError as exc:
+            session.rollback()
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND) from exc
+        except ValueError as exc:
+            session.rollback()
+            return _redirect_with_notice(next_path, str(exc), tone="danger")
+        edge_suffix = (
+            f" Archived {len(result.archived_edge_ids):,} connected edge"
+            f"{'' if len(result.archived_edge_ids) == 1 else 's'}."
+            if result.archived_edge_ids
+            else ""
+        )
+        return _redirect_with_notice(
+            next_path,
+            f"Graph entity archived.{edge_suffix}",
+            tone="warning",
+        )
+
+    @app.post("/knowledge-graph/edges/{edge_id}/confirm")
+    async def knowledge_graph_confirm_edge(
+        request: Request,
+        edge_id: UUID,
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> RedirectResponse:
+        form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+        next_path = _safe_next_path(form.get("next", ["/knowledge-graph"])[0])
+        try:
+            confirm_edge(
+                session,
+                edge_id,
+                by_user_id=dashboard_actor(principal.display_name),
+            )
+            session.commit()
+        except LookupError as exc:
+            session.rollback()
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND) from exc
+        except ValueError as exc:
+            session.rollback()
+            return _redirect_with_notice(next_path, str(exc), tone="danger")
+        return _redirect_with_notice(next_path, "Graph relationship confirmed.")
+
+    @app.post("/knowledge-graph/edges/{edge_id}/archive")
+    async def knowledge_graph_archive_edge(
+        request: Request,
+        edge_id: UUID,
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> RedirectResponse:
+        form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+        next_path = _safe_next_path(form.get("next", ["/knowledge-graph"])[0])
+        try:
+            archive_edge(
+                session,
+                edge_id,
+                by_user_id=dashboard_actor(principal.display_name),
+            )
+            session.commit()
+        except LookupError as exc:
+            session.rollback()
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND) from exc
+        except ValueError as exc:
+            session.rollback()
+            return _redirect_with_notice(next_path, str(exc), tone="danger")
+        return _redirect_with_notice(
+            next_path,
+            "Graph relationship archived.",
+            tone="warning",
         )
 
     @app.get("/integrations", response_class=HTMLResponse)

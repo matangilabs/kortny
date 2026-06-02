@@ -84,6 +84,7 @@ class KnowledgeGraphExtractionService:
             lifecycle_state="candidate",
             confidence_score=profile.confidence_score or Decimal("0.500"),
             confidence_reason=profile.confidence_reason,
+            freshness_window_days=profile.fresh_window_days,
             attrs_json={
                 "kind": "channel_profile_projection",
                 "profile_id": str(profile.id),
@@ -193,6 +194,7 @@ class KnowledgeGraphExtractionService:
             lifecycle_state="candidate",
             confidence_score=profile.confidence_score or Decimal("0.500"),
             confidence_reason=profile.confidence_reason,
+            freshness_window_days=profile.fresh_window_days,
             evidence=_profile_evidence(task, membership, profile),
         )
         return entity, True

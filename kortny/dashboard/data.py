@@ -13,7 +13,7 @@ from decimal import Decimal
 from typing import Any
 from urllib.parse import urlencode, urlsplit, urlunsplit
 
-from sqlalchemy import Select, Text, case, cast, func, or_, select
+from sqlalchemy import Select, Text, case, cast, exists, func, or_, select
 from sqlalchemy.engine import Row
 from sqlalchemy.orm import Session, aliased
 from sqlalchemy.sql.elements import ColumnElement
@@ -540,6 +540,12 @@ class KnowledgeGraphDashboard:
     candidate_entity_count: int
     edge_count: int
     evidence_count: int
+    stale_entity_count: int
+    stale_edge_count: int
+    unbacked_current_entity_count: int
+    unbacked_current_edge_count: int
+    runtime_eligible_entity_count: int
+    runtime_eligible_edge_count: int
     active_view: str
     query: str
     scope_filter: str
@@ -1433,9 +1439,33 @@ def get_knowledge_graph_dashboard(
         )
         or 0
     )
+    stale_entity_count = (
+        session.scalar(
+            select(func.count())
+            .select_from(KnowledgeGraphEntity)
+            .where(
+                *entity_scope,
+                *_kg_current_filters(KnowledgeGraphEntity),
+                KnowledgeGraphEntity.lifecycle_state == "stale",
+            )
+        )
+        or 0
+    )
     edge_count = (
         session.scalar(
             select(func.count()).select_from(KnowledgeGraphEdge).where(*edge_scope)
+        )
+        or 0
+    )
+    stale_edge_count = (
+        session.scalar(
+            select(func.count())
+            .select_from(KnowledgeGraphEdge)
+            .where(
+                *edge_scope,
+                *_kg_current_filters(KnowledgeGraphEdge),
+                KnowledgeGraphEdge.lifecycle_state == "stale",
+            )
         )
         or 0
     )
@@ -1444,6 +1474,56 @@ def get_knowledge_graph_dashboard(
             select(func.count())
             .select_from(KnowledgeGraphEvidence)
             .where(*evidence_scope)
+        )
+        or 0
+    )
+    unbacked_current_entity_count = (
+        session.scalar(
+            select(func.count())
+            .select_from(KnowledgeGraphEntity)
+            .where(
+                *entity_scope,
+                *_kg_current_filters(KnowledgeGraphEntity),
+                ~_kg_has_evidence_predicate(KnowledgeGraphEntity, "entity"),
+            )
+        )
+        or 0
+    )
+    unbacked_current_edge_count = (
+        session.scalar(
+            select(func.count())
+            .select_from(KnowledgeGraphEdge)
+            .where(
+                *edge_scope,
+                *_kg_current_filters(KnowledgeGraphEdge),
+                ~_kg_has_evidence_predicate(KnowledgeGraphEdge, "edge"),
+            )
+        )
+        or 0
+    )
+    runtime_eligible_entity_count = (
+        session.scalar(
+            select(func.count())
+            .select_from(KnowledgeGraphEntity)
+            .where(
+                *entity_scope,
+                *_kg_current_filters(KnowledgeGraphEntity),
+                KnowledgeGraphEntity.lifecycle_state.in_(("active", "confirmed")),
+                _kg_has_evidence_predicate(KnowledgeGraphEntity, "entity"),
+            )
+        )
+        or 0
+    )
+    runtime_eligible_edge_count = (
+        session.scalar(
+            select(func.count())
+            .select_from(KnowledgeGraphEdge)
+            .where(
+                *edge_scope,
+                *_kg_current_filters(KnowledgeGraphEdge),
+                KnowledgeGraphEdge.lifecycle_state.in_(("active", "confirmed")),
+                _kg_has_evidence_predicate(KnowledgeGraphEdge, "edge"),
+            )
         )
         or 0
     )
@@ -1511,6 +1591,12 @@ def get_knowledge_graph_dashboard(
         candidate_entity_count=int(candidate_entity_count),
         edge_count=int(edge_count),
         evidence_count=int(evidence_count),
+        stale_entity_count=int(stale_entity_count),
+        stale_edge_count=int(stale_edge_count),
+        unbacked_current_entity_count=int(unbacked_current_entity_count),
+        unbacked_current_edge_count=int(unbacked_current_edge_count),
+        runtime_eligible_entity_count=int(runtime_eligible_entity_count),
+        runtime_eligible_edge_count=int(runtime_eligible_edge_count),
         active_view=active_view,
         query=normalized_query,
         scope_filter=normalized_scope,
@@ -3301,6 +3387,21 @@ def _kg_installation_filter(
     if installation_id is None:
         return []
     return [model.installation_id == installation_id]
+
+
+def _kg_current_filters(model: object) -> list[ColumnElement[bool]]:
+    return [model.is_current.is_(True), model.expired_at.is_(None)]
+
+
+def _kg_has_evidence_predicate(
+    model: object,
+    target_kind: str,
+) -> ColumnElement[bool]:
+    return exists().where(
+        KnowledgeGraphEvidence.target_kind == target_kind,
+        KnowledgeGraphEvidence.target_id == model.id,
+        KnowledgeGraphEvidence.installation_id == model.installation_id,
+    )
 
 
 def _kg_entity_rows(

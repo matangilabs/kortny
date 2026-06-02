@@ -1,6 +1,7 @@
 import os
 import uuid
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -259,6 +260,82 @@ def test_anchor_traversal_returns_only_scope_safe_evidenced_edges(
     assert {edge.relationship_type for edge in pack.edges} == {"maps_to"}
     assert all(edge.evidence_ids for edge in pack.edges)
     assert graph.scope_guard_violations(pack, DestinationSurface.channel("C_A")) == ()
+
+
+def test_mark_stale_current_uses_freshness_windows(db_session: Session) -> None:
+    installation = create_installation(db_session)
+    graph = GraphService(db_session)
+    now = datetime(2026, 6, 2, 12, tzinfo=UTC)
+    old_channel = graph.create_entity(
+        installation_id=installation.id,
+        entity_type="channel",
+        canonical_key="slack_channel:C_OLD",
+        display_name="#old",
+        visibility_scope=VisibilityScope.channel("C_OLD"),
+        source_type="slack_authoritative",
+        lifecycle_state="active",
+        freshness_window_days=7,
+        confidence_score=Decimal("0.900"),
+        evidence=evidence("old channel"),
+    )
+    fresh_channel = graph.create_entity(
+        installation_id=installation.id,
+        entity_type="channel",
+        canonical_key="slack_channel:C_FRESH",
+        display_name="#fresh",
+        visibility_scope=VisibilityScope.channel("C_FRESH"),
+        source_type="slack_authoritative",
+        lifecycle_state="active",
+        freshness_window_days=7,
+        confidence_score=Decimal("0.900"),
+        evidence=evidence("fresh channel"),
+    )
+    old_project = graph.create_entity(
+        installation_id=installation.id,
+        entity_type="project",
+        canonical_key="project:old",
+        display_name="Old Project",
+        visibility_scope=VisibilityScope.channel("C_OLD"),
+        source_type="user_explicit",
+        lifecycle_state="confirmed",
+        confidence_score=Decimal("0.900"),
+        evidence=evidence("old project"),
+    )
+    old_edge = graph.create_edge(
+        installation_id=installation.id,
+        source_entity_id=old_channel.id,
+        target_entity_id=old_project.id,
+        relationship_type="maps_to",
+        visibility_scope=VisibilityScope.channel("C_OLD"),
+        source_type="user_explicit",
+        lifecycle_state="confirmed",
+        freshness_window_days=7,
+        confidence_score=Decimal("0.900"),
+        evidence=evidence("old mapping"),
+    )
+    old_channel.recorded_at = now - timedelta(days=8)
+    old_edge.recorded_at = now - timedelta(days=8)
+    fresh_channel.recorded_at = now - timedelta(days=2)
+    db_session.commit()
+
+    result = graph.mark_stale_current(installation_id=installation.id, now=now)
+    db_session.commit()
+
+    assert result.entity_ids == (old_channel.id,)
+    assert result.edge_ids == (old_edge.id,)
+    db_session.refresh(old_channel)
+    db_session.refresh(old_edge)
+    db_session.refresh(fresh_channel)
+    assert old_channel.lifecycle_state == "stale"
+    assert old_edge.lifecycle_state == "stale"
+    assert fresh_channel.lifecycle_state == "active"
+
+    pack = graph.retrieve_current_context(
+        installation_id=installation.id,
+        destination=DestinationSurface.channel("C_OLD"),
+        max_items=20,
+    )
+    assert "slack_channel:C_OLD" not in entity_keys(pack)
 
 
 def cleanup_database(session: Session) -> None:

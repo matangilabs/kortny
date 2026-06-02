@@ -1997,6 +1997,128 @@ def test_dashboard_knowledge_graph_page_shows_entities_relationships_and_evidenc
     assert "slack_channel:CCost" not in candidate_response.text
 
 
+def test_dashboard_knowledge_graph_review_actions_preserve_evidence(
+    client: tuple[TestClient, Session],
+) -> None:
+    test_client, session = client
+    task = create_dashboard_task(session)
+    channel = KnowledgeGraphEntity(
+        installation_id=task.installation_id,
+        entity_type="channel",
+        canonical_key="slack_channel:CCost",
+        display_name="#ops-desk",
+        visibility_scope_type="channel",
+        visibility_scope_id="CCost",
+        source_type="slack_authoritative",
+        lifecycle_state="active",
+        confidence_score=Decimal("0.950"),
+    )
+    project = KnowledgeGraphEntity(
+        installation_id=task.installation_id,
+        entity_type="project",
+        canonical_key="project:operator-console",
+        display_name="Operator Console",
+        visibility_scope_type="channel",
+        visibility_scope_id="CCost",
+        source_type="onboarding_scan",
+        lifecycle_state="candidate",
+        confidence_score=Decimal("0.720"),
+    )
+    session.add_all([channel, project])
+    session.flush()
+    edge = KnowledgeGraphEdge(
+        installation_id=task.installation_id,
+        source_entity_id=channel.id,
+        target_entity_id=project.id,
+        relationship_type="relates_to",
+        visibility_scope_type="channel",
+        visibility_scope_id="CCost",
+        source_type="onboarding_scan",
+        lifecycle_state="candidate",
+        confidence_score=Decimal("0.800"),
+    )
+    session.add(edge)
+    session.flush()
+    session.add_all(
+        [
+            KnowledgeGraphEvidence(
+                installation_id=task.installation_id,
+                target_kind="entity",
+                target_id=project.id,
+                source_type="onboarding_scan",
+                source_task_id=task.id,
+                source_slack_channel_id="CCost",
+                extracted_by="test",
+                raw_snippet="Operators discussed the dashboard knowledge graph.",
+                confidence_score=Decimal("0.720"),
+            ),
+            KnowledgeGraphEvidence(
+                installation_id=task.installation_id,
+                target_kind="edge",
+                target_id=edge.id,
+                source_type="onboarding_scan",
+                source_task_id=task.id,
+                source_slack_channel_id="CCost",
+                extracted_by="test",
+                raw_snippet="The channel is related to the operator console project.",
+                confidence_score=Decimal("0.800"),
+            ),
+        ]
+    )
+    session.commit()
+    project_id = project.id
+    edge_id = edge.id
+    login(test_client)
+
+    confirm_entity_response = test_client.post(
+        f"/knowledge-graph/entities/{project_id}/confirm",
+        data={"next": "/knowledge-graph?state=candidate"},
+        follow_redirects=False,
+    )
+
+    assert confirm_entity_response.status_code == 303
+    assert "Graph+entity+confirmed" in confirm_entity_response.headers["location"]
+    session.refresh(project)
+    assert project.lifecycle_state == "confirmed"
+    assert project.last_reinforced_at is not None
+    assert project.reinforcement_count == 1
+    assert session.scalar(
+        select(KnowledgeGraphEvidence).where(
+            KnowledgeGraphEvidence.target_kind == "entity",
+            KnowledgeGraphEvidence.target_id == project_id,
+            KnowledgeGraphEvidence.source_type == "admin_import",
+        )
+    )
+
+    confirm_edge_response = test_client.post(
+        f"/knowledge-graph/edges/{edge_id}/confirm",
+        data={"next": "/knowledge-graph?view=relationships"},
+        follow_redirects=False,
+    )
+
+    assert confirm_edge_response.status_code == 303
+    assert "Graph+relationship+confirmed" in confirm_edge_response.headers["location"]
+    session.refresh(edge)
+    assert edge.lifecycle_state == "confirmed"
+    assert edge.last_reinforced_at is not None
+    assert edge.reinforcement_count == 1
+
+    archive_response = test_client.post(
+        f"/knowledge-graph/entities/{project_id}/archive",
+        data={"next": "/knowledge-graph?state=confirmed"},
+        follow_redirects=False,
+    )
+
+    assert archive_response.status_code == 303
+    assert "Graph+entity+archived" in archive_response.headers["location"]
+    session.refresh(project)
+    session.refresh(edge)
+    assert project.lifecycle_state == "archived"
+    assert project.is_current is False
+    assert edge.lifecycle_state == "archived"
+    assert edge.is_current is False
+
+
 def test_dashboard_memory_forget_preserves_audit_and_hides_from_active_view(
     client: tuple[TestClient, Session],
 ) -> None:

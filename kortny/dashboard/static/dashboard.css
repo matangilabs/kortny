@@ -1636,6 +1636,20 @@ p {
   padding: 7px 8px;
 }
 
+.graph-actions {
+  align-items: stretch;
+}
+
+.graph-actions form {
+  margin: 0;
+}
+
+.graph-actions .btn,
+.graph-actions .btn-ghost {
+  justify-content: center;
+  width: 100%;
+}
+
 .graph-edge-line {
   align-items: center;
   color: var(--foreground);

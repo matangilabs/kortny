@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from sqlalchemy import and_, exists, func, or_, select
@@ -77,6 +77,20 @@ class GraphContextPack:
     omitted_reasons: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class GraphStalenessResult:
+    entity_ids: tuple[uuid.UUID, ...]
+    edge_ids: tuple[uuid.UUID, ...]
+
+    @property
+    def entity_count(self) -> int:
+        return len(self.entity_ids)
+
+    @property
+    def edge_count(self) -> int:
+        return len(self.edge_ids)
+
+
 class GraphService:
     """Service API for the HIG-181 workspace knowledge graph."""
 
@@ -98,6 +112,7 @@ class GraphService:
         lifecycle_state: str = "candidate",
         confidence_score: Decimal | float = Decimal("0.500"),
         confidence_reason: str | None = None,
+        freshness_window_days: int | None = None,
         evidence: EvidenceInput | None = None,
     ) -> KnowledgeGraphEntity:
         entity = KnowledgeGraphEntity(
@@ -114,6 +129,7 @@ class GraphService:
             lifecycle_state=lifecycle_state,
             confidence_score=confidence_score,
             confidence_reason=confidence_reason,
+            freshness_window_days=freshness_window_days,
         )
         self.session.add(entity)
         self.session.flush()
@@ -139,6 +155,7 @@ class GraphService:
         lifecycle_state: str = "candidate",
         confidence_score: Decimal | float = Decimal("0.500"),
         confidence_reason: str | None = None,
+        freshness_window_days: int | None = None,
         evidence: EvidenceInput | None = None,
     ) -> KnowledgeGraphEdge:
         edge = KnowledgeGraphEdge(
@@ -153,6 +170,7 @@ class GraphService:
             lifecycle_state=lifecycle_state,
             confidence_score=confidence_score,
             confidence_reason=confidence_reason,
+            freshness_window_days=freshness_window_days,
         )
         self.session.add(edge)
         self.session.flush()
@@ -221,6 +239,63 @@ class GraphService:
         current.expired_at = now
         if replacement is not None:
             replacement.is_current = True
+
+    def mark_stale_current(
+        self,
+        *,
+        installation_id: uuid.UUID | None = None,
+        now: datetime | None = None,
+    ) -> GraphStalenessResult:
+        """Mark current graph rows stale when their freshness window has elapsed."""
+
+        effective_now = now or datetime.now(UTC)
+        entity_predicates = [
+            KnowledgeGraphEntity.is_current.is_(True),
+            KnowledgeGraphEntity.expired_at.is_(None),
+            KnowledgeGraphEntity.freshness_window_days.is_not(None),
+            KnowledgeGraphEntity.lifecycle_state.in_(
+                ("candidate", "active", "confirmed")
+            ),
+        ]
+        edge_predicates = [
+            KnowledgeGraphEdge.is_current.is_(True),
+            KnowledgeGraphEdge.expired_at.is_(None),
+            KnowledgeGraphEdge.freshness_window_days.is_not(None),
+            KnowledgeGraphEdge.lifecycle_state.in_(
+                ("candidate", "active", "confirmed")
+            ),
+        ]
+        if installation_id is not None:
+            entity_predicates.append(
+                KnowledgeGraphEntity.installation_id == installation_id
+            )
+            edge_predicates.append(
+                KnowledgeGraphEdge.installation_id == installation_id
+            )
+
+        stale_entities: list[KnowledgeGraphEntity] = []
+        for entity in self.session.scalars(
+            select(KnowledgeGraphEntity).where(*entity_predicates)
+        ):
+            if _freshness_elapsed(entity, effective_now):
+                entity.lifecycle_state = "stale"
+                entity.updated_at = effective_now
+                stale_entities.append(entity)
+
+        stale_edges: list[KnowledgeGraphEdge] = []
+        for edge in self.session.scalars(
+            select(KnowledgeGraphEdge).where(*edge_predicates)
+        ):
+            if _freshness_elapsed(edge, effective_now):
+                edge.lifecycle_state = "stale"
+                edge.updated_at = effective_now
+                stale_edges.append(edge)
+
+        self.session.flush()
+        return GraphStalenessResult(
+            entity_ids=tuple(row.id for row in stale_entities),
+            edge_ids=tuple(row.id for row in stale_edges),
+        )
 
     def retrieve_current_context(
         self,
@@ -574,3 +649,17 @@ def _returned_scopes(
         seen.add(key)
         scopes.append(scope)
     return tuple(scopes)
+
+
+def _freshness_elapsed(
+    row: KnowledgeGraphEntity | KnowledgeGraphEdge,
+    now: datetime,
+) -> bool:
+    if row.freshness_window_days is None:
+        return False
+    if row.freshness_window_days <= 0:
+        return True
+    reference = row.last_reinforced_at or row.recorded_at or row.created_at
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=UTC)
+    return reference + timedelta(days=row.freshness_window_days) < now
