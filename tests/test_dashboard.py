@@ -1631,6 +1631,9 @@ def test_dashboard_task_detail_shows_events_usage_and_artifacts(
     assert "#ops-desk" in response.text
     assert "Aneesh Melkot" in response.text
     assert "Done with cost summary" in response.text
+    assert "Posted Slack Response" in response.text
+    assert "Posted Slack response after humanizer" in response.text
+    assert "Raw Agent Result" in response.text
     assert "status_changed" in response.text
     assert "Task created" in response.text
     assert "LLM call started" in response.text
@@ -2196,6 +2199,19 @@ def create_dashboard_task(
             TaskEvent(
                 task_id=task.id,
                 seq=5,
+                type=TaskEventType.message_posted,
+                payload={
+                    "channel": task.slack_channel_id,
+                    "thread_ts": task.slack_thread_ts,
+                    "message_ts": "1779660060.000001",
+                    "purpose": "result",
+                    "text": "Posted Slack response after humanizer",
+                },
+                created_at=task_finished_at - timedelta(seconds=5),
+            ),
+            TaskEvent(
+                task_id=task.id,
+                seq=6,
                 type=TaskEventType.status_changed,
                 payload={"from": "running", "to": status.value},
                 created_at=task_finished_at,

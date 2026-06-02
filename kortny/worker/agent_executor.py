@@ -84,7 +84,7 @@ from kortny.tools import (
     ToolRegistry,
     WebSearchTool,
 )
-from kortny.workflow import evaluate_runtime_handoff
+from kortny.workflow.handoff import evaluate_runtime_handoff
 
 GENERIC_FAILURE_TEXT = (
     "Something went wrong while I was working on this. Please try again soon."

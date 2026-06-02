@@ -1,4 +1,4 @@
-.PHONY: install lock lint lint-fix format format-check typecheck test check migrate downgrade compose-up compose-up-observability compose-down compose-down-observability compose-down-observability-volumes compose-logs compose-logs-observability playground clean
+.PHONY: install lock lint lint-fix format format-check typecheck test check migrate downgrade compose-up compose-up-observability compose-up-workflow compose-down compose-down-observability compose-down-workflow compose-down-observability-volumes compose-logs compose-logs-observability compose-logs-workflow playground clean
 
 install:
 	uv sync
@@ -38,11 +38,17 @@ compose-up:
 compose-up-observability:
 	OTEL_EXPORTER_OTLP_ENDPOINT=http://phoenix:6006/v1/traces docker compose --profile observability up -d
 
+compose-up-workflow:
+	KORTNY_WORKFLOW_BACKEND=temporal docker compose --profile workflow up -d
+
 compose-down:
 	docker compose down
 
 compose-down-observability:
 	docker compose --profile observability down
+
+compose-down-workflow:
+	docker compose --profile workflow down
 
 compose-down-observability-volumes:
 	docker compose --profile observability down -v
@@ -52,6 +58,9 @@ compose-logs:
 
 compose-logs-observability:
 	docker compose --profile observability logs -f app worker phoenix
+
+compose-logs-workflow:
+	docker compose --profile workflow logs -f app worker temporal temporal-worker
 
 playground:
 	uv run adk web .

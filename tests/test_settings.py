@@ -17,6 +17,9 @@ SETTINGS_ENV_VARS = {
     "LLM_HIGH_REASONING_MODEL",
     "AGENT_RUNTIME",
     "KORTNY_WORKFLOW_BACKEND",
+    "TEMPORAL_ADDRESS",
+    "TEMPORAL_NAMESPACE",
+    "TEMPORAL_TASK_QUEUE",
     "COMPOSIO_API_KEY",
     "COMPOSIO_CATALOG_ENABLED",
     "COMPOSIO_CATALOG_LIMIT",
@@ -70,6 +73,9 @@ def test_settings_loads_required_environment(monkeypatch: pytest.MonkeyPatch) ->
     assert settings.slack_app_name == "kortny"
     assert settings.agent_runtime == "custom"
     assert settings.workflow_backend == "inline"
+    assert settings.temporal_address == "temporal:7233"
+    assert settings.temporal_namespace == "default"
+    assert settings.temporal_task_queue == "kortny-workflows"
     assert settings.composio_catalog_enabled is True
     assert settings.composio_catalog_limit == 60
     assert settings.composio_request_timeout_seconds == 10.0
@@ -99,6 +105,9 @@ def test_settings_loads_optional_environment(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("LLM_DOCUMENT_MODEL", "anthropic/claude-sonnet-test")
     monkeypatch.setenv("AGENT_RUNTIME", "adk")
     monkeypatch.setenv("KORTNY_WORKFLOW_BACKEND", "temporal")
+    monkeypatch.setenv("TEMPORAL_ADDRESS", "temporal.example:7233")
+    monkeypatch.setenv("TEMPORAL_NAMESPACE", "kortny-dev")
+    monkeypatch.setenv("TEMPORAL_TASK_QUEUE", "kortny-dev-workflows")
     monkeypatch.setenv("OBSERVABILITY_CAPTURE_CONTENT", "summaries")
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://otel:4318")
     monkeypatch.setenv(
@@ -128,6 +137,9 @@ def test_settings_loads_optional_environment(monkeypatch: pytest.MonkeyPatch) ->
     assert settings.llm_document_model == "anthropic/claude-sonnet-test"
     assert settings.agent_runtime == "adk"
     assert settings.workflow_backend == "temporal"
+    assert settings.temporal_address == "temporal.example:7233"
+    assert settings.temporal_namespace == "kortny-dev"
+    assert settings.temporal_task_queue == "kortny-dev-workflows"
     assert settings.observability_capture_content == "summaries"
     assert settings.otel_exporter_otlp_endpoint == "http://otel:4318"
     assert (

@@ -138,6 +138,47 @@ services:
     volumes:
       - phoenix-data:/mnt/data
 
+  temporal:
+    image: ${TEMPORAL_IMAGE:-temporalio/temporal:latest}
+    profiles:
+      - workflow
+    command: ["server", "start-dev", "--ip", "0.0.0.0"]
+    ports:
+      - "${TEMPORAL_HOST_PORT:-7233}:7233"
+      - "127.0.0.1:${TEMPORAL_UI_HOST_PORT:-8233}:8233"
+
+  temporal-worker:
+    image: ghcr.io/astral-sh/uv:python3.11-bookworm-slim
+    profiles:
+      - workflow
+    working_dir: /app
+    command: ["uv", "run", "python", "-m", "kortny.workflow"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      temporal:
+        condition: service_started
+    env_file:
+      - .env
+    environment:
+      KORTNY_WORKFLOW_BACKEND: temporal
+      TEMPORAL_ADDRESS: ${TEMPORAL_ADDRESS:-temporal:7233}
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
+      TEMPORAL_TASK_QUEUE: ${TEMPORAL_TASK_QUEUE:-kortny-workflows}
+      OBSERVABILITY_ENABLED: ${OBSERVABILITY_ENABLED:-true}
+      OBSERVABILITY_CAPTURE_CONTENT: ${OBSERVABILITY_CAPTURE_CONTENT:-metadata}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      OTEL_EXPORTER_OTLP_HEADERS: ${OTEL_EXPORTER_OTLP_HEADERS:-}
+      OTEL_SERVICE_NAME: ${OTEL_TEMPORAL_WORKER_SERVICE_NAME:-kortny-temporal-worker}
+      OTEL_TRACE_SAMPLING_RATIO: ${OTEL_TRACE_SAMPLING_RATIO:-1.0}
+      POSTGRES_URL: postgresql://${POSTGRES_USER:-kortny}:${POSTGRES_PASSWORD:-kortny}@postgres:5432/${POSTGRES_DB:-kortny}
+      UV_CACHE_DIR: /tmp/uv-cache
+      UV_LINK_MODE: copy
+      UV_PROJECT_ENVIRONMENT: /tmp/kortny-venv
+    volumes:
+      - .:/app
+      - uv-cache:/tmp/uv-cache
+
 volumes:
   postgres-data:
   phoenix-data:

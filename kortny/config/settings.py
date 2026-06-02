@@ -66,6 +66,21 @@ class Settings(BaseSettings):
     workflow_backend: Literal["inline", "temporal"] = Field(
         default="inline", validation_alias="KORTNY_WORKFLOW_BACKEND"
     )
+    temporal_address: str = Field(
+        default="temporal:7233",
+        validation_alias="TEMPORAL_ADDRESS",
+        min_length=1,
+    )
+    temporal_namespace: str = Field(
+        default="default",
+        validation_alias="TEMPORAL_NAMESPACE",
+        min_length=1,
+    )
+    temporal_task_queue: str = Field(
+        default="kortny-workflows",
+        validation_alias="TEMPORAL_TASK_QUEUE",
+        min_length=1,
+    )
     tool_selector_max_external_candidates: int = Field(
         default=24, validation_alias="TOOL_SELECTOR_MAX_EXTERNAL_CANDIDATES"
     )

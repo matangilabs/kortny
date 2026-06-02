@@ -36,6 +36,7 @@ from kortny.db.models import (
     SlackIdentity,
     Task,
     TaskEvent,
+    TaskEventType,
     TaskStatus,
     WorkspaceState,
 )
@@ -109,6 +110,7 @@ class TaskDetail:
     timeline: tuple[TimelineEvent, ...]
     usage: tuple[LLMUsage, ...]
     artifacts: tuple[Artifact, ...]
+    posted_response_text: str | None
 
 
 @dataclass(frozen=True)
@@ -732,6 +734,7 @@ def get_task_detail(
         timeline=tuple(_timeline_event(event) for event in events),
         usage=usage,
         artifacts=artifacts,
+        posted_response_text=_posted_response_text(events),
     )
 
 
@@ -3538,6 +3541,20 @@ def _timeline_event(event: TaskEvent) -> TimelineEvent:
         metrics=metrics,
         payload_json=json.dumps(payload, indent=2, sort_keys=True, default=str),
     )
+
+
+def _posted_response_text(events: Sequence[TaskEvent]) -> str | None:
+    for event in reversed(events):
+        if event.type is not TaskEventType.message_posted:
+            continue
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        purpose = _payload_string(payload, "purpose")
+        if purpose not in {None, "", "result"}:
+            continue
+        text = _payload_string(payload, "text")
+        if text:
+            return text
+    return None
 
 
 def _event_title(event_type: str, message: str) -> str:

@@ -85,8 +85,16 @@
 
   <section class="card detail-section">
     <header>
-      <h2>Result</h2>
-      <p>Final task summary saved by the worker.</p>
+      <h2>Posted Slack Response</h2>
+      <p>Actual message delivered to Slack after final synthesis and formatting.</p>
+    </header>
+    <pre>{{ detail.posted_response_text or "-" }}</pre>
+  </section>
+
+  <section class="card detail-section">
+    <header>
+      <h2>Raw Agent Result</h2>
+      <p>Pre-humanizer task summary saved by the worker.</p>
     </header>
     <pre>{{ detail.task.result_summary or "-" }}</pre>
   </section>

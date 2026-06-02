@@ -755,7 +755,7 @@ def test_adk_model_callback_records_llm_usage(
         task_id=str(task.id),
     )
     response = LlmResponse(
-        model_version="openrouter/anthropic/claude-sonnet-4.6",
+        model_version="openrouter/anthropic/claude-4.6-sonnet-20260217",
         usage_metadata=genai_types.GenerateContentResponseUsageMetadata(
             prompt_token_count=100,
             tool_use_prompt_token_count=10,
@@ -769,7 +769,7 @@ def test_adk_model_callback_records_llm_usage(
 
     assert usage is not None
     assert usage.provider is LLMProvider.openrouter
-    assert usage.model == "anthropic/claude-sonnet-4.6"
+    assert usage.model == "anthropic/claude-4.6-sonnet-20260217"
     assert usage.model_tier == "analysis"
     assert usage.input_tokens == 110
     assert usage.output_tokens == 20

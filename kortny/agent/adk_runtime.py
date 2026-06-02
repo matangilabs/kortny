@@ -5,11 +5,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import uuid
 from collections.abc import Callable
 from contextlib import contextmanager
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 from google.adk.agents import Agent
@@ -532,6 +533,7 @@ class AdkAgentRuntime:
         cost_usd, pricing_missing = self._calculate_adk_cost_usd(
             model=model,
             usage=token_usage,
+            fallback_model=self._adk_model_name_for_agent(agent_name),
         )
         model_tier = self._adk_model_tier_for_agent(agent_name)
         route_reason = self._adk_route_reason_for_agent(agent_name)
@@ -588,10 +590,12 @@ class AdkAgentRuntime:
         *,
         model: str,
         usage: TokenUsage,
+        fallback_model: str | None = None,
     ) -> tuple[Decimal, bool]:
         provider = DbLLMProvider(self.settings.llm_provider.value)
         effective_at = datetime.now(UTC)
-        for candidate in _pricing_model_candidates(model):
+        candidates = _pricing_model_candidates(model, fallback_model=fallback_model)
+        for candidate in candidates:
             pricing = self.session.scalar(
                 select(ModelPricing)
                 .where(
@@ -604,6 +608,9 @@ class AdkAgentRuntime:
             )
             if pricing is not None:
                 return calculate_cost_usd(usage, pricing), False
+        litellm_cost = _litellm_model_cost_usd(candidates, usage)
+        if litellm_cost is not None:
+            return litellm_cost, False
         return Decimal("0"), True
 
     def _adk_model_name_for_agent(self, agent_name: str) -> str:
@@ -818,9 +825,68 @@ def _normalized_litellm_model_name(model: str) -> str:
     return model
 
 
-def _pricing_model_candidates(model: str) -> tuple[str, ...]:
-    normalized = _normalized_litellm_model_name(model)
-    return tuple(dict.fromkeys((model, normalized)))
+def _pricing_model_candidates(
+    model: str,
+    *,
+    fallback_model: str | None = None,
+) -> tuple[str, ...]:
+    candidates: list[str] = []
+    for item in (model, fallback_model):
+        if not item:
+            continue
+        normalized = _normalized_litellm_model_name(item)
+        candidates.extend((item, normalized))
+        candidates.extend(_anthropic_version_aliases(normalized))
+    return tuple(dict.fromkeys(candidates))
+
+
+def _anthropic_version_aliases(model: str) -> tuple[str, ...]:
+    match = re.match(
+        r"^(?P<prefix>(?:openrouter/)?anthropic/)claude-"
+        r"(?P<major>\d+)\.(?P<minor>\d+)-(?P<family>sonnet|opus)(?:-.+)?$",
+        model,
+    )
+    if match is None:
+        return ()
+    canonical = (
+        f"{match.group('prefix')}claude-{match.group('family')}-"
+        f"{match.group('major')}-{match.group('minor')}"
+    )
+    return (canonical,)
+
+
+def _litellm_model_cost_usd(
+    model_candidates: tuple[str, ...],
+    usage: TokenUsage,
+) -> Decimal | None:
+    try:
+        import litellm
+    except ImportError:
+        return None
+
+    for model in model_candidates:
+        pricing = litellm.model_cost.get(model)
+        if not isinstance(pricing, dict):
+            continue
+        input_cost_per_token = _decimal_or_none(pricing.get("input_cost_per_token"))
+        output_cost_per_token = _decimal_or_none(pricing.get("output_cost_per_token"))
+        if input_cost_per_token is None or output_cost_per_token is None:
+            continue
+        cost = (
+            Decimal(usage.input_tokens) * input_cost_per_token
+            + Decimal(usage.output_tokens) * output_cost_per_token
+        )
+        return cost.quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)
+    return None
+
+
+def _decimal_or_none(value: object) -> Decimal | None:
+    if value is None:
+        return None
+    try:
+        return Decimal(str(value))
+    except Exception:
+        return None
 
 
 def _adk_specialist_tier(agent_name: str) -> ModelRouteTier | None:

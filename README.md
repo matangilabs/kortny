@@ -127,6 +127,7 @@ POSTGRES_DB=kortny
 POSTGRES_USER=kortny
 POSTGRES_PASSWORD=kortny
 POSTGRES_HOST_PORT=5432
+KORTNY_WORKFLOW_BACKEND=inline
 ```
 
 ### 3. Start Kortny
@@ -139,7 +140,8 @@ This starts Postgres on `localhost:5432`, runs the Alembic migration, starts
 the Slack Socket Mode ingress service, starts the task worker, and serves the
 read-only operator dashboard at `http://localhost:8080`.
 
-This does not start optional observability services such as Phoenix.
+This does not start optional observability services such as Phoenix, or the
+optional Temporal workflow backend.
 
 The dashboard has a local bootstrap login backed by a signed session cookie.
 Use `DASHBOARD_USERNAME` and `DASHBOARD_PASSWORD` to sign in, and change
@@ -215,6 +217,21 @@ Generate the Basic Auth value with:
 ```
 printf 'pk-lf-...:sk-lf-...' | base64
 ```
+
+### Optional: run the Temporal workflow backend
+
+Kortny can also run an optional local Temporal dev server and Temporal worker:
+
+```
+make compose-up-workflow
+```
+
+This starts `temporal` and `temporal-worker` behind the `workflow` Compose
+profile. Temporal's local UI is available at `http://localhost:8233`.
+
+The default app path still runs without Temporal. `KORTNY_WORKFLOW_BACKEND`
+defaults to `inline`, and HIG-97 currently records durable-candidate handoff
+events before moving real Slack execution into Temporal workflows.
 
 ### 5. Invite your bot to a channel
 

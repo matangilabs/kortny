@@ -3,7 +3,7 @@ from typing import Any, cast
 
 from kortny.config import Settings
 from kortny.db.models import Task
-from kortny.workflow import TaskRuntimeClass, evaluate_runtime_handoff
+from kortny.workflow.handoff import TaskRuntimeClass, evaluate_runtime_handoff
 
 
 def test_handoff_classifies_short_availability_check_as_quick_response() -> None:

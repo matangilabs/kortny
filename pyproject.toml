@@ -25,6 +25,7 @@ dependencies = [
     "reportlab>=4.4",
     "slack-bolt>=1.20",
     "sqlalchemy>=2.0",
+    "temporalio>=1.10",
     "uvicorn>=0.47",
 ]
 
