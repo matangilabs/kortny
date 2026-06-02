@@ -332,6 +332,60 @@ def test_worker_registry_adds_composio_tool_for_scoped_connection(
     assert event.payload["suppressed_native_tools"] == ["web_search"]
 
 
+def test_tool_selector_failure_is_internal_fallback_not_task_error(
+    db_session: Session,
+) -> None:
+    task = create_task(
+        db_session,
+        slack_channel_id="CResearch",
+        slack_user_id="UAnalyst",
+    )
+    task.input = "What tools do you have access to?"
+    task_service = TaskService(db_session)
+    settings = build_settings(composio_api_key="composio-key")
+    native_tool = StaticWebSearchTool()
+    external_tool = StaticExternalTool()
+
+    tools = AgentTaskExecutor(
+        settings=settings,
+        web_search_tool=native_tool,
+        tool_selector=FailingToolSelector(),
+    )._select_runtime_tools(
+        settings=settings,
+        session=db_session,
+        task=task,
+        task_service=task_service,
+        native_tools=[native_tool],
+        external_tools=[external_tool],
+        external_cards=(
+            ToolCard(
+                registry_name=external_tool.name,
+                provider="composio",
+                display_name="Firecrawl search",
+                description="Searches current web content.",
+                capabilities=("web_search",),
+                side_effect="read",
+                toolkit_slug="firecrawl",
+            ),
+        ),
+    )
+    events = task_events(db_session, task)
+
+    assert [tool.name for tool in tools] == ["web_search"]
+    fallback_event = next(
+        event
+        for event in events
+        if event.payload.get("message") == "tool_selection_failed"
+    )
+    assert fallback_event.type is TaskEventType.log
+    assert fallback_event.payload["fallback"] == "heuristic_tool_selector"
+    assert not any(
+        event.type is TaskEventType.error
+        and event.payload.get("message") == "tool_selection_failed"
+        for event in events
+    )
+
+
 def test_worker_registry_uses_dynamic_composio_toolkit_catalog(
     db_session: Session,
     tmp_path: Path,
@@ -1276,6 +1330,33 @@ class StaticWebSearchTool:
     def invoke(self, args: JsonObject) -> ToolResult:
         del args
         return ToolResult(output={"results": []})
+
+
+class StaticExternalTool:
+    name = "composio_firecrawl_search"
+    description = "Static external tool."
+    parameters: JsonSchema = {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+    }
+
+    def invoke(self, args: JsonObject) -> ToolResult:
+        del args
+        return ToolResult(output={"results": []})
+
+
+class FailingToolSelector:
+    def select(
+        self,
+        *,
+        task_id: uuid.UUID,
+        task_input: str,
+        native_cards: tuple[ToolCard, ...],
+        external_cards: tuple[ToolCard, ...],
+    ) -> ToolSelectionResult:
+        del task_id, task_input, native_cards, external_cards
+        raise ValueError("invalid selector payload")
 
 
 class StaticToolSelector:

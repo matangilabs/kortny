@@ -84,6 +84,7 @@ from kortny.tools import (
     ToolRegistry,
     WebSearchTool,
 )
+from kortny.workflow import evaluate_runtime_handoff
 
 GENERIC_FAILURE_TEXT = (
     "Something went wrong while I was working on this. Please try again soon."
@@ -314,6 +315,20 @@ class AgentTaskExecutor:
         task_service: TaskService,
         working_dir: Path,
     ) -> AgentRunResult:
+        handoff = evaluate_runtime_handoff(settings=settings, task=task)
+        task_service.append_event(task, TaskEventType.log, handoff.to_payload())
+        log_observation(
+            logger,
+            "runtime_handoff_evaluated",
+            task=task,
+            runtime_class=handoff.runtime_class.value,
+            durable_candidate=handoff.durable_candidate,
+            recommended_backend=handoff.recommended_backend,
+            configured_backend=handoff.configured_backend,
+            selected_backend=handoff.selected_backend,
+            reason_codes=list(handoff.reason_codes),
+            fallback_reason=handoff.fallback_reason,
+        )
         task_service.append_event(
             task,
             TaskEventType.log,
@@ -634,11 +649,12 @@ class AgentTaskExecutor:
             logger.exception("tool selector failed task_id=%s", task.id)
             task_service.append_event(
                 task,
-                TaskEventType.error,
+                TaskEventType.log,
                 {
                     "message": "tool_selection_failed",
                     "error_type": type(exc).__name__,
                     "error": str(exc),
+                    "fallback": "heuristic_tool_selector",
                 },
             )
             selection = HeuristicToolSelector().select(

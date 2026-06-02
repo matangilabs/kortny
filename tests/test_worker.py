@@ -698,6 +698,12 @@ def test_agent_executor_passes_routed_model_to_adk_runtime(
     assert captured["model_route"].tier is ModelRouteTier.cheap_fast
     assert captured["registry_factory"] is not None
     assert any(
+        event.payload.get("message") == "runtime_handoff_evaluated"
+        and event.payload.get("runtime_class") == "quick_response"
+        and event.payload.get("selected_backend") == "inline"
+        for event in events
+    )
+    assert any(
         event.payload.get("message") == "model_route_selected"
         and event.payload.get("runtime") == "adk"
         and event.payload.get("tier") == "cheap_fast"

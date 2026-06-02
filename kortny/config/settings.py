@@ -63,6 +63,9 @@ class Settings(BaseSettings):
     agent_runtime: Literal["custom", "adk"] = Field(
         default="custom", validation_alias="AGENT_RUNTIME"
     )
+    workflow_backend: Literal["inline", "temporal"] = Field(
+        default="inline", validation_alias="KORTNY_WORKFLOW_BACKEND"
+    )
     tool_selector_max_external_candidates: int = Field(
         default=24, validation_alias="TOOL_SELECTOR_MAX_EXTERNAL_CANDIDATES"
     )

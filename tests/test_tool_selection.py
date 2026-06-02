@@ -103,6 +103,33 @@ def test_llm_selector_filters_to_allowed_tools_and_native_suppressions() -> None
     assert result.prompt_char_budget == 12000
 
 
+def test_llm_selector_coerces_singleton_boolean_confidence_values() -> None:
+    provider = FakeSelectorLLM(
+        content="""
+        {
+          "selected_tools": [],
+          "suppressed_native_tools": [],
+          "rejected_tools": [
+            {"registry_name": "composio_firecrawl_search", "confidence": [true], "reason": "Not needed"}
+          ],
+          "route_reason": "no_external_needed"
+        }
+        """
+    )
+
+    result = LLMToolSelector(provider).select(
+        task_id=uuid.uuid4(),
+        task_input="what tools do you have access to?",
+        native_cards=(native_web_search_card(),),
+        external_cards=(firecrawl_card(),),
+    )
+
+    assert result.selected_tools == ()
+    assert result.rejected_tools[0].registry_name == "composio_firecrawl_search"
+    assert result.rejected_tools[0].confidence == 1.0
+    assert result.route_reason == "no_external_needed"
+
+
 def test_llm_selector_trims_prompt_payload_to_budget() -> None:
     cards = tuple(
         ToolCard(

@@ -129,6 +129,41 @@ def test_adk_runtime_prompt_switches_when_tools_are_available(
     assert "no tools are connected yet" not in instruction
 
 
+def test_adk_runtime_prompts_keep_single_kortny_persona(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    set_required_settings_env(monkeypatch)
+    settings = load_settings(env_file=None)
+    task = Task(
+        id=uuid.UUID("5c53f4e1-9d72-468d-ab18-5021d9e15dad"),
+        installation_id=uuid.UUID("1c53f4e1-9d72-468d-ab18-5021d9e15dad"),
+        slack_channel_id="C123",
+        slack_thread_ts="123.456",
+        slack_user_id="U123",
+        input="what tools do you have access to?",
+    )
+    runtime = AdkAgentRuntime(
+        settings=settings,
+        session=cast(Any, None),
+        task_service=cast(Any, None),
+        registry=ToolRegistry([_EchoTool()]),
+    )
+
+    root_instruction = runtime._instruction()
+    agent = runtime._build_agent(task=task)
+    agent_by_name = {getattr(tool, "name", None): tool.agent for tool in agent.tools}
+    quick_instruction = agent_by_name["quick_response_agent"].instruction
+    worker_instruction = agent_by_name["tool_worker_agent"].instruction
+
+    assert "Speak as Kortny, a single Slack-native coworker" in root_instruction
+    assert "use tool_worker_agent when it is available" in root_instruction
+    assert "Speak as Kortny, a single Slack-native coworker" in quick_instruction
+    assert "Do not say actual tool access lives in another agent" in quick_instruction
+    assert "answer as Kortny" in worker_instruction
+    assert "actual tool access lives in the main Kortny agent" not in quick_instruction
+    assert "actual tool access lives in the main Kortny agent" not in worker_instruction
+
+
 def test_adk_runtime_builds_orchestrator_with_registry_worker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

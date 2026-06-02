@@ -117,31 +117,62 @@ class KortnyAdkTool(BaseTool):
                 result = _with_classified_error(result, classification)
         except Exception as exc:
             latency_ms = _latency_ms(started)
+            result = _recoverable_exception_tool_result(
+                arguments=arguments,
+                tool_name=self.name,
+                error=exc,
+            )
+            result_payload = _tool_result_payload(self.name, result)
+            prompt_result_payload, compaction_payload = _tool_result_prompt_payload(
+                self.name,
+                result_payload,
+                max_chars=self.tool_result_prompt_max_chars,
+            )
             self.task_service.append_event(
                 self.task,
-                TaskEventType.error,
+                TaskEventType.tool_result,
                 {
-                    "type": type(exc).__name__,
-                    "message": str(exc),
-                    "runtime": "adk",
-                    "phase": "tool_invoke",
+                    "turn": ADK_TOOL_TURN,
                     "tool_call_id": tool_call_id,
                     "tool": self.name,
+                    "runtime": "adk",
+                    "step_id": ADK_TOOL_STEP_ID,
+                    "normalized_args_hash": normalized_args_hash,
+                    "attempt_no": 1,
                     "latency_ms": latency_ms,
+                    "output_shape": _output_shape(result.output),
+                    "artifact_count": len(result.artifacts),
+                    "recoverable": _recoverable_tool_result(result.output),
+                    **result_payload,
                 },
             )
+            if compaction_payload is not None:
+                self.task_service.append_event(
+                    self.task,
+                    TaskEventType.log,
+                    {
+                        "message": "tool_result_compacted",
+                        "runtime": "adk",
+                        "turn": ADK_TOOL_TURN,
+                        "tool_call_id": tool_call_id,
+                        "tool": self.name,
+                        **compaction_payload,
+                    },
+                )
             log_observation(
                 logger,
                 "adk_tool_call_failed",
-                level=logging.ERROR,
+                level=logging.WARNING,
                 task=self.task,
                 tool_call_id=tool_call_id,
                 tool=self.name,
                 latency_ms=latency_ms,
                 error_type=type(exc).__name__,
                 error_summary=str(exc),
+                recoverable=True,
             )
-            raise
+            prompt_result_payload["recoverable_error"] = True
+            return prompt_result_payload
 
         latency_ms = _latency_ms(started)
         result_payload = _tool_result_payload(self.name, result)
@@ -380,6 +411,56 @@ def adk_tools_from_registry(
 
 def _sync_execution_marker() -> None:
     """Marker used only for ADK's sync-tool detection."""
+
+
+def _recoverable_exception_tool_result(
+    *,
+    arguments: JsonObject,
+    tool_name: str,
+    error: Exception,
+) -> ToolResult:
+    message = str(error) or type(error).__name__
+    error_payload: JsonObject = {
+        "code": _recoverable_exception_code(error, message),
+        "message": message,
+        "recoverable": True,
+        "hint": (
+            "Treat this tool call as unavailable for this run. Try another "
+            "available tool if one can answer the request; otherwise explain "
+            "the blocker clearly."
+        ),
+        "details": {
+            "tool": tool_name,
+            "error_type": type(error).__name__,
+            "attempted_argument_keys": sorted(arguments),
+        },
+    }
+    classification = _classify_recoverable_result_error({"error": error_payload})
+    if classification is None:
+        return ToolResult(
+            output={
+                "successful": False,
+                "attempted_argument_keys": sorted(arguments),
+                "error": error_payload,
+            }
+        )
+    return ToolResult(
+        output={
+            "successful": False,
+            "attempted_argument_keys": sorted(arguments),
+            "error": _with_classified_error(
+                ToolResult(output={"error": error_payload}),
+                classification,
+            ).output["error"],
+        }
+    )
+
+
+def _recoverable_exception_code(error: Exception, message: str) -> str:
+    normalized = f"{type(error).__name__} {message}".casefold()
+    if any(token in normalized for token in ("timeout", "timed out")):
+        return "tool_execution_timeout"
+    return "tool_execution_failed"
 
 
 def _latency_ms(started: float) -> int:

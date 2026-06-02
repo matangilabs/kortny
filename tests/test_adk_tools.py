@@ -63,6 +63,35 @@ def test_adk_tool_enforces_existing_approval_policy() -> None:
     ]
 
 
+def test_adk_tool_returns_recoverable_result_for_tool_exception() -> None:
+    task_service = _RecordingTaskService()
+    adapter = KortnyAdkTool(
+        tool=_TimeoutTool(),
+        task=cast(Any, _fake_task()),
+        session=cast(Any, None),
+        task_service=cast(Any, task_service),
+    )
+
+    result = asyncio.run(
+        adapter.run_async(
+            args={"url": "https://example.com"},
+            tool_context=cast(Any, SimpleNamespace(function_call_id="call-timeout")),
+        )
+    )
+
+    assert result["output"]["successful"] is False
+    assert result["output"]["error"]["code"] == "tool_execution_timeout"
+    assert result["output"]["error"]["recoverable"] is True
+    assert result["recoverable_error"] is True
+    assert [event_type for event_type, _ in task_service.events] == [
+        TaskEventType.tool_call,
+        TaskEventType.tool_result,
+    ]
+    tool_result = task_service.events[1][1]
+    assert tool_result["recoverable"] is True
+    assert tool_result["output"]["error"]["category"] == "transient_transport"
+
+
 def test_adk_registry_toolset_loads_registry_lazily_once() -> None:
     task_service = _RecordingTaskService()
     load_count = 0
@@ -125,6 +154,30 @@ class _ForgetFactTool:
 
     def invoke(self, args: JsonObject) -> ToolResult:
         return ToolResult(output={"deleted": args["key"]})
+
+
+class _TimeoutTool:
+    name = "composio_firecrawl_crawl"
+    description = "Crawls a website."
+    parameters = {
+        "type": "object",
+        "properties": {"url": {"type": "string"}},
+        "required": ["url"],
+    }
+
+    def invoke(self, args: JsonObject) -> ToolResult:
+        del args
+        raise RuntimeError("The read operation timed out")
+
+
+def _fake_task() -> SimpleNamespace:
+    return SimpleNamespace(
+        id=uuid.uuid4(),
+        installation_id=uuid.uuid4(),
+        slack_channel_id="C123",
+        slack_thread_ts="123.456",
+        slack_user_id="U123",
+    )
 
 
 class _NoApprovalSession:

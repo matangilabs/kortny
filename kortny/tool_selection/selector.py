@@ -8,7 +8,7 @@ from collections.abc import Sequence
 from dataclasses import replace
 from typing import Protocol
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from kortny.llm import ChatMessage, Completion
 from kortny.tool_selection.models import (
@@ -182,6 +182,15 @@ class _SelectionItem(BaseModel):
     registry_name: str
     confidence: float = Field(ge=0, le=1)
     reason: str = ""
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def _coerce_confidence(cls, value: object) -> object:
+        if isinstance(value, list) and len(value) == 1:
+            value = value[0]
+        if isinstance(value, bool):
+            return 1.0 if value else 0.0
+        return value
 
 
 class _SelectorPayload(BaseModel):

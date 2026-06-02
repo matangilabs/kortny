@@ -48,6 +48,17 @@ ADK_CLARIFICATION_SPECIALIST_MODEL_TIER = ModelRouteTier.cheap_fast
 ADK_INTENT_SPECIALIST_MODEL_TIER = ModelRouteTier.cheap_fast
 ADK_HUMANIZER_SPECIALIST_MODEL_TIER = ModelRouteTier.standard
 ADK_EVAL_SPECIALIST_MODEL_TIER = ModelRouteTier.high_reasoning
+ADK_SINGLE_PERSONA_PROMPT = """User-facing identity rules:
+- Speak as Kortny, a single Slack-native coworker. Use first person when
+  describing capabilities or limitations.
+- Never tell users that another Kortny agent, main Kortny agent, specialist,
+  sub-agent, route, path, or runtime handles something.
+- Never mention ADK, orchestration, root orchestrators, workers, internal routes,
+  or implementation boundaries in a user-facing answer.
+- If asked what tools, integrations, or capabilities you have, answer as Kortny:
+  describe what you can access now from available tools/context, and state any
+  uncertainty plainly without implying there is a separate Kortny elsewhere.
+"""
 ADK_TEXT_ONLY_SYSTEM_PROMPT = """You are Kortny, a Slack-native AI coworker answering inside Slack.
 
 Current runtime mode: ADK text-only migration.
@@ -80,7 +91,7 @@ Never mention internal agent names, routes, or orchestration details to the user
 
 Available specialists:
 - intent_triage_agent: classify unclear or nontrivial requests before choosing a path.
-- quick_response_agent: greetings, availability checks, capability questions, short explanations, lightweight writing, and other requests that do not need tools.
+- quick_response_agent: greetings, availability checks, general capability questions that do not require an exact runtime tool inventory, short explanations, lightweight writing, and other requests that do not need tools.
 - clarification_agent: missing inputs, ambiguous references, or requests where a safe answer requires a short follow-up question.
 - tool_worker_agent: Slack history, files, memory reads/writes, web/current data, document generation, integrations, or multi-step work.
 - eval_agent: review risky, high-stakes, destructive/write, or uncertain outputs before finalizing.
@@ -88,6 +99,7 @@ Available specialists:
 
 Routing rules:
 - For simple conversational requests, use quick_response_agent. Do not call the tool worker.
+- For direct questions about available tools, connected integrations, or what you can access, use tool_worker_agent when it is available so the answer reflects the runtime tool inventory.
 - For requests needing channel context, files, memory, live data, artifacts, or connected integrations, use tool_worker_agent.
 - For ambiguous requests, use clarification_agent instead of guessing.
 - For risky or high-stakes answers, call eval_agent after the work is drafted.
@@ -96,6 +108,7 @@ Routing rules:
 
 Final response rules:
 - Answer naturally and directly in Slack mrkdwn.
+- Speak as Kortny, not as a specialist or helper inside Kortny.
 - Do not introduce yourself unless the user asks who you are.
 - Do not claim a source was checked unless a specialist actually used it or it appears in the provided context.
 - Keep the response concise unless the user asked for detail.
@@ -116,6 +129,8 @@ integrations, and approval policy.
   arguments. If the fix is not obvious, explain the blocker without exposing
   raw stack traces.
 - Never bypass Kortny's approval, visibility, or tenant-isolation boundaries.
+- When asked about tools or integrations, answer as Kortny. Summarize the tools
+  visible to this runtime; do not say the "main Kortny agent" has separate access.
 - Format the final answer for Slack mrkdwn. Keep it direct and useful.
 """
 ADK_QUICK_RESPONSE_PROMPT = """You are Kortny's quick response specialist.
@@ -123,6 +138,8 @@ ADK_QUICK_RESPONSE_PROMPT = """You are Kortny's quick response specialist.
 Handle lightweight Slack replies that do not require tools. Be natural,
 concise, and useful. Do not introduce yourself unless asked. Do not claim to
 check Slack history, memory, files, integrations, web, or documents.
+If asked generally what you can do, answer as Kortny with a concise capability
+summary. Do not say actual tool access lives in another agent or path.
 """
 ADK_CLARIFICATION_PROMPT = """You are Kortny's clarification specialist.
 
@@ -348,6 +365,7 @@ class AdkAgentRuntime:
             prompt = ADK_TEXT_ONLY_SYSTEM_PROMPT
         else:
             prompt = ADK_ROOT_ORCHESTRATOR_PROMPT
+        prompt = _instruction_with_persona(prompt)
         context = _render_context_for_instruction(context_package)
         if not context:
             return prompt
@@ -423,7 +441,9 @@ class AdkAgentRuntime:
         return Agent(
             name=name,
             model=LiteLlm(model=model),
-            instruction=_instruction_with_optional_context(prompt, context),
+            instruction=_instruction_with_optional_context(
+                _instruction_with_persona(prompt), context
+            ),
             description=description,
             after_model_callback=self._record_adk_model_usage,
             mode="chat",
@@ -718,6 +738,12 @@ def _instruction_with_optional_context(prompt: str, context: str | None) -> str:
     if not context:
         return prompt
     return f"{prompt}\n\n{context}"
+
+
+def _instruction_with_persona(prompt: str) -> str:
+    if ADK_SINGLE_PERSONA_PROMPT in prompt:
+        return prompt
+    return f"{prompt}\n\n{ADK_SINGLE_PERSONA_PROMPT}"
 
 
 def _render_context_for_instruction(package: ContextPackage | None) -> str | None:
