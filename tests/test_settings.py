@@ -16,6 +16,9 @@ SETTINGS_ENV_VARS = {
     "LLM_DOCUMENT_MODEL",
     "LLM_HIGH_REASONING_MODEL",
     "AGENT_RUNTIME",
+    "KORTNY_PLANNED_WORKFLOWS_ENABLED",
+    "KORTNY_PLANNED_WORKFLOW_MAX_PARALLEL_BRANCHES",
+    "KORTNY_PLANNED_WORKFLOW_COST_CEILING_USD",
     "KORTNY_WORKFLOW_BACKEND",
     "TEMPORAL_ADDRESS",
     "TEMPORAL_NAMESPACE",
@@ -72,6 +75,9 @@ def test_settings_loads_required_environment(monkeypatch: pytest.MonkeyPatch) ->
     assert settings.slack_file_read_max_bytes == 25 * 1024 * 1024
     assert settings.slack_app_name == "kortny"
     assert settings.agent_runtime == "custom"
+    assert settings.planned_workflows_enabled is True
+    assert settings.planned_workflow_max_parallel_branches == 3
+    assert settings.planned_workflow_cost_ceiling_usd == 0.75
     assert settings.workflow_backend == "inline"
     assert settings.temporal_address == "temporal:7233"
     assert settings.temporal_namespace == "default"
@@ -104,6 +110,9 @@ def test_settings_loads_optional_environment(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("LLM_CHEAP_MODEL", "anthropic/claude-haiku-test")
     monkeypatch.setenv("LLM_DOCUMENT_MODEL", "anthropic/claude-sonnet-test")
     monkeypatch.setenv("AGENT_RUNTIME", "adk")
+    monkeypatch.setenv("KORTNY_PLANNED_WORKFLOWS_ENABLED", "false")
+    monkeypatch.setenv("KORTNY_PLANNED_WORKFLOW_MAX_PARALLEL_BRANCHES", "4")
+    monkeypatch.setenv("KORTNY_PLANNED_WORKFLOW_COST_CEILING_USD", "1.25")
     monkeypatch.setenv("KORTNY_WORKFLOW_BACKEND", "temporal")
     monkeypatch.setenv("TEMPORAL_ADDRESS", "temporal.example:7233")
     monkeypatch.setenv("TEMPORAL_NAMESPACE", "kortny-dev")
@@ -136,6 +145,9 @@ def test_settings_loads_optional_environment(monkeypatch: pytest.MonkeyPatch) ->
     assert settings.llm_cheap_model == "anthropic/claude-haiku-test"
     assert settings.llm_document_model == "anthropic/claude-sonnet-test"
     assert settings.agent_runtime == "adk"
+    assert settings.planned_workflows_enabled is False
+    assert settings.planned_workflow_max_parallel_branches == 4
+    assert settings.planned_workflow_cost_ceiling_usd == 1.25
     assert settings.workflow_backend == "temporal"
     assert settings.temporal_address == "temporal.example:7233"
     assert settings.temporal_namespace == "kortny-dev"

@@ -316,11 +316,13 @@ class AgentTaskExecutor:
         task_service: TaskService,
         working_dir: Path,
     ) -> AgentRunResult:
+        planned_workflow_candidate = False
         try:
             planned_workflow = classify_planned_workflow(
                 task=task,
                 events=_task_events(session, task),
             )
+            planned_workflow_candidate = planned_workflow.planned_candidate
             task_service.append_event(
                 task,
                 TaskEventType.log,
@@ -380,7 +382,10 @@ class AgentTaskExecutor:
             reason_codes=list(handoff.reason_codes),
             fallback_reason=handoff.fallback_reason,
         )
-        if handoff.durable_candidate and handoff.configured_backend == "temporal":
+        if (
+            handoff.configured_backend == "temporal"
+            and (handoff.durable_candidate or planned_workflow_candidate)
+        ):
             self._shadow_start_temporal_workflow(
                 settings=settings,
                 task=task,

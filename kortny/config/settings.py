@@ -66,6 +66,15 @@ class Settings(BaseSettings):
     workflow_backend: Literal["inline", "temporal"] = Field(
         default="inline", validation_alias="KORTNY_WORKFLOW_BACKEND"
     )
+    planned_workflows_enabled: bool = Field(
+        default=True, validation_alias="KORTNY_PLANNED_WORKFLOWS_ENABLED"
+    )
+    planned_workflow_max_parallel_branches: int = Field(
+        default=3, validation_alias="KORTNY_PLANNED_WORKFLOW_MAX_PARALLEL_BRANCHES"
+    )
+    planned_workflow_cost_ceiling_usd: float = Field(
+        default=0.75, validation_alias="KORTNY_PLANNED_WORKFLOW_COST_CEILING_USD"
+    )
     temporal_address: str = Field(
         default="temporal:7233",
         validation_alias="TEMPORAL_ADDRESS",
@@ -220,6 +229,24 @@ class Settings(BaseSettings):
     def _valid_response_humanizer_min_chars(cls, value: int) -> int:
         if value < 0:
             raise ValueError("RESPONSE_HUMANIZER_MIN_CHARS cannot be negative")
+        return value
+
+    @field_validator("planned_workflow_max_parallel_branches")
+    @classmethod
+    def _valid_planned_workflow_parallel_branches(cls, value: int) -> int:
+        if value < 1 or value > 5:
+            raise ValueError(
+                "KORTNY_PLANNED_WORKFLOW_MAX_PARALLEL_BRANCHES must be between 1 and 5"
+            )
+        return value
+
+    @field_validator("planned_workflow_cost_ceiling_usd")
+    @classmethod
+    def _valid_planned_workflow_cost_ceiling_usd(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError(
+                "KORTNY_PLANNED_WORKFLOW_COST_CEILING_USD must be positive"
+            )
         return value
 
     @field_validator("tool_selector_max_external_candidates")

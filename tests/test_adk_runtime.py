@@ -250,6 +250,101 @@ def test_adk_runtime_uses_cheaper_models_for_lightweight_specialists(
     assert agent_by_name["eval_agent"].model.model == "openrouter/anthropic/opus-review"
 
 
+def test_adk_runtime_builds_planned_parallel_pipeline_for_planned_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    set_required_settings_env(monkeypatch)
+    monkeypatch.setenv("LLM_MODEL", "anthropic/sonnet-default")
+    monkeypatch.setenv("LLM_CHEAP_MODEL", "deepseek/deepseek-v4-flash")
+    monkeypatch.setenv("LLM_STANDARD_MODEL", "anthropic/sonnet-standard")
+    monkeypatch.setenv("LLM_HIGH_REASONING_MODEL", "anthropic/opus-planner")
+    settings = load_settings(env_file=None)
+    task = Task(
+        id=uuid.UUID("6c53f4e1-9d72-468d-ab18-5021d9e15dad"),
+        installation_id=uuid.UUID("1c53f4e1-9d72-468d-ab18-5021d9e15dad"),
+        slack_channel_id="C123",
+        slack_thread_ts="123.456",
+        slack_user_id="U123",
+        input="research AI observability, check Linear, and summarize next steps",
+    )
+    task_service = _FakeTaskService()
+    runtime = AdkAgentRuntime(
+        settings=settings,
+        session=cast(Any, None),
+        task_service=cast(Any, task_service),
+        registry=ToolRegistry([_EchoTool()]),
+        model="anthropic/sonnet-routed",
+    )
+
+    agent = runtime._build_agent(
+        task=task,
+        planned_workflow_payload={
+            "planned_candidate": True,
+            "route": "planned_candidate",
+            "confidence": 0.84,
+            "estimated_subtask_count": 4,
+            "reason": "Task looks like broad research plus synthesis.",
+        },
+    )
+
+    assert agent.name == "kortny_planned_workflow"
+    assert [sub_agent.name for sub_agent in agent.sub_agents] == [
+        "planned_workflow_planner",
+        "planned_parallel_fanout",
+        "planned_workflow_merger",
+    ]
+    planner, parallel, merger = agent.sub_agents
+    assert planner.output_key == "planned_workflow_plan"
+    assert planner.model.model == "openrouter/anthropic/opus-planner"
+    assert merger.model.model == "openrouter/anthropic/sonnet-standard"
+    assert [worker.name for worker in parallel.sub_agents] == [
+        "planned_research_worker",
+        "planned_workspace_worker",
+        "planned_integration_worker",
+    ]
+    assert {
+        worker.output_key: worker.model.model for worker in parallel.sub_agents
+    } == {
+        "planned_research_result": "openrouter/deepseek/deepseek-v4-flash",
+        "planned_workspace_result": "openrouter/deepseek/deepseek-v4-flash",
+        "planned_integration_result": "openrouter/deepseek/deepseek-v4-flash",
+    }
+    assert task_service.events[0][1]["message"] == "adk_planned_workflow_selected"
+    assert task_service.events[0][1]["mode"] == "planned_parallel"
+
+
+def test_adk_runtime_respects_planned_workflow_disable_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    set_required_settings_env(monkeypatch)
+    monkeypatch.setenv("KORTNY_PLANNED_WORKFLOWS_ENABLED", "false")
+    settings = load_settings(env_file=None)
+    task = Task(
+        id=uuid.UUID("7c53f4e1-9d72-468d-ab18-5021d9e15dad"),
+        installation_id=uuid.UUID("1c53f4e1-9d72-468d-ab18-5021d9e15dad"),
+        slack_channel_id="C123",
+        slack_thread_ts="123.456",
+        slack_user_id="U123",
+        input="research AI observability, check Linear, and summarize next steps",
+    )
+    runtime = AdkAgentRuntime(
+        settings=settings,
+        session=cast(Any, None),
+        task_service=cast(Any, _FakeTaskService()),
+        registry=ToolRegistry([_EchoTool()]),
+    )
+
+    agent = runtime._build_agent(
+        task=task,
+        planned_workflow_payload={
+            "planned_candidate": True,
+            "route": "planned_candidate",
+        },
+    )
+
+    assert agent.name == "kortny_root_orchestrator"
+
+
 def test_adk_runtime_registry_factory_is_lazy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -304,6 +399,20 @@ class _EchoTool:
         return ToolResult(output={"echo": args})
 
 
+class _FakeTaskService:
+    def __init__(self) -> None:
+        self.events: list[tuple[Task, JsonObject]] = []
+
+    def append_event(
+        self,
+        task: Task,
+        event_type: object,
+        payload: JsonObject,
+    ) -> None:
+        del event_type
+        self.events.append((task, payload))
+
+
 def set_required_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in (
         "SLACK_BOT_TOKEN",
@@ -312,6 +421,12 @@ def set_required_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "LLM_PROVIDER",
         "LLM_API_KEY",
         "LLM_MODEL",
+        "LLM_CHEAP_MODEL",
+        "LLM_STANDARD_MODEL",
+        "LLM_HIGH_REASONING_MODEL",
+        "KORTNY_PLANNED_WORKFLOWS_ENABLED",
+        "KORTNY_PLANNED_WORKFLOW_MAX_PARALLEL_BRANCHES",
+        "KORTNY_PLANNED_WORKFLOW_COST_CEILING_USD",
         "POSTGRES_URL",
     ):
         monkeypatch.delenv(name, raising=False)

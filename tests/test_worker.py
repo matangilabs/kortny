@@ -780,6 +780,97 @@ def test_agent_executor_records_planned_workflow_classifier_event_for_complex_ta
     )
 
 
+def test_agent_executor_shadow_starts_temporal_for_planned_candidate(
+    db_session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = create_task(db_session, event_id="EvPlannedTemporalShadow")
+    task.input = "Research best AI agents for trading and summarize the options."
+    db_session.commit()
+    task_service = TaskService(db_session)
+    settings = Settings.model_validate(
+        {
+            "SLACK_BOT_TOKEN": "xoxb-test",
+            "SLACK_APP_TOKEN": "xapp-test",
+            "SLACK_SIGNING_SECRET": "signing-secret",
+            "LLM_PROVIDER": SettingsLLMProvider.openrouter,
+            "LLM_API_KEY": "openrouter-key",
+            "LLM_MODEL": "anthropic/sonnet-default",
+            "LLM_CHEAP_MODEL": "deepseek/deepseek-v4-flash",
+            "POSTGRES_URL": "postgresql://kortny:kortny@localhost/kortny",
+            "AGENT_RUNTIME": "adk",
+            "KORTNY_WORKFLOW_BACKEND": "temporal",
+        }
+    )
+    launch_calls: list[str] = []
+
+    def fake_start_temporal_task_workflow_sync(
+        *,
+        settings: Settings,
+        task: Task,
+    ) -> TemporalWorkflowLaunch:
+        launch_calls.append(str(task.id))
+        return TemporalWorkflowLaunch(
+            workflow_id=f"kortny-task-{task.id}",
+            run_id="run-planned-1",
+            first_execution_run_id="first-run-planned-1",
+            result_run_id=None,
+            namespace=settings.temporal_namespace,
+            task_queue=settings.temporal_task_queue,
+        )
+
+    class FakeAdkRuntime:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        def run(self, task_arg: Task) -> AgentRunResult:
+            return AgentRunResult(
+                task_id=task_arg.id,
+                result_summary="Planned task still answered by the current runtime.",
+                turns=1,
+                artifact_count=0,
+            )
+
+    monkeypatch.setattr(
+        "kortny.workflow.launcher.start_temporal_task_workflow_sync",
+        fake_start_temporal_task_workflow_sync,
+    )
+    monkeypatch.setattr(
+        "kortny.agent.adk_runtime.AdkAgentRuntime",
+        FakeAdkRuntime,
+    )
+
+    result = AgentTaskExecutor(settings=settings)._run_agent_runtime(
+        settings=settings,
+        session=db_session,
+        task=task,
+        task_service=task_service,
+        working_dir=tmp_path,
+    )
+
+    events = task_events(db_session, task)
+
+    assert result.result_summary == "Planned task still answered by the current runtime."
+    assert launch_calls == [str(task.id)]
+    assert any(
+        event.payload.get("message") == "planned_workflow_classified"
+        and event.payload.get("planned_candidate") is True
+        for event in events
+    )
+    assert any(
+        event.payload.get("message") == "runtime_handoff_evaluated"
+        and event.payload.get("runtime_class") == "inline_tool_task"
+        for event in events
+    )
+    assert any(
+        event.payload.get("message") == "temporal_workflow_shadow_started"
+        and event.payload.get("mode") == "shadow"
+        and event.payload.get("run_id") == "run-planned-1"
+        for event in events
+    )
+
+
 def test_agent_executor_shadow_starts_temporal_workflow_for_durable_candidate(
     db_session: Session,
     tmp_path: Path,
@@ -949,6 +1040,80 @@ def test_adk_model_callback_records_llm_usage(
     assert event.payload["runtime"] == "adk"
     assert event.payload["route_reason"] == "intent_classifier"
     assert event.payload["pricing_missing"] is False
+
+
+def test_adk_model_callback_records_planned_workflow_cost_ceiling_event(
+    db_session: Session,
+) -> None:
+    task = create_task(db_session, event_id="EvAdkPlannedCostCeiling")
+    task_service = TaskService(db_session)
+    task_service.append_event(
+        task,
+        TaskEventType.log,
+        {
+            "message": "planned_workflow_classified",
+            "route": "planned_candidate",
+            "planned_candidate": True,
+            "confidence": 0.9,
+        },
+    )
+    db_session.add(
+        ModelPricing(
+            provider=LLMProvider.openrouter,
+            model="anthropic/claude-sonnet-4.6",
+            input_price_per_mtok=Decimal("3.00"),
+            output_price_per_mtok=Decimal("15.00"),
+            effective_from=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+    )
+    db_session.commit()
+    settings = Settings.model_validate(
+        {
+            "SLACK_BOT_TOKEN": "xoxb-test",
+            "SLACK_APP_TOKEN": "xapp-test",
+            "SLACK_SIGNING_SECRET": "signing-secret",
+            "LLM_PROVIDER": SettingsLLMProvider.openrouter,
+            "LLM_API_KEY": "openrouter-key",
+            "LLM_MODEL": "anthropic/sonnet-default",
+            "POSTGRES_URL": "postgresql://kortny:kortny@localhost/kortny",
+            "AGENT_RUNTIME": "adk",
+            "KORTNY_PLANNED_WORKFLOW_COST_CEILING_USD": "0.0001",
+        }
+    )
+    runtime = AdkAgentRuntime(
+        settings=settings,
+        session=db_session,
+        task_service=task_service,
+        model_route=ModelRoute(
+            tier=ModelRouteTier.analysis,
+            model="anthropic/claude-sonnet-4.6",
+            reason="intent_classifier",
+        ),
+    )
+    context = FakeAdkContext(
+        agent_name="planned_workflow_planner",
+        invocation_id="adk-invocation-planned-budget",
+        task_id=str(task.id),
+    )
+    response = LlmResponse(
+        model_version="openrouter/anthropic/claude-4.6-sonnet-20260217",
+        usage_metadata=genai_types.GenerateContentResponseUsageMetadata(
+            prompt_token_count=100,
+            candidates_token_count=20,
+            total_token_count=120,
+        ),
+    )
+
+    runtime._record_adk_model_usage(callback_context=context, llm_response=response)
+    events = task_events(db_session, task)
+
+    assert any(
+        event.payload.get("message") == "planned_workflow_cost_ceiling_exceeded"
+        and event.payload.get("runtime") == "adk"
+        and event.payload.get("behavior") == "observe_only"
+        and event.payload.get("cost_ceiling_usd") == "0.0001"
+        for event in events
+    )
 
 
 def test_adk_model_callback_uses_openrouter_catalog_pricing_when_litellm_misses(

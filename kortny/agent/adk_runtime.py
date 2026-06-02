@@ -14,7 +14,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from functools import lru_cache
 from typing import Any
 
-from google.adk.agents import Agent
+from google.adk.agents import Agent, ParallelAgent, SequentialAgent
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.models.lite_llm import LiteLlm
 from google.adk.models.llm_response import LlmResponse
@@ -22,7 +22,7 @@ from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.adk.tools import AgentTool
 from google.genai import types as genai_types
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from kortny.agent.adk_tools import KortnyRegistryToolset, adk_tools_from_registry
@@ -32,7 +32,7 @@ from kortny.agent.thread_context import ThreadTranscriptProvider
 from kortny.approvals import ToolApprovalPolicy
 from kortny.config import LLMProvider, Settings
 from kortny.db.models import LLMProvider as DbLLMProvider
-from kortny.db.models import ModelPricing, Task, TaskEventType
+from kortny.db.models import LLMUsage, ModelPricing, Task, TaskEvent, TaskEventType
 from kortny.llm import ChatMessage
 from kortny.llm.routing import ModelRoute, ModelRouter, ModelRouteTier
 from kortny.llm.service import calculate_cost_usd
@@ -50,6 +50,9 @@ ADK_CLARIFICATION_SPECIALIST_MODEL_TIER = ModelRouteTier.cheap_fast
 ADK_INTENT_SPECIALIST_MODEL_TIER = ModelRouteTier.cheap_fast
 ADK_HUMANIZER_SPECIALIST_MODEL_TIER = ModelRouteTier.standard
 ADK_EVAL_SPECIALIST_MODEL_TIER = ModelRouteTier.high_reasoning
+ADK_PLANNED_PLANNER_MODEL_TIER = ModelRouteTier.high_reasoning
+ADK_PLANNED_BRANCH_MODEL_TIER = ModelRouteTier.cheap_fast
+ADK_PLANNED_MERGER_MODEL_TIER = ModelRouteTier.standard
 OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
 OPENROUTER_MODELS_TIMEOUT_SECONDS = 5.0
 ADK_SINGLE_PERSONA_PROMPT = """User-facing identity rules:
@@ -168,6 +171,68 @@ ADK_HUMANIZER_PROMPT = """You are Kortny's Slack response synthesis specialist.
 Rewrite the provided draft so it sounds like a capable human coworker in Slack.
 Preserve facts, caveats, numbers, tool/source provenance, and user-facing
 commitments. Do not add new claims. Keep it concise unless detail was requested.
+"""
+ADK_PLANNED_WORKFLOW_PLANNER_PROMPT = """You are Kortny's planned workflow planner.
+
+Create a bounded execution plan for the user's task before parallel workers run.
+Return compact JSON-shaped text with:
+- objective
+- max_subtasks
+- max_parallel_branches
+- estimated_cost_ceiling_usd
+- subtasks, each with id, objective, expected_output, suggested_tools,
+  dependencies, is_write, requires_approval, and stop_criteria
+
+Rules:
+- Do not execute the task yourself.
+- Prefer 2-3 independent subtasks when the work can be parallelized.
+- Respect Kortny's approval, tenant, and visibility boundaries.
+- Mark write/destructive subtasks as requires_approval=true.
+- Keep the plan short enough for Slack trace review.
+"""
+ADK_PLANNED_RESEARCH_BRANCH_PROMPT = """You are Kortny's planned workflow research branch.
+
+Use available tools only when they are relevant. Focus on web/current-data,
+source discovery, and external facts. If no relevant tool is available, return
+a short limitation instead of guessing.
+
+Use the plan in {planned_workflow_plan}. Store a concise branch result with
+facts, caveats, and source/tool provenance.
+"""
+ADK_PLANNED_WORKSPACE_BRANCH_PROMPT = """You are Kortny's planned workflow workspace branch.
+
+Use available tools only when they are relevant. Focus on Slack history, files,
+memory, and workspace context. If no relevant tool is available, return a short
+limitation instead of guessing.
+
+Use the plan in {planned_workflow_plan}. Store a concise branch result with
+facts, caveats, and source/tool provenance.
+"""
+ADK_PLANNED_INTEGRATION_BRANCH_PROMPT = """You are Kortny's planned workflow integration branch.
+
+Use available tools only when they are relevant. Focus on connected SaaS and
+Composio-backed integrations such as Linear, Notion, search providers, market
+data, and other scoped accounts. If no relevant tool is available, return a
+short limitation instead of guessing.
+
+Use the plan in {planned_workflow_plan}. Store a concise branch result with
+facts, caveats, and source/tool provenance.
+"""
+ADK_PLANNED_WORKFLOW_MERGER_PROMPT = """You are Kortny's planned workflow merger.
+
+Merge the parallel branch outputs into one Slack-native answer.
+
+Inputs:
+- Plan: {planned_workflow_plan}
+- Research branch: {planned_research_result}
+- Workspace branch: {planned_workspace_result}
+- Integration branch: {planned_integration_result}
+
+Rules:
+- Preserve what worked, what failed, and uncertainty.
+- Do not claim a source or tool was checked unless a branch actually says it was.
+- Keep the answer concise unless the user asked for depth.
+- Speak as Kortny, not as a workflow, branch, runtime, or agent.
 """
 logger = logging.getLogger(__name__)
 
@@ -305,7 +370,26 @@ class AdkAgentRuntime:
                 ],
             },
         )
-        agent = self._build_agent(task=task, context_package=context_package)
+        planned_workflow_payload = self._planned_workflow_payload(task)
+        if planned_workflow_payload is not None:
+            session = await session_service.get_session(
+                app_name=ADK_APP_NAME,
+                user_id=user_id,
+                session_id=session_id,
+            )
+            if session is not None:
+                session.state["planned_workflow"] = planned_workflow_payload
+                session.state["planned_workflow_route"] = planned_workflow_payload.get(
+                    "route"
+                )
+                session.state["planned_workflow_reason"] = planned_workflow_payload.get(
+                    "reason"
+                )
+        agent = self._build_agent(
+            task=task,
+            context_package=context_package,
+            planned_workflow_payload=planned_workflow_payload,
+        )
         runner = Runner(
             agent=agent,
             app_name=ADK_APP_NAME,
@@ -347,7 +431,18 @@ class AdkAgentRuntime:
         *,
         task: Task | None = None,
         context_package: ContextPackage | None = None,
-    ) -> Agent:
+        planned_workflow_payload: dict[str, Any] | None = None,
+    ) -> Any:
+        if self._should_use_planned_workflow(
+            task=task,
+            planned_workflow_payload=planned_workflow_payload,
+        ):
+            return self._build_planned_workflow_agent(
+                task=task,
+                context_package=context_package,
+                planned_workflow_payload=planned_workflow_payload,
+            )
+
         specialist_agents = self._build_specialist_agents(
             task=task,
             context_package=context_package,
@@ -360,6 +455,122 @@ class AdkAgentRuntime:
             tools=[AgentTool(agent=agent) for agent in specialist_agents],
             after_model_callback=self._record_adk_model_usage,
             mode="chat",
+        )
+
+    def _build_planned_workflow_agent(
+        self,
+        *,
+        task: Task | None,
+        context_package: ContextPackage | None,
+        planned_workflow_payload: dict[str, Any] | None,
+    ) -> SequentialAgent:
+        context = _render_context_for_instruction(context_package)
+        budget_context = _render_planned_workflow_budget(
+            settings=self.settings,
+            payload=planned_workflow_payload,
+        )
+        planner = self._planned_agent(
+            name="planned_workflow_planner",
+            description="Creates a bounded plan for a complex Kortny task.",
+            prompt=ADK_PLANNED_WORKFLOW_PLANNER_PROMPT,
+            context=_join_contexts(context, budget_context),
+            model=self._adk_model_for_tier(ADK_PLANNED_PLANNER_MODEL_TIER),
+            output_key="planned_workflow_plan",
+            tools=[],
+        )
+        branch_specs = [
+            (
+                "planned_research_worker",
+                "Researches current external facts and source material.",
+                ADK_PLANNED_RESEARCH_BRANCH_PROMPT,
+                "planned_research_result",
+            ),
+            (
+                "planned_workspace_worker",
+                "Checks Slack, files, memory, and workspace context.",
+                ADK_PLANNED_WORKSPACE_BRANCH_PROMPT,
+                "planned_workspace_result",
+            ),
+            (
+                "planned_integration_worker",
+                "Checks scoped connected integrations when relevant.",
+                ADK_PLANNED_INTEGRATION_BRANCH_PROMPT,
+                "planned_integration_result",
+            ),
+        ][: self.settings.planned_workflow_max_parallel_branches]
+        workers = [
+            self._planned_agent(
+                name=name,
+                description=description,
+                prompt=prompt,
+                context=context,
+                model=self._adk_model_for_tier(ADK_PLANNED_BRANCH_MODEL_TIER),
+                output_key=output_key,
+                tools=self._worker_tools(task=task),
+            )
+            for name, description, prompt, output_key in branch_specs
+        ]
+        merger = self._planned_agent(
+            name="planned_workflow_merger",
+            description="Merges planned workflow branch results into the final answer.",
+            prompt=ADK_PLANNED_WORKFLOW_MERGER_PROMPT,
+            context=context,
+            model=self._adk_model_for_tier(ADK_PLANNED_MERGER_MODEL_TIER),
+            output_key=None,
+            tools=[],
+        )
+        if task is not None:
+            self.task_service.append_event(
+                task,
+                TaskEventType.log,
+                {
+                    "message": "adk_planned_workflow_selected",
+                    "runtime": "adk",
+                    "mode": "planned_parallel",
+                    "planner_agent": planner.name,
+                    "parallel_agent": "planned_parallel_fanout",
+                    "merger_agent": merger.name,
+                    "branch_agents": [worker.name for worker in workers],
+                    "max_parallel_branches": (
+                        self.settings.planned_workflow_max_parallel_branches
+                    ),
+                    "cost_ceiling_usd": (
+                        self.settings.planned_workflow_cost_ceiling_usd
+                    ),
+                    "classifier_payload": planned_workflow_payload or {},
+                },
+            )
+            log_observation(
+                logger,
+                "adk_planned_workflow_selected",
+                task=task,
+                runtime="adk",
+                mode="planned_parallel",
+                planner_agent=planner.name,
+                merger_agent=merger.name,
+                branch_agents=[worker.name for worker in workers],
+                max_parallel_branches=(
+                    self.settings.planned_workflow_max_parallel_branches
+                ),
+                cost_ceiling_usd=str(
+                    self.settings.planned_workflow_cost_ceiling_usd
+                ),
+            )
+        return SequentialAgent(
+            name="kortny_planned_workflow",
+            description=(
+                "Plans complex Kortny work, fans out independent branches, "
+                "and synthesizes the final Slack response."
+            ),
+            sub_agents=[
+                planner,
+                ParallelAgent(
+                    name="planned_parallel_fanout",
+                    description="Runs independent planned workflow branches concurrently.",
+                    sub_agents=workers,
+                ),
+                merger,
+            ],
         )
 
     def _instruction(self, *, context_package: ContextPackage | None = None) -> str:
@@ -454,30 +665,6 @@ class AdkAgentRuntime:
         )
 
     def _worker_agent(self, *, task: Task | None, context: str | None) -> Agent:
-        tools: list[Any] = []
-        if task is not None:
-            if self.registry_factory is not None:
-                tools = [
-                    KortnyRegistryToolset(
-                        registry_factory=self.registry_factory,
-                        task=task,
-                        session=self.session,
-                        task_service=self.task_service,
-                        approval_policy=self.approval_policy,
-                        tool_result_prompt_max_chars=(
-                            self.tool_result_prompt_max_chars
-                        ),
-                    )
-                ]
-            elif self.registry is not None:
-                tools = adk_tools_from_registry(
-                    self.registry,
-                    task=task,
-                    session=self.session,
-                    task_service=self.task_service,
-                    approval_policy=self.approval_policy,
-                    tool_result_prompt_max_chars=self.tool_result_prompt_max_chars,
-                )
         return Agent(
             name="tool_worker_agent",
             model=LiteLlm(model=self._adk_model_name()),
@@ -489,10 +676,92 @@ class AdkAgentRuntime:
                 "Uses scoped Kortny tools for Slack context, memory, files, "
                 "web/current data, documents, integrations, and multi-step work."
             ),
-            tools=tools,
+            tools=self._worker_tools(task=task),
             after_model_callback=self._record_adk_model_usage,
             mode="chat",
         )
+
+    def _planned_agent(
+        self,
+        *,
+        name: str,
+        description: str,
+        prompt: str,
+        context: str | None,
+        model: str,
+        output_key: str | None,
+        tools: list[Any],
+    ) -> Agent:
+        return Agent(
+            name=name,
+            model=LiteLlm(model=model),
+            instruction=_instruction_with_optional_context(
+                _instruction_with_persona(prompt),
+                context,
+            ),
+            description=description,
+            tools=tools,
+            output_key=output_key,
+            after_model_callback=self._record_adk_model_usage,
+            mode="chat",
+        )
+
+    def _worker_tools(self, *, task: Task | None) -> list[Any]:
+        if task is None:
+            return []
+        if self.registry_factory is not None:
+            return [
+                KortnyRegistryToolset(
+                    registry_factory=self.registry_factory,
+                    task=task,
+                    session=self.session,
+                    task_service=self.task_service,
+                    approval_policy=self.approval_policy,
+                    tool_result_prompt_max_chars=self.tool_result_prompt_max_chars,
+                )
+            ]
+        if self.registry is not None:
+            return adk_tools_from_registry(
+                self.registry,
+                task=task,
+                session=self.session,
+                task_service=self.task_service,
+                approval_policy=self.approval_policy,
+                tool_result_prompt_max_chars=self.tool_result_prompt_max_chars,
+            )
+        return []
+
+    def _should_use_planned_workflow(
+        self,
+        *,
+        task: Task | None,
+        planned_workflow_payload: dict[str, Any] | None,
+    ) -> bool:
+        if task is None:
+            return False
+        if not self.settings.planned_workflows_enabled:
+            return False
+        if self.registry_factory is None and self.registry is None:
+            return False
+        if planned_workflow_payload is None:
+            return False
+        return planned_workflow_payload.get("planned_candidate") is True
+
+    def _planned_workflow_payload(self, task: Task) -> dict[str, Any] | None:
+        row = self.session.scalar(
+            select(TaskEvent)
+            .where(
+                TaskEvent.task_id == task.id,
+                TaskEvent.type == TaskEventType.log,
+                TaskEvent.payload["message"].as_string()
+                == "planned_workflow_classified",
+            )
+            .order_by(TaskEvent.seq.desc())
+            .limit(1)
+        )
+        if row is None:
+            return None
+        return dict(row.payload)
 
     def _assemble_context(self, task: Task) -> ContextPackage:
         assembler = self.context_assembler or ContextAssembler(
@@ -571,6 +840,7 @@ class AdkAgentRuntime:
             metadata=metadata,
         )
         if task is not None:
+            self._record_planned_cost_ceiling_if_exceeded(task)
             log_observation(
                 logger,
                 "adk_llm_usage_recorded",
@@ -587,6 +857,56 @@ class AdkAgentRuntime:
                 pricing_missing=pricing_missing,
             )
         return None
+
+    def _record_planned_cost_ceiling_if_exceeded(self, task: Task) -> None:
+        if not self.settings.planned_workflows_enabled:
+            return
+        planned_payload = self._planned_workflow_payload(task)
+        if planned_payload is None or planned_payload.get("planned_candidate") is not True:
+            return
+        ceiling = Decimal(str(self.settings.planned_workflow_cost_ceiling_usd))
+        cumulative_cost = self.session.scalar(
+            select(func.coalesce(func.sum(LLMUsage.cost_usd), Decimal("0"))).where(
+                LLMUsage.task_id == task.id
+            )
+        )
+        cumulative = Decimal(str(cumulative_cost or "0"))
+        if cumulative <= ceiling:
+            return
+        already_recorded = self.session.scalar(
+            select(TaskEvent)
+            .where(
+                TaskEvent.task_id == task.id,
+                TaskEvent.type == TaskEventType.log,
+                TaskEvent.payload["message"].as_string()
+                == "planned_workflow_cost_ceiling_exceeded",
+            )
+            .order_by(TaskEvent.seq.desc())
+            .limit(1)
+        )
+        if already_recorded is not None:
+            return
+        self.task_service.append_event(
+            task,
+            TaskEventType.log,
+            {
+                "message": "planned_workflow_cost_ceiling_exceeded",
+                "runtime": "adk",
+                "behavior": "observe_only",
+                "cost_ceiling_usd": str(ceiling),
+                "cumulative_cost_usd": str(cumulative),
+                "planned_workflow_route": planned_payload.get("route"),
+            },
+        )
+        log_observation(
+            logger,
+            "planned_workflow_cost_ceiling_exceeded",
+            task=task,
+            runtime="adk",
+            behavior="observe_only",
+            cost_ceiling_usd=str(ceiling),
+            cumulative_cost_usd=str(cumulative),
+        )
 
     def _calculate_adk_cost_usd(
         self,
@@ -621,7 +941,11 @@ class AdkAgentRuntime:
         return Decimal("0"), True
 
     def _adk_model_name_for_agent(self, agent_name: str) -> str:
-        if agent_name in {"kortny_root_orchestrator", "tool_worker_agent"}:
+        if agent_name in {
+            "kortny_root_orchestrator",
+            "tool_worker_agent",
+            "kortny_planned_workflow",
+        }:
             return self._adk_model_name()
         tier = _adk_specialist_tier(agent_name)
         if tier is not None:
@@ -629,7 +953,11 @@ class AdkAgentRuntime:
         return self._adk_model_name()
 
     def _adk_model_tier_for_agent(self, agent_name: str) -> str | None:
-        if agent_name in {"kortny_root_orchestrator", "tool_worker_agent"}:
+        if agent_name in {
+            "kortny_root_orchestrator",
+            "tool_worker_agent",
+            "kortny_planned_workflow",
+        }:
             if self.model_route is not None:
                 return self.model_route.tier.value
             return None
@@ -637,7 +965,11 @@ class AdkAgentRuntime:
         return tier.value if tier is not None else None
 
     def _adk_route_reason_for_agent(self, agent_name: str) -> str | None:
-        if agent_name in {"kortny_root_orchestrator", "tool_worker_agent"}:
+        if agent_name in {
+            "kortny_root_orchestrator",
+            "tool_worker_agent",
+            "kortny_planned_workflow",
+        }:
             return self.model_route.reason if self.model_route is not None else None
         tier = _adk_specialist_tier(agent_name)
         return f"adk_specialist:{tier.value}" if tier is not None else None
@@ -665,6 +997,21 @@ class AdkAgentRuntime:
             "eval_agent": self._adk_model_for_tier(ADK_EVAL_SPECIALIST_MODEL_TIER),
             "humanizer_agent": self._adk_model_for_tier(
                 ADK_HUMANIZER_SPECIALIST_MODEL_TIER
+            ),
+            "planned_workflow_planner": self._adk_model_for_tier(
+                ADK_PLANNED_PLANNER_MODEL_TIER
+            ),
+            "planned_research_worker": self._adk_model_for_tier(
+                ADK_PLANNED_BRANCH_MODEL_TIER
+            ),
+            "planned_workspace_worker": self._adk_model_for_tier(
+                ADK_PLANNED_BRANCH_MODEL_TIER
+            ),
+            "planned_integration_worker": self._adk_model_for_tier(
+                ADK_PLANNED_BRANCH_MODEL_TIER
+            ),
+            "planned_workflow_merger": self._adk_model_for_tier(
+                ADK_PLANNED_MERGER_MODEL_TIER
             ),
         }
 
@@ -754,6 +1101,13 @@ def _instruction_with_optional_context(prompt: str, context: str | None) -> str:
     return f"{prompt}\n\n{context}"
 
 
+def _join_contexts(*parts: str | None) -> str | None:
+    nonempty = [part for part in parts if part and part.strip()]
+    if not nonempty:
+        return None
+    return "\n\n".join(nonempty)
+
+
 def _instruction_with_persona(prompt: str) -> str:
     if ADK_SINGLE_PERSONA_PROMPT in prompt:
         return prompt
@@ -784,6 +1138,36 @@ def _render_context_for_instruction(package: ContextPackage | None) -> str | Non
         blocks.append("</context_block>")
     blocks.append("</kortny_context>")
     return "\n".join(blocks)
+
+
+def _render_planned_workflow_budget(
+    *,
+    settings: Settings,
+    payload: dict[str, Any] | None,
+) -> str:
+    return "\n".join(
+        [
+            "<planned_workflow_budget>",
+            "behavior=planned_parallel",
+            f"max_parallel_branches={settings.planned_workflow_max_parallel_branches}",
+            f"estimated_cost_ceiling_usd={settings.planned_workflow_cost_ceiling_usd}",
+            f"classifier_route={_payload_value(payload, 'route')}",
+            f"classifier_confidence={_payload_value(payload, 'confidence')}",
+            (
+                "classifier_estimated_subtask_count="
+                f"{_payload_value(payload, 'estimated_subtask_count')}"
+            ),
+            f"classifier_reason={_payload_value(payload, 'reason')}",
+            "</planned_workflow_budget>",
+        ]
+    )
+
+
+def _payload_value(payload: dict[str, Any] | None, key: str) -> str:
+    if payload is None:
+        return ""
+    value = payload.get(key)
+    return "" if value is None else str(value)
 
 
 def _is_nonempty_system_message(message: ChatMessage) -> bool:
@@ -972,4 +1356,14 @@ def _adk_specialist_tier(agent_name: str) -> ModelRouteTier | None:
         return ADK_EVAL_SPECIALIST_MODEL_TIER
     if agent_name == "humanizer_agent":
         return ADK_HUMANIZER_SPECIALIST_MODEL_TIER
+    if agent_name == "planned_workflow_planner":
+        return ADK_PLANNED_PLANNER_MODEL_TIER
+    if agent_name in {
+        "planned_research_worker",
+        "planned_workspace_worker",
+        "planned_integration_worker",
+    }:
+        return ADK_PLANNED_BRANCH_MODEL_TIER
+    if agent_name == "planned_workflow_merger":
+        return ADK_PLANNED_MERGER_MODEL_TIER
     return None
