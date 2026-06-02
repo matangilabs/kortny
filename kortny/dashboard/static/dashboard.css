@@ -4235,3 +4235,27 @@ pre {
   }
 }
 
+/* Page detail tabs */
+.task-detail-tabs {
+  margin-bottom: 20px;
+}
+
+.segmented-item.tab-btn {
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font: inherit;
+  transition: background-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.segmented-item.tab-btn:hover {
+  background: color-mix(in srgb, var(--card) 45%, transparent);
+  color: var(--foreground);
+}
+
+.segmented-item.tab-btn.active {
+  background: var(--card);
+  color: var(--foreground);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.04);
+}
+

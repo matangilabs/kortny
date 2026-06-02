@@ -59,199 +59,242 @@
     </div>
   </section>
 
-  <section class="card detail-section">
-    <header>
-      <h2>Request</h2>
-      <p>Original Slack trigger and context identifiers.</p>
-    </header>
-    <dl class="meta">
-      <dt>Channel</dt>
-      <dd>
-        <span class="identity-name">{{ detail.channel.name }}</span>
-        {% if detail.channel.secondary %}<span class="identity-id">{{ detail.channel.secondary }}</span>{% endif %}
-      </dd>
-      <dt>User</dt>
-      <dd>
-        <span class="identity-name">{{ detail.user.name }}</span>
-        {% if detail.user.secondary %}<span class="identity-id">{{ detail.user.secondary }}</span>{% endif %}
-      </dd>
-      <dt>Thread</dt>
-      <dd>{{ detail.task.slack_thread_ts or "-" }}</dd>
-      <dt>Created</dt>
-      <dd>{{ detail.task.created_at|datetime }}</dd>
-    </dl>
-    <pre>{{ detail.task.input }}</pre>
-  </section>
+  <nav class="segmented-nav task-detail-tabs" role="tablist">
+    <button class="segmented-item tab-btn active" data-tab="overview" role="tab" aria-selected="true">Overview</button>
+    <button class="segmented-item tab-btn" data-tab="timeline" role="tab" aria-selected="false">Timeline</button>
+    <button class="segmented-item tab-btn" data-tab="usage-artifacts" role="tab" aria-selected="false">Usage & Artifacts</button>
+  </nav>
 
-  <section class="card detail-section">
-    <header>
-      <h2>Posted Slack Response</h2>
-      <p>Actual message delivered to Slack after final synthesis and formatting.</p>
-    </header>
-    <pre>{{ detail.posted_response_text or "-" }}</pre>
-  </section>
+  <div id="panel-overview" class="tab-panel active" role="tabpanel">
+    <section class="card detail-section">
+      <header>
+        <h2>Request</h2>
+        <p>Original Slack trigger and context identifiers.</p>
+      </header>
+      <dl class="meta">
+        <dt>Channel</dt>
+        <dd>
+          <span class="identity-name">{{ detail.channel.name }}</span>
+          {% if detail.channel.secondary %}<span class="identity-id">{{ detail.channel.secondary }}</span>{% endif %}
+        </dd>
+        <dt>User</dt>
+        <dd>
+          <span class="identity-name">{{ detail.user.name }}</span>
+          {% if detail.user.secondary %}<span class="identity-id">{{ detail.user.secondary }}</span>{% endif %}
+        </dd>
+        <dt>Thread</dt>
+        <dd>{{ detail.task.slack_thread_ts or "-" }}</dd>
+        <dt>Created</dt>
+        <dd>{{ detail.task.created_at|datetime }}</dd>
+      </dl>
+      <pre>{{ detail.task.input }}</pre>
+    </section>
 
-  <section class="card detail-section">
-    <header>
-      <h2>Raw Agent Result</h2>
-      <p>Pre-humanizer task summary saved by the worker.</p>
-    </header>
-    <pre>{{ detail.task.result_summary or "-" }}</pre>
-  </section>
+    <section class="card detail-section">
+      <header>
+        <h2>Posted Slack Response</h2>
+        <p>Actual message delivered to Slack after final synthesis and formatting.</p>
+      </header>
+      <pre>{{ detail.posted_response_text or "-" }}</pre>
+    </section>
 
-  <section class="card detail-section">
-    <header>
-      <h2>LLM Usage</h2>
-      <p>Model calls, routing tier, tokens, and recorded cost.</p>
-    </header>
-    <div class="overflow-x-auto">
-      <table class="table">
-        <caption>LLM usage rows for this task.</caption>
-        <thead>
-          <tr>
-            <th>Created</th>
-            <th>Provider</th>
-            <th>Model</th>
-            <th>Tier</th>
-            <th class="num">Input</th>
-            <th class="num">Output</th>
-            <th class="num">Cost</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for usage in detail.usage %}
-            <tr>
-              <td>{{ usage.created_at|datetime }}</td>
-              <td>{{ usage.provider.value }}</td>
-              <td>{{ usage.model }}</td>
-              <td>{{ usage.model_tier or "-" }}</td>
-              <td class="num">{{ usage.input_tokens|number }}</td>
-              <td class="num">{{ usage.output_tokens|number }}</td>
-              <td class="num">{{ usage.cost_usd|money }}</td>
-            </tr>
-          {% else %}
-            <tr><td colspan="7" class="empty">No LLM calls recorded.</td></tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </div>
-  </section>
+    <section class="card detail-section">
+      <header>
+        <h2>Raw Agent Result</h2>
+        <p>Pre-humanizer task summary saved by the worker.</p>
+      </header>
+      <pre>{{ detail.task.result_summary or "-" }}</pre>
+    </section>
+  </div>
 
-  <section class="card detail-section">
-    <header>
-      <h2>Artifacts</h2>
-      <p>Files generated or posted back to Slack.</p>
-    </header>
-    <div class="overflow-x-auto">
-      <table class="table">
-        <caption>Artifacts created by this task.</caption>
-        <thead>
-          <tr>
-            <th>Created</th>
-            <th>Filename</th>
-            <th>MIME</th>
-            <th class="num">Bytes</th>
-            <th>Slack File</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for artifact in detail.artifacts %}
-            <tr>
-              <td>{{ artifact.created_at|datetime }}</td>
-              <td>{{ artifact.filename }}</td>
-              <td>{{ artifact.mime_type or "-" }}</td>
-              <td class="num">{{ artifact.size_bytes|number }}</td>
-              <td>{{ artifact.slack_file_id or "-" }}</td>
-            </tr>
-          {% else %}
-            <tr><td colspan="5" class="empty">No artifacts recorded.</td></tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </div>
-  </section>
-
-  <section class="detail-section">
-    <header class="section-header timeline-header-row">
-      <div>
-        <h2>Task Events</h2>
-        <p>Ordered execution timeline with expandable raw payloads.</p>
-      </div>
-    </header>
-
-    <div class="timeline-toolbar card">
-      <div class="timeline-search-box">
-        <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-          <circle cx="11" cy="11" r="8"></circle>
-          <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
-        </svg>
-        <input type="text" id="timeline-search" class="input timeline-search-input" placeholder="Search event titles, summaries, payloads, metrics...">
-      </div>
-      <div class="timeline-filters-row">
-        <div class="timeline-filter-tabs" role="tablist" aria-label="Filter events">
-          <button class="filter-tab active" data-filter="all" role="tab" aria-selected="true">All</button>
-          <button class="filter-tab" data-filter="error" role="tab" aria-selected="false">Errors</button>
-          <button class="filter-tab" data-filter="llm" role="tab" aria-selected="false">LLMs</button>
-          <button class="filter-tab" data-filter="tool" role="tab" aria-selected="false">Tools</button>
-          <button class="filter-tab" data-filter="slack" role="tab" aria-selected="false">Slack</button>
-          <button class="filter-tab" data-filter="log" role="tab" aria-selected="false">Logs</button>
+  <div id="panel-timeline" class="tab-panel" role="tabpanel" style="display: none;">
+    <section class="detail-section">
+      <header class="section-header timeline-header-row">
+        <div>
+          <h2>Task Events</h2>
+          <p>Ordered execution timeline with expandable raw payloads.</p>
         </div>
-        <div class="timeline-bulk-actions">
-          <button id="btn-expand-all" class="btn-text">Expand visible</button>
-          <span class="action-divider" aria-hidden="true">|</span>
-          <button id="btn-collapse-all" class="btn-text">Collapse all</button>
+      </header>
+
+      <div class="timeline-toolbar card">
+        <div class="timeline-search-box">
+          <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <circle cx="11" cy="11" r="8"></circle>
+            <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+          </svg>
+          <input type="text" id="timeline-search" class="input timeline-search-input" placeholder="Search event titles, summaries, payloads, metrics...">
+        </div>
+        <div class="timeline-filters-row">
+          <div class="timeline-filter-tabs" role="tablist" aria-label="Filter events">
+            <button class="filter-tab active" data-filter="all" role="tab" aria-selected="true">All</button>
+            <button class="filter-tab" data-filter="error" role="tab" aria-selected="false">Errors</button>
+            <button class="filter-tab" data-filter="llm" role="tab" aria-selected="false">LLMs</button>
+            <button class="filter-tab" data-filter="tool" role="tab" aria-selected="false">Tools</button>
+            <button class="filter-tab" data-filter="slack" role="tab" aria-selected="false">Slack</button>
+            <button class="filter-tab" data-filter="log" role="tab" aria-selected="false">Logs</button>
+          </div>
+          <div class="timeline-bulk-actions">
+            <button id="btn-expand-all" class="btn-text">Expand visible</button>
+            <span class="action-divider" aria-hidden="true">|</span>
+            <button id="btn-collapse-all" class="btn-text">Collapse all</button>
+          </div>
         </div>
       </div>
-    </div>
 
-    <ol class="timeline" aria-label="Task event timeline">
-      {% for event in detail.timeline %}
-        <li class="timeline-item timeline-{{ event.tone }}" data-type="{{ event.event_type }}" data-tone="{{ event.tone }}" data-badges="{% for badge in event.badges %}{{ badge.label|lower }} {% endfor %}">
-          <div class="timeline-marker" aria-hidden="true">{{ event.seq }}</div>
-          <article class="card timeline-card">
-            <header class="timeline-card-header">
-              <div class="timeline-title-stack">
-                <div class="timeline-title-row">
-                  <h3>{{ event.title }}</h3>
-                  <div class="timeline-badges" aria-label="Event labels">
-                    {% for badge in event.badges %}
-                      <span class="badge badge-{{ badge.tone }}">{{ badge.label }}</span>
-                    {% endfor %}
+      <ol class="timeline" aria-label="Task event timeline">
+        {% for event in detail.timeline %}
+          <li class="timeline-item timeline-{{ event.tone }}" data-type="{{ event.event_type }}" data-tone="{{ event.tone }}" data-badges="{% for badge in event.badges %}{{ badge.label|lower }} {% endfor %}">
+            <div class="timeline-marker" aria-hidden="true">{{ event.seq }}</div>
+            <article class="card timeline-card">
+              <header class="timeline-card-header">
+                <div class="timeline-title-stack">
+                  <div class="timeline-title-row">
+                    <h3>{{ event.title }}</h3>
+                    <div class="timeline-badges" aria-label="Event labels">
+                      {% for badge in event.badges %}
+                        <span class="badge badge-{{ badge.tone }}">{{ badge.label }}</span>
+                      {% endfor %}
+                    </div>
                   </div>
+                  <p>{{ event.summary }}</p>
                 </div>
-                <p>{{ event.summary }}</p>
-              </div>
-              <div class="timeline-time-col">
-                <time datetime="{{ event.created_at.isoformat() }}">{{ event.created_at|datetime }}</time>
-              </div>
-            </header>
-            {% if event.metrics %}
-              <dl class="event-metrics" aria-label="Event metrics">
-                {% for metric in event.metrics %}
-                  <div>
-                    <dt>{{ metric.label }}</dt>
-                    <dd>{{ metric.value }}</dd>
-                  </div>
-                {% endfor %}
-              </dl>
-            {% endif %}
-            <details class="event-payload">
-              <summary>Raw payload</summary>
-              <pre>{{ event.payload_json }}</pre>
-            </details>
-          </article>
-        </li>
-      {% else %}
-        <li class="empty">No events recorded.</li>
-      {% endfor %}
-    </ol>
-  </section>
+                <div class="timeline-time-col">
+                  <time datetime="{{ event.created_at.isoformat() }}">{{ event.created_at|datetime }}</time>
+                </div>
+              </header>
+              {% if event.metrics %}
+                <dl class="event-metrics" aria-label="Event metrics">
+                  {% for metric in event.metrics %}
+                    <div>
+                      <dt>{{ metric.label }}</dt>
+                      <dd>{{ metric.value }}</dd>
+                    </div>
+                  {% endfor %}
+                </dl>
+              {% endif %}
+              <details class="event-payload">
+                <summary>Raw payload</summary>
+                <pre>{{ event.payload_json }}</pre>
+              </details>
+            </article>
+          </li>
+        {% else %}
+          <li class="empty">No events recorded.</li>
+        {% endfor %}
+      </ol>
+    </section>
+  </div>
+
+  <div id="panel-usage-artifacts" class="tab-panel" role="tabpanel" style="display: none;">
+    <section class="card detail-section">
+      <header>
+        <h2>LLM Usage</h2>
+        <p>Model calls, routing tier, tokens, and recorded cost.</p>
+      </header>
+      <div class="overflow-x-auto">
+        <table class="table">
+          <caption>LLM usage rows for this task.</caption>
+          <thead>
+            <tr>
+              <th>Created</th>
+              <th>Provider</th>
+              <th>Model</th>
+              <th>Tier</th>
+              <th class="num">Input</th>
+              <th class="num">Output</th>
+              <th class="num">Cost</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for usage in detail.usage %}
+              <tr>
+                <td>{{ usage.created_at|datetime }}</td>
+                <td>{{ usage.provider.value }}</td>
+                <td>{{ usage.model }}</td>
+                <td>{{ usage.model_tier or "-" }}</td>
+                <td class="num">{{ usage.input_tokens|number }}</td>
+                <td class="num">{{ usage.output_tokens|number }}</td>
+                <td class="num">{{ usage.cost_usd|money }}</td>
+              </tr>
+            {% else %}
+              <tr><td colspan="7" class="empty">No LLM calls recorded.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card detail-section">
+      <header>
+        <h2>Artifacts</h2>
+        <p>Files generated or posted back to Slack.</p>
+      </header>
+      <div class="overflow-x-auto">
+        <table class="table">
+          <caption>Artifacts created by this task.</caption>
+          <thead>
+            <tr>
+              <th>Created</th>
+              <th>Filename</th>
+              <th>MIME</th>
+              <th class="num">Bytes</th>
+              <th>Slack File</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for artifact in detail.artifacts %}
+              <tr>
+                <td>{{ artifact.created_at|datetime }}</td>
+                <td>{{ artifact.filename }}</td>
+                <td>{{ artifact.mime_type or "-" }}</td>
+                <td class="num">{{ artifact.size_bytes|number }}</td>
+                <td>{{ artifact.slack_file_id or "-" }}</td>
+              </tr>
+            {% else %}
+              <tr><td colspan="5" class="empty">No artifacts recorded.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </div>
 
   <script>
     (function() {
+      // 1. Page Tab Toggling
+      const tabButtons = document.querySelectorAll('.task-detail-tabs .tab-btn');
+      const tabPanels = document.querySelectorAll('.tab-panel');
+
+      function activateTab(tabId) {
+        tabButtons.forEach(btn => {
+          const isActive = btn.getAttribute('data-tab') === tabId;
+          btn.classList.toggle('active', isActive);
+          btn.setAttribute('aria-selected', isActive ? 'true' : 'false');
+        });
+        tabPanels.forEach(panel => {
+          const isTarget = panel.id === `panel-${tabId}`;
+          panel.style.display = isTarget ? '' : 'none';
+          panel.classList.toggle('active', isTarget);
+        });
+      }
+
+      tabButtons.forEach(btn => {
+        btn.addEventListener('click', () => {
+          const tabId = btn.getAttribute('data-tab');
+          activateTab(tabId);
+          // Set hash without triggering screen jump
+          history.replaceState(null, null, `#${tabId}`);
+        });
+      });
+
+      // Restore active tab from hash on load
+      const initialHash = window.location.hash.substring(1);
+      if (initialHash && ['overview', 'timeline', 'usage-artifacts'].includes(initialHash)) {
+        activateTab(initialHash);
+      }
+
+      // 2. Timeline Step Latency Deltas
       const items = document.querySelectorAll('.timeline-item');
-      
-      // 1. Calculate time deltas
       let prevTime = null;
       items.forEach((item) => {
         const timeEl = item.querySelector('time');
@@ -289,7 +332,7 @@
         return `${mins}m ${remainingSecs}s`;
       }
 
-      // 2. Filter & Search logic
+      // 3. Timeline Filter & Search logic
       const searchInput = document.getElementById('timeline-search');
       const filterTabs = document.querySelectorAll('.filter-tab');
       
@@ -369,7 +412,7 @@
         });
       });
 
-      // 3. Bulk Payload expansion
+      // 4. Bulk Payload expansion
       const btnExpandAll = document.getElementById('btn-expand-all');
       const btnCollapseAll = document.getElementById('btn-collapse-all');
       
