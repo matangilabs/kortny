@@ -8,13 +8,19 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from sqlalchemy import and_, exists, func, or_, select
+from sqlalchemy import Text, and_, cast, exists, func, or_, select
 from sqlalchemy.orm import Session
 
 from kortny.db.models import (
     KnowledgeGraphEdge,
     KnowledgeGraphEntity,
     KnowledgeGraphEvidence,
+)
+from kortny.knowledge_graph.provenance import (
+    provenance_kind,
+    provenance_label,
+    review_status,
+    with_provenance_attrs,
 )
 from kortny.knowledge_graph.scopes import (
     DestinationSurface,
@@ -50,9 +56,14 @@ class RetrievedGraphEntity:
     entity_type: str
     canonical_key: str
     display_name: str | None
+    source_type: str
     visibility_scope: VisibilityScope
     lifecycle_state: str
     confidence_score: Decimal
+    confidence_reason: str | None
+    provenance_kind: str
+    provenance_label: str
+    review_status: str
     evidence_ids: tuple[uuid.UUID, ...]
 
 
@@ -62,9 +73,14 @@ class RetrievedGraphEdge:
     source_entity_id: uuid.UUID
     target_entity_id: uuid.UUID
     relationship_type: str
+    source_type: str
     visibility_scope: VisibilityScope
     lifecycle_state: str
     confidence_score: Decimal
+    confidence_reason: str | None
+    provenance_kind: str
+    provenance_label: str
+    review_status: str
     evidence_ids: tuple[uuid.UUID, ...]
 
 
@@ -122,7 +138,12 @@ class GraphService:
             display_name=display_name,
             external_ref_type=external_ref_type,
             external_ref_id=external_ref_id,
-            attrs_json=attrs_json or {},
+            attrs_json=with_provenance_attrs(
+                attrs_json,
+                source_type=source_type,
+                lifecycle_state=lifecycle_state,
+                confidence_score=confidence_score,
+            ),
             visibility_scope_type=visibility_scope.scope_type,
             visibility_scope_id=visibility_scope.scope_id,
             source_type=source_type,
@@ -163,7 +184,12 @@ class GraphService:
             source_entity_id=source_entity_id,
             target_entity_id=target_entity_id,
             relationship_type=relationship_type,
-            attrs_json=attrs_json or {},
+            attrs_json=with_provenance_attrs(
+                attrs_json,
+                source_type=source_type,
+                lifecycle_state=lifecycle_state,
+                confidence_score=confidence_score,
+            ),
             visibility_scope_type=visibility_scope.scope_type,
             visibility_scope_id=visibility_scope.scope_id,
             source_type=source_type,
@@ -376,34 +402,11 @@ class GraphService:
         entity_evidence = self._evidence_ids("entity", [row.id for row in entity_rows])
         edge_evidence = self._evidence_ids("edge", [row.id for row in edge_rows])
         entities = tuple(
-            RetrievedGraphEntity(
-                id=row.id,
-                entity_type=row.entity_type,
-                canonical_key=row.canonical_key,
-                display_name=row.display_name,
-                visibility_scope=VisibilityScope(
-                    row.visibility_scope_type, row.visibility_scope_id
-                ),
-                lifecycle_state=row.lifecycle_state,
-                confidence_score=row.confidence_score,
-                evidence_ids=tuple(entity_evidence.get(row.id, ())),
-            )
+            _retrieved_entity(row, entity_evidence.get(row.id, ()))
             for row in entity_rows
         )
         edges = tuple(
-            RetrievedGraphEdge(
-                id=row.id,
-                source_entity_id=row.source_entity_id,
-                target_entity_id=row.target_entity_id,
-                relationship_type=row.relationship_type,
-                visibility_scope=VisibilityScope(
-                    row.visibility_scope_type, row.visibility_scope_id
-                ),
-                lifecycle_state=row.lifecycle_state,
-                confidence_score=row.confidence_score,
-                evidence_ids=tuple(edge_evidence.get(row.id, ())),
-            )
-            for row in edge_rows
+            _retrieved_edge(row, edge_evidence.get(row.id, ())) for row in edge_rows
         )
         omitted_count = 0
         if len(entity_rows) >= max_items:
@@ -418,6 +421,75 @@ class GraphService:
             edges=edges,
             returned_scopes=_returned_scopes(entities, edges),
             omitted_count=omitted_count,
+            omitted_reasons=tuple(omitted_reasons),
+        )
+
+    def query_current_context(
+        self,
+        *,
+        installation_id: uuid.UUID,
+        destination: DestinationSurface,
+        query: str | None = None,
+        anchor_keys: Sequence[str] = (),
+        max_hops: int = 1,
+        max_items: int = 20,
+    ) -> GraphContextPack:
+        """Search or traverse current graph context allowed for the destination."""
+
+        normalized_query = " ".join((query or "").split())
+        if anchor_keys or not normalized_query:
+            return self.retrieve_current_context(
+                installation_id=installation_id,
+                destination=destination,
+                anchor_keys=anchor_keys,
+                max_hops=max_hops,
+                max_items=max_items,
+            )
+        if max_items <= 0:
+            return GraphContextPack((), (), (), 0, ("max_items<=0",))
+
+        entity_rows = self._search_current_entities(
+            installation_id=installation_id,
+            destination=destination,
+            query=normalized_query,
+            limit=max_items,
+        )
+        edge_rows = self._search_current_edges(
+            installation_id=installation_id,
+            destination=destination,
+            query=normalized_query,
+            limit=max_items,
+        )
+        entity_ids = {row.id for row in entity_rows}
+        for edge in edge_rows:
+            entity_ids.add(edge.source_entity_id)
+            entity_ids.add(edge.target_entity_id)
+        entity_rows = self._select_current_entities_by_id(
+            installation_id=installation_id,
+            destination=destination,
+            entity_ids=entity_ids,
+            limit=max_items,
+        )
+
+        entity_evidence = self._evidence_ids("entity", [row.id for row in entity_rows])
+        edge_evidence = self._evidence_ids("edge", [row.id for row in edge_rows])
+        entities = tuple(
+            _retrieved_entity(row, entity_evidence.get(row.id, ()))
+            for row in entity_rows
+        )
+        edges = tuple(
+            _retrieved_edge(row, edge_evidence.get(row.id, ())) for row in edge_rows
+        )
+        omitted_reasons: list[str] = []
+        if len(entity_rows) >= max_items:
+            omitted_reasons.append("entity_limit_reached")
+        if len(edge_rows) >= max_items:
+            omitted_reasons.append("edge_limit_reached")
+        return GraphContextPack(
+            entities=entities,
+            edges=edges,
+            returned_scopes=_returned_scopes(entities, edges),
+            omitted_count=len(omitted_reasons),
             omitted_reasons=tuple(omitted_reasons),
         )
 
@@ -573,6 +645,88 @@ class GraphService:
             )
         )
 
+    def _search_current_entities(
+        self,
+        *,
+        installation_id: uuid.UUID,
+        destination: DestinationSurface,
+        query: str,
+        limit: int,
+    ) -> list[KnowledgeGraphEntity]:
+        pattern = f"%{query}%"
+        return list(
+            self.session.scalars(
+                select(KnowledgeGraphEntity)
+                .where(
+                    KnowledgeGraphEntity.installation_id == installation_id,
+                    self._current_entity_predicate(),
+                    compatible_scope_predicate(KnowledgeGraphEntity, destination),
+                    self._entity_has_evidence_predicate(),
+                    or_(
+                        KnowledgeGraphEntity.canonical_key.ilike(pattern),
+                        KnowledgeGraphEntity.display_name.ilike(pattern),
+                        KnowledgeGraphEntity.entity_type.ilike(pattern),
+                        KnowledgeGraphEntity.source_type.ilike(pattern),
+                        KnowledgeGraphEntity.visibility_scope_id.ilike(pattern),
+                        cast(KnowledgeGraphEntity.attrs_json, Text).ilike(pattern),
+                    ),
+                )
+                .order_by(
+                    KnowledgeGraphEntity.confidence_score.desc(),
+                    KnowledgeGraphEntity.updated_at.desc(),
+                )
+                .limit(limit)
+            )
+        )
+
+    def _search_current_edges(
+        self,
+        *,
+        installation_id: uuid.UUID,
+        destination: DestinationSurface,
+        query: str,
+        limit: int,
+    ) -> list[KnowledgeGraphEdge]:
+        source = KnowledgeGraphEntity
+        target = KnowledgeGraphEntity
+        pattern = f"%{query}%"
+        source_alias = source.__table__.alias("kg_edge_search_source")
+        target_alias = target.__table__.alias("kg_edge_search_target")
+        return list(
+            self.session.scalars(
+                select(KnowledgeGraphEdge)
+                .join(
+                    source_alias,
+                    KnowledgeGraphEdge.source_entity_id == source_alias.c.id,
+                )
+                .join(
+                    target_alias,
+                    KnowledgeGraphEdge.target_entity_id == target_alias.c.id,
+                )
+                .where(
+                    KnowledgeGraphEdge.installation_id == installation_id,
+                    self._current_edge_predicate(),
+                    compatible_scope_predicate(KnowledgeGraphEdge, destination),
+                    self._edge_has_evidence_predicate(),
+                    or_(
+                        KnowledgeGraphEdge.relationship_type.ilike(pattern),
+                        KnowledgeGraphEdge.source_type.ilike(pattern),
+                        KnowledgeGraphEdge.visibility_scope_id.ilike(pattern),
+                        cast(KnowledgeGraphEdge.attrs_json, Text).ilike(pattern),
+                        source_alias.c.canonical_key.ilike(pattern),
+                        source_alias.c.display_name.ilike(pattern),
+                        target_alias.c.canonical_key.ilike(pattern),
+                        target_alias.c.display_name.ilike(pattern),
+                    ),
+                )
+                .order_by(
+                    KnowledgeGraphEdge.confidence_score.desc(),
+                    KnowledgeGraphEdge.updated_at.desc(),
+                )
+                .limit(limit)
+            )
+        )
+
     def _evidence_ids(
         self,
         target_kind: str,
@@ -649,6 +803,54 @@ def _returned_scopes(
         seen.add(key)
         scopes.append(scope)
     return tuple(scopes)
+
+
+def _retrieved_entity(
+    row: KnowledgeGraphEntity,
+    evidence_ids: Sequence[uuid.UUID],
+) -> RetrievedGraphEntity:
+    kind = provenance_kind(row.source_type, row.attrs_json)
+    return RetrievedGraphEntity(
+        id=row.id,
+        entity_type=row.entity_type,
+        canonical_key=row.canonical_key,
+        display_name=row.display_name,
+        source_type=row.source_type,
+        visibility_scope=VisibilityScope(
+            row.visibility_scope_type, row.visibility_scope_id
+        ),
+        lifecycle_state=row.lifecycle_state,
+        confidence_score=row.confidence_score,
+        confidence_reason=row.confidence_reason,
+        provenance_kind=kind,
+        provenance_label=provenance_label(kind),
+        review_status=review_status(row.attrs_json, row.lifecycle_state),
+        evidence_ids=tuple(evidence_ids),
+    )
+
+
+def _retrieved_edge(
+    row: KnowledgeGraphEdge,
+    evidence_ids: Sequence[uuid.UUID],
+) -> RetrievedGraphEdge:
+    kind = provenance_kind(row.source_type, row.attrs_json)
+    return RetrievedGraphEdge(
+        id=row.id,
+        source_entity_id=row.source_entity_id,
+        target_entity_id=row.target_entity_id,
+        relationship_type=row.relationship_type,
+        source_type=row.source_type,
+        visibility_scope=VisibilityScope(
+            row.visibility_scope_type, row.visibility_scope_id
+        ),
+        lifecycle_state=row.lifecycle_state,
+        confidence_score=row.confidence_score,
+        confidence_reason=row.confidence_reason,
+        provenance_kind=kind,
+        provenance_label=provenance_label(kind),
+        review_status=review_status(row.attrs_json, row.lifecycle_state),
+        evidence_ids=tuple(evidence_ids),
+    )
 
 
 def _freshness_elapsed(

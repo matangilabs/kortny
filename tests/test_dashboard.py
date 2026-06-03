@@ -1984,6 +1984,8 @@ def test_dashboard_knowledge_graph_page_shows_entities_relationships_and_evidenc
     assert "#ops-desk" in response.text
     assert "project:operator-console" in response.text
     assert "candidate" in response.text
+    assert "Extracted" in response.text
+    assert "auto" in response.text
     assert "Channel membership recorded for ops-desk." in response.text
     assert "Visible to operators, withheld from runtime context" in response.text
 

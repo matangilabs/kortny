@@ -56,6 +56,7 @@ from kortny.knowledge_graph import (
     KG_REFRESH_SOURCE,
     DestinationSurface,
     GraphService,
+    KnowledgeGraphExtractionService,
 )
 from kortny.llm import ChatMessage, Completion, TokenUsage, ToolCall
 from kortny.llm.routing import ModelRoute, ModelRouteTier
@@ -2053,6 +2054,7 @@ def test_worker_runs_dashboard_graph_refresh_without_agent_runtime(
                         "help_opportunities": [
                             "Summarize daily blotter changes",
                             "Flag unresolved review items",
+                            "Share the private API key cleanup plan",
                         ],
                         "evidence": [
                             "Daily trade blotter posted",
@@ -2168,6 +2170,8 @@ def test_worker_runs_dashboard_graph_refresh_without_agent_runtime(
     assert "branch outputs" not in profile.summary.lower()
     assert profile_entity is not None
     assert profile_entity.attrs_json["summary"] == profile.summary
+    assert profile_entity.lifecycle_state == "active"
+    assert profile_entity.attrs_json["review_status"] == "auto"
     assert projection_event.payload["entity_count"] > 2
     assert projection_event.payload["edge_count"] > 1
     assert projection_event.payload["evidence_count"] > 3
@@ -2193,6 +2197,89 @@ def test_worker_runs_dashboard_graph_refresh_without_agent_runtime(
         and edge.attrs_json.get("kind") == "channel_semantic_projection"
         for edge in semantic_edges
     )
+    semantic_rows_by_key = {entity.canonical_key: entity for entity in semantic_entities}
+    sensitive_help = semantic_rows_by_key[
+        "channel_help:CGraph:share-the-private-api-key-cleanup-plan"
+    ]
+    assert sensitive_help.lifecycle_state == "candidate"
+    assert sensitive_help.attrs_json["review_status"] == "needs_review"
+    assert sensitive_help.attrs_json["review_reason"] == "sensitive_or_high_impact_language"
+    active_semantic_rows = [
+        entity
+        for entity in semantic_entities
+        if entity.attrs_json.get("kind") == "channel_semantic_projection"
+        and entity.canonical_key != sensitive_help.canonical_key
+    ]
+    assert active_semantic_rows
+    assert {entity.lifecycle_state for entity in active_semantic_rows} == {"active"}
+    assert {entity.attrs_json["review_status"] for entity in active_semantic_rows} == {
+        "auto"
+    }
+    graph_context = GraphService(db_session).retrieve_current_context(
+        installation_id=task.installation_id,
+        destination=DestinationSurface.channel("CGraph"),
+        anchor_keys=("slack_channel:CGraph",),
+        max_hops=2,
+        max_items=50,
+    )
+    graph_context_keys = {entity.canonical_key for entity in graph_context.entities}
+    assert "channel_topic:CGraph:trade-blotter" in graph_context_keys
+    assert sensitive_help.canonical_key not in graph_context_keys
+    trade_blotter = semantic_rows_by_key["channel_topic:CGraph:trade-blotter"]
+    entry_exit = semantic_rows_by_key["channel_topic:CGraph:entry-and-exit-signals"]
+    profile.profile_version += 1
+    profile.summary = "Updated profile still sees trade blotter review."
+    profile.profile_json = {
+        "semantic_extraction": {
+            "recurring_topics": ["trade blotter", "post-trade exceptions"],
+            "workflows": ["Review daily blotter files before PM meeting"],
+            "important_entities": ["NVDA"],
+            "assumptions": [],
+            "help_opportunities": ["Summarize daily blotter changes"],
+            "evidence": ["Trade blotter discussion repeated"],
+            "confidence": "medium",
+        }
+    }
+    profile.assumptions_json = []
+    profile.evidence_refs_json = []
+    profile.confidence_score = Decimal("0.650")
+    profile.confidence_reason = "Repeated graph refresh sample."
+    profile.message_count = 2
+    profile.file_count = 0
+    profile.metadata_json = {"synthesis": "semantic_llm"}
+    db_session.flush()
+
+    second_projection = KnowledgeGraphExtractionService(db_session).project_channel_profile(
+        task=task,
+        membership=membership,
+        profile=profile,
+    )
+    db_session.flush()
+    reinforced_trade_blotter = db_session.scalar(
+        select(KnowledgeGraphEntity).where(
+            KnowledgeGraphEntity.installation_id == task.installation_id,
+            KnowledgeGraphEntity.canonical_key == "channel_topic:CGraph:trade-blotter",
+            KnowledgeGraphEntity.is_current.is_(True),
+            KnowledgeGraphEntity.expired_at.is_(None),
+        )
+    )
+    db_session.refresh(entry_exit)
+    assert second_projection.entity_count >= 1
+    assert reinforced_trade_blotter is not None
+    assert reinforced_trade_blotter.id == trade_blotter.id
+    assert reinforced_trade_blotter.reinforcement_count == 1
+    assert reinforced_trade_blotter.last_reinforced_at is not None
+    assert entry_exit.is_current is True
+    assert entry_exit.lifecycle_state == "active"
+    reinforced_evidence = tuple(
+        db_session.scalars(
+            select(KnowledgeGraphEvidence).where(
+                KnowledgeGraphEvidence.target_kind == "entity",
+                KnowledgeGraphEvidence.target_id == reinforced_trade_blotter.id,
+            )
+        )
+    )
+    assert len(reinforced_evidence) >= 2
 
 
 def test_worker_dashboard_graph_refresh_falls_back_on_bad_semantic_output(
@@ -2535,7 +2622,8 @@ def test_agent_executor_records_channel_profile_when_assessment_completes(
     assert channel_entity.lifecycle_state == "active"
     assert channel_entity.visibility_scope_type == "channel"
     assert profile_entity is not None
-    assert profile_entity.lifecycle_state == "candidate"
+    assert profile_entity.lifecycle_state == "active"
+    assert profile_entity.attrs_json["review_status"] == "auto"
     current_context = GraphService(db_session).retrieve_current_context(
         installation_id=task.installation_id,
         destination=DestinationSurface.channel("CObserve"),
@@ -2543,7 +2631,8 @@ def test_agent_executor_records_channel_profile_when_assessment_completes(
         max_hops=1,
     )
     assert {entity.canonical_key for entity in current_context.entities} == {
-        "slack_channel:CObserve"
+        "slack_channel:CObserve",
+        "channel_profile:CObserve",
     }
 
 

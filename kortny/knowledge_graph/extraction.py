@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import re
+import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import or_, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from kortny.db.models import (
@@ -17,6 +19,7 @@ from kortny.db.models import (
     SlackChannelMembership,
     Task,
 )
+from kortny.knowledge_graph.provenance import with_provenance_attrs
 from kortny.knowledge_graph.scopes import VisibilityScope
 from kortny.knowledge_graph.service import EvidenceInput, GraphService
 
@@ -39,6 +42,19 @@ SEMANTIC_ENTITY_SPECS = (
     ("assumptions", "channel_assumption", "firm_fact", "assumption"),
     ("help_opportunities", "channel_help", "firm_fact", "help_opportunity"),
 )
+AUTO_REVIEW_STATUS = "auto"
+NEEDS_REVIEW_STATUS = "needs_review"
+LOW_CONFIDENCE_THRESHOLD = Decimal("0.500")
+SENSITIVE_REVIEW_RE = re.compile(
+    r"\b("
+    r"api[-_ ]?key|credential|password|secret|token|"
+    r"salary|compensation|payroll|hr|human resources|"
+    r"medical|health|diagnosis|legal|lawsuit|attorney|"
+    r"fired|termination|underperforming|disciplinary|"
+    r"confidential|private"
+    r")\b",
+    re.I,
+)
 
 
 @dataclass(frozen=True)
@@ -51,12 +67,18 @@ class KnowledgeGraphProjectionResult:
     evidence_count: int
 
 
-class KnowledgeGraphExtractionService:
-    """Project already-approved system observations into graph rows.
+@dataclass(frozen=True)
+class SemanticReviewDecision:
+    lifecycle_state: str
+    review_status: str
+    review_reason: str | None
 
-    This service deliberately avoids broad LLM extraction. It only records
-    authoritative channel existence and stores channel assessment summaries as
-    channel-scoped candidates for later review.
+
+class KnowledgeGraphExtractionService:
+    """Project bounded system observations into graph rows.
+
+    Normal scope-safe observations become auto-active context with evidence and
+    confidence. Low-confidence or sensitive claims remain candidates for review.
     """
 
     def __init__(self, session: Session) -> None:
@@ -70,7 +92,7 @@ class KnowledgeGraphExtractionService:
         membership: SlackChannelMembership,
         profile: ObserveChannelProfile,
     ) -> KnowledgeGraphProjectionResult:
-        """Project a completed Observe channel profile into KG candidates."""
+        """Project a completed Observe channel profile into graph context."""
 
         entity_count = 0
         edge_count = 0
@@ -82,7 +104,7 @@ class KnowledgeGraphExtractionService:
         entity_count += int(created_channel)
         evidence_count += 1
 
-        profile_entity, profile_created = self._replace_channel_profile_entity(
+        profile_entity, profile_created = self._upsert_channel_profile_entity(
             task=task,
             membership=membership,
             profile=profile,
@@ -90,32 +112,28 @@ class KnowledgeGraphExtractionService:
         entity_count += int(profile_created)
         evidence_count += 1
 
-        self._supersede_current_profile_edges(channel_entity)
-        profile_edge = self.graph.create_edge(
+        profile_edge, profile_edge_created = self._upsert_edge(
             installation_id=task.installation_id,
             source_entity_id=channel_entity.id,
             target_entity_id=profile_entity.id,
             relationship_type=CHANNEL_PROFILE_RELATIONSHIP,
             visibility_scope=_scope_for_membership(membership),
             source_type="onboarding_scan",
-            lifecycle_state="candidate",
+            lifecycle_state="active",
             confidence_score=profile.confidence_score or Decimal("0.500"),
             confidence_reason=profile.confidence_reason,
             freshness_window_days=profile.fresh_window_days,
             attrs_json={
                 "kind": "channel_profile_projection",
+                "review_status": AUTO_REVIEW_STATUS,
                 "profile_id": str(profile.id),
                 "profile_version": profile.profile_version,
             },
             evidence=_profile_evidence(task, membership, profile),
         )
-        edge_count += 1
+        edge_count += int(profile_edge_created)
         evidence_count += 1
 
-        self._supersede_current_semantic_projection(
-            task=task,
-            membership=membership,
-        )
         semantic_entity_count, semantic_edge_count, semantic_evidence_count = (
             self._project_semantic_extraction(
                 task=task,
@@ -157,7 +175,12 @@ class KnowledgeGraphExtractionService:
         }
         if existing is not None:
             existing.display_name = _channel_display_name(membership)
-            existing.attrs_json = attrs
+            existing.attrs_json = with_provenance_attrs(
+                attrs,
+                source_type="slack_authoritative",
+                lifecycle_state="active",
+                confidence_score=Decimal("1.000"),
+            )
             existing.visibility_scope_type = _scope_for_membership(
                 membership
             ).scope_type
@@ -191,7 +214,7 @@ class KnowledgeGraphExtractionService:
         )
         return entity, True
 
-    def _replace_channel_profile_entity(
+    def _upsert_channel_profile_entity(
         self,
         *,
         task: Task,
@@ -201,8 +224,22 @@ class KnowledgeGraphExtractionService:
         canonical_key = _profile_canonical_key(membership.channel_id)
         existing = self._current_entity_by_key(task.installation_id, canonical_key)
         if existing is not None:
-            self.graph.supersede_entity(existing)
+            self._reinforce_entity(
+                existing,
+                display_name=f"Channel profile for {_channel_display_name(membership)}",
+                external_ref_type="observe_channel_profile",
+                external_ref_id=str(profile.id),
+                attrs_json=_profile_attrs(profile),
+                visibility_scope=_scope_for_membership(membership),
+                source_type="onboarding_scan",
+                lifecycle_state="active",
+                confidence_score=profile.confidence_score or Decimal("0.500"),
+                confidence_reason=profile.confidence_reason,
+                freshness_window_days=profile.fresh_window_days,
+                evidence=_profile_evidence(task, membership, profile),
+            )
             self.session.flush()
+            return existing, False
 
         entity = self.graph.create_entity(
             installation_id=task.installation_id,
@@ -211,87 +248,16 @@ class KnowledgeGraphExtractionService:
             display_name=f"Channel profile for {_channel_display_name(membership)}",
             external_ref_type="observe_channel_profile",
             external_ref_id=str(profile.id),
-            attrs_json={
-                "kind": "observe_channel_profile",
-                "profile_id": str(profile.id),
-                "profile_version": profile.profile_version,
-                "summary": profile.summary,
-                "profile": profile.profile_json,
-                "assumptions": profile.assumptions_json,
-                "evidence_refs": profile.evidence_refs_json,
-                "message_count": profile.message_count,
-                "file_count": profile.file_count,
-                "fresh_window_days": profile.fresh_window_days,
-            },
+            attrs_json=_profile_attrs(profile),
             visibility_scope=_scope_for_membership(membership),
             source_type="onboarding_scan",
-            lifecycle_state="candidate",
+            lifecycle_state="active",
             confidence_score=profile.confidence_score or Decimal("0.500"),
             confidence_reason=profile.confidence_reason,
             freshness_window_days=profile.fresh_window_days,
             evidence=_profile_evidence(task, membership, profile),
         )
         return entity, True
-
-    def _supersede_current_profile_edges(
-        self,
-        channel_entity: KnowledgeGraphEntity,
-    ) -> None:
-        edges = self.session.scalars(
-            select(KnowledgeGraphEdge).where(
-                KnowledgeGraphEdge.installation_id == channel_entity.installation_id,
-                KnowledgeGraphEdge.source_entity_id == channel_entity.id,
-                KnowledgeGraphEdge.relationship_type == CHANNEL_PROFILE_RELATIONSHIP,
-                KnowledgeGraphEdge.source_type == "onboarding_scan",
-                KnowledgeGraphEdge.is_current.is_(True),
-                KnowledgeGraphEdge.expired_at.is_(None),
-            )
-        )
-        for edge in edges:
-            self.graph.supersede_edge(edge)
-        self.session.flush()
-
-    def _supersede_current_semantic_projection(
-        self,
-        *,
-        task: Task,
-        membership: SlackChannelMembership,
-    ) -> None:
-        prefix_filters = [
-            KnowledgeGraphEntity.canonical_key.like(
-                f"{prefix}:{membership.channel_id}:%"
-            )
-            for prefix in SEMANTIC_PROJECTION_PREFIXES
-        ]
-        entities = list(
-            self.session.scalars(
-                select(KnowledgeGraphEntity).where(
-                    KnowledgeGraphEntity.installation_id == task.installation_id,
-                    KnowledgeGraphEntity.is_current.is_(True),
-                    KnowledgeGraphEntity.expired_at.is_(None),
-                    KnowledgeGraphEntity.source_type == "onboarding_scan",
-                    or_(*prefix_filters),
-                )
-            )
-        )
-        entity_ids = [entity.id for entity in entities]
-        if entity_ids:
-            edges = self.session.scalars(
-                select(KnowledgeGraphEdge).where(
-                    KnowledgeGraphEdge.installation_id == task.installation_id,
-                    KnowledgeGraphEdge.is_current.is_(True),
-                    KnowledgeGraphEdge.expired_at.is_(None),
-                    or_(
-                        KnowledgeGraphEdge.source_entity_id.in_(entity_ids),
-                        KnowledgeGraphEdge.target_entity_id.in_(entity_ids),
-                    ),
-                )
-            )
-            for edge in edges:
-                self.graph.supersede_edge(edge)
-        for entity in entities:
-            self.graph.supersede_entity(entity)
-        self.session.flush()
 
     def _project_semantic_extraction(
         self,
@@ -318,12 +284,16 @@ class KnowledgeGraphExtractionService:
         for field_name, key_prefix, entity_type, semantic_kind in SEMANTIC_ENTITY_SPECS:
             values = _semantic_values(extraction.get(field_name))
             for value in values:
+                review = _semantic_review_decision(
+                    value=value,
+                    confidence_score=confidence_score,
+                )
                 canonical_key = _semantic_canonical_key(
                     key_prefix=key_prefix,
                     channel_id=membership.channel_id,
                     label=value,
                 )
-                semantic_entity = self.graph.create_entity(
+                semantic_entity, created_entity = self._upsert_entity(
                     installation_id=task.installation_id,
                     entity_type=entity_type,
                     canonical_key=canonical_key,
@@ -336,11 +306,13 @@ class KnowledgeGraphExtractionService:
                         "profile_version": profile.profile_version,
                         "channel_id": membership.channel_id,
                         "confidence": extraction.get("confidence"),
+                        "review_status": review.review_status,
+                        "review_reason": review.review_reason,
                         "evidence": _semantic_values(extraction.get("evidence")),
                     },
                     visibility_scope=scope,
                     source_type="onboarding_scan",
-                    lifecycle_state="candidate",
+                    lifecycle_state=review.lifecycle_state,
                     confidence_score=confidence_score,
                     confidence_reason=_semantic_confidence_reason(profile),
                     freshness_window_days=profile.fresh_window_days,
@@ -352,17 +324,17 @@ class KnowledgeGraphExtractionService:
                         semantic_kind=semantic_kind,
                     ),
                 )
-                entity_count += 1
+                entity_count += int(created_entity)
                 evidence_count += 1
 
-                channel_edge = self.graph.create_edge(
+                channel_edge, channel_edge_created = self._upsert_edge(
                     installation_id=task.installation_id,
                     source_entity_id=channel_entity.id,
                     target_entity_id=semantic_entity.id,
                     relationship_type="relates_to",
                     visibility_scope=scope,
                     source_type="onboarding_scan",
-                    lifecycle_state="candidate",
+                    lifecycle_state=review.lifecycle_state,
                     confidence_score=confidence_score,
                     confidence_reason=_semantic_confidence_reason(profile),
                     freshness_window_days=profile.fresh_window_days,
@@ -371,6 +343,8 @@ class KnowledgeGraphExtractionService:
                         "semantic_kind": semantic_kind,
                         "source_field": field_name,
                         "profile_id": str(profile.id),
+                        "review_status": review.review_status,
+                        "review_reason": review.review_reason,
                     },
                     evidence=_semantic_evidence(
                         task=task,
@@ -380,14 +354,14 @@ class KnowledgeGraphExtractionService:
                         semantic_kind=semantic_kind,
                     ),
                 )
-                profile_edge = self.graph.create_edge(
+                profile_edge, profile_edge_created = self._upsert_edge(
                     installation_id=task.installation_id,
                     source_entity_id=profile_entity.id,
                     target_entity_id=semantic_entity.id,
                     relationship_type="maps_to",
                     visibility_scope=scope,
                     source_type="onboarding_scan",
-                    lifecycle_state="candidate",
+                    lifecycle_state=review.lifecycle_state,
                     confidence_score=confidence_score,
                     confidence_reason=_semantic_confidence_reason(profile),
                     freshness_window_days=profile.fresh_window_days,
@@ -396,6 +370,8 @@ class KnowledgeGraphExtractionService:
                         "semantic_kind": semantic_kind,
                         "source_field": field_name,
                         "profile_id": str(profile.id),
+                        "review_status": review.review_status,
+                        "review_reason": review.review_reason,
                     },
                     evidence=_semantic_evidence(
                         task=task,
@@ -405,7 +381,7 @@ class KnowledgeGraphExtractionService:
                         semantic_kind=semantic_kind,
                     ),
                 )
-                edge_count += int(channel_edge is not None) + int(profile_edge is not None)
+                edge_count += int(channel_edge_created) + int(profile_edge_created)
                 evidence_count += 2
 
         return entity_count, edge_count, evidence_count
@@ -424,6 +400,216 @@ class KnowledgeGraphExtractionService:
             )
         )
 
+    def _upsert_entity(
+        self,
+        *,
+        installation_id: uuid.UUID,
+        entity_type: str,
+        canonical_key: str,
+        display_name: str,
+        attrs_json: dict[str, Any],
+        visibility_scope: VisibilityScope,
+        source_type: str,
+        lifecycle_state: str,
+        confidence_score: Decimal,
+        confidence_reason: str,
+        freshness_window_days: int | None,
+        evidence: EvidenceInput,
+    ) -> tuple[KnowledgeGraphEntity, bool]:
+        existing = self._current_entity_by_key(installation_id, canonical_key)
+        if existing is not None:
+            self._reinforce_entity(
+                existing,
+                display_name=display_name,
+                external_ref_type=existing.external_ref_type,
+                external_ref_id=existing.external_ref_id,
+                attrs_json=attrs_json,
+                visibility_scope=visibility_scope,
+                source_type=source_type,
+                lifecycle_state=lifecycle_state,
+                confidence_score=confidence_score,
+                confidence_reason=confidence_reason,
+                freshness_window_days=freshness_window_days,
+                evidence=evidence,
+            )
+            return existing, False
+        entity = self.graph.create_entity(
+            installation_id=installation_id,
+            entity_type=entity_type,
+            canonical_key=canonical_key,
+            display_name=display_name,
+            attrs_json=attrs_json,
+            visibility_scope=visibility_scope,
+            source_type=source_type,
+            lifecycle_state=lifecycle_state,
+            confidence_score=confidence_score,
+            confidence_reason=confidence_reason,
+            freshness_window_days=freshness_window_days,
+            evidence=evidence,
+        )
+        return entity, True
+
+    def _upsert_edge(
+        self,
+        *,
+        installation_id: uuid.UUID,
+        source_entity_id: uuid.UUID,
+        target_entity_id: uuid.UUID,
+        relationship_type: str,
+        visibility_scope: VisibilityScope,
+        source_type: str,
+        attrs_json: dict[str, Any],
+        lifecycle_state: str,
+        confidence_score: Decimal,
+        confidence_reason: str | None,
+        freshness_window_days: int | None,
+        evidence: EvidenceInput,
+    ) -> tuple[KnowledgeGraphEdge, bool]:
+        existing = self._current_edge(
+            installation_id=installation_id,
+            source_entity_id=source_entity_id,
+            target_entity_id=target_entity_id,
+            relationship_type=relationship_type,
+            source_type=source_type,
+        )
+        if existing is not None:
+            self._reinforce_edge(
+                existing,
+                attrs_json=attrs_json,
+                visibility_scope=visibility_scope,
+                source_type=source_type,
+                lifecycle_state=lifecycle_state,
+                confidence_score=confidence_score,
+                confidence_reason=confidence_reason,
+                freshness_window_days=freshness_window_days,
+                evidence=evidence,
+            )
+            return existing, False
+        edge = self.graph.create_edge(
+            installation_id=installation_id,
+            source_entity_id=source_entity_id,
+            target_entity_id=target_entity_id,
+            relationship_type=relationship_type,
+            visibility_scope=visibility_scope,
+            source_type=source_type,
+            attrs_json=attrs_json,
+            lifecycle_state=lifecycle_state,
+            confidence_score=confidence_score,
+            confidence_reason=confidence_reason,
+            freshness_window_days=freshness_window_days,
+            evidence=evidence,
+        )
+        return edge, True
+
+    def _current_edge(
+        self,
+        *,
+        installation_id: object,
+        source_entity_id: uuid.UUID,
+        target_entity_id: uuid.UUID,
+        relationship_type: str,
+        source_type: str,
+    ) -> KnowledgeGraphEdge | None:
+        return self.session.scalar(
+            select(KnowledgeGraphEdge).where(
+                KnowledgeGraphEdge.installation_id == installation_id,
+                KnowledgeGraphEdge.source_entity_id == source_entity_id,
+                KnowledgeGraphEdge.target_entity_id == target_entity_id,
+                KnowledgeGraphEdge.relationship_type == relationship_type,
+                KnowledgeGraphEdge.source_type == source_type,
+                KnowledgeGraphEdge.is_current.is_(True),
+                KnowledgeGraphEdge.expired_at.is_(None),
+            )
+        )
+
+    def _reinforce_entity(
+        self,
+        entity: KnowledgeGraphEntity,
+        *,
+        display_name: str,
+        external_ref_type: str | None,
+        external_ref_id: str | None,
+        attrs_json: dict[str, Any],
+        visibility_scope: VisibilityScope,
+        source_type: str,
+        lifecycle_state: str,
+        confidence_score: Decimal,
+        confidence_reason: str | None,
+        freshness_window_days: int | None,
+        evidence: EvidenceInput,
+    ) -> None:
+        now = datetime.now(UTC)
+        entity.display_name = display_name
+        entity.external_ref_type = external_ref_type
+        entity.external_ref_id = external_ref_id
+        entity.attrs_json = with_provenance_attrs(
+            attrs_json,
+            source_type=source_type,
+            lifecycle_state=lifecycle_state,
+            confidence_score=confidence_score,
+        )
+        entity.visibility_scope_type = visibility_scope.scope_type
+        entity.visibility_scope_id = visibility_scope.scope_id
+        entity.source_type = source_type
+        entity.lifecycle_state = _reinforced_lifecycle_state(
+            current=entity.lifecycle_state,
+            proposed=lifecycle_state,
+        )
+        entity.confidence_score = max(entity.confidence_score, confidence_score)
+        entity.confidence_reason = confidence_reason
+        entity.freshness_window_days = freshness_window_days
+        entity.last_reinforced_at = now
+        entity.reinforcement_count = (entity.reinforcement_count or 0) + 1
+        entity.is_current = True
+        self.graph.add_evidence(
+            installation_id=entity.installation_id,
+            target_kind="entity",
+            target_id=entity.id,
+            evidence=evidence,
+        )
+        self.session.flush()
+
+    def _reinforce_edge(
+        self,
+        edge: KnowledgeGraphEdge,
+        *,
+        attrs_json: dict[str, Any],
+        visibility_scope: VisibilityScope,
+        source_type: str,
+        lifecycle_state: str,
+        confidence_score: Decimal,
+        confidence_reason: str | None,
+        freshness_window_days: int | None,
+        evidence: EvidenceInput,
+    ) -> None:
+        now = datetime.now(UTC)
+        edge.attrs_json = with_provenance_attrs(
+            attrs_json,
+            source_type=source_type,
+            lifecycle_state=lifecycle_state,
+            confidence_score=confidence_score,
+        )
+        edge.visibility_scope_type = visibility_scope.scope_type
+        edge.visibility_scope_id = visibility_scope.scope_id
+        edge.source_type = source_type
+        edge.lifecycle_state = _reinforced_lifecycle_state(
+            current=edge.lifecycle_state,
+            proposed=lifecycle_state,
+        )
+        edge.confidence_score = max(edge.confidence_score, confidence_score)
+        edge.confidence_reason = confidence_reason
+        edge.freshness_window_days = freshness_window_days
+        edge.last_reinforced_at = now
+        edge.reinforcement_count = (edge.reinforcement_count or 0) + 1
+        edge.is_current = True
+        self.graph.add_evidence(
+            installation_id=edge.installation_id,
+            target_kind="edge",
+            target_id=edge.id,
+            evidence=evidence,
+        )
+        self.session.flush()
+
 
 def _channel_canonical_key(channel_id: str) -> str:
     return f"slack_channel:{channel_id}"
@@ -431,6 +617,28 @@ def _channel_canonical_key(channel_id: str) -> str:
 
 def _profile_canonical_key(channel_id: str) -> str:
     return f"channel_profile:{channel_id}"
+
+
+def _profile_attrs(profile: ObserveChannelProfile) -> dict[str, Any]:
+    return {
+        "kind": "observe_channel_profile",
+        "profile_id": str(profile.id),
+        "profile_version": profile.profile_version,
+        "summary": profile.summary,
+        "profile": profile.profile_json,
+        "assumptions": profile.assumptions_json,
+        "evidence_refs": profile.evidence_refs_json,
+        "message_count": profile.message_count,
+        "file_count": profile.file_count,
+        "fresh_window_days": profile.fresh_window_days,
+        "review_status": AUTO_REVIEW_STATUS,
+    }
+
+
+def _reinforced_lifecycle_state(*, current: str, proposed: str) -> str:
+    if current == "confirmed":
+        return "confirmed"
+    return proposed
 
 
 def _channel_display_name(membership: SlackChannelMembership) -> str:
@@ -554,8 +762,32 @@ def _semantic_confidence_score(
 
 def _semantic_confidence_reason(profile: ObserveChannelProfile) -> str:
     return (
-        "Candidate extracted from bounded channel assessment; requires review "
-        f"before runtime use. Profile version {profile.profile_version}."
+        "Inferred from bounded channel assessment; usable as scoped background "
+        f"context with evidence and confidence. Profile version {profile.profile_version}."
+    )
+
+
+def _semantic_review_decision(
+    *,
+    value: str,
+    confidence_score: Decimal,
+) -> SemanticReviewDecision:
+    if confidence_score < LOW_CONFIDENCE_THRESHOLD:
+        return SemanticReviewDecision(
+            lifecycle_state="candidate",
+            review_status=NEEDS_REVIEW_STATUS,
+            review_reason="low_confidence",
+        )
+    if SENSITIVE_REVIEW_RE.search(value):
+        return SemanticReviewDecision(
+            lifecycle_state="candidate",
+            review_status=NEEDS_REVIEW_STATUS,
+            review_reason="sensitive_or_high_impact_language",
+        )
+    return SemanticReviewDecision(
+        lifecycle_state="active",
+        review_status=AUTO_REVIEW_STATUS,
+        review_reason=None,
     )
 
 

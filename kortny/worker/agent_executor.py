@@ -85,6 +85,7 @@ from kortny.tools import (
     ListIntegrationsTool,
     ObservationChannelHistoryCache,
     PdfGeneratorTool,
+    QueryWorkspaceGraphTool,
     RecallFactTool,
     RememberFactTool,
     SlackChannelHistoryTool,
@@ -684,6 +685,7 @@ class AgentTaskExecutor:
         recall_fact = RecallFactTool(service=memory_service, task=task)
         inspect_memory = InspectMemoryTool(service=memory_service, task=task)
         forget_fact = ForgetFactTool(service=memory_service, task=task)
+        query_workspace_graph = QueryWorkspaceGraphTool(session=session, task=task)
         native_tools: list[Tool] = [
             pdf_generator,
             slack_channel_history,
@@ -692,6 +694,7 @@ class AgentTaskExecutor:
             recall_fact,
             inspect_memory,
             forget_fact,
+            query_workspace_graph,
         ]
         if web_search is not None:
             native_tools.insert(0, web_search)

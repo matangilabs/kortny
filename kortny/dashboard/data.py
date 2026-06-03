@@ -44,6 +44,11 @@ from kortny.db.models import (
     TaskStatus,
     WorkspaceState,
 )
+from kortny.knowledge_graph.provenance import (
+    provenance_kind,
+    provenance_label,
+    review_status,
+)
 from kortny.tools.pdf_generator import PdfGeneratorTool
 from kortny.tools.slack_channel_history import SlackChannelHistoryTool
 from kortny.tools.slack_file_read import SlackFileReadTool
@@ -486,6 +491,9 @@ class KnowledgeGraphEntityRow:
     evidence: tuple[KnowledgeGraphEvidencePreview, ...]
     tone: str
     confidence_label: str
+    provenance_label: str
+    provenance_tone: str
+    review_status: str
     attrs_preview: str
 
 
@@ -499,6 +507,9 @@ class KnowledgeGraphEdgeRow:
     evidence: tuple[KnowledgeGraphEvidencePreview, ...]
     tone: str
     confidence_label: str
+    provenance_label: str
+    provenance_tone: str
+    review_status: str
     attrs_preview: str
 
 
@@ -517,6 +528,9 @@ class KnowledgeGraphMapNode:
     incoming_count: int
     outgoing_count: int
     confidence_label: str
+    provenance_label: str
+    provenance_tone: str
+    review_status: str
     scope_label: str
 
 
@@ -3558,6 +3572,13 @@ def _kg_entity_rows(
             evidence=evidence_previews.get(entity.id, ()),
             tone=_kg_lifecycle_tone(entity.lifecycle_state),
             confidence_label=_confidence_label(entity.confidence_score),
+            provenance_label=provenance_label(
+                provenance_kind(entity.source_type, entity.attrs_json)
+            ),
+            provenance_tone=_kg_provenance_tone(
+                provenance_kind(entity.source_type, entity.attrs_json)
+            ),
+            review_status=review_status(entity.attrs_json, entity.lifecycle_state),
             attrs_preview=_json_preview(entity.attrs_json),
         )
         for entity in entities
@@ -3642,6 +3663,13 @@ def _kg_edge_rows(
             evidence=evidence_previews.get(edge.id, ()),
             tone=_kg_lifecycle_tone(edge.lifecycle_state),
             confidence_label=_confidence_label(edge.confidence_score),
+            provenance_label=provenance_label(
+                provenance_kind(edge.source_type, edge.attrs_json)
+            ),
+            provenance_tone=_kg_provenance_tone(
+                provenance_kind(edge.source_type, edge.attrs_json)
+            ),
+            review_status=review_status(edge.attrs_json, edge.lifecycle_state),
             attrs_preview=_json_preview(edge.attrs_json),
         )
         for edge in edges
@@ -3725,6 +3753,13 @@ def _kg_graph_map(
             incoming_count=incoming_count,
             outgoing_count=outgoing_count,
             confidence_label=_confidence_label(entity.confidence_score),
+            provenance_label=provenance_label(
+                provenance_kind(entity.source_type, entity.attrs_json)
+            ),
+            provenance_tone=_kg_provenance_tone(
+                provenance_kind(entity.source_type, entity.attrs_json)
+            ),
+            review_status=review_status(entity.attrs_json, entity.lifecycle_state),
             scope_label=_kg_graph_scope_label(scope),
         )
 
@@ -4178,6 +4213,16 @@ def _kg_lifecycle_tone(state: str) -> str:
         return "warning"
     if state in {"contradicted", "forgotten"}:
         return "danger"
+    return "neutral"
+
+
+def _kg_provenance_tone(kind: str) -> str:
+    if kind == "observed":
+        return "success"
+    if kind == "extracted":
+        return "accent"
+    if kind == "inferred":
+        return "warning"
     return "neutral"
 
 

@@ -20,6 +20,7 @@ from kortny.tools.types import (
     ToolResult,
 )
 from kortny.tools.web_search import WebSearchTool
+from kortny.tools.workspace_graph import QueryWorkspaceGraphTool
 from kortny.tools.workspace_memory import (
     ForgetFactTool,
     InspectMemoryTool,
@@ -38,6 +39,7 @@ __all__ = [
     "ListIntegrationsTool",
     "ObservationChannelHistoryCache",
     "PdfGeneratorTool",
+    "QueryWorkspaceGraphTool",
     "RecallFactTool",
     "RecoverableToolError",
     "RememberFactTool",

@@ -136,6 +136,14 @@
                     <dd>{{ node.confidence_label }}</dd>
                   </div>
                   <div>
+                    <dt>Provenance</dt>
+                    <dd>{{ node.provenance_label }}</dd>
+                  </div>
+                  <div>
+                    <dt>Review</dt>
+                    <dd>{{ node.review_status }}</dd>
+                  </div>
+                  <div>
                     <dt>Evidence</dt>
                     <dd>{{ node.evidence_count|number }}</dd>
                   </div>
@@ -235,6 +243,8 @@
                 <code class="inline-code">{{ row.entity.canonical_key }}</code>
                 <span class="badge badge-accent">{{ row.entity.entity_type }}</span>
                 <span class="badge badge-{{ row.tone }}">{{ row.entity.lifecycle_state }}</span>
+                <span class="badge badge-{{ row.provenance_tone }}">{{ row.provenance_label }}</span>
+                <span class="badge badge-neutral">{{ row.review_status }}</span>
                 {% if not row.entity.is_current %}
                   <span class="badge badge-neutral">not current</span>
                 {% endif %}
@@ -302,6 +312,8 @@
               <div class="graph-title">
                 <code class="inline-code">{{ row.edge.relationship_type }}</code>
                 <span class="badge badge-{{ row.tone }}">{{ row.edge.lifecycle_state }}</span>
+                <span class="badge badge-{{ row.provenance_tone }}">{{ row.provenance_label }}</span>
+                <span class="badge badge-neutral">{{ row.review_status }}</span>
                 {% if not row.edge.is_current %}
                   <span class="badge badge-neutral">not current</span>
                 {% endif %}

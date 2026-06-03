@@ -15,6 +15,7 @@ from kortny.db.models import (
     KnowledgeGraphEdge,
     KnowledgeGraphEntity,
     KnowledgeGraphEvidence,
+    Task,
 )
 from kortny.db.session import make_engine, make_session_factory, normalize_database_url
 from kortny.knowledge_graph import (
@@ -24,6 +25,7 @@ from kortny.knowledge_graph import (
     VisibilityScope,
     is_scope_compatible,
 )
+from kortny.tools import QueryWorkspaceGraphTool
 
 TEST_POSTGRES_URL = os.environ.get("KORTNY_TEST_POSTGRES_URL")
 
@@ -338,11 +340,91 @@ def test_mark_stale_current_uses_freshness_windows(db_session: Session) -> None:
     assert "slack_channel:C_OLD" not in entity_keys(pack)
 
 
+def test_query_workspace_graph_tool_returns_scope_safe_provenance_and_evidence(
+    db_session: Session,
+) -> None:
+    installation = create_installation(db_session)
+    task = Task(
+        installation_id=installation.id,
+        slack_channel_id="C_A",
+        slack_thread_ts="111.222",
+        slack_user_id="U_A",
+        input="what do you know about alpha?",
+    )
+    db_session.add(task)
+    db_session.flush()
+    graph = GraphService(db_session)
+    channel = add_entity(
+        graph,
+        installation,
+        entity_type="channel",
+        canonical_key="slack_channel:C_A",
+        display_name="#alpha",
+        visibility_scope=VisibilityScope.channel("C_A"),
+    )
+    project = graph.create_entity(
+        installation_id=installation.id,
+        entity_type="project",
+        canonical_key="project:alpha",
+        display_name="Project Alpha",
+        visibility_scope=VisibilityScope.channel("C_A"),
+        source_type="onboarding_scan",
+        lifecycle_state="active",
+        confidence_score=Decimal("0.820"),
+        confidence_reason="Extracted from bounded channel assessment.",
+        attrs_json={"review_status": "auto"},
+        evidence=evidence("Project Alpha is the main channel workflow."),
+    )
+    graph.create_entity(
+        installation_id=installation.id,
+        entity_type="project",
+        canonical_key="project:private-alpha",
+        display_name="Private Alpha",
+        visibility_scope=VisibilityScope.private_channel("G_A"),
+        source_type="onboarding_scan",
+        lifecycle_state="active",
+        confidence_score=Decimal("0.900"),
+        evidence=evidence("Private Alpha belongs elsewhere."),
+    )
+    graph.create_edge(
+        installation_id=installation.id,
+        source_entity_id=channel.id,
+        target_entity_id=project.id,
+        relationship_type="relates_to",
+        visibility_scope=VisibilityScope.channel("C_A"),
+        source_type="onboarding_scan",
+        lifecycle_state="active",
+        confidence_score=Decimal("0.800"),
+        evidence=evidence("The #alpha channel relates to Project Alpha."),
+    )
+    db_session.commit()
+
+    result = QueryWorkspaceGraphTool(session=db_session, task=task).invoke(
+        {"query": "Alpha", "include_evidence": True}
+    )
+
+    assert result.output["successful"] is True
+    assert result.output["destination"]["surface_type"] == "channel"
+    entity_keys_output = {row["canonical_key"] for row in result.output["entities"]}
+    assert "project:alpha" in entity_keys_output
+    assert "project:private-alpha" not in entity_keys_output
+    project_output = next(
+        row for row in result.output["entities"] if row["canonical_key"] == "project:alpha"
+    )
+    assert project_output["provenance"]["extraction_kind"] == "extracted"
+    assert project_output["provenance"]["review_status"] == "auto"
+    assert project_output["evidence"][0]["snippet"] == (
+        "Project Alpha is the main channel workflow."
+    )
+    assert result.output["relationships"][0]["provenance"]["label"] == "Extracted"
+
+
 def cleanup_database(session: Session) -> None:
     for model in (
         KnowledgeGraphEvidence,
         KnowledgeGraphEdge,
         KnowledgeGraphEntity,
+        Task,
         Installation,
     ):
         session.execute(delete(model))
