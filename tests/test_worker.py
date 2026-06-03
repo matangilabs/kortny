@@ -77,7 +77,7 @@ from kortny.slack.reactions import (
 )
 from kortny.slack.synthesis import EvidenceKind, EvidenceTrust, SynthesisOutcome
 from kortny.tasks import TaskService
-from kortny.tools import ToolResult
+from kortny.tools import ToolRegistry, ToolResult
 from kortny.tools.types import JsonObject, JsonSchema
 from kortny.worker import (
     AgentTaskExecutor,
@@ -734,6 +734,74 @@ def test_agent_executor_passes_routed_model_to_adk_runtime(
     )
 
 
+def test_agent_executor_memoizes_adk_registry_factory_per_execution(
+    db_session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = create_task(db_session, event_id="EvAdkMemoizedRegistry")
+    task.input = "research AI observability, check Linear, and summarize"
+    task_service = TaskService(db_session)
+    settings = Settings.model_validate(
+        {
+            "SLACK_BOT_TOKEN": "xoxb-test",
+            "SLACK_APP_TOKEN": "xapp-test",
+            "SLACK_SIGNING_SECRET": "signing-secret",
+            "LLM_PROVIDER": SettingsLLMProvider.openrouter,
+            "LLM_API_KEY": "openrouter-key",
+            "LLM_MODEL": "anthropic/sonnet-default",
+            "LLM_CHEAP_MODEL": "deepseek/deepseek-v4-flash",
+            "LLM_STANDARD_MODEL": "openai/gpt-5.4-mini",
+            "POSTGRES_URL": "postgresql://kortny:kortny@localhost/kortny",
+            "AGENT_RUNTIME": "adk",
+        }
+    )
+    build_count = 0
+    captured: dict[str, Any] = {}
+
+    def fake_build_registry(self: AgentTaskExecutor, **kwargs: Any) -> ToolRegistry:
+        del self, kwargs
+        nonlocal build_count
+        build_count += 1
+        return ToolRegistry([StaticWebSearchTool()])
+
+    class FakeAdkRuntime:
+        def __init__(self, **kwargs: Any) -> None:
+            registry_factory = kwargs["registry_factory"]
+            first = registry_factory()
+            second = registry_factory()
+            third = registry_factory()
+            captured["same_registry"] = first is second is third
+            captured["tool_names"] = list(first.names())
+
+        def run(self, task_arg: Task) -> AgentRunResult:
+            return AgentRunResult(
+                task_id=task_arg.id,
+                result_summary="Done.",
+                turns=1,
+                artifact_count=0,
+            )
+
+    monkeypatch.setattr(AgentTaskExecutor, "_build_registry", fake_build_registry)
+    monkeypatch.setattr(
+        "kortny.agent.adk_runtime.AdkAgentRuntime",
+        FakeAdkRuntime,
+    )
+
+    result = AgentTaskExecutor(settings=settings)._run_agent_runtime(
+        settings=settings,
+        session=db_session,
+        task=task,
+        task_service=task_service,
+        working_dir=tmp_path,
+    )
+
+    assert result.result_summary == "Done."
+    assert build_count == 1
+    assert captured["same_registry"] is True
+    assert captured["tool_names"] == ["web_search"]
+
+
 def test_agent_executor_records_planned_workflow_classifier_event_for_complex_task(
     db_session: Session,
     tmp_path: Path,
@@ -1284,6 +1352,88 @@ def test_agent_executor_skips_humanizer_for_adk_quick_fast_path(
     )
 
 
+def test_agent_executor_skips_humanizer_for_adk_planned_merger_final(
+    db_session: Session,
+) -> None:
+    task = create_task(db_session, event_id="EvAdkPlannedSkipHumanizer")
+    task.input = "research AI observability tools, check Linear, and summarize"
+    task_service = TaskService(db_session)
+    task_service.append_event(
+        task,
+        TaskEventType.log,
+        {
+            "message": "model_route_selected",
+            "runtime": "adk",
+            "tier": "analysis",
+            "model": "anthropic/claude-sonnet-4.6",
+            "reason": "planned_workflow",
+        },
+    )
+    task_service.append_event(
+        task,
+        TaskEventType.log,
+        {
+            "message": "adk_runtime_completed",
+            "runtime": "adk",
+            "mode": "planned_parallel",
+            "event_count": 8,
+            "final_author": "planned_workflow_merger",
+            "authors": [
+                "planned_workflow_planner",
+                "planned_research_worker",
+                "planned_workspace_worker",
+                "planned_integration_worker",
+                "planned_workflow_merger",
+            ],
+            "result_chars": 183,
+        },
+    )
+    settings = Settings.model_validate(
+        {
+            "SLACK_BOT_TOKEN": "xoxb-test",
+            "SLACK_APP_TOKEN": "xapp-test",
+            "SLACK_SIGNING_SECRET": "signing-secret",
+            "LLM_PROVIDER": SettingsLLMProvider.openrouter,
+            "LLM_API_KEY": "openrouter-key",
+            "LLM_MODEL": "anthropic/sonnet-default",
+            "LLM_CHEAP_MODEL": "deepseek/deepseek-v4-flash",
+            "POSTGRES_URL": "postgresql://kortny:kortny@localhost/kortny",
+            "AGENT_RUNTIME": "adk",
+            "RESPONSE_HUMANIZER_ENABLED": True,
+        }
+    )
+    slack_client = FakeSlackClient()
+    raw_answer = (
+        "I checked the research, workspace context, and integration context. "
+        "The next step is to record the observability decision, keep Langfuse "
+        "as the default candidate, and track Phoenix as the evaluation path."
+    )
+
+    AgentTaskExecutor(
+        settings=settings,
+        llm_provider=FakeAgentProvider([]),
+        slack_client=slack_client,
+    )._post_outputs(
+        settings=settings,
+        session=db_session,
+        task=task,
+        task_service=task_service,
+        result_summary=raw_answer,
+    )
+
+    events = task_events(db_session, task)
+
+    assert slack_client.messages[-1]["text"] == raw_answer
+    assert any(
+        event.payload.get("message") == "response_humanizer_skipped"
+        and event.payload.get("reason") == "adk_planned_merger_final"
+        for event in events
+    )
+    assert not any(
+        event.payload.get("message") == "response_humanizer_started" for event in events
+    )
+
+
 def test_agent_executor_humanizes_final_text_before_posting(
     db_session: Session,
     worker_session_factory: sessionmaker[Session],
@@ -1370,6 +1520,13 @@ def test_agent_executor_humanizes_final_text_before_posting(
         and event.payload.get("prompt_name") == "kortny.response_humanizer"
         for event in events
     )
+    humanizer_llm_event = next(
+        event
+        for event in events
+        if event.type is TaskEventType.llm_call
+        and event.payload.get("prompt_name") == "kortny.response_humanizer"
+    )
+    assert humanizer_llm_event.payload["model_tier"] == "cheap_fast"
     assert any(
         event.payload.get("message") == "response_humanizer_started" for event in events
     )

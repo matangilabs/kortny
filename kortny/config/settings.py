@@ -75,6 +75,14 @@ class Settings(BaseSettings):
     planned_workflow_cost_ceiling_usd: float = Field(
         default=0.75, validation_alias="KORTNY_PLANNED_WORKFLOW_COST_CEILING_USD"
     )
+    planned_workflow_max_branch_model_calls: int = Field(
+        default=3,
+        validation_alias="KORTNY_PLANNED_WORKFLOW_MAX_BRANCH_MODEL_CALLS",
+    )
+    planned_workflow_max_branch_tool_calls: int = Field(
+        default=8,
+        validation_alias="KORTNY_PLANNED_WORKFLOW_MAX_BRANCH_TOOL_CALLS",
+    )
     temporal_address: str = Field(
         default="temporal:7233",
         validation_alias="TEMPORAL_ADDRESS",
@@ -246,6 +254,24 @@ class Settings(BaseSettings):
         if value <= 0:
             raise ValueError(
                 "KORTNY_PLANNED_WORKFLOW_COST_CEILING_USD must be positive"
+            )
+        return value
+
+    @field_validator("planned_workflow_max_branch_model_calls")
+    @classmethod
+    def _valid_planned_workflow_max_branch_model_calls(cls, value: int) -> int:
+        if value < 1 or value > 20:
+            raise ValueError(
+                "KORTNY_PLANNED_WORKFLOW_MAX_BRANCH_MODEL_CALLS must be between 1 and 20"
+            )
+        return value
+
+    @field_validator("planned_workflow_max_branch_tool_calls")
+    @classmethod
+    def _valid_planned_workflow_max_branch_tool_calls(cls, value: int) -> int:
+        if value < 0 or value > 100:
+            raise ValueError(
+                "KORTNY_PLANNED_WORKFLOW_MAX_BRANCH_TOOL_CALLS must be between 0 and 100"
             )
         return value
 

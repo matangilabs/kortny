@@ -756,19 +756,8 @@ def _response_skills_from_activations(
 
 
 def _route_tier(response_record: ResponseRecord) -> ModelRouteTier:
-    if response_record.response_shape.shape in {
-        ResponseShape.analyst_audit,
-        ResponseShape.comparison_memo,
-        ResponseShape.research_brief,
-        ResponseShape.file_review,
-    }:
-        return ModelRouteTier.analysis
-    if response_record.response_mode in {
-        ResponseMode.quick_answer,
-        ResponseMode.memory_recall,
-    }:
-        return ModelRouteTier.cheap_fast
-    return ModelRouteTier.standard
+    del response_record
+    return ModelRouteTier.cheap_fast
 
 
 def _synthesis_payload(

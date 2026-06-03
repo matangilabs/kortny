@@ -67,6 +67,21 @@ ADK_DISALLOWED_DIRECT_SLACK_TOOL_NAMES = frozenset(
         "slacksendmessage",
     }
 )
+_ADK_DIRECT_QUICK_RESPONSE_RE = re.compile(
+    r"(?:yo\s+)?(?:hey\s+)?(?:kortny\s+)?(?:are you up|you up|ping|"
+    r"what'?s up|hi|hello|sup)\??"
+)
+ADK_PLANNED_BRANCH_AGENT_NAMES = frozenset(
+    {
+        "planned_research_worker",
+        "planned_workspace_worker",
+        "planned_integration_worker",
+    }
+)
+ADK_BRANCH_BUDGET_BLOCKED_PREFIX = "adk_budget_blocked:"
+ADK_BRANCH_MODEL_CALLS_PREFIX = "adk_model_calls:"
+ADK_BRANCH_TOOL_CALLS_PREFIX = "adk_tool_calls:"
+ADK_BRANCH_BUDGET_EVENT_PREFIX = "adk_budget_event_recorded:"
 ADK_SINGLE_PERSONA_PROMPT = """User-facing identity rules:
 - Speak as Kortny, a single Slack-native coworker. Use first person when
   describing capabilities or limitations.
@@ -212,6 +227,10 @@ a short limitation instead of guessing.
 
 Use the plan in {planned_workflow_plan}. Store a concise branch result with
 facts, caveats, and source/tool provenance.
+
+Stop once you have enough evidence for a useful branch result. Prefer a small
+set of high-signal searches over exhaustive movie-by-movie or item-by-item
+lookup.
 """
 ADK_PLANNED_WORKSPACE_BRANCH_PROMPT = """You are Kortny's planned workflow workspace branch.
 
@@ -221,6 +240,9 @@ limitation instead of guessing.
 
 Use the plan in {planned_workflow_plan}. Store a concise branch result with
 facts, caveats, and source/tool provenance.
+
+Stop once you have enough evidence for a useful branch result. Prefer a small
+set of high-signal checks over exhaustive lookup.
 """
 ADK_PLANNED_INTEGRATION_BRANCH_PROMPT = """You are Kortny's planned workflow integration branch.
 
@@ -231,6 +253,9 @@ short limitation instead of guessing.
 
 Use the plan in {planned_workflow_plan}. Store a concise branch result with
 facts, caveats, and source/tool provenance.
+
+Stop once you have enough evidence for a useful branch result. Prefer a small
+set of high-signal integration checks over exhaustive lookup.
 """
 ADK_PLANNED_WORKFLOW_MERGER_PROMPT = """You are Kortny's planned workflow merger.
 
@@ -459,6 +484,12 @@ class AdkAgentRuntime:
                 planned_workflow_payload=planned_workflow_payload,
             )
 
+        if self._should_use_direct_quick_response(task=task):
+            return self._build_direct_quick_response_agent(
+                task=task,
+                context_package=context_package,
+            )
+
         specialist_agents = self._build_specialist_agents(
             task=task,
             context_package=context_package,
@@ -585,6 +616,40 @@ class AdkAgentRuntime:
                 ),
                 merger,
             ],
+        )
+
+    def _build_direct_quick_response_agent(
+        self,
+        *,
+        task: Task | None,
+        context_package: ContextPackage | None,
+    ) -> Agent:
+        context = _render_context_for_instruction(context_package)
+        if task is not None:
+            self.task_service.append_event(
+                task,
+                TaskEventType.log,
+                {
+                    "message": "adk_quick_response_selected",
+                    "runtime": "adk",
+                    "agent": "quick_response_agent",
+                    "reason": "runtime_handoff_quick_conversation",
+                },
+            )
+            log_observation(
+                logger,
+                "adk_quick_response_selected",
+                task=task,
+                runtime="adk",
+                agent="quick_response_agent",
+                reason="runtime_handoff_quick_conversation",
+            )
+        return self._specialist_agent(
+            name="quick_response_agent",
+            description="Handles lightweight replies that do not require tools.",
+            prompt=ADK_QUICK_RESPONSE_PROMPT,
+            context=context,
+            model=self._adk_model_for_tier(ADK_QUICK_SPECIALIST_MODEL_TIER),
         )
 
     def _instruction(self, *, context_package: ContextPackage | None = None) -> str:
@@ -716,7 +781,9 @@ class AdkAgentRuntime:
             description=description,
             tools=tools,
             output_key=output_key,
+            before_model_callback=self._guard_planned_model_request,
             after_model_callback=self._record_and_guard_adk_model_response,
+            before_tool_callback=self._guard_planned_tool_call,
             mode="chat",
         )
 
@@ -761,14 +828,51 @@ class AdkAgentRuntime:
             return False
         return planned_workflow_payload.get("planned_candidate") is True
 
+    def _should_use_direct_quick_response(self, *, task: Task | None) -> bool:
+        if task is None:
+            return False
+        if not _is_direct_quick_response_input(task.input):
+            return False
+        handoff_payload = self._latest_log_payload(
+            task=task,
+            message="runtime_handoff_evaluated",
+        )
+        if handoff_payload is None:
+            return False
+        if handoff_payload.get("runtime_class") != "quick_response":
+            return False
+        if handoff_payload.get("selected_backend") != "inline":
+            return False
+        planned_payload = self._latest_log_payload(
+            task=task,
+            message="planned_workflow_classified",
+        )
+        reason_codes = planned_payload.get("reason_codes") if planned_payload else ()
+        return "quick_conversation" in {
+            str(reason) for reason in reason_codes if isinstance(reason, str)
+        }
+
     def _planned_workflow_payload(self, task: Task) -> dict[str, Any] | None:
+        return self._latest_log_payload(
+            task=task,
+            message="planned_workflow_classified",
+        )
+
+    def _latest_log_payload(
+        self,
+        *,
+        task: Task,
+        message: str,
+    ) -> dict[str, Any] | None:
+        if self.session is None:
+            return None
         row = self.session.scalar(
             select(TaskEvent)
             .where(
                 TaskEvent.task_id == task.id,
                 TaskEvent.type == TaskEventType.log,
                 TaskEvent.payload["message"].as_string()
-                == "planned_workflow_classified",
+                == message,
             )
             .order_by(TaskEvent.seq.desc())
             .limit(1)
@@ -790,6 +894,151 @@ class AdkAgentRuntime:
 
     def _adk_model_name(self) -> str:
         return adk_litellm_model_name(self.settings, model=self.model)
+
+    def _guard_planned_model_request(
+        self,
+        callback_context: CallbackContext,
+        llm_request: Any,
+    ) -> LlmResponse | None:
+        """Stop planned branch workers before they exceed model-call budgets."""
+
+        del llm_request
+        agent_name = callback_context.agent_name
+        if agent_name not in ADK_PLANNED_BRANCH_AGENT_NAMES:
+            return None
+
+        blocked_reason = _adk_state_text(
+            callback_context.state,
+            f"{ADK_BRANCH_BUDGET_BLOCKED_PREFIX}{agent_name}",
+        )
+        if blocked_reason is not None:
+            return _planned_branch_budget_response(
+                agent_name=agent_name,
+                reason=blocked_reason,
+            )
+
+        count_key = f"{ADK_BRANCH_MODEL_CALLS_PREFIX}{agent_name}"
+        model_call_count = _increment_adk_state_counter(
+            callback_context.state,
+            count_key,
+        )
+        limit = self.settings.planned_workflow_max_branch_model_calls
+        if model_call_count <= limit:
+            return None
+
+        reason = "max_branch_model_calls_exceeded"
+        callback_context.state[f"{ADK_BRANCH_BUDGET_BLOCKED_PREFIX}{agent_name}"] = (
+            reason
+        )
+        task = self._task_from_callback_context(callback_context)
+        if task is not None:
+            self._record_planned_branch_budget_exceeded(
+                task=task,
+                callback_context=callback_context,
+                budget_type="model_calls",
+                reason=reason,
+                limit=limit,
+                observed=model_call_count,
+            )
+        return _planned_branch_budget_response(
+            agent_name=agent_name,
+            reason=reason,
+        )
+
+    def _guard_planned_tool_call(
+        self,
+        tool: Any,
+        args: dict[str, Any],
+        callback_context: CallbackContext,
+    ) -> dict[str, Any] | None:
+        """Stop planned branch workers before they exceed tool-call budgets."""
+
+        del args
+        agent_name = callback_context.agent_name
+        if agent_name not in ADK_PLANNED_BRANCH_AGENT_NAMES:
+            return None
+
+        count_key = f"{ADK_BRANCH_TOOL_CALLS_PREFIX}{agent_name}"
+        tool_call_count = _increment_adk_state_counter(
+            callback_context.state,
+            count_key,
+        )
+        limit = self.settings.planned_workflow_max_branch_tool_calls
+        if tool_call_count <= limit:
+            return None
+
+        reason = "max_branch_tool_calls_exceeded"
+        callback_context.state[f"{ADK_BRANCH_BUDGET_BLOCKED_PREFIX}{agent_name}"] = (
+            reason
+        )
+        task = self._task_from_callback_context(callback_context)
+        tool_name = _string_or_none(getattr(tool, "name", None)) or "unknown_tool"
+        if task is not None:
+            self._record_planned_branch_budget_exceeded(
+                task=task,
+                callback_context=callback_context,
+                budget_type="tool_calls",
+                reason=reason,
+                limit=limit,
+                observed=tool_call_count,
+                tool_name=tool_name,
+            )
+        return {
+            "successful": False,
+            "error": (
+                f"{agent_name} stopped before running {tool_name}: "
+                f"planned branch tool-call budget reached."
+            ),
+            "budget_exhausted": True,
+            "budget_type": "tool_calls",
+            "budget_limit": limit,
+            "observed_count": tool_call_count,
+            "tool": tool_name,
+        }
+
+    def _record_planned_branch_budget_exceeded(
+        self,
+        *,
+        task: Task,
+        callback_context: CallbackContext,
+        budget_type: str,
+        reason: str,
+        limit: int,
+        observed: int,
+        tool_name: str | None = None,
+    ) -> None:
+        agent_name = callback_context.agent_name
+        event_key = (
+            f"{ADK_BRANCH_BUDGET_EVENT_PREFIX}{agent_name}:{budget_type}:{reason}"
+        )
+        if callback_context.state.get(event_key):
+            return
+        callback_context.state[event_key] = True
+        payload: dict[str, Any] = {
+            "message": "adk_planned_branch_budget_exceeded",
+            "runtime": "adk",
+            "adk_agent_name": agent_name,
+            "adk_invocation_id": callback_context.invocation_id,
+            "budget_type": budget_type,
+            "reason": reason,
+            "limit": limit,
+            "observed": observed,
+        }
+        if tool_name is not None:
+            payload["tool"] = tool_name
+        self.task_service.append_event(task, TaskEventType.log, payload)
+        log_observation(
+            logger,
+            "adk_planned_branch_budget_exceeded",
+            task=task,
+            runtime="adk",
+            adk_agent_name=agent_name,
+            budget_type=budget_type,
+            reason=reason,
+            limit=limit,
+            observed=observed,
+            tool=tool_name,
+        )
 
     def _record_and_guard_adk_model_response(
         self,
@@ -1336,6 +1585,44 @@ def _safe_adk_id(value: str | None, *, fallback: str) -> str:
     if value is None or not value.strip():
         return fallback
     return value.strip()
+
+
+def _is_direct_quick_response_input(value: str) -> bool:
+    normalized = re.sub(r"\s+", " ", value.casefold()).strip()
+    return bool(_ADK_DIRECT_QUICK_RESPONSE_RE.fullmatch(normalized))
+
+
+def _increment_adk_state_counter(state: Any, key: str) -> int:
+    raw_value = state.get(key, 0)
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError):
+        value = 0
+    value += 1
+    state[key] = value
+    return value
+
+
+def _adk_state_text(state: Any, key: str) -> str | None:
+    value = state.get(key)
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    return text or None
+
+
+def _planned_branch_budget_response(*, agent_name: str, reason: str) -> LlmResponse:
+    text = (
+        f"{agent_name} stopped because {reason}. Use the evidence already "
+        "gathered in this branch and summarize the useful findings, gaps, and "
+        "uncertainties without calling more tools."
+    )
+    return LlmResponse(
+        content=genai_types.Content(
+            role="model",
+            parts=[genai_types.Part.from_text(text=text)],
+        )
+    )
 
 
 def _string_or_none(value: object) -> str | None:

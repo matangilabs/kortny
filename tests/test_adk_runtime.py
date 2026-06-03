@@ -207,6 +207,231 @@ def test_adk_runtime_builds_orchestrator_with_registry_worker(
     assert [getattr(tool, "name", None) for tool in worker_agent.tools] == ["echo_tool"]
 
 
+def test_adk_runtime_short_availability_check_uses_direct_quick_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    set_required_settings_env(monkeypatch)
+    monkeypatch.setenv("LLM_MODEL", "anthropic/sonnet-default")
+    monkeypatch.setenv("LLM_CHEAP_MODEL", "deepseek/deepseek-v4-flash")
+    settings = load_settings(env_file=None)
+    task = Task(
+        id=uuid.UUID("9c53f4e1-9d72-468d-ab18-5021d9e15dad"),
+        installation_id=uuid.UUID("1c53f4e1-9d72-468d-ab18-5021d9e15dad"),
+        slack_channel_id="D123",
+        slack_thread_ts="D123",
+        slack_user_id="U123",
+        input="Are you up?",
+    )
+    task_service = _FakeTaskService()
+    factory_called = False
+
+    def registry_factory() -> ToolRegistry:
+        nonlocal factory_called
+        factory_called = True
+        return ToolRegistry([_EchoTool()])
+
+    runtime = AdkAgentRuntime(
+        settings=settings,
+        session=cast(
+            Any,
+            _FakeScalarSession(
+                [
+                    {
+                        "message": "runtime_handoff_evaluated",
+                        "runtime_class": "quick_response",
+                        "selected_backend": "inline",
+                    },
+                    {
+                        "message": "planned_workflow_classified",
+                        "reason_codes": ["quick_conversation"],
+                    },
+                ]
+            ),
+        ),
+        task_service=cast(Any, task_service),
+        registry_factory=registry_factory,
+    )
+
+    agent = runtime._build_agent(task=task)
+
+    assert agent.name == "quick_response_agent"
+    assert agent.model.model == "openrouter/deepseek/deepseek-v4-flash"
+    assert not factory_called
+    assert task_service.events == [
+        (
+            task,
+            {
+                "message": "adk_quick_response_selected",
+                "runtime": "adk",
+                "agent": "quick_response_agent",
+                "reason": "runtime_handoff_quick_conversation",
+            },
+        )
+    ]
+
+
+def test_adk_runtime_tool_inventory_question_stays_orchestrated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    set_required_settings_env(monkeypatch)
+    settings = load_settings(env_file=None)
+    task = Task(
+        id=uuid.UUID("0c53f4e1-9d72-468d-ab18-5021d9e15dad"),
+        installation_id=uuid.UUID("1c53f4e1-9d72-468d-ab18-5021d9e15dad"),
+        slack_channel_id="D123",
+        slack_thread_ts="D123",
+        slack_user_id="U123",
+        input="What tools do you have?",
+    )
+    runtime = AdkAgentRuntime(
+        settings=settings,
+        session=cast(Any, _FakeScalarSession([])),
+        task_service=cast(Any, _FakeTaskService()),
+        registry=ToolRegistry([_EchoTool()]),
+    )
+
+    agent = runtime._build_agent(task=task)
+
+    assert agent.name == "kortny_root_orchestrator"
+
+
+def test_adk_runtime_planned_branch_model_budget_returns_stop_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    set_required_settings_env(monkeypatch)
+    monkeypatch.setenv("KORTNY_PLANNED_WORKFLOW_MAX_BRANCH_MODEL_CALLS", "2")
+    settings = load_settings(env_file=None)
+    task = Task(
+        id=uuid.UUID("ac53f4e1-9d72-468d-ab18-5021d9e15dad"),
+        installation_id=uuid.UUID("1c53f4e1-9d72-468d-ab18-5021d9e15dad"),
+        slack_channel_id="D123",
+        slack_thread_ts="D123",
+        slack_user_id="U123",
+        input="Research the top James Bond movies.",
+    )
+    task_service = _FakeTaskService()
+    task_service.tasks[task.id] = task
+    runtime = AdkAgentRuntime(
+        settings=settings,
+        session=cast(Any, _FakeScalarSession([])),
+        task_service=cast(Any, task_service),
+    )
+    callback_context = SimpleNamespace(
+        agent_name="planned_research_worker",
+        invocation_id="inv-model-budget",
+        state={"task_id": str(task.id)},
+    )
+
+    assert runtime._guard_planned_model_request(cast(Any, callback_context), object()) is None
+    assert runtime._guard_planned_model_request(cast(Any, callback_context), object()) is None
+    response = runtime._guard_planned_model_request(
+        cast(Any, callback_context),
+        object(),
+    )
+    repeated_response = runtime._guard_planned_model_request(
+        cast(Any, callback_context),
+        object(),
+    )
+
+    assert response is not None
+    assert repeated_response is not None
+    assert response.content is not None
+    assert response.content.parts is not None
+    assert response.content.parts[0].text is not None
+    assert "max_branch_model_calls_exceeded" in response.content.parts[0].text
+    budget_events = [
+        payload
+        for _, payload in task_service.events
+        if payload.get("message") == "adk_planned_branch_budget_exceeded"
+    ]
+    assert len(budget_events) == 1
+    assert budget_events[0] == {
+        "message": "adk_planned_branch_budget_exceeded",
+        "runtime": "adk",
+        "adk_agent_name": "planned_research_worker",
+        "adk_invocation_id": "inv-model-budget",
+        "budget_type": "model_calls",
+        "reason": "max_branch_model_calls_exceeded",
+        "limit": 2,
+        "observed": 3,
+    }
+
+
+def test_adk_runtime_planned_branch_tool_budget_blocks_tool_and_next_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    set_required_settings_env(monkeypatch)
+    monkeypatch.setenv("KORTNY_PLANNED_WORKFLOW_MAX_BRANCH_TOOL_CALLS", "1")
+    settings = load_settings(env_file=None)
+    task = Task(
+        id=uuid.UUID("bc53f4e1-9d72-468d-ab18-5021d9e15dad"),
+        installation_id=uuid.UUID("1c53f4e1-9d72-468d-ab18-5021d9e15dad"),
+        slack_channel_id="D123",
+        slack_thread_ts="D123",
+        slack_user_id="U123",
+        input="Research the top James Bond movies.",
+    )
+    task_service = _FakeTaskService()
+    task_service.tasks[task.id] = task
+    runtime = AdkAgentRuntime(
+        settings=settings,
+        session=cast(Any, _FakeScalarSession([])),
+        task_service=cast(Any, task_service),
+    )
+    callback_context = SimpleNamespace(
+        agent_name="planned_research_worker",
+        invocation_id="inv-tool-budget",
+        state={"task_id": str(task.id)},
+    )
+    tool = SimpleNamespace(name="composio_exa_search")
+
+    assert (
+        runtime._guard_planned_tool_call(
+            tool,
+            {"query": "best bond movies"},
+            cast(Any, callback_context),
+        )
+        is None
+    )
+    blocked_tool_result = runtime._guard_planned_tool_call(
+        tool,
+        {"query": "more bond rankings"},
+        cast(Any, callback_context),
+    )
+    model_response = runtime._guard_planned_model_request(
+        cast(Any, callback_context),
+        object(),
+    )
+
+    assert blocked_tool_result is not None
+    assert blocked_tool_result["budget_exhausted"] is True
+    assert blocked_tool_result["budget_type"] == "tool_calls"
+    assert blocked_tool_result["tool"] == "composio_exa_search"
+    assert model_response is not None
+    assert model_response.content is not None
+    assert model_response.content.parts is not None
+    assert model_response.content.parts[0].text is not None
+    assert "max_branch_tool_calls_exceeded" in model_response.content.parts[0].text
+    budget_events = [
+        payload
+        for _, payload in task_service.events
+        if payload.get("message") == "adk_planned_branch_budget_exceeded"
+    ]
+    assert budget_events == [
+        {
+            "message": "adk_planned_branch_budget_exceeded",
+            "runtime": "adk",
+            "adk_agent_name": "planned_research_worker",
+            "adk_invocation_id": "inv-tool-budget",
+            "budget_type": "tool_calls",
+            "reason": "max_branch_tool_calls_exceeded",
+            "limit": 1,
+            "observed": 2,
+            "tool": "composio_exa_search",
+        }
+    ]
+
+
 def test_adk_runtime_uses_cheaper_models_for_lightweight_specialists(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -482,6 +707,17 @@ class _FakeTaskService:
         return self.tasks.get(task_id)
 
 
+class _FakeScalarSession:
+    def __init__(self, payloads: list[JsonObject]) -> None:
+        self.rows = [SimpleNamespace(payload=payload) for payload in payloads]
+
+    def scalar(self, statement: object) -> object | None:
+        del statement
+        if not self.rows:
+            return None
+        return self.rows.pop(0)
+
+
 def set_required_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in (
         "SLACK_BOT_TOKEN",
@@ -496,6 +732,8 @@ def set_required_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "KORTNY_PLANNED_WORKFLOWS_ENABLED",
         "KORTNY_PLANNED_WORKFLOW_MAX_PARALLEL_BRANCHES",
         "KORTNY_PLANNED_WORKFLOW_COST_CEILING_USD",
+        "KORTNY_PLANNED_WORKFLOW_MAX_BRANCH_MODEL_CALLS",
+        "KORTNY_PLANNED_WORKFLOW_MAX_BRANCH_TOOL_CALLS",
         "POSTGRES_URL",
     ):
         monkeypatch.delenv(name, raising=False)

@@ -517,7 +517,12 @@ class AgentTaskExecutor:
                 model_route.reason,
             )
 
+            cached_registry: ToolRegistry | None = None
+
             def registry_factory() -> ToolRegistry:
+                nonlocal cached_registry
+                if cached_registry is not None:
+                    return cached_registry
                 registry = self._build_registry(
                     settings=settings,
                     session=session,
@@ -525,6 +530,7 @@ class AgentTaskExecutor:
                     task_service=task_service,
                     working_dir=working_dir,
                 )
+                cached_registry = registry
                 logger.info(
                     "agent executor registry ready task_id=%s runtime=adk_lazy tools=%s",
                     task.id,
@@ -1102,19 +1108,20 @@ class AgentTaskExecutor:
                 )
                 return
             logger.info("posting final message task_id=%s", task.id)
-            if _should_skip_response_humanizer(
+            skip_humanizer_reason = _response_humanizer_skip_reason(
                 settings=settings,
                 session=session,
                 task=task,
                 raw_text=result_summary,
-            ):
+            )
+            if skip_humanizer_reason is not None:
                 response_text = normalize_slack_mrkdwn(result_summary)
                 task_service.append_event(
                     task,
                     TaskEventType.log,
                     {
                         "message": "response_humanizer_skipped",
-                        "reason": "adk_quick_fast_path",
+                        "reason": skip_humanizer_reason,
                         "runtime": "adk",
                         "raw_chars": len(result_summary),
                         "output_chars": len(response_text),
@@ -1573,44 +1580,51 @@ def _task_events(session: Session, task: Task) -> tuple[TaskEvent, ...]:
     )
 
 
-def _should_skip_response_humanizer(
+def _response_humanizer_skip_reason(
     *,
     settings: Settings,
     session: Session,
     task: Task,
     raw_text: str,
-) -> bool:
-    """Return whether a trivial ADK response can bypass final synthesis."""
+) -> str | None:
+    """Return why an ADK response can bypass final synthesis, if applicable."""
 
     if settings.agent_runtime != "adk":
-        return False
-    if len(raw_text.strip()) >= settings.response_humanizer_min_chars:
-        return False
+        return None
 
     events = _task_events(session, task)
+    completed = _latest_payload_event(
+        events,
+        message="adk_runtime_completed",
+    )
+    if completed is not None and completed.get("final_author") == (
+        "planned_workflow_merger"
+    ):
+        return "adk_planned_merger_final"
+
+    if len(raw_text.strip()) >= settings.response_humanizer_min_chars:
+        return None
+
     if any(
         event.type in {TaskEventType.tool_call, TaskEventType.tool_result}
         for event in events
     ):
-        return False
+        return None
 
     route = _latest_payload_event(
         events,
         message="model_route_selected",
     )
     if route is None or route.get("runtime") != "adk":
-        return False
+        return None
     if route.get("tier") != ModelRouteTier.cheap_fast.value:
-        return False
-
-    completed = _latest_payload_event(
-        events,
-        message="adk_runtime_completed",
-    )
+        return None
     if completed is None:
-        return False
+        return None
     final_author = completed.get("final_author")
-    return final_author in ADK_QUICK_FINAL_AUTHORS
+    if final_author in ADK_QUICK_FINAL_AUTHORS:
+        return "adk_quick_fast_path"
+    return None
 
 
 def _latest_payload_event(
