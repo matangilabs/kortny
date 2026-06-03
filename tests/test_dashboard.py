@@ -2046,6 +2046,7 @@ def test_dashboard_knowledge_graph_refresh_queues_channel_assessment_tasks(
 
     assert response.status_code == 303
     assert "Queued+1+graph+refresh+assessment" in response.headers["location"]
+    assert "trusted+Slack+graph+facts" in response.headers["location"]
     session.refresh(membership)
     queued_task_id = uuid.UUID(membership.metadata_json["assessment_task_id"])
     queued_task = session.get(Task, queued_task_id)
@@ -2079,6 +2080,16 @@ def test_dashboard_knowledge_graph_refresh_queues_channel_assessment_tasks(
             == KG_CHANNEL_REFRESH_REQUESTED_MESSAGE,
         )
     )
+    channel_entity = session.scalar(
+        select(KnowledgeGraphEntity).where(
+            KnowledgeGraphEntity.installation_id == task.installation_id,
+            KnowledgeGraphEntity.canonical_key == "slack_channel:CRefresh",
+        )
+    )
+    assert channel_entity is not None
+    assert channel_entity.display_name == "#graph-refresh"
+    assert channel_entity.source_type == "slack_authoritative"
+    assert channel_entity.lifecycle_state == "active"
 
     duplicate_response = test_client.post(
         "/knowledge-graph/refresh",

@@ -15,8 +15,10 @@ from sqlalchemy.orm import Session
 from kortny.db.models import (
     KnowledgeGraphEdge,
     KnowledgeGraphEntity,
+    ObservationEvent,
     ObserveChannelProfile,
     SlackChannelMembership,
+    SlackIdentity,
     Task,
 )
 from kortny.knowledge_graph.provenance import with_provenance_attrs
@@ -27,6 +29,8 @@ CHANNEL_ENTITY_TYPE = "channel"
 CHANNEL_PROFILE_ENTITY_TYPE = "firm_fact"
 CHANNEL_PROFILE_RELATIONSHIP = "relates_to"
 KG_CHANNEL_PROFILE_PROJECTED_MESSAGE = "kg_channel_profile_projected"
+DETERMINISTIC_PROJECTION_KIND = "slack_deterministic_projection"
+DETERMINISTIC_OBSERVATION_LIMIT = 500
 SEMANTIC_PROJECTION_KIND = "channel_semantic_projection"
 SEMANTIC_PROJECTION_PREFIXES = (
     "channel_topic",
@@ -68,6 +72,24 @@ class KnowledgeGraphProjectionResult:
 
 
 @dataclass(frozen=True)
+class KnowledgeGraphDeterministicProjectionResult:
+    channel_count: int
+    person_count: int
+    artifact_count: int
+    membership_edge_count: int
+    artifact_edge_count: int
+    evidence_count: int
+
+    @property
+    def entity_count(self) -> int:
+        return self.channel_count + self.person_count + self.artifact_count
+
+    @property
+    def edge_count(self) -> int:
+        return self.membership_edge_count + self.artifact_edge_count
+
+
+@dataclass(frozen=True)
 class SemanticReviewDecision:
     lifecycle_state: str
     review_status: str
@@ -84,6 +106,160 @@ class KnowledgeGraphExtractionService:
     def __init__(self, session: Session) -> None:
         self.session = session
         self.graph = GraphService(session)
+
+    def project_deterministic_workspace_facts(
+        self,
+        *,
+        installation_id: uuid.UUID | None = None,
+        observation_limit: int = DETERMINISTIC_OBSERVATION_LIMIT,
+    ) -> KnowledgeGraphDeterministicProjectionResult:
+        """Project trusted Slack DB facts into graph rows without LLM inference."""
+
+        memberships = self._active_memberships(installation_id=installation_id)
+        if not memberships:
+            return KnowledgeGraphDeterministicProjectionResult(
+                channel_count=0,
+                person_count=0,
+                artifact_count=0,
+                membership_edge_count=0,
+                artifact_edge_count=0,
+                evidence_count=0,
+            )
+
+        membership_by_key = {
+            (membership.installation_id, membership.channel_id): membership
+            for membership in memberships
+        }
+        observations = self._recent_observations(
+            installation_id=installation_id,
+            channel_ids={membership.channel_id for membership in memberships},
+            limit=observation_limit,
+        )
+        identity_map = self._identity_map(
+            installation_ids={membership.installation_id for membership in memberships}
+            | {observation.installation_id for observation in observations},
+            user_ids={
+                user_id
+                for membership in memberships
+                for user_id in (membership.added_by_user_id,)
+                if user_id
+            }
+            | {observation.user_id for observation in observations if observation.user_id},
+        )
+
+        channel_entities: dict[
+            tuple[uuid.UUID, str], KnowledgeGraphEntity
+        ] = {}
+        channel_count = 0
+        person_count = 0
+        artifact_count = 0
+        membership_edge_count = 0
+        artifact_edge_count = 0
+        evidence_count = 0
+
+        for membership in memberships:
+            channel_entity, _created = self._upsert_deterministic_channel_entity(
+                membership=membership,
+            )
+            channel_entities[(membership.installation_id, membership.channel_id)] = (
+                channel_entity
+            )
+            channel_count += 1
+            evidence_count += 1
+
+            if membership.added_by_user_id:
+                identity = identity_map.get(
+                    (membership.installation_id, membership.added_by_user_id)
+                )
+                if not _skip_identity(identity):
+                    self._upsert_deterministic_person_entity(
+                        membership=membership,
+                        user_id=membership.added_by_user_id,
+                        identity=identity,
+                        observation=None,
+                        source_reason="app_added_by_user",
+                    )
+                    person_count += 1
+                    evidence_count += 1
+
+        seen_user_pairs: set[tuple[uuid.UUID, str, str]] = set()
+        seen_file_pairs: set[tuple[uuid.UUID, str, str]] = set()
+        for observation in observations:
+            membership = membership_by_key.get(
+                (observation.installation_id, observation.channel_id)
+            )
+            channel_entity = channel_entities.get(
+                (observation.installation_id, observation.channel_id)
+            )
+            if membership is None or channel_entity is None:
+                continue
+
+            if observation.user_id:
+                user_pair = (
+                    observation.installation_id,
+                    observation.channel_id,
+                    observation.user_id,
+                )
+                if user_pair not in seen_user_pairs:
+                    seen_user_pairs.add(user_pair)
+                    identity = identity_map.get(
+                        (observation.installation_id, observation.user_id)
+                    )
+                    if not _skip_identity(identity):
+                        person_entity, _created = (
+                            self._upsert_deterministic_person_entity(
+                                membership=membership,
+                                user_id=observation.user_id,
+                                identity=identity,
+                                observation=observation,
+                                source_reason="observed_channel_participation",
+                            )
+                        )
+                        person_count += 1
+                        evidence_count += 1
+                        self._upsert_deterministic_membership_edge(
+                            membership=membership,
+                            person_entity=person_entity,
+                            channel_entity=channel_entity,
+                            observation=observation,
+                        )
+                        membership_edge_count += 1
+                        evidence_count += 1
+
+            if observation.file_id:
+                file_pair = (
+                    observation.installation_id,
+                    observation.channel_id,
+                    observation.file_id,
+                )
+                if file_pair not in seen_file_pairs:
+                    seen_file_pairs.add(file_pair)
+                    artifact_entity, _created = (
+                        self._upsert_deterministic_file_artifact(
+                            membership=membership,
+                            observation=observation,
+                        )
+                    )
+                    artifact_count += 1
+                    evidence_count += 1
+                    self._upsert_deterministic_file_edge(
+                        membership=membership,
+                        artifact_entity=artifact_entity,
+                        channel_entity=channel_entity,
+                        observation=observation,
+                    )
+                    artifact_edge_count += 1
+                    evidence_count += 1
+
+        self.session.flush()
+        return KnowledgeGraphDeterministicProjectionResult(
+            channel_count=channel_count,
+            person_count=person_count,
+            artifact_count=artifact_count,
+            membership_edge_count=membership_edge_count,
+            artifact_edge_count=artifact_edge_count,
+            evidence_count=evidence_count,
+        )
 
     def project_channel_profile(
         self,
@@ -213,6 +389,263 @@ class KnowledgeGraphExtractionService:
             evidence=_channel_evidence(task, membership),
         )
         return entity, True
+
+    def _active_memberships(
+        self,
+        *,
+        installation_id: uuid.UUID | None,
+    ) -> list[SlackChannelMembership]:
+        predicates = [SlackChannelMembership.membership_status == "active"]
+        if installation_id is not None:
+            predicates.append(SlackChannelMembership.installation_id == installation_id)
+        return list(
+            self.session.scalars(
+                select(SlackChannelMembership)
+                .where(*predicates)
+                .order_by(
+                    SlackChannelMembership.last_seen_at.desc(),
+                    SlackChannelMembership.channel_id,
+                )
+            )
+        )
+
+    def _recent_observations(
+        self,
+        *,
+        installation_id: uuid.UUID | None,
+        channel_ids: set[str],
+        limit: int,
+    ) -> list[ObservationEvent]:
+        if not channel_ids:
+            return []
+        predicates = [
+            ObservationEvent.purged_at.is_(None),
+            ObservationEvent.channel_id.in_(channel_ids),
+        ]
+        if installation_id is not None:
+            predicates.append(ObservationEvent.installation_id == installation_id)
+        return list(
+            self.session.scalars(
+                select(ObservationEvent)
+                .where(*predicates)
+                .order_by(ObservationEvent.observed_at.desc(), ObservationEvent.id)
+                .limit(limit)
+            )
+        )
+
+    def _identity_map(
+        self,
+        *,
+        installation_ids: set[uuid.UUID],
+        user_ids: set[str | None],
+    ) -> dict[tuple[uuid.UUID, str], SlackIdentity]:
+        cleaned_user_ids = {user_id for user_id in user_ids if user_id}
+        if not installation_ids or not cleaned_user_ids:
+            return {}
+        rows = self.session.scalars(
+            select(SlackIdentity).where(
+                SlackIdentity.installation_id.in_(installation_ids),
+                SlackIdentity.kind == "user",
+                SlackIdentity.slack_id.in_(cleaned_user_ids),
+            )
+        )
+        return {
+            (identity.installation_id, identity.slack_id): identity
+            for identity in rows
+        }
+
+    def _upsert_deterministic_channel_entity(
+        self,
+        *,
+        membership: SlackChannelMembership,
+    ) -> tuple[KnowledgeGraphEntity, bool]:
+        attrs = {
+            "kind": DETERMINISTIC_PROJECTION_KIND,
+            "deterministic_kind": "active_slack_channel",
+            "review_status": AUTO_REVIEW_STATUS,
+            "channel_id": membership.channel_id,
+            "channel_name": membership.channel_name,
+            "channel_type": membership.channel_type,
+            "membership_status": membership.membership_status,
+            "discovered_via": membership.discovered_via,
+            "membership_id": str(membership.id),
+            "first_seen_at": _isoformat(membership.first_seen_at),
+            "last_seen_at": _isoformat(membership.last_seen_at),
+            "onboarding_status": membership.onboarding_status,
+        }
+        return self._upsert_entity(
+            installation_id=membership.installation_id,
+            entity_type=CHANNEL_ENTITY_TYPE,
+            canonical_key=_channel_canonical_key(membership.channel_id),
+            display_name=_channel_display_name(membership),
+            external_ref_type="slack_channel",
+            external_ref_id=membership.channel_id,
+            attrs_json=attrs,
+            visibility_scope=_scope_for_membership(membership),
+            source_type="slack_authoritative",
+            lifecycle_state="active",
+            confidence_score=Decimal("1.000"),
+            confidence_reason="Slack channel membership is authoritative.",
+            freshness_window_days=30,
+            evidence=_membership_evidence(membership),
+        )
+
+    def _upsert_deterministic_person_entity(
+        self,
+        *,
+        membership: SlackChannelMembership,
+        user_id: str,
+        identity: SlackIdentity | None,
+        observation: ObservationEvent | None,
+        source_reason: str,
+    ) -> tuple[KnowledgeGraphEntity, bool]:
+        attrs = {
+            "kind": DETERMINISTIC_PROJECTION_KIND,
+            "deterministic_kind": "observed_slack_user",
+            "review_status": AUTO_REVIEW_STATUS,
+            "slack_user_id": user_id,
+            "channel_id": membership.channel_id,
+            "source_reason": source_reason,
+            "identity_display_name": identity.display_name if identity else None,
+            "identity_raw_name": identity.raw_name if identity else None,
+            "identity_is_bot": identity.is_bot if identity else None,
+            "identity_is_deleted": identity.is_deleted if identity else None,
+            "last_observed_at": _isoformat(observation.observed_at)
+            if observation is not None
+            else None,
+        }
+        confidence = Decimal("0.950") if identity is not None else Decimal("0.850")
+        return self._upsert_entity(
+            installation_id=membership.installation_id,
+            entity_type="person",
+            canonical_key=_channel_user_canonical_key(membership.channel_id, user_id),
+            display_name=_user_display_name(user_id=user_id, identity=identity),
+            external_ref_type="slack_user",
+            external_ref_id=user_id,
+            attrs_json=attrs,
+            visibility_scope=_scope_for_membership(membership),
+            source_type="slack_authoritative",
+            lifecycle_state="active",
+            confidence_score=confidence,
+            confidence_reason="Observed Slack user participation in a scoped channel.",
+            freshness_window_days=30,
+            evidence=_person_evidence(membership, user_id, identity, observation),
+        )
+
+    def _upsert_deterministic_file_artifact(
+        self,
+        *,
+        membership: SlackChannelMembership,
+        observation: ObservationEvent,
+    ) -> tuple[KnowledgeGraphEntity, bool]:
+        assert observation.file_id is not None
+        attrs = {
+            "kind": DETERMINISTIC_PROJECTION_KIND,
+            "deterministic_kind": "observed_slack_file",
+            "review_status": AUTO_REVIEW_STATUS,
+            "slack_file_id": observation.file_id,
+            "channel_id": membership.channel_id,
+            "message_ts": observation.message_ts,
+            "thread_ts": observation.thread_ts,
+            "text_preview": observation.text_preview,
+            "observed_at": _isoformat(observation.observed_at),
+            "visibility_metadata": observation.visibility_metadata,
+        }
+        return self._upsert_entity(
+            installation_id=membership.installation_id,
+            entity_type="artifact",
+            canonical_key=_channel_file_canonical_key(
+                membership.channel_id,
+                observation.file_id,
+            ),
+            display_name=_file_display_name(observation.file_id),
+            external_ref_type="slack_file",
+            external_ref_id=observation.file_id,
+            attrs_json=attrs,
+            visibility_scope=_scope_for_membership(membership),
+            source_type="slack_authoritative",
+            lifecycle_state="active",
+            confidence_score=Decimal("0.950"),
+            confidence_reason="Observed Slack file share in a scoped channel.",
+            freshness_window_days=30,
+            evidence=_observation_evidence(
+                observation,
+                raw_snippet=f"Slack file {observation.file_id} was shared in {membership.channel_id}.",
+            ),
+        )
+
+    def _upsert_deterministic_membership_edge(
+        self,
+        *,
+        membership: SlackChannelMembership,
+        person_entity: KnowledgeGraphEntity,
+        channel_entity: KnowledgeGraphEntity,
+        observation: ObservationEvent,
+    ) -> tuple[KnowledgeGraphEdge, bool]:
+        return self._upsert_edge(
+            installation_id=membership.installation_id,
+            source_entity_id=person_entity.id,
+            target_entity_id=channel_entity.id,
+            relationship_type="member_of",
+            visibility_scope=_scope_for_membership(membership),
+            source_type="slack_authoritative",
+            lifecycle_state="active",
+            confidence_score=Decimal("0.850"),
+            confidence_reason="User was observed posting or joining in this channel.",
+            freshness_window_days=30,
+            attrs_json={
+                "kind": DETERMINISTIC_PROJECTION_KIND,
+                "deterministic_kind": "observed_channel_participation",
+                "review_status": AUTO_REVIEW_STATUS,
+                "channel_id": membership.channel_id,
+                "slack_user_id": observation.user_id,
+                "event_type": observation.event_type,
+                "message_ts": observation.message_ts,
+            },
+            evidence=_observation_evidence(
+                observation,
+                raw_snippet=(
+                    observation.text_preview
+                    or f"Slack user {observation.user_id} was observed in {membership.channel_id}."
+                ),
+            ),
+        )
+
+    def _upsert_deterministic_file_edge(
+        self,
+        *,
+        membership: SlackChannelMembership,
+        artifact_entity: KnowledgeGraphEntity,
+        channel_entity: KnowledgeGraphEntity,
+        observation: ObservationEvent,
+    ) -> tuple[KnowledgeGraphEdge, bool]:
+        return self._upsert_edge(
+            installation_id=membership.installation_id,
+            source_entity_id=artifact_entity.id,
+            target_entity_id=channel_entity.id,
+            relationship_type="referenced_in",
+            visibility_scope=_scope_for_membership(membership),
+            source_type="slack_authoritative",
+            lifecycle_state="active",
+            confidence_score=Decimal("0.950"),
+            confidence_reason="Slack file share was observed in this channel.",
+            freshness_window_days=30,
+            attrs_json={
+                "kind": DETERMINISTIC_PROJECTION_KIND,
+                "deterministic_kind": "file_referenced_in_channel",
+                "review_status": AUTO_REVIEW_STATUS,
+                "channel_id": membership.channel_id,
+                "slack_file_id": observation.file_id,
+                "message_ts": observation.message_ts,
+            },
+            evidence=_observation_evidence(
+                observation,
+                raw_snippet=(
+                    observation.text_preview
+                    or f"Slack file {observation.file_id} was shared in {membership.channel_id}."
+                ),
+            ),
+        )
 
     def _upsert_channel_profile_entity(
         self,
@@ -415,14 +848,16 @@ class KnowledgeGraphExtractionService:
         confidence_reason: str,
         freshness_window_days: int | None,
         evidence: EvidenceInput,
+        external_ref_type: str | None = None,
+        external_ref_id: str | None = None,
     ) -> tuple[KnowledgeGraphEntity, bool]:
         existing = self._current_entity_by_key(installation_id, canonical_key)
         if existing is not None:
             self._reinforce_entity(
                 existing,
                 display_name=display_name,
-                external_ref_type=existing.external_ref_type,
-                external_ref_id=existing.external_ref_id,
+                external_ref_type=external_ref_type or existing.external_ref_type,
+                external_ref_id=external_ref_id or existing.external_ref_id,
                 attrs_json=attrs_json,
                 visibility_scope=visibility_scope,
                 source_type=source_type,
@@ -438,6 +873,8 @@ class KnowledgeGraphExtractionService:
             entity_type=entity_type,
             canonical_key=canonical_key,
             display_name=display_name,
+            external_ref_type=external_ref_type,
+            external_ref_id=external_ref_id,
             attrs_json=attrs_json,
             visibility_scope=visibility_scope,
             source_type=source_type,
@@ -617,6 +1054,100 @@ def _channel_canonical_key(channel_id: str) -> str:
 
 def _profile_canonical_key(channel_id: str) -> str:
     return f"channel_profile:{channel_id}"
+
+
+def _channel_user_canonical_key(channel_id: str, user_id: str) -> str:
+    return f"slack_channel_user:{channel_id}:{user_id}"
+
+
+def _channel_file_canonical_key(channel_id: str, file_id: str) -> str:
+    return f"slack_channel_file:{channel_id}:{file_id}"
+
+
+def _user_display_name(*, user_id: str, identity: SlackIdentity | None) -> str:
+    if identity is not None and identity.display_name:
+        return identity.display_name
+    return user_id
+
+
+def _file_display_name(file_id: str) -> str:
+    return f"Slack file {file_id}"
+
+
+def _skip_identity(identity: SlackIdentity | None) -> bool:
+    return bool(identity is not None and (identity.is_deleted or identity.is_bot))
+
+
+def _isoformat(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    return value.isoformat()
+
+
+def _bounded_snippet(value: str | None, fallback: str) -> str:
+    snippet = re.sub(r"\s+", " ", value or "").strip()
+    if not snippet:
+        snippet = fallback
+    return snippet[:1000]
+
+
+def _membership_evidence(membership: SlackChannelMembership) -> EvidenceInput:
+    return EvidenceInput(
+        source_type="slack_authoritative",
+        extracted_by="slack_channel_membership",
+        source_slack_channel_id=membership.channel_id,
+        source_slack_message_ts=membership.onboarding_message_ts,
+        raw_snippet=f"Kortny is active in Slack channel {membership.channel_id}.",
+        confidence_score=Decimal("1.000"),
+        confidence_reason="Slack channel membership row.",
+    )
+
+
+def _person_evidence(
+    membership: SlackChannelMembership,
+    user_id: str,
+    identity: SlackIdentity | None,
+    observation: ObservationEvent | None,
+) -> EvidenceInput:
+    if observation is not None:
+        return _observation_evidence(
+            observation,
+            raw_snippet=(
+                observation.text_preview
+                or f"Slack user {user_id} was observed in {membership.channel_id}."
+            ),
+        )
+    display_name = _user_display_name(user_id=user_id, identity=identity)
+    return EvidenceInput(
+        source_type="slack_authoritative",
+        extracted_by="slack_channel_membership",
+        source_slack_channel_id=membership.channel_id,
+        source_slack_message_ts=membership.onboarding_message_ts,
+        raw_snippet=(
+            f"{display_name} ({user_id}) is associated with channel "
+            f"{membership.channel_id} because they added Kortny."
+        ),
+        confidence_score=Decimal("0.900"),
+        confidence_reason="Slack channel membership added-by user row.",
+    )
+
+
+def _observation_evidence(
+    observation: ObservationEvent,
+    *,
+    raw_snippet: str,
+) -> EvidenceInput:
+    return EvidenceInput(
+        source_type="slack_authoritative",
+        extracted_by="slack_observation_event",
+        source_observation_id=observation.id,
+        source_slack_channel_id=observation.channel_id,
+        source_slack_message_ts=observation.message_ts,
+        source_slack_file_id=observation.file_id,
+        raw_snippet=_bounded_snippet(raw_snippet, "Slack observation event."),
+        confidence_score=Decimal("0.900"),
+        confidence_reason="Slack observation event recorded by Kortny.",
+    )
 
 
 def _profile_attrs(profile: ObserveChannelProfile) -> dict[str, Any]:

@@ -10,7 +10,13 @@ from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from kortny.db.models import KnowledgeGraphEntity, KnowledgeGraphEvidence, Task
+from kortny.db.models import (
+    KnowledgeGraphEntity,
+    KnowledgeGraphEvidence,
+    SlackChannelMembership,
+    SlackIdentity,
+    Task,
+)
 from kortny.knowledge_graph.scopes import DestinationSurface
 from kortny.knowledge_graph.service import (
     GraphService,
@@ -85,7 +91,7 @@ class QueryWorkspaceGraphTool:
         limit = _bounded_int(args.get("limit", 20), default=20, minimum=1, maximum=50)
         include_evidence = _optional_bool(args.get("include_evidence", True))
 
-        destination = _destination_for_task(self.task)
+        destination = _destination_for_task(self.session, self.task)
         pack = self.graph.query_current_context(
             installation_id=self.task.installation_id,
             destination=destination,
@@ -169,13 +175,39 @@ class QueryWorkspaceGraphTool:
         )
 
 
-def _destination_for_task(task: Task) -> DestinationSurface:
+def _destination_for_task(session: Session, task: Task) -> DestinationSurface:
     channel_id = task.slack_channel_id
     if channel_id.startswith("D"):
         return DestinationSurface.dm(channel_id, user_id=task.slack_user_id)
-    if channel_id.startswith("G"):
+
+    if _is_private_channel(session, task):
         return DestinationSurface.private_channel(channel_id)
     return DestinationSurface.channel(channel_id)
+
+
+def _is_private_channel(session: Session, task: Task) -> bool:
+    channel_id = task.slack_channel_id
+    if channel_id.startswith("G"):
+        return True
+
+    membership = session.scalar(
+        select(SlackChannelMembership).where(
+            SlackChannelMembership.installation_id == task.installation_id,
+            SlackChannelMembership.channel_id == channel_id,
+        )
+    )
+    channel_type = (membership.channel_type or "").lower() if membership else ""
+    if channel_type in {"group", "private_channel", "private"}:
+        return True
+
+    identity = session.scalar(
+        select(SlackIdentity).where(
+            SlackIdentity.installation_id == task.installation_id,
+            SlackIdentity.kind == "channel",
+            SlackIdentity.slack_id == channel_id,
+        )
+    )
+    return bool(identity and identity.is_private)
 
 
 def _default_anchor_key(task: Task) -> str | None:

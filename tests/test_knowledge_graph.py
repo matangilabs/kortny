@@ -7,7 +7,7 @@ from decimal import Decimal
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import Engine, delete
+from sqlalchemy import Engine, delete, select
 from sqlalchemy.orm import Session
 
 from kortny.db.models import (
@@ -15,6 +15,9 @@ from kortny.db.models import (
     KnowledgeGraphEdge,
     KnowledgeGraphEntity,
     KnowledgeGraphEvidence,
+    ObservationEvent,
+    SlackChannelMembership,
+    SlackIdentity,
     Task,
 )
 from kortny.db.session import make_engine, make_session_factory, normalize_database_url
@@ -22,6 +25,7 @@ from kortny.knowledge_graph import (
     DestinationSurface,
     EvidenceInput,
     GraphService,
+    KnowledgeGraphExtractionService,
     VisibilityScope,
     is_scope_compatible,
 )
@@ -419,11 +423,217 @@ def test_query_workspace_graph_tool_returns_scope_safe_provenance_and_evidence(
     assert result.output["relationships"][0]["provenance"]["label"] == "Extracted"
 
 
+def test_query_workspace_graph_tool_treats_private_c_channel_as_private_scope(
+    db_session: Session,
+) -> None:
+    installation = create_installation(db_session)
+    db_session.add(
+        SlackChannelMembership(
+            installation_id=installation.id,
+            channel_id="C_PRIVATE",
+            channel_name="private-project",
+            channel_type="group",
+            membership_status="active",
+            discovered_via="app_mention",
+            added_by_user_id="U_A",
+            onboarding_status="posted",
+            metadata_json={},
+        )
+    )
+    db_session.add(
+        SlackIdentity(
+            installation_id=installation.id,
+            kind="channel",
+            slack_id="C_PRIVATE",
+            display_name="#private-project",
+            raw_name="private-project",
+            is_private=True,
+            raw_json={"id": "C_PRIVATE", "is_private": True},
+        )
+    )
+    task = Task(
+        installation_id=installation.id,
+        slack_channel_id="C_PRIVATE",
+        slack_thread_ts="111.222",
+        slack_user_id="U_A",
+        input="what do you know about this channel?",
+    )
+    db_session.add(task)
+    db_session.flush()
+    graph = GraphService(db_session)
+    channel = add_entity(
+        graph,
+        installation,
+        entity_type="channel",
+        canonical_key="slack_channel:C_PRIVATE",
+        display_name="#private-project",
+        visibility_scope=VisibilityScope.private_channel("C_PRIVATE"),
+    )
+    profile = graph.create_entity(
+        installation_id=installation.id,
+        entity_type="firm_fact",
+        canonical_key="channel_profile:C_PRIVATE",
+        display_name="Private project channel profile",
+        visibility_scope=VisibilityScope.private_channel("C_PRIVATE"),
+        source_type="onboarding_scan",
+        lifecycle_state="active",
+        confidence_score=Decimal("0.700"),
+        evidence=evidence("Private project channel is used for roadmap work."),
+    )
+    graph.create_edge(
+        installation_id=installation.id,
+        source_entity_id=channel.id,
+        target_entity_id=profile.id,
+        relationship_type="relates_to",
+        visibility_scope=VisibilityScope.private_channel("C_PRIVATE"),
+        source_type="onboarding_scan",
+        lifecycle_state="active",
+        confidence_score=Decimal("0.700"),
+        evidence=evidence("#private-project relates to roadmap work."),
+    )
+    db_session.commit()
+
+    result = QueryWorkspaceGraphTool(session=db_session, task=task).invoke(
+        {"anchor_keys": ["slack_channel:C_PRIVATE"], "include_evidence": True}
+    )
+
+    assert result.output["successful"] is True
+    assert result.output["destination"]["surface_type"] == "private_channel"
+    assert result.output["entity_count"] >= 2
+    entity_keys_output = {row["canonical_key"] for row in result.output["entities"]}
+    assert "slack_channel:C_PRIVATE" in entity_keys_output
+    assert "channel_profile:C_PRIVATE" in entity_keys_output
+    assert result.output["relationships"][0]["visibility_scope"] == {
+        "type": "private_channel",
+        "id": "C_PRIVATE",
+    }
+
+
+def test_deterministic_projection_builds_scoped_slack_workspace_facts(
+    db_session: Session,
+) -> None:
+    installation = create_installation(db_session)
+    membership = SlackChannelMembership(
+        installation_id=installation.id,
+        channel_id="CGraphDet",
+        channel_name="graph-deterministic",
+        channel_type="channel",
+        membership_status="active",
+        discovered_via="message_observation",
+        added_by_user_id="UAdded",
+        onboarding_status="posted",
+        onboarding_message_ts="1780000000.000000",
+        metadata_json={},
+    )
+    db_session.add(membership)
+    db_session.add(
+        SlackIdentity(
+            installation_id=installation.id,
+            kind="user",
+            slack_id="UDet",
+            display_name="Aneesh Melkot",
+            raw_name="aneesh",
+            raw_json={"id": "UDet", "profile": {"real_name": "Aneesh Melkot"}},
+            refreshed_at=datetime(2026, 6, 2, 13, tzinfo=UTC),
+            last_seen_at=datetime(2026, 6, 2, 13, tzinfo=UTC),
+        )
+    )
+    db_session.add(
+        ObservationEvent(
+            installation_id=installation.id,
+            slack_team_id=installation.slack_team_id,
+            channel_id="CGraphDet",
+            user_id="UDet",
+            event_type="file_share",
+            slack_event_id="EvGraphDet",
+            message_ts="1780000010.000000",
+            thread_ts="1780000010.000000",
+            file_id="FDet",
+            raw_payload_checksum="graph-det-checksum",
+            text_preview="Uploaded roadmap.csv for review.",
+            visibility_metadata={
+                "scope_type": "channel",
+                "scope_id": "CGraphDet",
+                "file_count": 1,
+            },
+            observed_at=datetime(2026, 6, 2, 13, 5, tzinfo=UTC),
+        )
+    )
+    db_session.commit()
+
+    result = KnowledgeGraphExtractionService(
+        db_session
+    ).project_deterministic_workspace_facts(installation_id=installation.id)
+    db_session.commit()
+
+    assert result.channel_count == 1
+    assert result.person_count == 2
+    assert result.artifact_count == 1
+    assert result.membership_edge_count == 1
+    assert result.artifact_edge_count == 1
+
+    rows = {
+        entity.canonical_key: entity
+        for entity in db_session.scalars(
+            select(KnowledgeGraphEntity).where(
+                KnowledgeGraphEntity.installation_id == installation.id
+            )
+        )
+    }
+    assert rows["slack_channel:CGraphDet"].display_name == "#graph-deterministic"
+    assert rows["slack_channel:CGraphDet"].source_type == "slack_authoritative"
+    assert rows["slack_channel:CGraphDet"].lifecycle_state == "active"
+    assert rows["slack_channel_user:CGraphDet:UDet"].display_name == "Aneesh Melkot"
+    assert rows["slack_channel_user:CGraphDet:UDet"].visibility_scope_type == "channel"
+    assert rows["slack_channel_user:CGraphDet:UDet"].visibility_scope_id == "CGraphDet"
+    assert "slack_channel_file:CGraphDet:FDet" in rows
+
+    relationships = {
+        edge.relationship_type
+        for edge in db_session.scalars(
+            select(KnowledgeGraphEdge).where(
+                KnowledgeGraphEdge.installation_id == installation.id
+            )
+        )
+    }
+    assert relationships == {"member_of", "referenced_in"}
+    assert db_session.scalar(
+        select(KnowledgeGraphEvidence.id).where(
+            KnowledgeGraphEvidence.source_observation_id.is_not(None),
+            KnowledgeGraphEvidence.source_slack_channel_id == "CGraphDet",
+            KnowledgeGraphEvidence.source_slack_file_id == "FDet",
+        )
+    )
+
+    pack = GraphService(db_session).retrieve_current_context(
+        installation_id=installation.id,
+        destination=DestinationSurface.channel("CGraphDet"),
+        anchor_keys=("slack_channel:CGraphDet",),
+        max_hops=1,
+        max_items=20,
+    )
+    assert {
+        "slack_channel:CGraphDet",
+        "slack_channel_user:CGraphDet:UDet",
+        "slack_channel_file:CGraphDet:FDet",
+    }.issubset(entity_keys(pack))
+    assert (
+        GraphService(db_session).scope_guard_violations(
+            pack,
+            DestinationSurface.channel("CGraphDet"),
+        )
+        == ()
+    )
+
+
 def cleanup_database(session: Session) -> None:
     for model in (
         KnowledgeGraphEvidence,
         KnowledgeGraphEdge,
         KnowledgeGraphEntity,
+        ObservationEvent,
+        SlackChannelMembership,
+        SlackIdentity,
         Task,
         Installation,
     ):

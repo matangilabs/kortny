@@ -2264,10 +2264,15 @@ def _graph_refresh_notice(result: object) -> str:
     queued_count = getattr(result, "queued_count", 0)
     skipped_count = getattr(result, "skipped_count", 0)
     known_channel_count = getattr(result, "known_channel_count", 0)
+    deterministic_entity_count = getattr(result, "deterministic_entity_count", 0)
+    deterministic_edge_count = getattr(result, "deterministic_edge_count", 0)
     pieces = [
         f"Queued {queued_count:,} graph refresh assessment"
         f"{'' if queued_count == 1 else 's'}"
     ]
+    deterministic_count = deterministic_entity_count + deterministic_edge_count
+    if deterministic_count:
+        pieces.append(f"projected {deterministic_count:,} trusted Slack graph facts")
     if skipped_count:
         pieces.append(f"skipped {skipped_count:,} already active or recent")
     pieces.append(f"across {known_channel_count:,} known active channel")

@@ -1,8 +1,11 @@
 import os
 import uuid
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from google.adk.models.llm_response import LlmResponse
+from google.genai import types as genai_types
 
 from kortny.agent.adk_runtime import AdkAgentRuntime, adk_litellm_model_name
 from kortny.config import load_settings
@@ -157,6 +160,7 @@ def test_adk_runtime_prompts_keep_single_kortny_persona(
 
     assert "Speak as Kortny, a single Slack-native coworker" in root_instruction
     assert "use tool_worker_agent when it is available" in root_instruction
+    assert "Do not call or invent Slack posting/reply tools" in root_instruction
     assert "Speak as Kortny, a single Slack-native coworker" in quick_instruction
     assert "Do not say actual tool access lives in another agent" in quick_instruction
     assert "answer as Kortny" in worker_instruction
@@ -386,6 +390,67 @@ def test_adk_runtime_registry_factory_is_lazy(
     ]
 
 
+def test_adk_runtime_suppresses_direct_slack_post_tool_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    set_required_settings_env(monkeypatch)
+    settings = load_settings(env_file=None)
+    task = Task(
+        id=uuid.UUID("8c53f4e1-9d72-468d-ab18-5021d9e15dad"),
+        installation_id=uuid.UUID("1c53f4e1-9d72-468d-ab18-5021d9e15dad"),
+        slack_channel_id="C123",
+        slack_thread_ts="123.456",
+        slack_user_id="U123",
+        input="what do you know about this channel?",
+    )
+    task_service = _FakeTaskService()
+    task_service.tasks[task.id] = task
+    runtime = AdkAgentRuntime(
+        settings=settings,
+        session=cast(Any, None),
+        task_service=cast(Any, task_service),
+        registry=ToolRegistry([_EchoTool()]),
+    )
+    callback_context = SimpleNamespace(
+        agent_name="planned_workspace_worker",
+        invocation_id="inv-test",
+        state={"task_id": str(task.id)},
+    )
+    response = LlmResponse(
+        content=genai_types.Content(
+            role="model",
+            parts=[
+                genai_types.Part(
+                    function_call=genai_types.FunctionCall(
+                        name="slack_post_message",
+                        args={"text": "Channel summary here."},
+                    )
+                ),
+            ],
+        )
+    )
+
+    guarded = runtime._record_and_guard_adk_model_response(
+        cast(Any, callback_context),
+        response,
+    )
+
+    assert guarded is not None
+    assert guarded.content is not None
+    assert [part.text for part in guarded.content.parts or []] == [
+        "Channel summary here."
+    ]
+    assert all(part.function_call is None for part in guarded.content.parts or [])
+    assert task_service.events[0][1] == {
+        "message": "adk_disallowed_tool_call_suppressed",
+        "runtime": "adk",
+        "adk_agent_name": "planned_workspace_worker",
+        "adk_invocation_id": "inv-test",
+        "tool_names": ["slack_post_message"],
+        "reason": "direct_slack_posting_is_worker_owned",
+    }
+
+
 class _EchoTool:
     name = "echo_tool"
     description = "Echoes provided text."
@@ -402,6 +467,7 @@ class _EchoTool:
 class _FakeTaskService:
     def __init__(self) -> None:
         self.events: list[tuple[Task, JsonObject]] = []
+        self.tasks: dict[uuid.UUID, Task] = {}
 
     def append_event(
         self,
@@ -411,6 +477,9 @@ class _FakeTaskService:
     ) -> None:
         del event_type
         self.events.append((task, payload))
+
+    def get_task(self, task_id: uuid.UUID) -> Task | None:
+        return self.tasks.get(task_id)
 
 
 def set_required_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:

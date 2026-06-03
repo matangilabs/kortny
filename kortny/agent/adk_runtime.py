@@ -55,6 +55,18 @@ ADK_PLANNED_BRANCH_MODEL_TIER = ModelRouteTier.cheap_fast
 ADK_PLANNED_MERGER_MODEL_TIER = ModelRouteTier.standard
 OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
 OPENROUTER_MODELS_TIMEOUT_SECONDS = 5.0
+ADK_DISALLOWED_DIRECT_SLACK_TOOL_NAMES = frozenset(
+    {
+        "chatpostmessage",
+        "replyinslack",
+        "sendslackmessage",
+        "slackchatpostmessage",
+        "slackpostmessage",
+        "slackpostreply",
+        "slackreply",
+        "slacksendmessage",
+    }
+)
 ADK_SINGLE_PERSONA_PROMPT = """User-facing identity rules:
 - Speak as Kortny, a single Slack-native coworker. Use first person when
   describing capabilities or limitations.
@@ -65,6 +77,8 @@ ADK_SINGLE_PERSONA_PROMPT = """User-facing identity rules:
 - If asked what tools, integrations, or capabilities you have, answer as Kortny:
   describe what you can access now from available tools/context, and state any
   uncertainty plainly without implying there is a separate Kortny elsewhere.
+- Do not call or invent Slack posting/reply tools. Kortny's worker posts your
+  final answer to Slack after the runtime returns text.
 """
 ADK_TEXT_ONLY_SYSTEM_PROMPT = """You are Kortny, a Slack-native AI coworker answering inside Slack.
 
@@ -453,7 +467,7 @@ class AdkAgentRuntime:
             instruction=self._instruction(context_package=context_package),
             description="Routes Slack requests to Kortny specialist agents.",
             tools=[AgentTool(agent=agent) for agent in specialist_agents],
-            after_model_callback=self._record_adk_model_usage,
+            after_model_callback=self._record_and_guard_adk_model_response,
             mode="chat",
         )
 
@@ -660,7 +674,7 @@ class AdkAgentRuntime:
                 _instruction_with_persona(prompt), context
             ),
             description=description,
-            after_model_callback=self._record_adk_model_usage,
+            after_model_callback=self._record_and_guard_adk_model_response,
             mode="chat",
         )
 
@@ -677,7 +691,7 @@ class AdkAgentRuntime:
                 "web/current data, documents, integrations, and multi-step work."
             ),
             tools=self._worker_tools(task=task),
-            after_model_callback=self._record_adk_model_usage,
+            after_model_callback=self._record_and_guard_adk_model_response,
             mode="chat",
         )
 
@@ -702,7 +716,7 @@ class AdkAgentRuntime:
             description=description,
             tools=tools,
             output_key=output_key,
-            after_model_callback=self._record_adk_model_usage,
+            after_model_callback=self._record_and_guard_adk_model_response,
             mode="chat",
         )
 
@@ -776,6 +790,19 @@ class AdkAgentRuntime:
 
     def _adk_model_name(self) -> str:
         return adk_litellm_model_name(self.settings, model=self.model)
+
+    def _record_and_guard_adk_model_response(
+        self,
+        callback_context: CallbackContext,
+        llm_response: LlmResponse,
+    ) -> LlmResponse | None:
+        """Record usage, then suppress direct Slack-post tool calls from ADK."""
+
+        self._record_adk_model_usage(callback_context, llm_response)
+        return self._suppress_direct_slack_post_tool_calls(
+            callback_context,
+            llm_response,
+        )
 
     def _record_adk_model_usage(
         self,
@@ -857,6 +884,89 @@ class AdkAgentRuntime:
                 pricing_missing=pricing_missing,
             )
         return None
+
+    def _suppress_direct_slack_post_tool_calls(
+        self,
+        callback_context: CallbackContext,
+        llm_response: LlmResponse,
+    ) -> LlmResponse | None:
+        """Prevent ADK from executing hallucinated Slack posting tools.
+
+        Slack posting is a worker-side effect in Kortny: ADK should return final
+        text and let the worker post it. ADK resolves function calls before
+        ``before_tool_callback`` runs, so this after-model callback is the last
+        safe place to remove an invented direct-posting function call.
+        """
+
+        content = llm_response.content
+        if content is None:
+            return None
+        parts = list(content.parts or [])
+        if not parts:
+            return None
+
+        kept_parts: list[genai_types.Part] = []
+        suppressed_names: list[str] = []
+        suppressed_texts: list[str] = []
+        for part in parts:
+            tool_name = _adk_part_tool_call_name(part)
+            if _is_disallowed_direct_slack_tool_name(tool_name):
+                suppressed_names.append(str(tool_name))
+                text_arg = _adk_part_tool_call_text_arg(part)
+                if text_arg is not None:
+                    suppressed_texts.append(text_arg)
+                continue
+            kept_parts.append(part)
+
+        if not suppressed_names:
+            return None
+
+        if not kept_parts:
+            text = "\n\n".join(suppressed_texts).strip()
+            if not text:
+                text = (
+                    "I can respond here directly, but I do not have the "
+                    "drafted text from that Slack posting tool call."
+                )
+            kept_parts.append(
+                genai_types.Part.from_text(text=text)
+            )
+
+        task = self._task_from_callback_context(callback_context)
+        if task is not None:
+            payload = {
+                "message": "adk_disallowed_tool_call_suppressed",
+                "runtime": "adk",
+                "adk_agent_name": callback_context.agent_name,
+                "adk_invocation_id": callback_context.invocation_id,
+                "tool_names": suppressed_names,
+                "reason": "direct_slack_posting_is_worker_owned",
+            }
+            self.task_service.append_event(task, TaskEventType.log, payload)
+            log_observation(
+                logger,
+                "adk_disallowed_tool_call_suppressed",
+                task=task,
+                runtime="adk",
+                adk_agent_name=callback_context.agent_name,
+                tool_names=suppressed_names,
+                reason="direct_slack_posting_is_worker_owned",
+            )
+
+        new_content = genai_types.Content(
+            role=content.role,
+            parts=kept_parts,
+        )
+        return llm_response.model_copy(update={"content": new_content})
+
+    def _task_from_callback_context(
+        self,
+        callback_context: CallbackContext,
+    ) -> Task | None:
+        task_id = _task_id_from_context(callback_context)
+        if task_id is None or self.task_service is None:
+            return None
+        return self.task_service.get_task(task_id)
 
     def _record_planned_cost_ceiling_if_exceeded(self, task: Task) -> None:
         if not self.settings.planned_workflows_enabled:
@@ -1093,6 +1203,49 @@ def _event_text(event: Any) -> str:
         if isinstance(text, str) and text:
             texts.append(text)
     return "\n".join(texts)
+
+
+def _adk_part_tool_call_name(part: genai_types.Part) -> str | None:
+    function_call = getattr(part, "function_call", None)
+    if function_call is None:
+        function_call = getattr(part, "functionCall", None)
+    if function_call is None:
+        return None
+    name = getattr(function_call, "name", None)
+    if not isinstance(name, str) or not name.strip():
+        return None
+    return name.strip()
+
+
+def _adk_part_tool_call_text_arg(part: genai_types.Part) -> str | None:
+    function_call = getattr(part, "function_call", None)
+    if function_call is None:
+        function_call = getattr(part, "functionCall", None)
+    if function_call is None:
+        return None
+    raw_args = getattr(function_call, "args", None)
+    if raw_args is None:
+        return None
+    try:
+        args = dict(raw_args)
+    except (TypeError, ValueError):
+        return None
+    for key in ("text", "message", "content", "response"):
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _is_disallowed_direct_slack_tool_name(tool_name: str | None) -> bool:
+    if tool_name is None:
+        return False
+    normalized = _normalized_adk_tool_name(tool_name)
+    return normalized in ADK_DISALLOWED_DIRECT_SLACK_TOOL_NAMES
+
+
+def _normalized_adk_tool_name(tool_name: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", tool_name.lower())
 
 
 def _instruction_with_optional_context(prompt: str, context: str | None) -> str:

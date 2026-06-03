@@ -44,6 +44,9 @@ class KnowledgeGraphRefreshResult:
 
     known_channel_count: int
     queued_task_ids: tuple[uuid.UUID, ...]
+    deterministic_entity_count: int = 0
+    deterministic_edge_count: int = 0
+    deterministic_evidence_count: int = 0
     skipped_reasons: dict[str, int] = field(default_factory=dict)
 
     @property
@@ -76,6 +79,13 @@ class KnowledgeGraphRefreshService:
         skipped_reasons: dict[str, int] = {}
         requested_at = now or datetime.now(UTC)
         memberships = self._active_memberships(installation_id=installation_id)
+        from kortny.knowledge_graph.extraction import KnowledgeGraphExtractionService
+
+        deterministic_projection = (
+            KnowledgeGraphExtractionService(
+                self.session
+            ).project_deterministic_workspace_facts(installation_id=installation_id)
+        )
 
         for membership in memberships:
             skip_reason = self._skip_reason(membership, now=requested_at)
@@ -92,6 +102,9 @@ class KnowledgeGraphRefreshService:
         return KnowledgeGraphRefreshResult(
             known_channel_count=len(memberships),
             queued_task_ids=tuple(queued_task_ids),
+            deterministic_entity_count=deterministic_projection.entity_count,
+            deterministic_edge_count=deterministic_projection.edge_count,
+            deterministic_evidence_count=deterministic_projection.evidence_count,
             skipped_reasons=skipped_reasons,
         )
 
