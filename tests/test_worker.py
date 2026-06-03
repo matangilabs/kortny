@@ -54,9 +54,12 @@ from kortny.knowledge_graph import (
     KG_CHANNEL_REFRESH_SEMANTIC_EXTRACTED_MESSAGE,
     KG_CHANNEL_REFRESH_SEMANTIC_FALLBACK_MESSAGE,
     KG_REFRESH_SOURCE,
+    KG_RUNTIME_CONTEXT_REINFORCED_MESSAGE,
     DestinationSurface,
+    EvidenceInput,
     GraphService,
     KnowledgeGraphExtractionService,
+    VisibilityScope,
 )
 from kortny.llm import ChatMessage, Completion, TokenUsage, ToolCall
 from kortny.llm.routing import ModelRoute, ModelRouteTier
@@ -1846,6 +1849,193 @@ def test_synthesis_context_uses_graph_profile_despite_memory_no_match(
     )
 
 
+def test_agent_executor_reinforces_graph_rows_used_in_delivered_answer(
+    db_session: Session,
+    worker_session_factory: sessionmaker[Session],
+    tmp_path: Path,
+) -> None:
+    claim_time = datetime(2026, 6, 3, 10, 15, tzinfo=UTC)
+    task = create_task(db_session, event_id="EvRuntimeGraphReinforcement")
+    task.input = "what do you know about how this channel is used, and why?"
+    task.available_at = claim_time - timedelta(seconds=1)
+    db_session.add(
+        ModelPricing(
+            provider=LLMProvider.openrouter,
+            model="openai/gpt-4o-mini",
+            input_price_per_mtok=Decimal("1.000000"),
+            output_price_per_mtok=Decimal("2.000000"),
+            effective_from=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+    )
+    graph = GraphService(db_session)
+    channel = graph.create_entity(
+        installation_id=task.installation_id,
+        entity_type="channel",
+        canonical_key="slack_channel:C123",
+        display_name="#rag",
+        visibility_scope=VisibilityScope.channel("C123"),
+        source_type="slack_authoritative",
+        lifecycle_state="active",
+        confidence_score=Decimal("1.000"),
+        confidence_reason="Slack channel membership is authoritative.",
+        evidence=EvidenceInput(
+            source_type="slack_authoritative",
+            extracted_by="test",
+            source_slack_channel_id="C123",
+            raw_snippet="Kortny is active in #rag.",
+            confidence_score=Decimal("1.000"),
+        ),
+    )
+    profile = graph.create_entity(
+        installation_id=task.installation_id,
+        entity_type="firm_fact",
+        canonical_key="channel_profile:C123",
+        display_name="AI assistant testing and Linear task management",
+        visibility_scope=VisibilityScope.channel("C123"),
+        source_type="onboarding_scan",
+        lifecycle_state="active",
+        confidence_score=Decimal("0.750"),
+        confidence_reason="Repeated channel assessment sample.",
+        evidence=EvidenceInput(
+            source_type="onboarding_scan",
+            extracted_by="test",
+            source_task_id=task.id,
+            raw_snippet="The channel is used for AI assistant testing and Linear lookups.",
+            confidence_score=Decimal("0.750"),
+        ),
+    )
+    relation = graph.create_edge(
+        installation_id=task.installation_id,
+        source_entity_id=channel.id,
+        target_entity_id=profile.id,
+        relationship_type="relates_to",
+        visibility_scope=VisibilityScope.channel("C123"),
+        source_type="onboarding_scan",
+        lifecycle_state="active",
+        confidence_score=Decimal("0.750"),
+        confidence_reason="Channel profile projection.",
+        evidence=EvidenceInput(
+            source_type="onboarding_scan",
+            extracted_by="test",
+            source_task_id=task.id,
+            raw_snippet="#rag relates to AI assistant testing and Linear task work.",
+            confidence_score=Decimal("0.750"),
+        ),
+    )
+    db_session.commit()
+
+    raw_answer = (
+        "This channel looks like a Kortny testing and task-management workspace. "
+        "I believe that because the graph profile says it is used for AI "
+        "assistant testing and Linear task management, and the channel-profile "
+        "relationship ties that profile directly to #rag."
+    )
+    humanized_answer = (
+        "This channel reads like a Kortny testing and task-management space.\n\n"
+        "Why I believe that: I have a channel profile tied to #rag that points "
+        "to AI assistant testing and Linear task-management work."
+    )
+    slack_client = FakeSlackClient()
+    provider = FakeAgentProvider(
+        [
+            Completion(
+                content=None,
+                tool_calls=(
+                    ToolCall(
+                        id="call-graph",
+                        name="query_workspace_graph",
+                        arguments={
+                            "anchor_keys": ["slack_channel:C123"],
+                            "include_evidence": True,
+                            "max_hops": 1,
+                            "limit": 10,
+                        },
+                    ),
+                ),
+                usage=TokenUsage(input_tokens=260, output_tokens=45),
+                model="openai/gpt-4o-mini",
+            ),
+            Completion(
+                content=raw_answer,
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=520, output_tokens=80),
+                model="openai/gpt-4o-mini",
+            ),
+            Completion(
+                content=humanized_answer,
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=640, output_tokens=90),
+                model="openai/gpt-4o-mini",
+            ),
+        ]
+    )
+
+    result = TaskWorker(
+        session_factory=worker_session_factory,
+        worker_id="agent-worker-test",
+        executor=AgentTaskExecutor(
+            settings=make_settings(),
+            llm_provider=provider,
+            provider_name=LLMProvider.openrouter,
+            slack_client=slack_client,
+            workspace_base_dir=tmp_path,
+        ),
+    ).run_once(now=claim_time)
+
+    db_session.refresh(task)
+    db_session.refresh(channel)
+    db_session.refresh(profile)
+    db_session.refresh(relation)
+    events = task_events(db_session, task)
+    reinforcement_event = next(
+        event
+        for event in events
+        if event.payload.get("message") == KG_RUNTIME_CONTEXT_REINFORCED_MESSAGE
+    )
+    message_event = next(
+        event for event in events if event.type is TaskEventType.message_posted
+    )
+    profile_evidence = db_session.scalar(
+        select(KnowledgeGraphEvidence).where(
+            KnowledgeGraphEvidence.target_kind == "entity",
+            KnowledgeGraphEvidence.target_id == profile.id,
+            KnowledgeGraphEvidence.source_type == "task_summary",
+            KnowledgeGraphEvidence.source_task_id == task.id,
+        )
+    )
+    edge_evidence = db_session.scalar(
+        select(KnowledgeGraphEvidence).where(
+            KnowledgeGraphEvidence.target_kind == "edge",
+            KnowledgeGraphEvidence.target_id == relation.id,
+            KnowledgeGraphEvidence.source_type == "task_summary",
+            KnowledgeGraphEvidence.source_task_id == task.id,
+        )
+    )
+
+    assert result.status == TaskStatus.succeeded.value, task.error
+    assert slack_client.messages == [
+        {
+            "channel": "C123",
+            "text": humanized_answer,
+            "thread_ts": "EvRuntimeGraphReinforcement",
+        }
+    ]
+    assert channel.reinforcement_count == 1
+    assert profile.reinforcement_count == 1
+    assert relation.reinforcement_count == 1
+    assert profile.last_reinforced_at is not None
+    assert relation.last_reinforced_at is not None
+    assert reinforcement_event.payload["entity_count"] == 2
+    assert reinforcement_event.payload["edge_count"] == 1
+    assert reinforcement_event.payload["evidence_count"] == 3
+    assert reinforcement_event.payload["message_event_id"] == message_event.id
+    assert profile_evidence is not None
+    assert profile_evidence.source_task_event_id == message_event.id
+    assert profile_evidence.source_slack_message_ts == message_event.payload["message_ts"]
+    assert "Runtime graph context was used" in (profile_evidence.raw_snippet or "")
+    assert edge_evidence is not None
+
+
 def test_agent_executor_removes_ack_reaction_after_success(
     db_session: Session,
     worker_session_factory: sessionmaker[Session],
@@ -2990,6 +3180,8 @@ def make_settings(brave_search_api_key: str = "brave-key") -> Settings:
             "LLM_PROVIDER": SettingsLLMProvider.openrouter,
             "LLM_API_KEY": "openrouter-key",
             "LLM_MODEL": "openai/gpt-4o-mini",
+            "AGENT_RUNTIME": "custom",
+            "KORTNY_WORKFLOW_BACKEND": "inline",
             "BRAVE_SEARCH_API_KEY": brave_search_api_key,
             "POSTGRES_URL": "postgresql://kortny:kortny@localhost/kortny",
         }

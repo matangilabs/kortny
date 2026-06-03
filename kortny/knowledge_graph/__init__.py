@@ -9,6 +9,11 @@ from __future__ import annotations
 from importlib import import_module
 from typing import Any
 
+from kortny.knowledge_graph.reinforcement import (
+    KG_RUNTIME_CONTEXT_REINFORCED_MESSAGE,
+    RuntimeGraphReinforcementResult,
+    RuntimeGraphReinforcementService,
+)
 from kortny.knowledge_graph.scopes import (
     DestinationSurface,
     VisibilityScope,
@@ -61,6 +66,7 @@ __all__ = [
     "KG_CHANNEL_REFRESH_REQUESTED_MESSAGE",
     "KG_CHANNEL_PROFILE_PROJECTED_MESSAGE",
     "KG_REFRESH_SOURCE",
+    "KG_RUNTIME_CONTEXT_REINFORCED_MESSAGE",
     "ChannelGraphRefreshPipeline",
     "ChannelGraphRefreshPipelineResult",
     "KnowledgeGraphRefreshResult",
@@ -70,6 +76,8 @@ __all__ = [
     "KnowledgeGraphProjectionResult",
     "RetrievedGraphEdge",
     "RetrievedGraphEntity",
+    "RuntimeGraphReinforcementResult",
+    "RuntimeGraphReinforcementService",
     "VisibilityScope",
     "compatible_scope_predicate",
     "is_dashboard_graph_refresh_task",

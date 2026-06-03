@@ -28,8 +28,10 @@ from kortny.db.models import LLMProvider as DbLLMProvider
 from kortny.execution import task_workspace
 from kortny.knowledge_graph import (
     KG_CHANNEL_PROFILE_PROJECTED_MESSAGE,
+    KG_RUNTIME_CONTEXT_REINFORCED_MESSAGE,
     ChannelGraphRefreshPipeline,
     KnowledgeGraphExtractionService,
+    RuntimeGraphReinforcementService,
     is_dashboard_graph_refresh_task,
 )
 from kortny.llm import LLMProvider, LLMService, ModelRouter, create_llm_provider
@@ -197,6 +199,11 @@ class AgentTaskExecutor:
                     task=task,
                     task_service=task_service,
                     result_summary=agent_result.result_summary,
+                )
+                self._reinforce_runtime_graph_context(
+                    session=session,
+                    task=task,
+                    task_service=task_service,
                 )
                 self._mark_channel_assessment_completed(
                     session=session,
@@ -1219,6 +1226,52 @@ class AgentTaskExecutor:
                 "profile_id": str(profile.id),
                 "profile_version": profile.profile_version,
             },
+        )
+
+    def _reinforce_runtime_graph_context(
+        self,
+        *,
+        session: Session,
+        task: Task,
+        task_service: TaskService,
+    ) -> None:
+        """Best-effort reinforcement for graph rows used in delivered answers."""
+
+        try:
+            result = RuntimeGraphReinforcementService(session).reinforce_task_context(
+                task
+            )
+        except Exception as exc:
+            task_service.append_event(
+                task,
+                TaskEventType.error,
+                {
+                    "message": "kg_runtime_context_reinforcement_failed",
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                },
+            )
+            log_observation(
+                logger,
+                "kg_runtime_context_reinforcement_failed",
+                level=logging.WARNING,
+                task=task,
+                error_type=type(exc).__name__,
+                error_summary=str(exc)[:500],
+            )
+            return
+
+        if result.reinforced_count <= 0:
+            return
+        task_service.append_event(task, TaskEventType.log, result.to_payload())
+        log_observation(
+            logger,
+            KG_RUNTIME_CONTEXT_REINFORCED_MESSAGE,
+            task=task,
+            entity_count=result.entity_count,
+            edge_count=result.edge_count,
+            evidence_count=result.evidence_count,
+            duplicate_count=result.duplicate_count,
         )
 
     def _mark_channel_assessment_failed(
