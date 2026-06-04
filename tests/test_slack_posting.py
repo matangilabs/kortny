@@ -46,14 +46,16 @@ class FakeSlackClient:
         channel: str,
         text: str,
         thread_ts: str | None = None,
+        blocks: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        self.messages.append(
-            {
-                "channel": channel,
-                "text": text,
-                "thread_ts": thread_ts,
-            }
-        )
+        message = {
+            "channel": channel,
+            "text": text,
+            "thread_ts": thread_ts,
+        }
+        if blocks is not None:
+            message["blocks"] = blocks
+        self.messages.append(message)
         return {"ok": True, "ts": f"1716400001.{len(self.messages):06d}"}
 
     def files_upload_v2(
@@ -93,14 +95,16 @@ class FakeSlackSdkResponseClient(FakeSlackClient):
         channel: str,
         text: str,
         thread_ts: str | None = None,
+        blocks: list[dict[str, Any]] | None = None,
     ) -> FakeSlackSdkResponse:
-        self.messages.append(
-            {
-                "channel": channel,
-                "text": text,
-                "thread_ts": thread_ts,
-            }
-        )
+        message = {
+            "channel": channel,
+            "text": text,
+            "thread_ts": thread_ts,
+        }
+        if blocks is not None:
+            message["blocks"] = blocks
+        self.messages.append(message)
         return FakeSlackSdkResponse(
             {"ok": True, "ts": f"1716400001.{len(self.messages):06d}"}
         )
@@ -201,6 +205,47 @@ def test_post_message_allows_scheduled_channel_root_delivery(
             "thread_ts": None,
         }
     ]
+
+
+def test_post_message_records_blocks_in_outbox_and_event(db_session: Session) -> None:
+    task = create_task(db_session)
+    client = FakeSlackClient()
+    blocks = [
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Pause"},
+                    "action_id": "kortny_schedule_pause",
+                    "value": "schedule-id",
+                }
+            ],
+        }
+    ]
+
+    SlackPoster(session=db_session, client=client).post_message(
+        SlackThread.from_task(task),
+        "Done.",
+        purpose="schedule_created",
+        blocks=blocks,
+    )
+
+    event = db_session.scalar(
+        select(TaskEvent).where(
+            TaskEvent.task_id == task.id,
+            TaskEvent.type == TaskEventType.message_posted,
+        )
+    )
+    side_effect = db_session.scalar(
+        select(SlackSideEffect).where(SlackSideEffect.task_id == task.id)
+    )
+
+    assert client.messages[0]["blocks"] == blocks
+    assert event is not None
+    assert event.payload["blocks"] == blocks
+    assert side_effect is not None
+    assert side_effect.request_json["blocks"] == blocks
 
 
 def test_post_message_in_dm_posts_without_thread_ts(db_session: Session) -> None:

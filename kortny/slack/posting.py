@@ -37,6 +37,7 @@ class SlackPostingClient(Protocol):
         channel: str,
         text: str,
         thread_ts: str | None = None,
+        blocks: list[dict[str, Any]] | None = None,
     ) -> Mapping[str, Any]:
         """Post a Slack message."""
 
@@ -93,6 +94,7 @@ class SlackPoster:
         text: str,
         *,
         purpose: str = "result",
+        blocks: list[dict[str, Any]] | None = None,
     ) -> str:
         """Post text into a Slack thread and return the Slack message ts."""
 
@@ -135,10 +137,18 @@ class SlackPoster:
                     channel=thread.channel_id,
                     text=slack_text,
                     thread_ts=post_thread_ts,
+                    blocks=blocks,
                 )
             else:
                 task = self._resolve_task(thread.task_id)
                 idempotency_key = slack_message_key(task.id, purpose)
+                request: dict[str, Any] = {
+                    "channel": thread.channel_id,
+                    "text": slack_text,
+                    "thread_ts": post_thread_ts,
+                }
+                if blocks is not None:
+                    request["blocks"] = blocks
                 result = SlackSideEffectOutbox(self.session).deliver(
                     installation_id=task.installation_id,
                     task_id=task.id,
@@ -147,15 +157,12 @@ class SlackPoster:
                     purpose=purpose,
                     target_channel_id=thread.channel_id,
                     target_thread_ts=post_thread_ts,
-                    request={
-                        "channel": thread.channel_id,
-                        "text": slack_text,
-                        "thread_ts": post_thread_ts,
-                    },
+                    request=request,
                     call=lambda: self.client.chat_postMessage(
                         channel=thread.channel_id,
                         text=slack_text,
                         thread_ts=post_thread_ts,
+                        blocks=blocks,
                     ),
                 )
                 response = result.response
@@ -187,6 +194,7 @@ class SlackPoster:
                     "purpose": purpose,
                     "slack_side_effect_id": side_effect_id,
                     "idempotency_key": idempotency_key,
+                    "blocks": blocks,
                 },
             )
         return message_ts

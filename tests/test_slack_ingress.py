@@ -74,12 +74,15 @@ class FakeSlackClient:
         channel: str,
         text: str,
         thread_ts: str | None = None,
+        blocks: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         call = {
             "channel": channel,
             "text": text,
             "thread_ts": thread_ts,
         }
+        if blocks is not None:
+            call["blocks"] = blocks
         self.calls.append(call)
         return {
             "ok": True,
@@ -800,6 +803,13 @@ def test_dm_scheduling_request_creates_active_schedule(
     assert "Schedule id" not in client.calls[0]["text"]
     assert "Budget cap" not in client.calls[0]["text"]
     assert "proposed schedule" not in client.calls[0]["text"]
+    blocks = client.calls[0]["blocks"]
+    assert blocks[0]["type"] == "actions"
+    assert [item["text"]["text"] for item in blocks[0]["elements"]] == [
+        "Pause",
+        "Change",
+        "Cancel",
+    ]
 
     events = task_events(db_session, task)
     assert any(
@@ -816,6 +826,57 @@ def test_dm_scheduling_request_creates_active_schedule(
         and event.payload.get("purpose") == "schedule_created"
     )
     assert message_event.payload["text"] == client.calls[0]["text"]
+
+
+def test_schedule_pause_button_pauses_active_schedule(
+    db_session: Session,
+) -> None:
+    client = FakeSlackClient()
+    ingress = SlackIngress(
+        session=db_session,
+        client=client,
+        intent_classifier=FakeIntentClassifier(intent_decision()),
+        reaction_provider=FakeReactionProvider(name="calendar", intent="scheduled"),
+    )
+    created = ingress.handle_dm(
+        body=message_body(event_id="EvScheduleButtonCreate"),
+        event=dm_event(
+            text="Every morning send me a market update",
+            ts="1716500200.000001",
+        ),
+    )
+    db_session.commit()
+    schedule = db_session.scalar(select(Schedule))
+    assert created is not None
+    assert schedule is not None
+    assert schedule.status == "active"
+
+    result = ingress.handle_schedule_action(
+        body=schedule_action_body(
+            channel_id="D123",
+            user_id="U123",
+            message_ts="1716500200.000001",
+        ),
+        action={
+            "action_id": "kortny_schedule_pause",
+            "value": str(schedule.id),
+        },
+    )
+    db_session.commit()
+
+    db_session.refresh(schedule)
+    assert result.handled is True
+    assert schedule.status == "paused"
+    assert len(client.calls) == 2
+    assert "Paused that scheduled task" in client.calls[1]["text"]
+    task = result.task
+    assert task is not None
+    events = task_events(db_session, task)
+    assert any(
+        event.payload.get("message") == "schedule_paused"
+        and event.payload.get("schedule_id") == str(schedule.id)
+        for event in events
+    )
 
 
 def test_channel_scheduling_request_defaults_to_thread_delivery(
@@ -2133,6 +2194,21 @@ def message_body(*, event_id: str | None = None) -> dict[str, Any]:
     return {
         "event_id": event_id or f"Ev{uuid.uuid4().hex}",
         "team_id": "T123",
+    }
+
+
+def schedule_action_body(
+    *,
+    channel_id: str,
+    user_id: str,
+    message_ts: str,
+    team_id: str = "T123",
+) -> dict[str, Any]:
+    return {
+        "team": {"id": team_id},
+        "user": {"id": user_id},
+        "channel": {"id": channel_id},
+        "message": {"ts": message_ts},
     }
 
 

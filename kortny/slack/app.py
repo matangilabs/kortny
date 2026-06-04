@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Callable
 from typing import Any, TypeVar
 
@@ -20,6 +21,7 @@ from kortny.observability import configure_tracing, record_span_exception, start
 from kortny.slack.acknowledgement import LLMAcknowledgementGenerator
 from kortny.slack.ingress import SlackIngress, is_bare_app_mention
 from kortny.slack.outbox import SlackSideEffectOutbox
+from kortny.slack.schedule_blocks import SCHEDULE_ACTION_PREFIX
 
 T = TypeVar("T")
 logger = logging.getLogger(__name__)
@@ -219,6 +221,38 @@ def create_bolt_app(
 
         acknowledge_then_handle(ack, handle)
 
+    @app.action(re.compile(f"^{re.escape(SCHEDULE_ACTION_PREFIX)}"))
+    def handle_schedule_action(
+        ack: Callable[[], None],
+        body: dict[str, Any],
+        action: dict[str, Any],
+        client: Any,
+        logger: Any,
+    ) -> None:
+        def handle() -> None:
+            with start_span(
+                "slack.ingress.schedule_action",
+                attributes={
+                    "slack.action_id": action.get("action_id"),
+                    "slack.team_id": _action_body_team_id(body),
+                },
+            ):
+                try:
+                    with session_scope(session_factory) as session:
+                        SlackIngress(
+                            session=session,
+                            client=client,
+                        ).handle_schedule_action(
+                            body=body,
+                            action=action,
+                        )
+                except Exception as exc:
+                    record_span_exception(exc)
+                    logger.exception("Failed to process Slack schedule action")
+                    raise
+
+        acknowledge_then_handle(ack, handle)
+
     return app
 
 
@@ -245,6 +279,16 @@ def _pre_task_intent_classifier(settings: Settings) -> LLMIntentClassifier:
     return LLMIntentClassifier(
         provider=create_llm_provider(settings, model=model_route.model)
     )
+
+
+def _action_body_team_id(body: dict[str, Any]) -> str | None:
+    team = body.get("team")
+    if isinstance(team, dict):
+        team_id = team.get("id")
+        if isinstance(team_id, str):
+            return team_id
+    team_id = body.get("team_id")
+    return team_id if isinstance(team_id, str) else None
 
 
 def _recover_stale_side_effects_on_start(

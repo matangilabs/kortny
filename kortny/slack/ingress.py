@@ -19,6 +19,7 @@ from kortny.approvals import (
 )
 from kortny.db.models import (
     Installation,
+    Schedule,
     SlackInboundEvent,
     Task,
     TaskEvent,
@@ -84,6 +85,15 @@ from kortny.slack.reactions import (
     LibraryReactionProvider,
     ReactionProvider,
 )
+from kortny.slack.schedule_blocks import (
+    SCHEDULE_ACTION_ACTIVATE,
+    SCHEDULE_ACTION_CANCEL,
+    SCHEDULE_ACTION_CHANGE,
+    SCHEDULE_ACTION_PAUSE,
+    SCHEDULE_ACTION_RESUME,
+    parse_schedule_action_value,
+    schedule_action_blocks,
+)
 from kortny.tasks import TaskIdentity, TaskService
 
 LEADING_MENTION_RE = re.compile(r"^\s*<@[^>]+>\s*")
@@ -129,6 +139,7 @@ class SlackPostMessageClient(Protocol):
         channel: str,
         text: str,
         thread_ts: str | None = None,
+        blocks: list[dict[str, Any]] | None = None,
     ) -> Mapping[str, Any]:
         """Post a Slack message and return the API response."""
 
@@ -153,6 +164,17 @@ class ReactionResult:
     reason: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class ScheduleActionResult:
+    """Result of a Slack schedule button action."""
+
+    handled: bool
+    action: str
+    task: Task | None = None
+    reason: str | None = None
+    message_ts: str | None = None
+
+
 class SlackIngress:
     """Turns Slack trigger events into queued tasks."""
 
@@ -175,6 +197,111 @@ class SlackIngress:
         self.reaction_provider = reaction_provider or LibraryReactionProvider()
         self.intent_classifier = intent_classifier
         self.inbound_events = SlackInboundEventService(session)
+
+    def handle_schedule_action(
+        self,
+        *,
+        body: Mapping[str, Any],
+        action: Mapping[str, Any],
+    ) -> ScheduleActionResult:
+        """Handle Slack Block Kit buttons for schedule management."""
+
+        action_id = action.get("action_id")
+        if not isinstance(action_id, str):
+            return ScheduleActionResult(handled=False, action="unknown", reason="missing_action_id")
+        schedule_id = parse_schedule_action_value(action.get("value"))
+        if schedule_id is None:
+            return ScheduleActionResult(handled=False, action=action_id, reason="invalid_schedule_id")
+
+        user_id = _action_user_id(body)
+        channel_id = _action_channel_id(body)
+        message_ts = _action_message_ts(body)
+        team_id = _action_team_id(body)
+        installation = self._get_or_create_installation(team_id)
+        task = self.task_service.create_task(
+            installation_id=installation.id,
+            slack_channel_id=channel_id,
+            slack_user_id=user_id,
+            slack_thread_ts=message_ts,
+            slack_message_ts=None,
+            input=f"schedule button action {action_id} {schedule_id}",
+            identity=TaskIdentity.synthetic(
+                source="slack_schedule_action",
+                source_id=f"{action_id}:{schedule_id}:{user_id}:{message_ts}",
+                input_text=f"schedule button action {action_id} {schedule_id}",
+                payload={
+                    "action_id": action_id,
+                    "schedule_id": str(schedule_id),
+                    "channel_id": channel_id,
+                    "message_ts": message_ts,
+                    "user_id": user_id,
+                },
+            ),
+            source_surface="slack_action",
+        )
+        context = ScheduleCreationContext(
+            installation_id=installation.id,
+            slack_channel_id=channel_id,
+            slack_user_id=user_id,
+            slack_thread_ts=message_ts,
+            source_surface="slack_action",
+            source_task_id=task.id,
+        )
+
+        if action_id == SCHEDULE_ACTION_CHANGE:
+            response_text = (
+                "Tell me the change in this thread, like "
+                "`change that schedule to every weekday morning`."
+            )
+            message_purpose = "schedule_change_guidance"
+        else:
+            command_text = _schedule_action_command_text(
+                action_id=action_id,
+                schedule_id=schedule_id,
+            )
+            if command_text is None:
+                return ScheduleActionResult(
+                    handled=False,
+                    action=action_id,
+                    task=task,
+                    reason="unsupported_action",
+                )
+            result = ScheduleCommandService(
+                self.session,
+                task_service=self.task_service,
+            ).handle_text(
+                task=task,
+                context=context,
+                text=command_text,
+            )
+            if result is None:
+                response_text = "I could not apply that schedule action."
+                message_purpose = "schedule_action_failed"
+            else:
+                response_text = result.response_text
+                message_purpose = f"schedule_{result.action}"
+
+        posted_ts = SlackPoster(
+            session=self.session,
+            client=cast(SlackPostingClient, self.client),
+            task_service=self.task_service,
+        ).post_message(
+            SlackThread(
+                channel_id=channel_id,
+                thread_ts=message_ts,
+                task_id=task.id,
+            ),
+            response_text,
+            purpose=message_purpose,
+        )
+        task.result_summary = response_text
+        self.task_service.transition(task, DbTaskStatus.succeeded)
+        return ScheduleActionResult(
+            handled=True,
+            action=action_id,
+            task=task,
+            message_ts=posted_ts,
+        )
 
     def handle_app_mention(
         self,
@@ -1231,6 +1358,7 @@ class SlackIngress:
             ),
             result.response_text,
             purpose=f"schedule_{result.action}",
+            blocks=_schedule_blocks_for_response(result.schedule),
         )
         task.result_summary = result.response_text
         self.task_service.transition(task, DbTaskStatus.succeeded)
@@ -1288,6 +1416,7 @@ class SlackIngress:
                 if proposal.schedule.status == "proposed"
                 else "schedule_created"
             ),
+            blocks=_schedule_blocks_for_response(proposal.schedule),
         )
         task.result_summary = proposal.response_text
         self.task_service.transition(task, DbTaskStatus.succeeded)
@@ -2136,6 +2265,83 @@ def _team_id(body: Mapping[str, Any], event: Mapping[str, Any]) -> str:
     if not isinstance(team_id, str) or not team_id:
         raise ValueError("Slack event is missing team_id")
     return team_id
+
+
+def _action_team_id(body: Mapping[str, Any]) -> str:
+    team = body.get("team")
+    if isinstance(team, Mapping):
+        team_id = team.get("id")
+        if isinstance(team_id, str) and team_id:
+            return team_id
+    team_id = body.get("team_id")
+    if isinstance(team_id, str) and team_id:
+        return team_id
+    raise ValueError("Slack action is missing team id")
+
+
+def _action_user_id(body: Mapping[str, Any]) -> str:
+    user = body.get("user")
+    if isinstance(user, Mapping):
+        user_id = user.get("id")
+        if isinstance(user_id, str) and user_id:
+            return user_id
+    raise ValueError("Slack action is missing user id")
+
+
+def _action_channel_id(body: Mapping[str, Any]) -> str:
+    channel = body.get("channel")
+    if isinstance(channel, Mapping):
+        channel_id = channel.get("id")
+        if isinstance(channel_id, str) and channel_id:
+            return channel_id
+    container = body.get("container")
+    if isinstance(container, Mapping):
+        channel_id = container.get("channel_id")
+        if isinstance(channel_id, str) and channel_id:
+            return channel_id
+    raise ValueError("Slack action is missing channel id")
+
+
+def _action_message_ts(body: Mapping[str, Any]) -> str:
+    message = body.get("message")
+    if isinstance(message, Mapping):
+        thread_ts = message.get("thread_ts")
+        if isinstance(thread_ts, str) and thread_ts:
+            return thread_ts
+        message_ts = message.get("ts")
+        if isinstance(message_ts, str) and message_ts:
+            return message_ts
+    container = body.get("container")
+    if isinstance(container, Mapping):
+        thread_ts = container.get("thread_ts")
+        if isinstance(thread_ts, str) and thread_ts:
+            return thread_ts
+        message_ts = container.get("message_ts")
+        if isinstance(message_ts, str) and message_ts:
+            return message_ts
+    raise ValueError("Slack action is missing message timestamp")
+
+
+def _schedule_action_command_text(
+    *,
+    action_id: str,
+    schedule_id: uuid.UUID,
+) -> str | None:
+    if action_id == SCHEDULE_ACTION_ACTIVATE:
+        return f"activate schedule {schedule_id}"
+    if action_id == SCHEDULE_ACTION_PAUSE:
+        return f"pause schedule {schedule_id}"
+    if action_id == SCHEDULE_ACTION_RESUME:
+        return f"resume schedule {schedule_id}"
+    if action_id == SCHEDULE_ACTION_CANCEL:
+        return f"cancel schedule {schedule_id}"
+    return None
+
+
+def _schedule_blocks_for_response(schedule: Schedule) -> list[dict[str, Any]] | None:
+    if schedule.status not in {"proposed", "active", "paused"}:
+        return None
+    return schedule_action_blocks(schedule)
 
 
 def _result_thread_ts(task: Task) -> str | None:
