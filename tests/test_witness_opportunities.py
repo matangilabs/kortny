@@ -12,19 +12,31 @@ from sqlalchemy.orm import Session
 
 from kortny.db.models import (
     Installation,
+    LLMUsage,
     ObserveChannelProfile,
     SlackChannelMembership,
     SlackSideEffect,
     Task,
     TaskEvent,
+    TaskStatus,
     WitnessOpportunityCandidate,
 )
+from kortny.db.models import (
+    LLMProvider as DbLLMProvider,
+)
 from kortny.db.session import make_engine, make_session_factory, normalize_database_url
+from kortny.llm import ChatMessage, Completion, TokenUsage
 from kortny.tasks import TaskService
+from kortny.tools.types import JsonObject, JsonSchema
 from kortny.witness import (
+    WITNESS_OPPORTUNITY_CANDIDATES_PROJECTED_MESSAGE,
+    WITNESS_RUNNER_DELIVERY_SENT_MESSAGE,
+    WITNESS_RUNNER_PROFILE_SCAN_COMPLETED_MESSAGE,
+    WITNESS_RUNNER_PROFILE_SCAN_STARTED_MESSAGE,
     WITNESS_SUGGESTION_PURPOSE,
     WitnessOpportunityCandidateInput,
     WitnessOpportunityService,
+    WitnessRunner,
     accept_candidate,
     dismiss_candidate,
     reactivate_candidate,
@@ -105,7 +117,9 @@ def test_project_from_channel_profile_creates_and_dedupes_candidates(
     assert all(candidate.source_profile_id == profile.id for candidate in candidates)
     assert all(candidate.source_type == "channel_profile" for candidate in candidates)
     assert all(candidate.source_task_id == task.id for candidate in candidates)
-    assert all(candidate.metadata_json["raw_candidate_count"] == 2 for candidate in candidates)
+    assert all(
+        candidate.metadata_json["raw_candidate_count"] == 2 for candidate in candidates
+    )
     assert all(
         candidate.metadata_json["source"] == "llm_channel_profile_extractor"
         for candidate in candidates
@@ -143,7 +157,9 @@ def test_project_from_channel_profile_creates_and_dedupes_candidates(
     assert all(
         candidate.metadata_json["profile_version"] == 2 for candidate in refreshed
     )
-    assert all("last_reinforced_at" in candidate.metadata_json for candidate in refreshed)
+    assert all(
+        "last_reinforced_at" in candidate.metadata_json for candidate in refreshed
+    )
 
 
 def test_project_from_task_candidates_persists_llm_proposals(
@@ -204,10 +220,12 @@ def test_project_from_task_candidates_persists_llm_proposals(
         "unresolved_decision",
     }
     assert all(
-        candidate.visibility_scope_type == "private_channel"
+        candidate.visibility_scope_type == "private_channel" for candidate in candidates
+    )
+    assert all(
+        candidate.visibility_scope_id == membership.channel_id
         for candidate in candidates
     )
-    assert all(candidate.visibility_scope_id == membership.channel_id for candidate in candidates)
     assert all(candidate.source_type == "task_summary" for candidate in candidates)
     assert all(candidate.source_task_id == task.id for candidate in candidates)
     assert all(candidate.source_profile_id is None for candidate in candidates)
@@ -215,7 +233,9 @@ def test_project_from_task_candidates_persists_llm_proposals(
         candidate.metadata_json["source"] == "llm_task_response_extractor"
         for candidate in candidates
     )
-    assert all(candidate.metadata_json["raw_candidate_count"] == 2 for candidate in candidates)
+    assert all(
+        candidate.metadata_json["raw_candidate_count"] == 2 for candidate in candidates
+    )
     assert any(
         item.get("type") == "llm_evidence"
         for candidate in candidates
@@ -435,9 +455,177 @@ def test_send_private_suggestion_requires_dm_scope_and_records_outbox(
     assert side_effect.purpose == WITNESS_SUGGESTION_PURPOSE
 
 
+def test_witness_runner_projects_due_profiles_and_respects_scan_interval(
+    db_session: Session,
+) -> None:
+    source_task, membership, profile = create_profile_fixture(db_session)
+    run_at = datetime(2026, 6, 5, 14, 0, tzinfo=UTC)
+    provider = FakeWitnessLLMProvider(
+        [
+            witness_extraction_completion(),
+            witness_extraction_completion(title_suffix=" v2"),
+        ]
+    )
+    runner = WitnessRunner(
+        db_session,
+        llm_provider=provider,
+        provider_name=DbLLMProvider.openrouter,
+        runner_id="witness-test",
+    )
+
+    result = runner.run_once(
+        installation_id=source_task.installation_id,
+        now=run_at,
+        profile_limit=5,
+    )
+    db_session.flush()
+
+    assert result.status == "processed"
+    assert result.projected_count == 2
+    assert len(provider.calls) == 1
+    outcome = result.projections[0]
+    scan_task = db_session.get(Task, outcome.task_id)
+    assert scan_task is not None
+    assert scan_task.status is TaskStatus.succeeded
+    assert scan_task.slack_channel_id == membership.channel_id
+    assert scan_task.identity_payload["source_surface"] == "witness_runner"
+    events = task_events(db_session, scan_task)
+    event_messages = [event.payload.get("message") for event in events]
+    assert WITNESS_RUNNER_PROFILE_SCAN_STARTED_MESSAGE in event_messages
+    assert WITNESS_RUNNER_PROFILE_SCAN_COMPLETED_MESSAGE in event_messages
+    assert WITNESS_OPPORTUNITY_CANDIDATES_PROJECTED_MESSAGE in event_messages
+    assert profile.metadata_json["witness_runner"]["profile_version"] == 1
+    assert profile.metadata_json["witness_runner"]["task_id"] == str(scan_task.id)
+    candidates = tuple(
+        db_session.scalars(
+            select(WitnessOpportunityCandidate).order_by(
+                WitnessOpportunityCandidate.candidate_type
+            )
+        )
+    )
+    assert len(candidates) == 2
+    assert all(
+        candidate.metadata_json["runner_source"] == "witness_runner"
+        for candidate in candidates
+    )
+    usage = db_session.scalar(select(LLMUsage).where(LLMUsage.task_id == scan_task.id))
+    assert usage is not None
+    assert usage.model_tier == "cheap_fast"
+
+    idle_result = runner.run_once(
+        installation_id=source_task.installation_id,
+        now=run_at + timedelta(hours=1),
+        profile_limit=5,
+    )
+    assert idle_result.status == "idle"
+    assert len(provider.calls) == 1
+
+    profile.profile_version = 2
+    db_session.flush()
+    second = runner.run_once(
+        installation_id=source_task.installation_id,
+        now=run_at + timedelta(hours=1, minutes=1),
+        profile_limit=5,
+    )
+    assert second.status == "processed"
+    assert len(provider.calls) == 2
+
+
+def test_witness_runner_delivers_only_dm_scoped_candidates(
+    db_session: Session,
+) -> None:
+    task, membership, profile = create_profile_fixture(db_session)
+    service = WitnessOpportunityService(db_session)
+    service.project_from_channel_profile(
+        task=task,
+        membership=membership,
+        profile=profile,
+        candidates=channel_profile_candidate_inputs(),
+        extraction_metadata={"raw_candidate_count": 2},
+    )
+    dm_task = TaskService(db_session).create_task(
+        installation_id=task.installation_id,
+        slack_event_id=f"Ev{uuid.uuid4().hex}",
+        slack_channel_id="DRunnerUser",
+        slack_thread_ts="DRunnerUser",
+        slack_message_ts="1780200000.000001",
+        slack_user_id="URunnerUser",
+        input="Watch my weekly vendor task follow-up.",
+    )
+    service.project_from_task_candidates(
+        task=dm_task,
+        candidates=(
+            WitnessOpportunityCandidateInput(
+                candidate_type="recurring_check",
+                title="Weekly vendor follow-up",
+                summary="Offer to check weekly vendor task follow-up.",
+                suggested_action="Watch weekly vendor task follow-up.",
+                suggested_message="I can keep an eye on your weekly vendor follow-up.",
+                evidence=("The task named a weekly follow-up.",),
+                confidence_score=Decimal("0.810"),
+                confidence_reason="The request is explicitly recurring.",
+                metadata_json={"extractor": "test"},
+            ),
+        ),
+        response_text="I can watch your weekly vendor follow-up.",
+        extraction_metadata={"raw_candidate_count": 1},
+    )
+    db_session.flush()
+    channel_candidates = tuple(
+        db_session.scalars(
+            select(WitnessOpportunityCandidate).where(
+                WitnessOpportunityCandidate.visibility_scope_type == "channel"
+            )
+        )
+    )
+    dm_candidate = db_session.scalar(
+        select(WitnessOpportunityCandidate).where(
+            WitnessOpportunityCandidate.visibility_scope_type == "dm"
+        )
+    )
+    assert channel_candidates
+    assert dm_candidate is not None
+    client = FakeWitnessSlackClient()
+
+    result = WitnessRunner(
+        db_session,
+        slack_client=client,
+        runner_id="witness-delivery-test",
+    ).run_once(
+        installation_id=task.installation_id,
+        now=datetime(2026, 6, 5, 15, 0, tzinfo=UTC),
+        profile_limit=0,
+        deliver_private=True,
+        delivery_limit=5,
+    )
+    db_session.flush()
+
+    assert result.status == "processed"
+    assert result.projected_count == 0
+    assert result.delivered_count == 1
+    assert result.deliveries[0].candidate_id == dm_candidate.id
+    assert client.calls == [
+        {
+            "channel": "DRunnerUser",
+            "text": "I can keep an eye on your weekly vendor follow-up.",
+            "thread_ts": None,
+        }
+    ]
+    assert dm_candidate.status == "sent"
+    assert all(candidate.status == "candidate" for candidate in channel_candidates)
+    delivery_event = next(
+        event
+        for event in task_events(db_session, dm_task)
+        if event.payload.get("message") == WITNESS_RUNNER_DELIVERY_SENT_MESSAGE
+    )
+    assert delivery_event.payload["candidate_id"] == str(dm_candidate.id)
+    assert delivery_event.payload["runner_id"] == "witness-delivery-test"
+
+
 def cleanup_database(session: Session) -> None:
     for model in (
         WitnessOpportunityCandidate,
+        LLMUsage,
         SlackSideEffect,
         ObserveChannelProfile,
         SlackChannelMembership,
@@ -574,3 +762,71 @@ class FakeWitnessSlackClient:
             }
         )
         return {"ok": True, "ts": "1780200100.000002"}
+
+
+class FakeWitnessLLMProvider:
+    model = "openai/gpt-4o-mini"
+
+    def __init__(self, completions: list[Completion]) -> None:
+        self.completions = completions
+        self.calls: list[
+            tuple[tuple[ChatMessage, ...], tuple[JsonSchema, ...], JsonObject | None]
+        ] = []
+
+    def complete(
+        self,
+        messages: tuple[ChatMessage, ...],
+        tools: tuple[JsonSchema, ...] = (),
+        *,
+        response_format: JsonObject | None = None,
+    ) -> Completion:
+        self.calls.append((tuple(messages), tuple(tools), response_format))
+        if not self.completions:
+            raise AssertionError("FakeWitnessLLMProvider received too many calls")
+        return self.completions.pop(0)
+
+
+def witness_extraction_completion(*, title_suffix: str = "") -> Completion:
+    return Completion(
+        content=(
+            "{"
+            '"candidates":['
+            "{"
+            '"candidate_type":"recurring_check",'
+            f'"title":"Daily blotter review{title_suffix}",'
+            '"summary":"Offer to summarize daily blotter changes before review.",'
+            '"suggested_action":"Watch for daily blotter report posts.",'
+            '"suggested_message":"I can summarize daily blotter changes when they land.",'
+            '"evidence":["The channel profile names recurring daily blotter review."],'
+            '"confidence_score":0.7,'
+            '"confidence_reason":"The profile has repeated report evidence."'
+            "},"
+            "{"
+            '"candidate_type":"data_quality_issue",'
+            f'"title":"CSV placeholder checks{title_suffix}",'
+            '"summary":"Flag missing CSV placeholders and failed file formatting.",'
+            '"suggested_action":"Watch for broken report output.",'
+            '"suggested_message":"I can flag broken placeholders in report files.",'
+            '"evidence":["The profile names missing CSV placeholders."],'
+            '"confidence_score":0.76,'
+            '"confidence_reason":"The profile includes direct evidence."'
+            "}"
+            "],"
+            '"skipped_reason":null'
+            "}"
+        ),
+        tool_calls=(),
+        usage=TokenUsage(input_tokens=240, output_tokens=90),
+        cost_usd=Decimal("0.000100"),
+        model="openai/gpt-4o-mini",
+    )
+
+
+def task_events(session: Session, task: Task) -> tuple[TaskEvent, ...]:
+    return tuple(
+        session.scalars(
+            select(TaskEvent)
+            .where(TaskEvent.task_id == task.id)
+            .order_by(TaskEvent.seq.asc())
+        )
+    )
