@@ -172,21 +172,21 @@
           </div>
         {% endif %}
         <div class="table-wrap">
-          <table class="table model-config-table">
+          <table class="table model-config-table model-catalog-table">
             <caption>Provider model rows, pricing, tier usage, and status controls.</caption>
             <thead>
               <tr>
                 <th>Model</th>
-                <th>Status</th>
-                <th>Used By</th>
+                <th>Specs</th>
                 <th>Pricing</th>
-                <th>Source</th>
-                <th>Controls</th>
+                <th>Tier Routing</th>
+                <th>Status</th>
               </tr>
             </thead>
             <tbody data-model-catalog-body>
               {% set model_rows = detail.models %}
               {% set provider_id = detail.provider.id %}
+              {% set tier_options = detail.tier_options %}
               {% set next_path = "/admin/models/providers/" ~ detail.provider.id %}
               {% set empty_message = "No models have been synced for this provider yet." %}
               {% include "_model_catalog_rows.html" %}

@@ -1,33 +1,82 @@
 {% for row in model_rows %}
+  {% set route_disabled = (not row.model.is_enabled) or row.provider.status != "active" %}
   <tr data-model-catalog-row>
-    <td>
-      <strong>{{ row.model.display_name }}</strong>
-      <code class="inline-code">{{ row.model.model_identifier }}</code>
-      {% if row.model.capabilities_json.runtime_routable is sameas false %}
-        <span class="badge badge-warning">Not routable</span>
+    <td class="model-catalog-model-cell">
+      <div class="model-catalog-model-title">
+        <strong>{{ row.model.display_name }}</strong>
+        <code class="inline-code">{{ row.model.model_identifier }}</code>
+      </div>
+      <div class="model-catalog-meta-line">
+        <span class="badge badge-neutral">{{ row.mode_label }}</span>
+        <span>{{ row.source_label }}</span>
+        {% if row.model.capabilities_json.runtime_routable is sameas false %}
+          <span class="badge badge-warning">Not routable</span>
+        {% endif %}
+      </div>
+    </td>
+    <td class="model-catalog-spec-cell">
+      <div class="model-catalog-spec-grid">
+        <div>
+          <span>Context</span>
+          <strong>{{ row.context_label }}</strong>
+        </div>
+        <div>
+          <span>Output</span>
+          <strong>{{ row.output_label }}</strong>
+        </div>
+      </div>
+      <div class="model-tag-list model-catalog-capabilities">
+        {% for label in row.capability_labels %}
+          <span class="badge badge-neutral">{{ label }}</span>
+        {% endfor %}
+      </div>
+    </td>
+    <td class="model-catalog-pricing-cell">
+      {% if row.latest_pricing %}
+        <strong>{{ row.pricing_label }}</strong>
+        <span>{{ row.pricing_detail }}</span>
+      {% else %}
+        <span class="badge badge-warning">{{ row.pricing_label }}</span>
+        <small>{{ row.pricing_detail }}</small>
       {% endif %}
     </td>
-    <td><span class="badge badge-{{ row.tone }}">{{ "enabled" if row.model.is_enabled else "disabled" }}</span></td>
-    <td>
+    <td class="model-catalog-route-cell">
       {% if row.assignment_labels %}
         <div class="model-tag-list">
           {% for label in row.assignment_labels %}
-            <span class="badge badge-neutral">{{ label }}</span>
+            <span class="badge badge-success">{{ label }}</span>
           {% endfor %}
         </div>
       {% else %}
         <span class="identity-id">Unused</span>
       {% endif %}
+      <form
+        class="model-catalog-tier-form"
+        method="post"
+        action="/admin/models/catalog/{{ row.model.id }}/assign-tier"
+        onsubmit="return confirm('Assign {{ row.model.display_name }} to the selected runtime tier?');"
+      >
+        <input type="hidden" name="next" value="{{ next_path }}">
+        <label>
+          <span class="sr-only">Runtime tier</span>
+          <select class="input compact-input" name="tier" aria-label="Runtime tier" {{ "disabled" if route_disabled else "" }}>
+            {% for option in tier_options %}
+              <option value="{{ option.tier }}">{{ option.label }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>
+          <span class="sr-only">Tier priority</span>
+          <select class="input compact-input" name="priority" aria-label="Tier priority" {{ "disabled" if route_disabled else "" }}>
+            <option value="1">Primary</option>
+            <option value="2">Fallback P2</option>
+          </select>
+        </label>
+        <button class="btn-ghost" type="submit" {{ "disabled" if route_disabled else "" }}>Assign</button>
+      </form>
     </td>
-    <td>
-      {% if row.latest_pricing %}
-        <span>{{ row.latest_pricing.input_price_per_mtok or "?" }} / {{ row.latest_pricing.output_price_per_mtok or "?" }} {{ row.latest_pricing.currency }}</span>
-      {% else %}
-        <span class="badge badge-warning">Missing</span>
-      {% endif %}
-    </td>
-    <td>{{ row.model.source.replace("_", " ").title() }}</td>
-    <td>
+    <td class="model-catalog-status-cell">
+      <span class="badge badge-{{ row.tone }}">{{ "enabled" if row.model.is_enabled else "disabled" }}</span>
       <form method="post" action="/admin/models/catalog/{{ row.model.id }}/status" onsubmit="return confirm('Update {{ row.model.display_name }} model status?');">
         <input type="hidden" name="next" value="{{ next_path }}">
         <select class="input compact-input" name="is_enabled">
@@ -40,6 +89,6 @@
   </tr>
 {% else %}
   <tr data-model-catalog-empty>
-    <td colspan="6">{{ empty_message }}</td>
+    <td colspan="5">{{ empty_message }}</td>
   </tr>
 {% endfor %}

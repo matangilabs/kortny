@@ -34,6 +34,8 @@ class LiteLLMModelCandidate:
 
 OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
 OPENROUTER_MODELS_TIMEOUT_SECONDS = 5.0
+PRICE_PER_MTOK_QUANTUM = Decimal("0.000001")
+MAX_PRICE_PER_MTOK = Decimal("999999.999999")
 
 
 LITELLM_PROVIDER_OPTIONS: tuple[LiteLLMProviderOption, ...] = (
@@ -538,9 +540,14 @@ def _price_per_mtok(value: object) -> Decimal | None:
     if value is None:
         return None
     try:
-        return (Decimal(str(value)) * Decimal("1000000")).quantize(Decimal("0.000001"))
+        price = (Decimal(str(value)) * Decimal("1000000")).quantize(
+            PRICE_PER_MTOK_QUANTUM
+        )
     except Exception:
         return None
+    if price < 0 or price > MAX_PRICE_PER_MTOK:
+        return None
+    return price
 
 
 def _rank_candidates(

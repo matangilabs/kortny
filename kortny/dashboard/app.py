@@ -53,6 +53,7 @@ from kortny.dashboard.data import (
     get_user_detail,
     list_tasks,
     list_users,
+    llm_tier_catalog_options,
     parse_date_bound,
 )
 from kortny.dashboard.knowledge_graph_actions import (
@@ -116,6 +117,16 @@ SESSION_DASHBOARD_ROLE_KEY = "dashboard_role"
 SESSION_DASHBOARD_SOURCE_KEY = "dashboard_source"
 SESSION_DASHBOARD_INSTALLATION_ID_KEY = "dashboard_installation_id"
 SESSION_DASHBOARD_SLACK_USER_ID_KEY = "dashboard_slack_user_id"
+MODEL_PRICE_PER_MTOK_MIN = Decimal("0")
+MODEL_PRICE_PER_MTOK_MAX = Decimal("999999.999999")
+MODEL_TIER_VALUES = {
+    "cheap_fast",
+    "standard",
+    "analysis",
+    "document",
+    "high_reasoning",
+    "humanizer",
+}
 
 templates = Jinja2Templates(directory=TEMPLATE_DIR)
 
@@ -801,6 +812,7 @@ def register_routes(app: FastAPI) -> None:
         html = templates.env.get_template("_model_catalog_rows.html").render(
             model_rows=model_page.rows,
             provider_id=provider_account_id,
+            tier_options=llm_tier_catalog_options(),
             next_path=f"/admin/models/providers/{provider_account_id}",
             empty_message=(
                 "No models match this search."
@@ -1360,14 +1372,7 @@ def register_routes(app: FastAPI) -> None:
                 "No installation scope is available for this model tier.",
                 tone="danger",
             )
-        if tier not in {
-            "cheap_fast",
-            "standard",
-            "analysis",
-            "document",
-            "high_reasoning",
-            "humanizer",
-        }:
+        if tier not in MODEL_TIER_VALUES:
             return _redirect_with_notice(
                 next_path,
                 "Unknown model tier.",
@@ -1400,38 +1405,70 @@ def register_routes(app: FastAPI) -> None:
                 tone="danger",
             )
         priority = _positive_int(_form_value(form, "priority"), default=1, maximum=5)
-        assignment = session.scalar(
-            select(LLMTierAssignment).where(
-                LLMTierAssignment.installation_id == installation_id,
-                LLMTierAssignment.tier == tier,
-                LLMTierAssignment.priority == priority,
-            )
-        )
-        previous_value = _tier_assignment_audit_payload(assignment, session)
-        if assignment is None:
-            assignment = LLMTierAssignment(
-                installation_id=installation_id,
-                tier=tier,
-                model_catalog_id=model.id,
-                priority=priority,
-                is_active=True,
-            )
-            session.add(assignment)
-            action = "create"
-        else:
-            assignment.model_catalog_id = model.id
-            assignment.is_active = True
-            action = "update"
-        session.flush()
-        _append_llm_config_audit(
+        _assign_llm_model_tier(
             session,
             installation_id=installation_id,
+            tier=tier,
+            model=model,
+            priority=priority,
             principal=principal,
-            action=action,
-            entity_type="llm_tier_assignment",
-            entity_id=str(assignment.id),
-            previous_value=previous_value,
-            new_value=_tier_assignment_audit_payload(assignment, session),
+        )
+        session.commit()
+        route_label = "primary" if priority == 1 else f"fallback P{priority}"
+        return _redirect_with_notice(
+            next_path,
+            f"{tier.replace('_', ' ').title()} {route_label} now routes to {model.display_name}.",
+        )
+
+    @app.post("/admin/models/catalog/{model_catalog_id}/assign-tier")
+    async def model_config_assign_catalog_tier(
+        request: Request,
+        model_catalog_id: UUID,
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> RedirectResponse:
+        form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+        next_path = _safe_next_path(_form_value(form, "next") or "/admin/models")
+        installation_id = _dashboard_installation_id(session, principal)
+        if installation_id is None:
+            return _redirect_with_notice(
+                next_path,
+                "No installation scope is available for this model tier.",
+                tone="danger",
+            )
+        tier = _form_value(form, "tier")
+        if tier not in MODEL_TIER_VALUES:
+            return _redirect_with_notice(
+                next_path,
+                "Choose a valid tier for this model.",
+                tone="danger",
+            )
+        model = _get_scoped_model_catalog(
+            session,
+            model_catalog_id=model_catalog_id,
+            installation_id=installation_id,
+        )
+        if model is None:
+            return _redirect_with_notice(
+                next_path,
+                "That model is not available for this installation.",
+                tone="danger",
+            )
+        provider = session.get(LLMProviderAccount, model.provider_account_id)
+        if provider is None or provider.status != "active" or not model.is_enabled:
+            return _redirect_with_notice(
+                next_path,
+                "Only enabled models on active providers can be assigned to a tier.",
+                tone="danger",
+            )
+        priority = _positive_int(_form_value(form, "priority"), default=1, maximum=5)
+        _assign_llm_model_tier(
+            session,
+            installation_id=installation_id,
+            tier=tier,
+            model=model,
+            priority=priority,
+            principal=principal,
         )
         session.commit()
         route_label = "primary" if priority == 1 else f"fallback P{priority}"
@@ -3638,10 +3675,9 @@ def _upsert_pricing_from_candidate(
     provider: LLMProviderAccount,
     candidate: LiteLLMModelCandidate,
 ) -> int:
-    if (
-        candidate.input_price_per_mtok is None
-        and candidate.output_price_per_mtok is None
-    ):
+    input_price = _valid_model_price_per_mtok(candidate.input_price_per_mtok)
+    output_price = _valid_model_price_per_mtok(candidate.output_price_per_mtok)
+    if input_price is None and output_price is None:
         return 0
     existing_pricing = session.scalar(
         select(LLMModelPricing.id)
@@ -3658,8 +3694,8 @@ def _upsert_pricing_from_candidate(
         LLMModelPricing(
             provider_account_id=provider.id,
             model_identifier=candidate.model_identifier,
-            input_price_per_mtok=candidate.input_price_per_mtok,
-            output_price_per_mtok=candidate.output_price_per_mtok,
+            input_price_per_mtok=input_price,
+            output_price_per_mtok=output_price,
             currency="USD",
             pricing_source="litellm_catalog",
             metadata_json={
@@ -3669,6 +3705,14 @@ def _upsert_pricing_from_candidate(
         )
     )
     return 1
+
+
+def _valid_model_price_per_mtok(value: Decimal | None) -> Decimal | None:
+    if value is None:
+        return None
+    if value < MODEL_PRICE_PER_MTOK_MIN or value > MODEL_PRICE_PER_MTOK_MAX:
+        return None
+    return value
 
 
 def _local_litellm_candidate(
@@ -3723,6 +3767,51 @@ def _tier_assignment_audit_payload(
         "provider_account_id": str(provider.id) if provider is not None else None,
         "provider_kind": provider.provider_kind if provider is not None else None,
     }
+
+
+def _assign_llm_model_tier(
+    session: Session,
+    *,
+    installation_id: UUID,
+    tier: str,
+    model: LLMModelCatalog,
+    priority: int,
+    principal: DashboardPrincipal,
+) -> LLMTierAssignment:
+    assignment = session.scalar(
+        select(LLMTierAssignment).where(
+            LLMTierAssignment.installation_id == installation_id,
+            LLMTierAssignment.tier == tier,
+            LLMTierAssignment.priority == priority,
+        )
+    )
+    previous_value = _tier_assignment_audit_payload(assignment, session)
+    if assignment is None:
+        assignment = LLMTierAssignment(
+            installation_id=installation_id,
+            tier=tier,
+            model_catalog_id=model.id,
+            priority=priority,
+            is_active=True,
+        )
+        session.add(assignment)
+        action = "create"
+    else:
+        assignment.model_catalog_id = model.id
+        assignment.is_active = True
+        action = "update"
+    session.flush()
+    _append_llm_config_audit(
+        session,
+        installation_id=installation_id,
+        principal=principal,
+        action=action,
+        entity_type="llm_tier_assignment",
+        entity_id=str(assignment.id),
+        previous_value=previous_value,
+        new_value=_tier_assignment_audit_payload(assignment, session),
+    )
+    return assignment
 
 
 def _append_llm_config_audit(

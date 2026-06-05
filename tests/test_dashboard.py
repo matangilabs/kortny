@@ -1310,6 +1310,75 @@ def test_dashboard_admin_imports_full_openrouter_catalog(
     assert audit.new_value["candidate_count"] == 105
 
 
+def test_dashboard_admin_import_models_skips_invalid_pricing(
+    client: tuple[TestClient, Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    test_client, session = client
+    set_runtime_settings_env(monkeypatch)
+    installation = Installation(
+        slack_team_id="TOpenRouterInvalidPricing",
+        team_name="OpenRouter Invalid Pricing Team",
+    )
+    session.add(installation)
+    session.flush()
+    provider = LLMProviderAccount(
+        installation_id=installation.id,
+        provider_kind="openrouter",
+        display_name="OpenRouter provider",
+        status="active",
+        health_status="ok",
+        metadata_json={"credential_source": "env", "source": "env_bootstrap"},
+    )
+    session.add(provider)
+    session.commit()
+    invalid_candidate = LiteLLMModelCandidate(
+        model_identifier="auto",
+        display_name="Auto",
+        provider_kind="openrouter",
+        source="provider_api",
+        capabilities={"runtime_routable": True},
+        metadata={"litellm_provider": "openrouter"},
+        input_price_per_mtok=Decimal("-1000000.000000"),
+        output_price_per_mtok=Decimal("-1000000.000000"),
+    )
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setattr(
+        "kortny.dashboard.app.litellm_model_candidates",
+        lambda _provider_kind, *, limit=24: (),
+    )
+    monkeypatch.setattr(
+        "kortny.dashboard.app.litellm_endpoint_model_candidates",
+        lambda _provider_kind, *, api_key, api_base=None, limit=24: (
+            invalid_candidate,
+        ),
+    )
+    login(test_client)
+
+    response = test_client.post(
+        f"/admin/models/providers/{provider.id}/import-models",
+        data={"next": f"/admin/models/providers/{provider.id}", "limit": "100"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    session.expire_all()
+    model = session.scalar(
+        select(LLMModelCatalog).where(
+            LLMModelCatalog.provider_account_id == provider.id,
+            LLMModelCatalog.model_identifier == "auto",
+        )
+    )
+    pricing_count = session.scalar(
+        select(func.count())
+        .select_from(LLMModelPricing)
+        .where(LLMModelPricing.provider_account_id == provider.id)
+    )
+    assert model is not None
+    assert pricing_count == 0
+
+
 def test_dashboard_admin_can_inspect_provider_detail_page(
     client: tuple[TestClient, Session],
 ) -> None:
@@ -1335,6 +1404,11 @@ def test_dashboard_admin_can_inspect_provider_detail_page(
         model_identifier="deepseek/deepseek-v4-flash",
         display_name="DeepSeek Flash",
         is_enabled=True,
+        capabilities_json={
+            "max_input_tokens": 128000,
+            "supports_function_calling": True,
+        },
+        metadata_json={"litellm_metadata": {"max_output_tokens": 8192, "mode": "chat"}},
         source="env_bootstrap",
     )
     session.add(model)
@@ -1386,7 +1460,13 @@ def test_dashboard_admin_can_inspect_provider_detail_page(
     assert "Add Manual Model" in detail_response.text
     assert "DeepSeek Flash" in detail_response.text
     assert "Cheap Fast P1" in detail_response.text
-    assert "0.100000 / 0.200000 USD" in detail_response.text
+    assert "$0.100000 in / $0.200000 out" in detail_response.text
+    assert "per 1M tokens · USD" in detail_response.text
+    assert "128,000 tokens" in detail_response.text
+    assert "8,192 tokens" in detail_response.text
+    assert "Chat" in detail_response.text
+    assert "Tools" in detail_response.text
+    assert "assign-tier" in detail_response.text
     assert "https://openrouter.ai/api/v1" in detail_response.text
 
 
@@ -1593,6 +1673,7 @@ def test_dashboard_provider_detail_lazy_loads_model_catalog_page(
     assert next_payload["shown_count"] == 30
     assert next_payload["has_more"] is False
     assert "Paged Model 29" in next_payload["html"]
+    assert "assign-tier" in next_payload["html"]
     assert search_response.status_code == 200
     search_payload = search_response.json()
     assert search_payload["total_count"] == 1
@@ -1676,6 +1757,69 @@ def test_dashboard_admin_can_assign_fallback_model_tier(
     assert audit is not None
     assert audit.action == "create"
     assert audit.new_value["priority"] == 2
+
+
+def test_dashboard_admin_can_assign_model_tier_from_provider_catalog(
+    client: tuple[TestClient, Session],
+) -> None:
+    test_client, session = client
+    installation = Installation(
+        slack_team_id="TModelCatalogAssign", team_name="Catalog Assign Team"
+    )
+    session.add(installation)
+    session.flush()
+    provider = LLMProviderAccount(
+        installation_id=installation.id,
+        provider_kind="openrouter",
+        display_name="OpenRouter catalog provider",
+        status="active",
+        health_status="ok",
+        metadata_json={"credential_source": "env", "source": "env_bootstrap"},
+    )
+    session.add(provider)
+    session.flush()
+    model = LLMModelCatalog(
+        provider_account_id=provider.id,
+        model_identifier="anthropic/claude-sonnet-4.6",
+        display_name="Claude Sonnet 4.6",
+        is_enabled=True,
+        source="provider_api",
+    )
+    session.add(model)
+    session.commit()
+    login(test_client)
+
+    response = test_client.post(
+        f"/admin/models/catalog/{model.id}/assign-tier",
+        data={
+            "tier": "humanizer",
+            "priority": "1",
+            "next": f"/admin/models/providers/{provider.id}",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assignment = session.scalar(
+        select(LLMTierAssignment).where(
+            LLMTierAssignment.installation_id == installation.id,
+            LLMTierAssignment.tier == "humanizer",
+            LLMTierAssignment.priority == 1,
+        )
+    )
+    assert assignment is not None
+    assert assignment.model_catalog_id == model.id
+    audit = session.scalar(
+        select(LLMConfigAudit).where(
+            LLMConfigAudit.installation_id == installation.id,
+            LLMConfigAudit.entity_type == "llm_tier_assignment",
+            LLMConfigAudit.entity_id == str(assignment.id),
+        )
+    )
+    assert audit is not None
+    assert audit.action == "create"
+    assert audit.new_value["tier"] == "humanizer"
+    assert audit.new_value["model_identifier"] == model.model_identifier
 
 
 def test_dashboard_renders_theme_toggle(

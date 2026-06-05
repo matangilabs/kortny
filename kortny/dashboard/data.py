@@ -938,6 +938,13 @@ class LLMModelConfigOption:
 
 
 @dataclass(frozen=True)
+class LLMTierCatalogOption:
+    tier: str
+    label: str
+    description: str
+
+
+@dataclass(frozen=True)
 class LLMTierConfigRow:
     tier: str
     label: str
@@ -959,6 +966,13 @@ class LLMModelConfigRow:
     assignment_labels: tuple[str, ...]
     latest_pricing: LLMModelPricing | None
     tone: str
+    source_label: str
+    pricing_label: str
+    pricing_detail: str
+    context_label: str
+    output_label: str
+    mode_label: str
+    capability_labels: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -1002,6 +1016,7 @@ class LLMProviderConfigDetail:
     metrics: tuple[SystemMetric, ...]
     api_version_label: str
     base_url_label: str
+    tier_options: tuple[LLMTierCatalogOption, ...]
 
 
 @dataclass(frozen=True)
@@ -2335,17 +2350,13 @@ def get_llm_model_config_dashboard(
         for provider in providers
     )
     model_rows = tuple(
-        LLMModelConfigRow(
+        _llm_model_config_row(
             model=model,
             provider=provider_by_id[model.provider_account_id],
-            assignment_labels=tuple(
-                _tier_assignment_label(assignment)
-                for assignment in assignments_by_model.get(model.id, ())
-            ),
+            assignments=assignments_by_model.get(model.id, ()),
             latest_pricing=pricing_by_model.get(
                 (model.provider_account_id, model.model_identifier)
             ),
-            tone="success" if model.is_enabled else "neutral",
         )
         for model in models
         if model.provider_account_id in provider_by_id
@@ -2576,6 +2587,7 @@ def get_llm_provider_config_detail(
         metrics=metrics,
         api_version_label=str(metadata.get("api_version") or "Not configured"),
         base_url_label=provider.base_url or "Default LiteLLM endpoint",
+        tier_options=_tier_catalog_options(),
     )
 
 
@@ -2675,15 +2687,11 @@ def _llm_provider_model_rows(
         assignments_by_model[assignment.model_catalog_id].append(assignment)
     pricing_by_model = _latest_llm_pricing_by_model(session, (provider.id,))
     return tuple(
-        LLMModelConfigRow(
+        _llm_model_config_row(
             model=model,
             provider=provider,
-            assignment_labels=tuple(
-                _tier_assignment_label(assignment)
-                for assignment in assignments_by_model.get(model.id, ())
-            ),
+            assignments=assignments_by_model.get(model.id, ()),
             latest_pricing=pricing_by_model.get((provider.id, model.model_identifier)),
-            tone="success" if model.is_enabled else "neutral",
         )
         for model in models
     )
@@ -6588,6 +6596,162 @@ def _latest_llm_pricing_by_model(
     return latest
 
 
+def _llm_model_config_row(
+    *,
+    model: LLMModelCatalog,
+    provider: LLMProviderAccount,
+    assignments: Sequence[LLMTierAssignment],
+    latest_pricing: LLMModelPricing | None,
+) -> LLMModelConfigRow:
+    return LLMModelConfigRow(
+        model=model,
+        provider=provider,
+        assignment_labels=tuple(
+            _tier_assignment_label(assignment) for assignment in assignments
+        ),
+        latest_pricing=latest_pricing,
+        tone="success" if model.is_enabled else "neutral",
+        source_label=model.source.replace("_", " ").title(),
+        pricing_label=_model_pricing_label(latest_pricing),
+        pricing_detail=_model_pricing_detail(latest_pricing),
+        context_label=_model_token_label(
+            model,
+            keys=("max_input_tokens", "context_length", "context_window"),
+            fallback="Context unknown",
+        ),
+        output_label=_model_token_label(
+            model,
+            keys=("max_output_tokens", "max_tokens"),
+            fallback="Output unknown",
+        ),
+        mode_label=_model_mode_label(model),
+        capability_labels=_model_capability_labels(model),
+    )
+
+
+def _model_pricing_label(pricing: LLMModelPricing | None) -> str:
+    if pricing is None:
+        return "Missing pricing"
+    input_price = (
+        f"${pricing.input_price_per_mtok}"
+        if pricing.input_price_per_mtok is not None
+        else "? input"
+    )
+    output_price = (
+        f"${pricing.output_price_per_mtok}"
+        if pricing.output_price_per_mtok is not None
+        else "? output"
+    )
+    return f"{input_price} in / {output_price} out"
+
+
+def _model_pricing_detail(pricing: LLMModelPricing | None) -> str:
+    if pricing is None:
+        return "Cost tracking will show missing until pricing is synced or entered."
+    return f"per 1M tokens · {pricing.currency}"
+
+
+def _model_token_label(
+    model: LLMModelCatalog,
+    *,
+    keys: Sequence[str],
+    fallback: str,
+) -> str:
+    for key in keys:
+        value = _model_metadata_value(model, key)
+        numeric = _intish(value)
+        if numeric is not None and numeric > 0:
+            return f"{numeric:,} tokens"
+    return fallback
+
+
+def _model_mode_label(model: LLMModelCatalog) -> str:
+    mode = _model_metadata_value(model, "mode")
+    if isinstance(mode, str) and mode.strip():
+        return mode.strip().replace("_", " ").title()
+    input_modalities = _model_metadata_value(model, "input_modalities")
+    output_modalities = _model_metadata_value(model, "output_modalities")
+    if _contains_str(input_modalities, "text") and _contains_str(
+        output_modalities, "text"
+    ):
+        return "Text"
+    return "Mode unknown"
+
+
+def _model_capability_labels(model: LLMModelCatalog) -> tuple[str, ...]:
+    labels: list[str] = []
+    supported_parameters = _model_metadata_value(model, "supported_parameters")
+    input_modalities = _model_metadata_value(model, "input_modalities")
+    output_modalities = _model_metadata_value(model, "output_modalities")
+    capability_checks = (
+        ("Tools", _truthy_model_value(model, "supports_function_calling")),
+        (
+            "Parallel tools",
+            _truthy_model_value(model, "supports_parallel_function_calling"),
+        ),
+        ("Vision", _truthy_model_value(model, "supports_vision")),
+        ("Structured output", _truthy_model_value(model, "supports_response_schema")),
+        ("System prompts", _truthy_model_value(model, "supports_system_messages")),
+    )
+    for label, enabled in capability_checks:
+        if enabled:
+            labels.append(label)
+    if _contains_str(supported_parameters, "tools"):
+        labels.append("Tools")
+    if _contains_str(supported_parameters, "response_format"):
+        labels.append("Structured output")
+    if _contains_str(input_modalities, "image"):
+        labels.append("Vision")
+    if _contains_str(input_modalities, "audio"):
+        labels.append("Audio in")
+    if _contains_str(output_modalities, "image"):
+        labels.append("Image out")
+    if _model_metadata_value(model, "runtime_routable") is False:
+        labels.append("Not routable")
+    unique = tuple(dict.fromkeys(labels))
+    return unique[:5] if unique else ("Metadata pending",)
+
+
+def _model_metadata_value(model: LLMModelCatalog, key: str) -> object | None:
+    capabilities = _mapping(model.capabilities_json)
+    metadata = _mapping(model.metadata_json)
+    litellm_metadata = _mapping(metadata.get("litellm_metadata"))
+    openrouter_architecture = _mapping(litellm_metadata.get("openrouter_architecture"))
+    for source in (capabilities, litellm_metadata, metadata, openrouter_architecture):
+        value = source.get(key)
+        if value is not None:
+            return value
+    return None
+
+
+def _truthy_model_value(model: LLMModelCatalog, key: str) -> bool:
+    return _model_metadata_value(model, key) is True
+
+
+def _contains_str(value: object, expected: str) -> bool:
+    if isinstance(value, str):
+        return value == expected
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return any(item == expected for item in value)
+    return False
+
+
+def _intish(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    return None
+
+
+def _mapping(value: object) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
 def _provider_credential_label(provider: LLMProviderAccount) -> str:
     metadata = (
         provider.metadata_json if isinstance(provider.metadata_json, dict) else {}
@@ -6640,6 +6804,23 @@ def _tier_description(tier: str) -> str:
         "humanizer": "Final Slack response synthesis and tone polishing.",
     }
     return descriptions.get(tier, "Model tier route.")
+
+
+def _tier_catalog_options() -> tuple[LLMTierCatalogOption, ...]:
+    return tuple(
+        LLMTierCatalogOption(
+            tier=tier.value,
+            label=_tier_label(tier.value),
+            description=_tier_description(tier.value),
+        )
+        for tier in CONFIG_TIERS
+    )
+
+
+def llm_tier_catalog_options() -> tuple[LLMTierCatalogOption, ...]:
+    """Return runtime tier choices for provider catalog assignment controls."""
+
+    return _tier_catalog_options()
 
 
 def _tier_assignment_label(assignment: LLMTierAssignment) -> str:
