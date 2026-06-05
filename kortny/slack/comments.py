@@ -16,7 +16,10 @@ from kortny.llm import (
     LLMService,
     ModelRouter,
     ModelRouteTier,
-    create_llm_provider,
+)
+from kortny.llm.runtime_config import (
+    create_provider_for_selection,
+    select_runtime_model,
 )
 from kortny.tasks import TaskService
 
@@ -85,11 +88,24 @@ class LLMArtifactCommentGenerator:
             ModelRouteTier.cheap_fast,
             reason="artifact_comment",
         )
-        provider = self.provider or create_llm_provider(
-            self.settings,
-            model=model_route.model,
-        )
-        provider_name = self.provider_name or DbLLMProvider(self.settings.llm_provider)
+        if self.provider is None:
+            selection = select_runtime_model(
+                session=session,
+                settings=self.settings,
+                installation_id=task.installation_id,
+                model_route=model_route,
+            )
+            provider = create_provider_for_selection(
+                settings=self.settings,
+                selection=selection,
+            )
+            provider_name = self.provider_name or selection.provider_name
+            model_route = selection.model_route
+        else:
+            provider = self.provider
+            provider_name = self.provider_name or DbLLMProvider(
+                self.settings.llm_provider
+            )
         completion = LLMService(
             session=session,
             provider=provider,

@@ -933,7 +933,9 @@ def test_agent_executor_posts_planned_workflow_progress_update(
 
     events = task_events(db_session, task)
 
-    assert result.result_summary == "Complex task still executed by the current runtime."
+    assert (
+        result.result_summary == "Complex task still executed by the current runtime."
+    )
     assert len(slack_client.messages) == 1
     assert slack_client.messages[0]["channel"] == "C123"
     assert slack_client.messages[0]["thread_ts"] == "EvPlannedWorkflowProgress"
@@ -2328,7 +2330,9 @@ def test_agent_executor_reinforces_graph_rows_used_in_delivered_answer(
     assert reinforcement_event.payload["message_event_id"] == message_event.id
     assert profile_evidence is not None
     assert profile_evidence.source_task_event_id == message_event.id
-    assert profile_evidence.source_slack_message_ts == message_event.payload["message_ts"]
+    assert (
+        profile_evidence.source_slack_message_ts == message_event.payload["message_ts"]
+    )
     assert "Runtime graph context was used" in (profile_evidence.raw_snippet or "")
     assert edge_evidence is not None
 
@@ -2459,8 +2463,7 @@ def test_agent_executor_projects_task_summary_into_graph(
     assert open_question is not None
     assert open_question.attrs_json["review_status"] == "needs_review"
     assert (
-        open_question.attrs_json["review_reason"]
-        == "sensitive_or_high_impact_language"
+        open_question.attrs_json["review_reason"] == "sensitive_or_high_impact_language"
     )
     decision_evidence = db_session.scalar(
         select(KnowledgeGraphEvidence).where(
@@ -2472,7 +2475,9 @@ def test_agent_executor_projects_task_summary_into_graph(
     )
     assert decision_evidence is not None
     assert decision_evidence.source_task_event_id == message_event.id
-    assert decision_evidence.source_slack_message_ts == message_event.payload["message_ts"]
+    assert (
+        decision_evidence.source_slack_message_ts == message_event.payload["message_ts"]
+    )
     graph_context = GraphService(db_session).retrieve_current_context(
         installation_id=task.installation_id,
         destination=DestinationSurface.channel("C123"),
@@ -3544,14 +3549,16 @@ class FakeSlackClient:
         channel: str,
         text: str,
         thread_ts: str | None = None,
+        blocks: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        self.messages.append(
-            {
-                "channel": channel,
-                "text": text,
-                "thread_ts": thread_ts,
-            }
-        )
+        message: dict[str, Any] = {
+            "channel": channel,
+            "text": text,
+            "thread_ts": thread_ts,
+        }
+        if blocks is not None:
+            message["blocks"] = blocks
+        self.messages.append(message)
         return {"ok": True, "ts": f"1716400100.{len(self.messages):06d}"}
 
     def files_upload_v2(

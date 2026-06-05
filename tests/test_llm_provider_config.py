@@ -21,11 +21,16 @@ from kortny.db.models import (
     LLMTierAssignment,
 )
 from kortny.db.session import make_engine, make_session_factory, normalize_database_url
+from kortny.llm.openrouter import OpenRouterProvider
 from kortny.llm.provider_config import (
     ModelConfigService,
     bootstrap_llm_provider_config_from_env,
 )
-from kortny.llm.routing import ModelRouteTier
+from kortny.llm.routing import ModelRoute, ModelRouteTier
+from kortny.llm.runtime_config import (
+    create_provider_for_selection,
+    select_runtime_model,
+)
 
 TEST_POSTGRES_URL = os.environ.get("KORTNY_TEST_POSTGRES_URL")
 
@@ -352,6 +357,44 @@ def test_model_config_service_skips_secret_backed_candidate_without_resolver(
     assert chain.skipped_candidate_count == 1
     assert chain.primary.model == "env/model"
     assert chain.primary.provider_account_id is None
+
+
+def test_runtime_selection_builds_provider_from_db_model_config(
+    db_session: Session,
+) -> None:
+    installation = create_installation(db_session)
+    create_provider_model_assignment(
+        db_session,
+        installation_id=installation.id,
+        model_identifier="deepseek/deepseek-db-standard",
+        tier=ModelRouteTier.standard,
+        priority=1,
+    )
+    db_session.flush()
+    settings = build_settings(
+        LLM_API_KEY="env-key",
+        LLM_STANDARD_MODEL="deepseek/deepseek-env-standard",
+    )
+
+    selection = select_runtime_model(
+        session=db_session,
+        settings=settings,
+        installation_id=installation.id,
+        model_route=ModelRoute(
+            tier=ModelRouteTier.standard,
+            model="deepseek/deepseek-env-standard",
+            reason="test_route",
+        ),
+    )
+    provider = create_provider_for_selection(settings=settings, selection=selection)
+
+    assert selection.chain.source == "db"
+    assert selection.model_route.model == "deepseek/deepseek-db-standard"
+    assert selection.model_route.reason == "test_route"
+    assert selection.event_payload["model_config_source"] == "db"
+    assert isinstance(provider, OpenRouterProvider)
+    assert provider.model == "deepseek/deepseek-db-standard"
+    assert provider.api_key == "env-key"
 
 
 def cleanup_database(session: Session) -> None:

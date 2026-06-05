@@ -7,7 +7,7 @@ import logging
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from enum import StrEnum
-from typing import Protocol
+from typing import Protocol, cast
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -21,7 +21,10 @@ from kortny.llm import (
     LLMService,
     ModelRouter,
     ModelRouteTier,
-    create_llm_provider,
+)
+from kortny.llm.runtime_config import (
+    create_provider_for_selection,
+    select_runtime_model,
 )
 from kortny.skills import (
     RESPONSE_HUMANIZER_INVOCATION,
@@ -476,11 +479,24 @@ class LLMResponseSynthesizer:
             _route_tier(response_record),
             reason="response_humanizer",
         )
-        provider = self.provider or create_llm_provider(
-            self.settings,
-            model=model_route.model,
-        )
-        provider_name = self.provider_name or DbLLMProvider(self.settings.llm_provider)
+        if self.provider is None:
+            selection = select_runtime_model(
+                session=session,
+                settings=self.settings,
+                installation_id=task.installation_id,
+                model_route=model_route,
+            )
+            provider = create_provider_for_selection(
+                settings=self.settings,
+                selection=selection,
+            )
+            provider_name = self.provider_name or selection.provider_name
+            model_route = selection.model_route
+        else:
+            provider = self.provider
+            provider_name = self.provider_name or DbLLMProvider(
+                self.settings.llm_provider
+            )
         completion = LLMService(
             session=session,
             provider=provider,
@@ -595,7 +611,7 @@ def synthesize_response(
                 "fallback": "raw_answer",
             },
         )
-        return normalize_slack_mrkdwn(raw_text)
+        return cast(str, normalize_slack_mrkdwn(raw_text))
 
     task_service.append_event(
         task,
@@ -615,7 +631,10 @@ def synthesize_response(
 def sanitize_humanized_response(text: str | None, *, fallback: str) -> str:
     """Normalize a model-generated Slack response."""
 
-    safe_fallback = normalize_slack_mrkdwn(strip_internal_response_preamble(fallback))
+    safe_fallback: str = cast(
+        str,
+        normalize_slack_mrkdwn(strip_internal_response_preamble(fallback)),
+    )
     if text is None:
         return safe_fallback
     message = _json_message(text)
@@ -628,7 +647,7 @@ def sanitize_humanized_response(text: str | None, *, fallback: str) -> str:
         return safe_fallback
     if len(normalized) > MAX_HUMANIZED_CHARS:
         normalized = normalized[: MAX_HUMANIZED_CHARS - 1].rstrip() + "."
-    return normalize_slack_mrkdwn(normalized)
+    return cast(str, normalize_slack_mrkdwn(normalized))
 
 
 def strip_internal_response_preamble(text: str) -> str:
@@ -1189,9 +1208,7 @@ def _select_synthesis_outcome(
 ) -> tuple[SynthesisOutcome, str]:
     if any(approval.status in {"required", "waiting"} for approval in approvals):
         return SynthesisOutcome.needs_approval, "tool approval is pending"
-    if _has_no_result_signal(events) and _no_result_signal_is_terminal(
-        response_record
-    ):
+    if _has_no_result_signal(events) and _no_result_signal_is_terminal(response_record):
         return SynthesisOutcome.no_result, "tool evidence reported no matching result"
     if response_record.failures and response_record.actions_taken:
         return (

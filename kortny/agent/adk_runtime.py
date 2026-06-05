@@ -10,7 +10,7 @@ from collections.abc import Callable, MutableMapping
 from datetime import UTC, datetime
 from decimal import ROUND_HALF_UP, Decimal
 from functools import lru_cache
-from typing import Any
+from typing import Any, SupportsInt, cast
 
 from google.adk.agents import Agent, ParallelAgent, SequentialAgent
 from google.adk.agents.callback_context import CallbackContext
@@ -32,7 +32,13 @@ from kortny.config import LLMProvider, Settings
 from kortny.db.models import LLMProvider as DbLLMProvider
 from kortny.db.models import LLMUsage, ModelPricing, Task, TaskEvent, TaskEventType
 from kortny.llm import ChatMessage
+from kortny.llm.provider_config import (
+    ModelConfigService,
+    ResolvedLLMModel,
+    ResolvedLLMModelChain,
+)
 from kortny.llm.routing import ModelRoute, ModelRouter, ModelRouteTier
+from kortny.llm.runtime_config import db_provider_name
 from kortny.llm.service import calculate_cost_usd
 from kortny.llm.types import TokenUsage
 from kortny.observability import log_observation
@@ -308,6 +314,7 @@ class AdkAgentRuntime:
         thread_transcript_provider: ThreadTranscriptProvider | None = None,
         context_assembler: ContextAssembler | None = None,
         approval_policy: ToolApprovalPolicy | None = None,
+        model_config_service: ModelConfigService | None = None,
         tool_result_prompt_max_chars: int = 8000,
     ) -> None:
         self.settings = settings
@@ -323,6 +330,7 @@ class AdkAgentRuntime:
         self.thread_transcript_provider = thread_transcript_provider
         self.context_assembler = context_assembler
         self.approval_policy = approval_policy or ToolApprovalPolicy()
+        self._model_config_service = model_config_service
         self.tool_result_prompt_max_chars = tool_result_prompt_max_chars
 
     def run(self, task: Task | uuid.UUID) -> AgentRunResult:
@@ -331,7 +339,7 @@ class AdkAgentRuntime:
         task_obj = self._resolve_task(task)
         runtime_mode = self._runtime_mode()
         tool_names = self._tool_names()
-        specialist_models = self._specialist_model_routes()
+        specialist_models = self._specialist_model_routes(task=task_obj)
         self.task_service.append_event(
             task_obj,
             TaskEventType.log,
@@ -341,7 +349,7 @@ class AdkAgentRuntime:
                 "mode": runtime_mode,
                 "tool_count": len(tool_names),
                 "tool_names": list(tool_names),
-                "model": self._adk_model_name(),
+                "model": self._adk_model_name(task=task_obj),
                 "specialist_models": specialist_models,
             },
         )
@@ -353,7 +361,7 @@ class AdkAgentRuntime:
             mode=runtime_mode,
             tool_count=len(tool_names),
             tool_names=list(tool_names),
-            model=self._adk_model_name(),
+            model=self._adk_model_name(task=task_obj),
             specialist_models=specialist_models,
         )
 
@@ -511,7 +519,7 @@ class AdkAgentRuntime:
         )
         return Agent(
             name="kortny_root_orchestrator",
-            model=self._adk_model(),
+            model=self._adk_model(task=task),
             instruction=self._instruction(context_package=context_package),
             description="Routes Slack requests to Kortny specialist agents.",
             tools=[AgentTool(agent=agent) for agent in specialist_agents],
@@ -537,7 +545,8 @@ class AdkAgentRuntime:
             description="Creates a bounded plan for a complex Kortny task.",
             prompt=ADK_PLANNED_WORKFLOW_PLANNER_PROMPT,
             context=planned_context,
-            model=self._adk_model_for_tier(ADK_PLANNED_PLANNER_MODEL_TIER),
+            model_tier=ADK_PLANNED_PLANNER_MODEL_TIER,
+            task=task,
             output_key="planned_workflow_plan",
             tools=[],
         )
@@ -567,7 +576,8 @@ class AdkAgentRuntime:
                 description=description,
                 prompt=prompt,
                 context=planned_context,
-                model=self._adk_model_for_tier(ADK_PLANNED_BRANCH_MODEL_TIER),
+                model_tier=ADK_PLANNED_BRANCH_MODEL_TIER,
+                task=task,
                 output_key=output_key,
                 tools=self._worker_tools(task=task),
             )
@@ -578,7 +588,8 @@ class AdkAgentRuntime:
             description="Merges planned workflow branch results into the final answer.",
             prompt=ADK_PLANNED_WORKFLOW_MERGER_PROMPT,
             context=planned_context,
-            model=self._adk_model_for_tier(ADK_PLANNED_MERGER_MODEL_TIER),
+            model_tier=ADK_PLANNED_MERGER_MODEL_TIER,
+            task=task,
             output_key=None,
             tools=[],
         )
@@ -681,7 +692,8 @@ class AdkAgentRuntime:
             description="Handles lightweight replies that do not require tools.",
             prompt=ADK_QUICK_RESPONSE_PROMPT,
             context=context,
-            model=self._adk_model_for_tier(ADK_QUICK_SPECIALIST_MODEL_TIER),
+            model_tier=ADK_QUICK_SPECIALIST_MODEL_TIER,
+            task=task,
         )
 
     def _instruction(self, *, context_package: ContextPackage | None = None) -> str:
@@ -710,21 +722,24 @@ class AdkAgentRuntime:
                 description="Classifies nontrivial Slack requests and recommends a route.",
                 prompt=ADK_INTENT_TRIAGE_PROMPT,
                 context=context,
-                model=self._adk_model_for_tier(ADK_INTENT_SPECIALIST_MODEL_TIER),
+                model_tier=ADK_INTENT_SPECIALIST_MODEL_TIER,
+                task=task,
             ),
             self._specialist_agent(
                 name="quick_response_agent",
                 description="Handles lightweight replies that do not require tools.",
                 prompt=ADK_QUICK_RESPONSE_PROMPT,
                 context=context,
-                model=self._adk_model_for_tier(ADK_QUICK_SPECIALIST_MODEL_TIER),
+                model_tier=ADK_QUICK_SPECIALIST_MODEL_TIER,
+                task=task,
             ),
             self._specialist_agent(
                 name="clarification_agent",
                 description="Asks a concise follow-up question when required context is missing.",
                 prompt=ADK_CLARIFICATION_PROMPT,
                 context=context,
-                model=self._adk_model_for_tier(ADK_CLARIFICATION_SPECIALIST_MODEL_TIER),
+                model_tier=ADK_CLARIFICATION_SPECIALIST_MODEL_TIER,
+                task=task,
             ),
         ]
         if task is not None and (
@@ -740,7 +755,8 @@ class AdkAgentRuntime:
                     ),
                     prompt=ADK_EVAL_PROMPT,
                     context=context,
-                    model=self._adk_model_for_tier(ADK_EVAL_SPECIALIST_MODEL_TIER),
+                    model_tier=ADK_EVAL_SPECIALIST_MODEL_TIER,
+                    task=task,
                 ),
                 self._specialist_agent(
                     name="humanizer_agent",
@@ -749,7 +765,8 @@ class AdkAgentRuntime:
                     ),
                     prompt=ADK_HUMANIZER_PROMPT,
                     context=context,
-                    model=self._adk_model_for_tier(ADK_HUMANIZER_SPECIALIST_MODEL_TIER),
+                    model_tier=ADK_HUMANIZER_SPECIALIST_MODEL_TIER,
+                    task=task,
                 ),
             ]
         )
@@ -762,11 +779,12 @@ class AdkAgentRuntime:
         description: str,
         prompt: str,
         context: str | None,
-        model: str,
+        model_tier: ModelRouteTier,
+        task: Task | None,
     ) -> Agent:
         return Agent(
             name=name,
-            model=self._adk_model(model=model),
+            model=self._adk_model(task=task, tier=model_tier),
             instruction=_instruction_with_optional_context(
                 _instruction_with_persona(prompt), context
             ),
@@ -778,7 +796,7 @@ class AdkAgentRuntime:
     def _worker_agent(self, *, task: Task | None, context: str | None) -> Agent:
         return Agent(
             name="tool_worker_agent",
-            model=self._adk_model(),
+            model=self._adk_model(task=task),
             instruction=_instruction_with_optional_context(
                 ADK_TOOL_WORKER_PROMPT,
                 context,
@@ -799,13 +817,14 @@ class AdkAgentRuntime:
         description: str,
         prompt: str,
         context: str | None,
-        model: str,
+        model_tier: ModelRouteTier,
+        task: Task | None,
         output_key: str | None,
         tools: list[Any],
     ) -> Agent:
         return Agent(
             name=name,
-            model=self._adk_model(model=model),
+            model=self._adk_model(task=task, tier=model_tier),
             instruction=_instruction_with_optional_context(
                 _instruction_with_persona(prompt),
                 context,
@@ -835,13 +854,16 @@ class AdkAgentRuntime:
                 )
             ]
         if self.registry is not None:
-            return adk_tools_from_registry(
-                self.registry,
-                task=task,
-                session=self.session,
-                task_service=self.task_service,
-                approval_policy=self.approval_policy,
-                tool_result_prompt_max_chars=self.tool_result_prompt_max_chars,
+            return cast(
+                list[Any],
+                adk_tools_from_registry(
+                    self.registry,
+                    task=task,
+                    session=self.session,
+                    task_service=self.task_service,
+                    approval_policy=self.approval_policy,
+                    tool_result_prompt_max_chars=self.tool_result_prompt_max_chars,
+                ),
             )
         return []
 
@@ -881,6 +903,8 @@ class AdkAgentRuntime:
             message="planned_workflow_classified",
         )
         reason_codes = planned_payload.get("reason_codes") if planned_payload else ()
+        if not isinstance(reason_codes, (list, tuple, set)):
+            return False
         return "quick_conversation" in {
             str(reason) for reason in reason_codes if isinstance(reason, str)
         }
@@ -904,8 +928,7 @@ class AdkAgentRuntime:
             .where(
                 TaskEvent.task_id == task.id,
                 TaskEvent.type == TaskEventType.log,
-                TaskEvent.payload["message"].as_string()
-                == message,
+                TaskEvent.payload["message"].as_string() == message,
             )
             .order_by(TaskEvent.seq.desc())
             .limit(1)
@@ -925,11 +948,94 @@ class AdkAgentRuntime:
         )
         return assembler.build_for_task(task)
 
-    def _adk_model_name(self) -> str:
-        return adk_litellm_model_name(self.settings, model=self.model)
+    def _adk_model_name(
+        self,
+        *,
+        task: Task | None = None,
+        tier: ModelRouteTier | None = None,
+        model: str | None = None,
+    ) -> str:
+        resolved = self._resolved_adk_model(task=task, tier=tier)
+        if resolved is not None and model is None:
+            return resolved.litellm_model
+        return adk_litellm_model_name(
+            self.settings,
+            model=self._env_model_for_request(tier=tier, model=model),
+        )
 
-    def _adk_model(self, *, model: str | None = None) -> LiteLlm:
-        return adk_litellm_model(self.settings, model=model or self.model)
+    def _adk_model(
+        self,
+        *,
+        task: Task | None = None,
+        tier: ModelRouteTier | None = None,
+        model: str | None = None,
+    ) -> LiteLlm:
+        resolved = self._resolved_adk_model(task=task, tier=tier)
+        if resolved is not None and model is None:
+            return LiteLlm(**resolved.adk_litellm_kwargs)
+        return adk_litellm_model(
+            self.settings,
+            model=self._env_model_for_request(tier=tier, model=model),
+        )
+
+    def _env_model_for_request(
+        self,
+        *,
+        tier: ModelRouteTier | None,
+        model: str | None,
+    ) -> str | None:
+        if model is not None:
+            return model
+        if tier is not None:
+            route = ModelRouter(self.settings).route_for_tier(
+                tier,
+                reason=f"adk_specialist:{tier.value}",
+            )
+            return str(route.model)
+        return self.model
+
+    def _resolved_adk_model(
+        self,
+        *,
+        task: Task | None,
+        tier: ModelRouteTier | None,
+    ) -> ResolvedLLMModel | None:
+        chain = self._resolved_adk_model_chain(task=task, tier=tier)
+        return chain.primary if chain is not None else None
+
+    def _resolved_adk_model_chain(
+        self,
+        *,
+        task: Task | None,
+        tier: ModelRouteTier | None,
+    ) -> ResolvedLLMModelChain | None:
+        if task is None or self.session is None:
+            return None
+        resolved_tier = tier or (
+            self.model_route.tier if self.model_route is not None else None
+        )
+        if resolved_tier is None:
+            return None
+        try:
+            return self._get_model_config_service().resolve_model_chain(
+                installation_id=task.installation_id,
+                tier=resolved_tier,
+            )
+        except Exception:
+            logger.exception(
+                "failed to resolve ADK model config task_id=%s tier=%s",
+                task.id,
+                resolved_tier.value,
+            )
+            return None
+
+    def _get_model_config_service(self) -> ModelConfigService:
+        if self._model_config_service is None:
+            self._model_config_service = ModelConfigService(
+                self.session,
+                settings=self.settings,
+            )
+        return self._model_config_service
 
     def _guard_planned_model_request(
         self,
@@ -1228,7 +1334,8 @@ class AdkAgentRuntime:
         task = self.task_service.get_task(task_id)
         agent_name = callback_context.agent_name
         model = _normalized_litellm_model_name(
-            llm_response.model_version or self._adk_model_name_for_agent(agent_name)
+            llm_response.model_version
+            or self._adk_model_name_for_agent(agent_name, task=task)
         )
         input_tokens = _token_count(usage.prompt_token_count) + _token_count(
             usage.tool_use_prompt_token_count
@@ -1241,8 +1348,13 @@ class AdkAgentRuntime:
         cost_usd, pricing_missing = self._calculate_adk_cost_usd(
             model=model,
             usage=token_usage,
-            fallback_model=self._adk_model_name_for_agent(agent_name),
+            fallback_model=self._adk_model_name_for_agent(agent_name, task=task),
         )
+        model_chain = self._resolved_adk_model_chain(
+            task=task,
+            tier=self._adk_model_tier_enum_for_agent(agent_name),
+        )
+        resolved_model = model_chain.primary if model_chain is not None else None
         model_tier = self._adk_model_tier_for_agent(agent_name)
         route_reason = self._adk_route_reason_for_agent(agent_name)
         metadata = {
@@ -1264,10 +1376,35 @@ class AdkAgentRuntime:
                 usage.cached_content_token_count
             ),
             "pricing_missing": pricing_missing,
+            "model_config_source": model_chain.source if model_chain else "env",
+            "model_config_fallback_reason": model_chain.fallback_reason
+            if model_chain
+            else None,
+            "model_config_skipped_candidate_count": (
+                model_chain.skipped_candidate_count if model_chain else 0
+            ),
+            "provider_kind": resolved_model.provider_kind if resolved_model else None,
+            "provider_account_id": str(resolved_model.provider_account_id)
+            if resolved_model and resolved_model.provider_account_id is not None
+            else None,
+            "model_catalog_id": str(resolved_model.model_catalog_id)
+            if resolved_model and resolved_model.model_catalog_id is not None
+            else None,
+            "tier_assignment_id": str(resolved_model.tier_assignment_id)
+            if resolved_model and resolved_model.tier_assignment_id is not None
+            else None,
+            "credential_source": resolved_model.credential_source
+            if resolved_model
+            else None,
         }
         self.task_service.record_llm_usage(
             task_id,
-            provider=DbLLMProvider(self.settings.llm_provider.value),
+            provider=db_provider_name(
+                resolved_model.provider_kind
+                if resolved_model
+                else self.settings.llm_provider.value,
+                fallback=self.settings.llm_provider.value,
+            ),
             model=model,
             model_tier=model_tier,
             input_tokens=input_tokens,
@@ -1287,6 +1424,7 @@ class AdkAgentRuntime:
                 model_tier=model_tier,
                 route_reason=route_reason,
                 adk_agent_name=agent_name,
+                model_config_source=model_chain.source if model_chain else "env",
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 cost_usd=str(cost_usd),
@@ -1460,17 +1598,34 @@ class AdkAgentRuntime:
                 return openrouter_cost, False
         return Decimal("0"), True
 
-    def _adk_model_name_for_agent(self, agent_name: str) -> str:
+    def _adk_model_name_for_agent(
+        self,
+        agent_name: str,
+        *,
+        task: Task | None = None,
+    ) -> str:
         if agent_name in {
             "kortny_root_orchestrator",
             "tool_worker_agent",
             "kortny_planned_workflow",
         }:
-            return self._adk_model_name()
-        tier = _adk_specialist_tier(agent_name)
+            return self._adk_model_name(task=task)
+        tier = self._adk_model_tier_enum_for_agent(agent_name)
         if tier is not None:
-            return self._adk_model_for_tier(tier)
-        return self._adk_model_name()
+            return self._adk_model_name_for_tier(tier, task=task)
+        return self._adk_model_name(task=task)
+
+    def _adk_model_tier_enum_for_agent(
+        self,
+        agent_name: str,
+    ) -> ModelRouteTier | None:
+        if agent_name in {
+            "kortny_root_orchestrator",
+            "tool_worker_agent",
+            "kortny_planned_workflow",
+        }:
+            return self.model_route.tier if self.model_route is not None else None
+        return _adk_specialist_tier(agent_name)
 
     def _adk_model_tier_for_agent(self, agent_name: str) -> str | None:
         if agent_name in {
@@ -1479,7 +1634,7 @@ class AdkAgentRuntime:
             "kortny_planned_workflow",
         }:
             if self.model_route is not None:
-                return self.model_route.tier.value
+                return str(self.model_route.tier.value)
             return None
         tier = _adk_specialist_tier(agent_name)
         return tier.value if tier is not None else None
@@ -1494,44 +1649,64 @@ class AdkAgentRuntime:
         tier = _adk_specialist_tier(agent_name)
         return f"adk_specialist:{tier.value}" if tier is not None else None
 
-    def _adk_model_for_tier(self, tier: ModelRouteTier) -> str:
+    def _adk_model_name_for_tier(
+        self,
+        tier: ModelRouteTier,
+        *,
+        task: Task | None = None,
+    ) -> str:
+        resolved = self._resolved_adk_model(task=task, tier=tier)
+        if resolved is not None:
+            return resolved.litellm_model
         route = ModelRouter(self.settings).route_for_tier(
             tier,
             reason=f"adk_specialist:{tier.value}",
         )
         return adk_litellm_model_name(self.settings, model=route.model)
 
-    def _specialist_model_routes(self) -> dict[str, str]:
+    def _specialist_model_routes(self, *, task: Task | None = None) -> dict[str, str]:
         return {
-            "root_orchestrator": self._adk_model_name(),
-            "intent_triage_agent": self._adk_model_for_tier(
-                ADK_INTENT_SPECIALIST_MODEL_TIER
+            "root_orchestrator": self._adk_model_name(task=task),
+            "intent_triage_agent": self._adk_model_name_for_tier(
+                ADK_INTENT_SPECIALIST_MODEL_TIER,
+                task=task,
             ),
-            "quick_response_agent": self._adk_model_for_tier(
-                ADK_QUICK_SPECIALIST_MODEL_TIER
+            "quick_response_agent": self._adk_model_name_for_tier(
+                ADK_QUICK_SPECIALIST_MODEL_TIER,
+                task=task,
             ),
-            "clarification_agent": self._adk_model_for_tier(
-                ADK_CLARIFICATION_SPECIALIST_MODEL_TIER
+            "clarification_agent": self._adk_model_name_for_tier(
+                ADK_CLARIFICATION_SPECIALIST_MODEL_TIER,
+                task=task,
             ),
-            "tool_worker_agent": self._adk_model_name(),
-            "eval_agent": self._adk_model_for_tier(ADK_EVAL_SPECIALIST_MODEL_TIER),
-            "humanizer_agent": self._adk_model_for_tier(
-                ADK_HUMANIZER_SPECIALIST_MODEL_TIER
+            "tool_worker_agent": self._adk_model_name(task=task),
+            "eval_agent": self._adk_model_name_for_tier(
+                ADK_EVAL_SPECIALIST_MODEL_TIER,
+                task=task,
             ),
-            "planned_workflow_planner": self._adk_model_for_tier(
-                ADK_PLANNED_PLANNER_MODEL_TIER
+            "humanizer_agent": self._adk_model_name_for_tier(
+                ADK_HUMANIZER_SPECIALIST_MODEL_TIER,
+                task=task,
             ),
-            "planned_research_worker": self._adk_model_for_tier(
-                ADK_PLANNED_BRANCH_MODEL_TIER
+            "planned_workflow_planner": self._adk_model_name_for_tier(
+                ADK_PLANNED_PLANNER_MODEL_TIER,
+                task=task,
             ),
-            "planned_workspace_worker": self._adk_model_for_tier(
-                ADK_PLANNED_BRANCH_MODEL_TIER
+            "planned_research_worker": self._adk_model_name_for_tier(
+                ADK_PLANNED_BRANCH_MODEL_TIER,
+                task=task,
             ),
-            "planned_integration_worker": self._adk_model_for_tier(
-                ADK_PLANNED_BRANCH_MODEL_TIER
+            "planned_workspace_worker": self._adk_model_name_for_tier(
+                ADK_PLANNED_BRANCH_MODEL_TIER,
+                task=task,
             ),
-            "planned_workflow_merger": self._adk_model_for_tier(
-                ADK_PLANNED_MERGER_MODEL_TIER
+            "planned_integration_worker": self._adk_model_name_for_tier(
+                ADK_PLANNED_BRANCH_MODEL_TIER,
+                task=task,
+            ),
+            "planned_workflow_merger": self._adk_model_name_for_tier(
+                ADK_PLANNED_MERGER_MODEL_TIER,
+                task=task,
             ),
         }
 
@@ -1543,7 +1718,7 @@ class AdkAgentRuntime:
     def _tool_names(self) -> tuple[str, ...]:
         if self.registry is None:
             return ()
-        return self.registry.names()
+        return tuple(str(name) for name in self.registry.names())
 
     def _resolve_task(self, task: Task | uuid.UUID) -> Task:
         if isinstance(task, Task):
@@ -1928,7 +2103,10 @@ def _token_count(value: object) -> int:
     if value is None:
         return 0
     try:
-        count = int(value)
+        if isinstance(value, (SupportsInt, str, bytes, bytearray)):
+            count = int(value)
+        else:
+            return 0
     except (TypeError, ValueError):
         return 0
     return max(0, count)

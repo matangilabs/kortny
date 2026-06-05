@@ -14,6 +14,8 @@ from kortny.agent.adk_runtime import (
 )
 from kortny.config import load_settings
 from kortny.db.models import Task
+from kortny.llm.provider_config import ResolvedLLMModel, ResolvedLLMModelChain
+from kortny.llm.routing import ModelRouteTier
 from kortny.tools import ToolRegistry
 from kortny.tools.types import JsonObject, ToolResult
 
@@ -291,6 +293,78 @@ def test_adk_runtime_short_availability_check_uses_direct_quick_agent(
     ]
 
 
+def test_adk_runtime_uses_model_config_service_for_task_bound_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    set_required_settings_env(monkeypatch)
+    monkeypatch.setenv("LLM_MODEL", "anthropic/sonnet-env")
+    settings = load_settings(env_file=None)
+    task = Task(
+        id=uuid.UUID("8c53f4e1-9d72-468d-ab18-5021d9e15dad"),
+        installation_id=uuid.UUID("1c53f4e1-9d72-468d-ab18-5021d9e15dad"),
+        slack_channel_id="D123",
+        slack_thread_ts="D123",
+        slack_user_id="U123",
+        input="Are you up?",
+    )
+    task_service = _FakeTaskService()
+    model_config_service = _FakeModelConfigService(
+        ResolvedLLMModelChain(
+            installation_id=task.installation_id,
+            tier=ModelRouteTier.cheap_fast,
+            source="db",
+            models=(
+                ResolvedLLMModel(
+                    tier=ModelRouteTier.cheap_fast,
+                    provider_kind="openrouter",
+                    model="deepseek/deepseek-db-fast",
+                    api_key="db-runtime-key",
+                    provider_account_id=uuid.UUID(
+                        "2c53f4e1-9d72-468d-ab18-5021d9e15dad"
+                    ),
+                    model_catalog_id=uuid.UUID("3c53f4e1-9d72-468d-ab18-5021d9e15dad"),
+                    tier_assignment_id=uuid.UUID(
+                        "4c53f4e1-9d72-468d-ab18-5021d9e15dad"
+                    ),
+                    priority=1,
+                    credential_source="env",
+                ),
+            ),
+        )
+    )
+
+    runtime = AdkAgentRuntime(
+        settings=settings,
+        session=cast(
+            Any,
+            _FakeScalarSession(
+                [
+                    {
+                        "message": "runtime_handoff_evaluated",
+                        "runtime_class": "quick_response",
+                        "selected_backend": "inline",
+                    },
+                    {
+                        "message": "planned_workflow_classified",
+                        "reason_codes": ["quick_conversation"],
+                    },
+                ]
+            ),
+        ),
+        task_service=cast(Any, task_service),
+        model_config_service=cast(Any, model_config_service),
+    )
+
+    agent = runtime._build_agent(task=task)
+
+    assert agent.name == "quick_response_agent"
+    assert agent.model.model == "openrouter/deepseek/deepseek-db-fast"
+    assert agent.model._additional_args["api_key"] == "db-runtime-key"
+    assert model_config_service.calls == [
+        (task.installation_id, ModelRouteTier.cheap_fast)
+    ]
+
+
 def test_adk_runtime_tool_inventory_question_stays_orchestrated(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -343,8 +417,14 @@ def test_adk_runtime_planned_branch_model_budget_returns_stop_response(
         state={"task_id": str(task.id)},
     )
 
-    assert runtime._guard_planned_model_request(cast(Any, callback_context), object()) is None
-    assert runtime._guard_planned_model_request(cast(Any, callback_context), object()) is None
+    assert (
+        runtime._guard_planned_model_request(cast(Any, callback_context), object())
+        is None
+    )
+    assert (
+        runtime._guard_planned_model_request(cast(Any, callback_context), object())
+        is None
+    )
     response = runtime._guard_planned_model_request(
         cast(Any, callback_context),
         object(),
@@ -942,6 +1022,21 @@ class _FakeScalarSession:
         if not self.rows:
             return None
         return self.rows.pop(0)
+
+
+class _FakeModelConfigService:
+    def __init__(self, chain: ResolvedLLMModelChain) -> None:
+        self.chain = chain
+        self.calls: list[tuple[uuid.UUID, ModelRouteTier]] = []
+
+    def resolve_model_chain(
+        self,
+        *,
+        installation_id: uuid.UUID,
+        tier: ModelRouteTier,
+    ) -> ResolvedLLMModelChain:
+        self.calls.append((installation_id, tier))
+        return self.chain
 
 
 class _FakeAdkEvent:

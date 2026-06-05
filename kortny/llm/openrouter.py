@@ -92,6 +92,9 @@ def create_llm_provider(
     settings: Settings | None = None,
     *,
     model: str | None = None,
+    provider_kind: str | None = None,
+    api_key: str | None = None,
+    endpoint: str | None = None,
     **kwargs: Any,
 ) -> OpenRouterProvider:
     """Create the configured MVP provider.
@@ -101,12 +104,18 @@ def create_llm_provider(
     """
 
     resolved_settings = settings or load_settings()
-    if resolved_settings.llm_provider is not SettingsLLMProvider.openrouter:
+    resolved_provider = provider_kind or resolved_settings.llm_provider.value
+    if resolved_provider != SettingsLLMProvider.openrouter.value:
         raise NotImplementedError(
-            f"LLM_PROVIDER={resolved_settings.llm_provider.value!r} is not "
+            f"LLM provider {resolved_provider!r} is not "
             "implemented yet; use 'openrouter' for the MVP provider"
         )
-    return OpenRouterProvider.from_settings(resolved_settings, model=model, **kwargs)
+    return OpenRouterProvider(
+        api_key=api_key or resolved_settings.llm_api_key,
+        model=model or resolved_settings.llm_model,
+        endpoint=endpoint or OPENROUTER_CHAT_COMPLETIONS_ENDPOINT,
+        **kwargs,
+    )
 
 
 def _message_to_payload(message: ChatMessage) -> JsonObject:

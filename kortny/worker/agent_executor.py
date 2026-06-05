@@ -36,8 +36,13 @@ from kortny.knowledge_graph import (
     TaskSummaryGraphExtractionService,
     is_dashboard_graph_refresh_task,
 )
-from kortny.llm import LLMProvider, LLMService, ModelRouter, create_llm_provider
+from kortny.llm import LLMProvider, LLMService, ModelRoute, ModelRouter
 from kortny.llm.routing import ModelRouteTier, effective_intent_decision
+from kortny.llm.runtime_config import (
+    RuntimeModelSelection,
+    create_provider_for_selection,
+    select_runtime_model,
+)
 from kortny.memory import WorkspaceStateService
 from kortny.observability import log_observation
 from kortny.observe.assessment import (
@@ -317,11 +322,17 @@ class AgentTaskExecutor:
             ModelRouteTier.cheap_fast,
             reason="knowledge_graph_semantic_extraction",
         )
-        provider = self.llm_provider or create_llm_provider(
-            settings,
-            model=model_route.model,
+        selection = self._select_runtime_model(
+            settings=settings,
+            session=session,
+            task=task,
+            model_route=model_route,
         )
-        provider_name = self.provider_name or DbLLMProvider(settings.llm_provider.value)
+        provider = self.llm_provider or create_provider_for_selection(
+            settings=settings,
+            selection=selection,
+        )
+        provider_name = self.provider_name or selection.provider_name
         result = ChannelGraphRefreshPipeline(
             session=session,
             task_service=task_service,
@@ -338,7 +349,7 @@ class AgentTaskExecutor:
                 provider=provider,
                 provider_name=provider_name,
                 task_service=task_service,
-                model_route=model_route,
+                model_route=selection.model_route,
             ),
         ).run(task)
         return AgentRunResult(
@@ -363,7 +374,17 @@ class AgentTaskExecutor:
                 task,
                 events=_task_events(session, task),
             )
-            provider = create_llm_provider(settings, model=model_route.model)
+            selection = self._select_runtime_model(
+                settings=settings,
+                session=session,
+                task=task,
+                model_route=model_route,
+            )
+            model_route = selection.model_route
+            provider = create_provider_for_selection(
+                settings=settings,
+                selection=selection,
+            )
             task_service.append_event(
                 task,
                 TaskEventType.log,
@@ -372,23 +393,45 @@ class AgentTaskExecutor:
                     "tier": model_route.tier.value,
                     "model": model_route.model,
                     "reason": model_route.reason,
+                    **selection.event_payload,
                 },
             )
             logger.info(
-                "agent executor model route selected task_id=%s tier=%s model=%s reason=%s",
+                "agent executor model route selected task_id=%s tier=%s model=%s reason=%s source=%s",
                 task.id,
                 model_route.tier.value,
                 model_route.model,
                 model_route.reason,
+                selection.chain.source,
             )
         else:
             provider = self.llm_provider
-        provider_name = self.provider_name or DbLLMProvider(settings.llm_provider.value)
+            selection = None
+        provider_name = self.provider_name or (
+            selection.provider_name
+            if selection is not None
+            else DbLLMProvider(settings.llm_provider.value)
+        )
         return LLMService(
             session=session,
             provider=provider,
             provider_name=provider_name,
             task_service=task_service,
+            model_route=model_route,
+        )
+
+    def _select_runtime_model(
+        self,
+        *,
+        settings: Settings,
+        session: Session,
+        task: Task,
+        model_route: ModelRoute,
+    ) -> RuntimeModelSelection:
+        return select_runtime_model(
+            session=session,
+            settings=settings,
+            installation_id=task.installation_id,
             model_route=model_route,
         )
 
@@ -518,6 +561,13 @@ class AgentTaskExecutor:
                 task,
                 events=_task_events(session, task),
             )
+            selection = self._select_runtime_model(
+                settings=settings,
+                session=session,
+                task=task,
+                model_route=model_route,
+            )
+            model_route = selection.model_route
             task_service.append_event(
                 task,
                 TaskEventType.log,
@@ -527,14 +577,16 @@ class AgentTaskExecutor:
                     "model": model_route.model,
                     "reason": model_route.reason,
                     "runtime": "adk",
+                    **selection.event_payload,
                 },
             )
             logger.info(
-                "agent executor model route selected task_id=%s runtime=adk tier=%s model=%s reason=%s",
+                "agent executor model route selected task_id=%s runtime=adk tier=%s model=%s reason=%s source=%s",
                 task.id,
                 model_route.tier.value,
                 model_route.model,
                 model_route.reason,
+                selection.chain.source,
             )
 
             cached_registry: ToolRegistry | None = None
@@ -882,6 +934,7 @@ class AgentTaskExecutor:
         selector = self.tool_selector or self._build_tool_selector(
             settings=settings,
             session=session,
+            task=task,
             task_service=task_service,
         )
         try:
@@ -941,6 +994,7 @@ class AgentTaskExecutor:
         *,
         settings: Settings,
         session: Session,
+        task: Task,
         task_service: TaskService,
     ) -> ToolSelector:
         if self.llm_provider is not None:
@@ -950,14 +1004,22 @@ class AgentTaskExecutor:
             ModelRouteTier.cheap_fast,
             reason="tool_selection",
         )
+        selection = self._select_runtime_model(
+            settings=settings,
+            session=session,
+            task=task,
+            model_route=model_route,
+        )
         return LLMToolSelector(
             LLMService(
                 session=session,
-                provider=create_llm_provider(settings, model=model_route.model),
-                provider_name=self.provider_name
-                or DbLLMProvider(settings.llm_provider.value),
+                provider=create_provider_for_selection(
+                    settings=settings,
+                    selection=selection,
+                ),
+                provider_name=self.provider_name or selection.provider_name,
                 task_service=task_service,
-                model_route=model_route,
+                model_route=selection.model_route,
             ),
             max_prompt_chars=settings.tool_selector_max_prompt_chars,
         )
@@ -1211,14 +1273,17 @@ class AgentTaskExecutor:
                 SlackPostingClient,
                 WebClient(token=settings.slack_bot_token),
             )
-        return SlackPoster(
-            session=session,
-            client=client,
-            task_service=task_service,
-        ).post_message(
-            SlackThread.from_task(task),
-            approval_prompt_text(approval.request),
-            purpose=TOOL_APPROVAL_PROMPT_PURPOSE,
+        return cast(
+            str,
+            SlackPoster(
+                session=session,
+                client=client,
+                task_service=task_service,
+            ).post_message(
+                SlackThread.from_task(task),
+                approval_prompt_text(approval.request),
+                purpose=TOOL_APPROVAL_PROMPT_PURPOSE,
+            ),
         )
 
     def _record_planned_task_started(
@@ -1766,7 +1831,7 @@ def _latest_payload_event(
             continue
         if event.payload.get("message") != message:
             continue
-        return event.payload
+        return cast(dict[str, Any], event.payload)
     return None
 
 
