@@ -21,7 +21,11 @@ from kortny.db.models import (
     LLMTierAssignment,
 )
 from kortny.db.session import make_engine, make_session_factory, normalize_database_url
-from kortny.llm.provider_config import bootstrap_llm_provider_config_from_env
+from kortny.llm.provider_config import (
+    ModelConfigService,
+    bootstrap_llm_provider_config_from_env,
+)
+from kortny.llm.routing import ModelRouteTier
 
 TEST_POSTGRES_URL = os.environ.get("KORTNY_TEST_POSTGRES_URL")
 
@@ -168,6 +172,188 @@ def test_env_bootstrap_respects_force_env_escape_hatch(db_session: Session) -> N
     assert provider_count == 0
 
 
+def test_model_config_service_bootstraps_and_resolves_env_seeded_config(
+    db_session: Session,
+) -> None:
+    installation = create_installation(db_session)
+    service = ModelConfigService(db_session, settings=build_settings())
+
+    chain = service.resolve_model_chain(
+        installation_id=installation.id,
+        tier=ModelRouteTier.analysis,
+    )
+
+    provider_count = db_session.scalar(
+        select(func.count()).select_from(LLMProviderAccount)
+    )
+
+    assert chain.source == "env_bootstrap"
+    assert chain.fallback_reason is None
+    assert chain.primary.model == "anthropic/claude-sonnet-4.6"
+    assert chain.primary.provider_kind == "openrouter"
+    assert chain.primary.provider_account_id is not None
+    assert chain.primary.api_key == "secret-llm-key"
+    assert chain.primary.litellm_model == "openrouter/anthropic/claude-sonnet-4.6"
+    assert provider_count == 1
+
+
+def test_model_config_service_resolves_db_chain_in_priority_order(
+    db_session: Session,
+) -> None:
+    installation = create_installation(db_session)
+    primary_model = create_provider_model_assignment(
+        db_session,
+        installation_id=installation.id,
+        model_identifier="anthropic/claude-sonnet-4.6",
+        tier=ModelRouteTier.analysis,
+        priority=1,
+        metadata_json={"credential_source": "env", "extra_headers": {"X-Test": "ok"}},
+    )
+    fallback_model = create_provider_model_assignment(
+        db_session,
+        installation_id=installation.id,
+        model_identifier="deepseek/deepseek-v4-pro",
+        tier=ModelRouteTier.analysis,
+        priority=2,
+    )
+    db_session.flush()
+    service = ModelConfigService(db_session, settings=build_settings())
+
+    chain = service.resolve_model_chain(
+        installation_id=installation.id,
+        tier=ModelRouteTier.analysis,
+    )
+
+    assert chain.source == "db"
+    assert [model.model for model in chain.models] == [
+        "anthropic/claude-sonnet-4.6",
+        "deepseek/deepseek-v4-pro",
+    ]
+    assert chain.primary.model_catalog_id == primary_model.id
+    assert chain.models[1].model_catalog_id == fallback_model.id
+    assert chain.primary.api_key == "secret-llm-key"
+    assert chain.primary.credential_source == "env"
+    assert chain.primary.adk_litellm_kwargs == {
+        "model": "openrouter/anthropic/claude-sonnet-4.6",
+        "api_key": "secret-llm-key",
+        "extra_headers": {"X-Test": "ok"},
+    }
+    assert chain.primary.direct_provider_kwargs == {
+        "api_key": "secret-llm-key",
+        "model": "anthropic/claude-sonnet-4.6",
+    }
+
+
+def test_model_config_service_force_env_bypasses_db_config(
+    db_session: Session,
+) -> None:
+    installation = create_installation(db_session)
+    create_provider_model_assignment(
+        db_session,
+        installation_id=installation.id,
+        model_identifier="anthropic/claude-opus-4.8",
+        tier=ModelRouteTier.analysis,
+        priority=1,
+    )
+    db_session.flush()
+    service = ModelConfigService(
+        db_session,
+        settings=build_settings(
+            LLM_CONFIG_FORCE_ENV=True,
+            LLM_ANALYSIS_MODEL="deepseek/deepseek-v4-flash",
+        ),
+    )
+
+    chain = service.resolve_model_chain(
+        installation_id=installation.id,
+        tier=ModelRouteTier.analysis,
+    )
+
+    assert chain.source == "env_forced"
+    assert chain.fallback_reason == "force_env_enabled"
+    assert chain.primary.model == "deepseek/deepseek-v4-flash"
+    assert chain.primary.provider_account_id is None
+
+
+def test_model_config_service_cache_can_be_invalidated(db_session: Session) -> None:
+    installation = create_installation(db_session)
+    catalog = create_provider_model_assignment(
+        db_session,
+        installation_id=installation.id,
+        model_identifier="old/model",
+        tier=ModelRouteTier.standard,
+        priority=1,
+    )
+    db_session.flush()
+    service = ModelConfigService(
+        db_session,
+        settings=build_settings(),
+        cache_ttl_seconds=60,
+    )
+
+    first = service.resolve_model(
+        installation_id=installation.id,
+        tier=ModelRouteTier.standard,
+    )
+    catalog.model_identifier = "new/model"
+    catalog.display_name = "new/model"
+    db_session.flush()
+    cached = service.resolve_model(
+        installation_id=installation.id,
+        tier=ModelRouteTier.standard,
+    )
+    service.invalidate_cache(
+        installation_id=installation.id,
+        tier=ModelRouteTier.standard,
+    )
+    refreshed = service.resolve_model(
+        installation_id=installation.id,
+        tier=ModelRouteTier.standard,
+    )
+
+    assert first.model == "old/model"
+    assert cached.model == "old/model"
+    assert refreshed.model == "new/model"
+
+
+def test_model_config_service_skips_secret_backed_candidate_without_resolver(
+    db_session: Session,
+) -> None:
+    installation = create_installation(db_session)
+    encrypted_secret = EncryptedSecret(
+        installation_id=installation.id,
+        secret_type="llm_provider:openrouter",
+        ciphertext=b"ciphertext",
+    )
+    db_session.add(encrypted_secret)
+    db_session.flush()
+    create_provider_model_assignment(
+        db_session,
+        installation_id=installation.id,
+        model_identifier="secret/model",
+        tier=ModelRouteTier.standard,
+        priority=1,
+        encrypted_secret_id=encrypted_secret.id,
+        metadata_json={"credential_source": "encrypted_secret"},
+    )
+    db_session.flush()
+    service = ModelConfigService(
+        db_session,
+        settings=build_settings(LLM_STANDARD_MODEL="env/model"),
+    )
+
+    chain = service.resolve_model_chain(
+        installation_id=installation.id,
+        tier=ModelRouteTier.standard,
+    )
+
+    assert chain.source == "env_fallback"
+    assert chain.fallback_reason == "db_candidates_missing_credentials"
+    assert chain.skipped_candidate_count == 1
+    assert chain.primary.model == "env/model"
+    assert chain.primary.provider_account_id is None
+
+
 def cleanup_database(session: Session) -> None:
     for model in (
         LLMConfigAudit,
@@ -191,6 +377,50 @@ def create_installation(session: Session) -> Installation:
     session.add(installation)
     session.flush()
     return installation
+
+
+def create_provider_model_assignment(
+    session: Session,
+    *,
+    installation_id: uuid.UUID,
+    model_identifier: str,
+    tier: ModelRouteTier,
+    priority: int,
+    encrypted_secret_id: uuid.UUID | None = None,
+    metadata_json: dict[str, object] | None = None,
+) -> LLMModelCatalog:
+    provider = LLMProviderAccount(
+        installation_id=installation_id,
+        provider_kind="openrouter",
+        display_name=f"OpenRouter provider {priority}",
+        status="active",
+        health_status="ok",
+        encrypted_secret_id=encrypted_secret_id,
+        metadata_json=metadata_json or {"credential_source": "env"},
+    )
+    session.add(provider)
+    session.flush()
+    catalog = LLMModelCatalog(
+        provider_account_id=provider.id,
+        model_identifier=model_identifier,
+        display_name=model_identifier,
+        is_enabled=True,
+        capabilities_json={},
+        source="manual",
+        metadata_json={},
+    )
+    session.add(catalog)
+    session.flush()
+    assignment = LLMTierAssignment(
+        installation_id=installation_id,
+        tier=tier.value,
+        model_catalog_id=catalog.id,
+        priority=priority,
+        is_active=True,
+        routing_json={},
+    )
+    session.add(assignment)
+    return catalog
 
 
 def build_settings(**overrides: Any) -> Settings:
