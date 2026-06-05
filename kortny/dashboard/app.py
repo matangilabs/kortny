@@ -17,6 +17,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from slack_sdk import WebClient
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 from starlette.middleware.sessions import SessionMiddleware
@@ -109,6 +110,15 @@ from kortny.llm.provider_config import (
     secret_resolver_from_settings,
 )
 from kortny.secrets import SecretEncryptionError, encrypt_secret_value
+from kortny.witness import (
+    DEFAULT_WITNESS_SNOOZE,
+    accept_candidate,
+    archive_candidate,
+    dismiss_candidate,
+    reactivate_candidate,
+    send_private_suggestion,
+    snooze_candidate,
+)
 
 TEMPLATE_DIR = Path(__file__).parent / "templates"
 STATIC_DIR = Path(__file__).parent / "static"
@@ -604,8 +614,97 @@ def register_routes(app: FastAPI) -> None:
             context={
                 **_dashboard_context(principal, active_page="witness"),
                 "witness": candidates,
+                "witness_return_path": _request_path(request),
             },
         )
+
+    @app.post("/witness/candidates/{candidate_id}/{action}")
+    async def witness_candidate_action(
+        request: Request,
+        candidate_id: UUID,
+        action: str,
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> RedirectResponse:
+        form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+        next_path = _safe_next_path(form.get("next", ["/witness"])[0])
+        actor = principal.slack_user_id or dashboard_actor(principal.display_name)
+        installation_id = _dashboard_installation_id(session, principal)
+        if installation_id is None:
+            return _redirect_with_notice(
+                next_path,
+                "Witness candidate actions require a selected workspace.",
+                tone="danger",
+            )
+        try:
+            if action == "dismiss":
+                dismiss_candidate(
+                    session,
+                    candidate_id,
+                    installation_id=installation_id,
+                    by_user_id=actor,
+                    reason=_form_value(form, "reason"),
+                )
+                notice = "Witness candidate dismissed."
+                tone = "warning"
+            elif action == "snooze":
+                snooze_candidate(
+                    session,
+                    candidate_id,
+                    installation_id=installation_id,
+                    by_user_id=actor,
+                    duration=DEFAULT_WITNESS_SNOOZE,
+                )
+                notice = "Witness candidate snoozed for 7 days."
+                tone = "warning"
+            elif action == "accept":
+                accept_candidate(
+                    session,
+                    candidate_id,
+                    installation_id=installation_id,
+                    by_user_id=actor,
+                )
+                notice = "Witness candidate marked useful."
+                tone = "success"
+            elif action == "reactivate":
+                reactivate_candidate(
+                    session,
+                    candidate_id,
+                    installation_id=installation_id,
+                    by_user_id=actor,
+                )
+                notice = "Witness candidate reactivated."
+                tone = "success"
+            elif action == "archive":
+                archive_candidate(
+                    session,
+                    candidate_id,
+                    installation_id=installation_id,
+                    by_user_id=actor,
+                )
+                notice = "Witness candidate archived."
+                tone = "warning"
+            elif action == "send":
+                runtime_settings = load_settings()
+                delivery = send_private_suggestion(
+                    session,
+                    candidate_id,
+                    installation_id=installation_id,
+                    by_user_id=actor,
+                    client=WebClient(token=runtime_settings.slack_bot_token),
+                )
+                notice = f"Witness suggestion sent in DM at {delivery.message_ts}."
+                tone = "success"
+            else:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+            session.commit()
+        except LookupError as exc:
+            session.rollback()
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND) from exc
+        except (SettingsError, ValueError) as exc:
+            session.rollback()
+            return _redirect_with_notice(next_path, str(exc), tone="danger")
+        return _redirect_with_notice(next_path, notice, tone=tone)
 
     @app.post("/knowledge-graph/refresh")
     async def knowledge_graph_refresh(

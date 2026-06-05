@@ -3600,6 +3600,10 @@ def test_dashboard_witness_page_shows_candidates_and_filters(
     assert "Daily blotter channel with generated reports." in response.text
     assert f"/tasks/{task.id}" in response.text
     assert "witness-test-dedupe-key" in response.text
+    assert "Mark useful" in response.text
+    assert "Snooze" in response.text
+    assert "Dismiss" in response.text
+    assert "Send DM" not in response.text
     assert "Recurring check: morning project scan" not in response.text
     assert 'href="/witness"' in response.text
     assert "LLM Providers" in response.text
@@ -3609,6 +3613,54 @@ def test_dashboard_witness_page_shows_candidates_and_filters(
     assert filtered_response.status_code == 200
     assert "Recurring check: morning project scan" in filtered_response.text
     assert "Data quality watch: flag unresolved placeholders" not in filtered_response.text
+
+
+def test_dashboard_witness_candidate_lifecycle_action_updates_row(
+    client: tuple[TestClient, Session],
+) -> None:
+    test_client, session = client
+    task = create_dashboard_task(session)
+    candidate = WitnessOpportunityCandidate(
+        installation_id=task.installation_id,
+        channel_id=task.slack_channel_id,
+        target_slack_user_id=task.slack_user_id,
+        visibility_scope_type="channel",
+        visibility_scope_id=task.slack_channel_id,
+        candidate_type="project_status_gap",
+        title="Project status follow-up",
+        summary="Kortny should watch for missing project status updates.",
+        suggested_action="Watch project status gaps.",
+        suggested_message="I can watch for missing project updates here.",
+        evidence_json=[],
+        source_type="manual",
+        source_id="manual-status-gap",
+        source_task_id=task.id,
+        dedupe_key="witness-dashboard-action-key",
+        confidence_score=Decimal("0.700"),
+        confidence_reason="Manual test candidate.",
+        status="candidate",
+        metadata_json={},
+    )
+    session.add(candidate)
+    session.commit()
+    login(test_client)
+
+    response = test_client.post(
+        f"/witness/candidates/{candidate.id}/snooze",
+        data={"next": "/witness?status=all&type=project_status_gap"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    location = response.headers["location"]
+    assert location.startswith("/witness?status=all&type=project_status_gap")
+    assert "notice=" in location
+    session.expire_all()
+    refreshed = session.get(WitnessOpportunityCandidate, candidate.id)
+    assert refreshed is not None
+    assert refreshed.status == "cooldown"
+    assert refreshed.cooldown_until is not None
+    assert refreshed.feedback_json["last_action"]["action"] == "snoozed"
 
 
 def test_dashboard_knowledge_graph_refresh_queues_channel_assessment_tasks(

@@ -6,7 +6,7 @@
   <section class="page-heading">
     <div>
       <h1>Witness</h1>
-      <p>Review proactive work candidates before Kortny is allowed to privately suggest them.</p>
+      <p>Review, pause, dismiss, and send tightly scoped proactive suggestions.</p>
     </div>
     <div class="heading-actions">
       <a class="btn-ghost" href="/knowledge-graph">View Graph</a>
@@ -52,7 +52,7 @@
   <section class="card detail-section witness-panel">
     <header>
       <h2>Opportunity Candidates</h2>
-      <p>Read-only backlog of evidence-backed moments where Kortny may be able to help.</p>
+      <p>Evidence-backed moments where Kortny may be able to help, with delivery controlled from here.</p>
     </header>
 
     <form class="filters panel-filters witness-filters" method="get" action="/witness">
@@ -140,6 +140,44 @@
               <span>Updated {{ row.candidate.updated_at|datetime }}</span>
               {% if row.cooldown_label %}
                 <span>{{ row.cooldown_label }}</span>
+              {% endif %}
+            </div>
+            <div class="witness-actions" aria-label="Candidate actions">
+              {% if row.can_send_private %}
+                <form method="post" action="/witness/candidates/{{ row.candidate.id }}/send">
+                  <input type="hidden" name="next" value="{{ witness_return_path }}">
+                  <button class="btn" type="submit">Send DM</button>
+                </form>
+              {% endif %}
+              {% if row.can_accept %}
+                <form method="post" action="/witness/candidates/{{ row.candidate.id }}/accept">
+                  <input type="hidden" name="next" value="{{ witness_return_path }}">
+                  <button class="btn-ghost" type="submit">Mark useful</button>
+                </form>
+              {% endif %}
+              {% if row.can_snooze %}
+                <form method="post" action="/witness/candidates/{{ row.candidate.id }}/snooze">
+                  <input type="hidden" name="next" value="{{ witness_return_path }}">
+                  <button class="btn-ghost" type="submit">Snooze</button>
+                </form>
+              {% endif %}
+              {% if row.can_reactivate %}
+                <form method="post" action="/witness/candidates/{{ row.candidate.id }}/reactivate">
+                  <input type="hidden" name="next" value="{{ witness_return_path }}">
+                  <button class="btn-ghost" type="submit">Reactivate</button>
+                </form>
+              {% endif %}
+              {% if row.can_dismiss %}
+                <form method="post" action="/witness/candidates/{{ row.candidate.id }}/dismiss">
+                  <input type="hidden" name="next" value="{{ witness_return_path }}">
+                  <button class="btn-ghost btn-danger" type="submit">Dismiss</button>
+                </form>
+              {% endif %}
+              {% if row.can_archive %}
+                <form method="post" action="/witness/candidates/{{ row.candidate.id }}/archive">
+                  <input type="hidden" name="next" value="{{ witness_return_path }}">
+                  <button class="btn-ghost" type="submit">Archive</button>
+                </form>
               {% endif %}
             </div>
           </div>

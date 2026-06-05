@@ -2251,6 +2251,25 @@ p {
   margin-left: 8px;
 }
 
+.witness-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.witness-actions form {
+  margin: 0;
+}
+
+.witness-actions .btn,
+.witness-actions .btn-ghost {
+  font-size: 12px;
+  min-height: 30px;
+  padding: 6px 10px;
+}
+
 .witness-side {
   display: grid;
   gap: 10px;
@@ -7830,6 +7849,5 @@ dialog::backdrop {
   color: var(--destructive);
   border-color: color-mix(in srgb, var(--destructive) 25%, transparent);
 }
-
 
 

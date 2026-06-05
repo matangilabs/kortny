@@ -776,6 +776,12 @@ class WitnessCandidateRow:
     source_label: str
     confidence_label: str
     cooldown_label: str | None
+    can_send_private: bool
+    can_snooze: bool
+    can_dismiss: bool
+    can_accept: bool
+    can_reactivate: bool
+    can_archive: bool
 
 
 @dataclass(frozen=True)
@@ -5466,6 +5472,12 @@ def _witness_candidate_rows(
                 source_label=_labelize(candidate.source_type),
                 confidence_label=_confidence_label(candidate.confidence_score),
                 cooldown_label=_witness_cooldown_label(candidate.cooldown_until, now),
+                can_send_private=_witness_can_send_private(candidate, now),
+                can_snooze=candidate.status == "candidate",
+                can_dismiss=candidate.status in {"candidate", "sent", "cooldown"},
+                can_accept=candidate.status in {"candidate", "sent", "cooldown"},
+                can_reactivate=candidate.status in {"dismissed", "cooldown"},
+                can_archive=candidate.status != "archived",
             )
             for candidate in candidates
         ),
@@ -5631,6 +5643,20 @@ def _witness_status_tone(
     if status in {"dismissed", "superseded", "archived"}:
         return "neutral"
     return "neutral"
+
+
+def _witness_can_send_private(
+    candidate: WitnessOpportunityCandidate,
+    now: datetime,
+) -> bool:
+    return (
+        candidate.status == "candidate"
+        and (candidate.cooldown_until is None or candidate.cooldown_until <= now)
+        and candidate.visibility_scope_type == "dm"
+        and candidate.channel_id is not None
+        and candidate.channel_id.startswith("D")
+        and bool(candidate.target_slack_user_id)
+    )
 
 
 def _witness_cooldown_label(

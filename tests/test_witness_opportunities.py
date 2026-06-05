@@ -14,6 +14,7 @@ from kortny.db.models import (
     Installation,
     ObserveChannelProfile,
     SlackChannelMembership,
+    SlackSideEffect,
     Task,
     TaskEvent,
     WitnessOpportunityCandidate,
@@ -21,8 +22,14 @@ from kortny.db.models import (
 from kortny.db.session import make_engine, make_session_factory, normalize_database_url
 from kortny.tasks import TaskService
 from kortny.witness import (
+    WITNESS_SUGGESTION_PURPOSE,
     WitnessOpportunityCandidateInput,
     WitnessOpportunityService,
+    accept_candidate,
+    dismiss_candidate,
+    reactivate_candidate,
+    send_private_suggestion,
+    snooze_candidate,
 )
 
 TEST_POSTGRES_URL = os.environ.get("KORTNY_TEST_POSTGRES_URL")
@@ -270,9 +277,168 @@ def test_eligible_private_suggestions_respects_status_and_cooldown(
     }
 
 
+def test_witness_lifecycle_actions_record_feedback(
+    db_session: Session,
+) -> None:
+    task, membership, profile = create_profile_fixture(db_session)
+    service = WitnessOpportunityService(db_session)
+    service.project_from_channel_profile(
+        task=task,
+        membership=membership,
+        profile=profile,
+        candidates=channel_profile_candidate_inputs(),
+        extraction_metadata={"raw_candidate_count": 2},
+    )
+    candidate = db_session.scalar(
+        select(WitnessOpportunityCandidate).order_by(
+            WitnessOpportunityCandidate.created_at.asc()
+        )
+    )
+    assert candidate is not None
+
+    snooze_candidate(
+        db_session,
+        candidate.id,
+        installation_id=task.installation_id,
+        by_user_id="UAdmin",
+        duration=timedelta(days=3),
+    )
+    db_session.flush()
+    assert candidate.status == "cooldown"
+    assert candidate.cooldown_until is not None
+    assert candidate.feedback_json["last_action"]["action"] == "snoozed"
+
+    reactivate_candidate(
+        db_session,
+        candidate.id,
+        installation_id=task.installation_id,
+        by_user_id="UAdmin",
+    )
+    assert candidate.status == "candidate"
+    assert candidate.cooldown_until is None
+    assert candidate.feedback_json["last_action"]["action"] == "reactivated"
+
+    accept_candidate(
+        db_session,
+        candidate.id,
+        installation_id=task.installation_id,
+        by_user_id="UAdmin",
+    )
+    assert candidate.status == "accepted"
+    assert candidate.feedback_json["last_action"]["action"] == "accepted"
+
+    dismiss_candidate(
+        db_session,
+        candidate.id,
+        installation_id=task.installation_id,
+        by_user_id="UAdmin",
+        reason="not useful right now",
+    )
+    assert candidate.status == "dismissed"
+    assert candidate.feedback_json["last_action"]["action"] == "dismissed"
+    assert candidate.feedback_json["last_action"]["reason"] == "not useful right now"
+
+
+def test_send_private_suggestion_requires_dm_scope_and_records_outbox(
+    db_session: Session,
+) -> None:
+    task, membership, profile = create_profile_fixture(db_session)
+    service = WitnessOpportunityService(db_session)
+    service.project_from_channel_profile(
+        task=task,
+        membership=membership,
+        profile=profile,
+        candidates=channel_profile_candidate_inputs(),
+        extraction_metadata={"raw_candidate_count": 2},
+    )
+    channel_candidate = db_session.scalar(select(WitnessOpportunityCandidate))
+    assert channel_candidate is not None
+    with pytest.raises(ValueError, match="Only DM-scoped"):
+        send_private_suggestion(
+            db_session,
+            channel_candidate.id,
+            installation_id=task.installation_id,
+            by_user_id="UAdmin",
+            client=FakeWitnessSlackClient(),
+        )
+
+    dm_task = TaskService(db_session).create_task(
+        installation_id=task.installation_id,
+        slack_event_id=f"Ev{uuid.uuid4().hex}",
+        slack_channel_id="DUser123",
+        slack_thread_ts="DUser123",
+        slack_message_ts="1780200000.000001",
+        slack_user_id="UUser123",
+        input="Keep an eye on my recurring vendor checklist.",
+    )
+    service.project_from_task_candidates(
+        task=dm_task,
+        candidates=(
+            WitnessOpportunityCandidateInput(
+                candidate_type="recurring_check",
+                title="Vendor checklist follow-up",
+                summary="Offer to check recurring vendor checklist gaps.",
+                suggested_action="Watch recurring vendor checklist gaps.",
+                suggested_message=(
+                    "I can keep an eye on recurring vendor checklist gaps for you."
+                ),
+                evidence=("The answer identified recurring checklist gaps.",),
+                confidence_score=Decimal("0.800"),
+                confidence_reason="The source task named a recurring check.",
+                metadata_json={"extractor": "test"},
+            ),
+        ),
+        response_text="I can watch recurring vendor checklist gaps.",
+        extraction_metadata={"raw_candidate_count": 1},
+    )
+    dm_candidate = db_session.scalar(
+        select(WitnessOpportunityCandidate).where(
+            WitnessOpportunityCandidate.visibility_scope_type == "dm"
+        )
+    )
+    assert dm_candidate is not None
+    client = FakeWitnessSlackClient()
+
+    result = send_private_suggestion(
+        db_session,
+        dm_candidate.id,
+        installation_id=task.installation_id,
+        by_user_id="UAdmin",
+        client=client,
+        now=datetime(2026, 6, 5, 12, 30, tzinfo=UTC),
+    )
+    db_session.flush()
+
+    assert result.channel_id == "DUser123"
+    assert result.message_ts == "1780200100.000002"
+    assert client.calls == [
+        {
+            "channel": "DUser123",
+            "text": "I can keep an eye on recurring vendor checklist gaps for you.",
+            "thread_ts": None,
+        }
+    ]
+    assert dm_candidate.status == "sent"
+    assert dm_candidate.last_suggested_at == datetime(2026, 6, 5, 12, 30, tzinfo=UTC)
+    assert dm_candidate.feedback_json["last_action"]["action"] == "sent"
+    assert (
+        dm_candidate.feedback_json["last_action"]["delivery_policy"]
+        == "explicit_dm_only"
+    )
+    side_effect = db_session.scalar(
+        select(SlackSideEffect).where(
+            SlackSideEffect.id == result.side_effect_id,
+        )
+    )
+    assert side_effect is not None
+    assert side_effect.status == "succeeded"
+    assert side_effect.purpose == WITNESS_SUGGESTION_PURPOSE
+
+
 def cleanup_database(session: Session) -> None:
     for model in (
         WitnessOpportunityCandidate,
+        SlackSideEffect,
         ObserveChannelProfile,
         SlackChannelMembership,
         TaskEvent,
@@ -386,3 +552,25 @@ def channel_profile_candidate_inputs() -> tuple[WitnessOpportunityCandidateInput
             metadata_json={"extractor": "test_channel_profile_extractor"},
         ),
     )
+
+
+class FakeWitnessSlackClient:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, str | None]] = []
+
+    def chat_postMessage(
+        self,
+        *,
+        channel: str,
+        text: str,
+        thread_ts: str | None = None,
+        blocks: list[dict] | None = None,
+    ) -> dict[str, str | bool]:
+        self.calls.append(
+            {
+                "channel": channel,
+                "text": text,
+                "thread_ts": thread_ts,
+            }
+        )
+        return {"ok": True, "ts": "1780200100.000002"}
