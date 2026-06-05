@@ -904,6 +904,24 @@ def test_agent_executor_posts_planned_workflow_progress_update(
         }
     )
     slack_client = FakeSlackClient()
+    provider = FakeAgentProvider(
+        [
+            Completion(
+                content=json.dumps(
+                    {
+                        "message": (
+                            "I'll check the channel pattern and recent context, "
+                            "then call out what I would watch for."
+                        )
+                    }
+                ),
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=90, output_tokens=24),
+                cost_usd=Decimal("0.000001"),
+                model="deepseek/deepseek-v4-flash-20260423",
+            )
+        ]
+    )
 
     class FakeAdkRuntime:
         def __init__(self, **kwargs: Any) -> None:
@@ -924,6 +942,8 @@ def test_agent_executor_posts_planned_workflow_progress_update(
 
     result = AgentTaskExecutor(
         settings=settings,
+        llm_provider=provider,
+        provider_name="openrouter",
         slack_client=slack_client,
     )._run_agent_runtime(
         settings=settings,
@@ -941,7 +961,10 @@ def test_agent_executor_posts_planned_workflow_progress_update(
     assert len(slack_client.messages) == 1
     assert slack_client.messages[0]["channel"] == "C123"
     assert slack_client.messages[0]["thread_ts"] == "EvPlannedWorkflowProgress"
-    assert "split this into a few workstreams" in slack_client.messages[0]["text"]
+    assert "channel pattern and recent context" in slack_client.messages[0]["text"]
+    assert "workstreams" not in slack_client.messages[0]["text"].casefold()
+    assert len(provider.calls) == 1
+    assert provider.calls[0][2] == {"type": "json_object"}
     assert any(
         event.payload.get("message") == "planned_task_started"
         and event.payload.get("progress_updates_enabled") is True
@@ -955,8 +978,21 @@ def test_agent_executor_posts_planned_workflow_progress_update(
     assert any(
         event.payload.get("message") == "planned_task_progress_posted"
         and event.payload.get("purpose") == "planned_progress_start"
+        and event.payload.get("text_source") == "llm"
         for event in events
     )
+    assert any(
+        event.payload.get("message") == "llm_call_started"
+        and event.payload.get("prompt_name") == "kortny.planned_progress_status"
+        and event.payload.get("model_tier") == "cheap_fast"
+        for event in events
+    )
+    usage = db_session.scalar(
+        select(LLMUsage).where(LLMUsage.task_id == task.id)
+    )
+    assert usage is not None
+    assert usage.model_tier == "cheap_fast"
+    assert usage.model == "deepseek/deepseek-v4-flash-20260423"
 
 
 def test_agent_executor_shadow_starts_temporal_for_planned_candidate(

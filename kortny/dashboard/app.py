@@ -51,6 +51,7 @@ from kortny.dashboard.data import (
     get_task_detail,
     get_usage_aggregate,
     get_user_detail,
+    get_witness_candidates_dashboard,
     list_tasks,
     list_users,
     llm_tier_catalog_options,
@@ -570,6 +571,39 @@ def register_routes(app: FastAPI) -> None:
                 "graph_return_path": _request_path(request),
                 "notice": notice,
                 "notice_tone": _notice_tone(notice_tone),
+            },
+        )
+
+    @app.get("/witness", response_class=HTMLResponse)
+    def witness_candidates(
+        request: Request,
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        session: Annotated[Session, Depends(get_session)],
+        q: Annotated[str | None, Query()] = None,
+        status_filter: Annotated[str, Query(alias="status")] = "candidate",
+        type_filter: Annotated[str, Query(alias="type")] = "all",
+        scope: Annotated[str, Query()] = "all",
+        sort: Annotated[str | None, Query()] = None,
+        page: Annotated[int, Query(ge=1)] = 1,
+        page_size: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)] = DEFAULT_PAGE_SIZE,
+    ) -> Response:
+        candidates = get_witness_candidates_dashboard(
+            session,
+            query=q,
+            status_filter=status_filter,
+            type_filter=type_filter,
+            scope_filter=scope,
+            sort=sort,
+            page=page,
+            page_size=page_size,
+            installation_id=principal.installation_id,
+        )
+        return templates.TemplateResponse(
+            request=request,
+            name="witness.html",
+            context={
+                **_dashboard_context(principal, active_page="witness"),
+                "witness": candidates,
             },
         )
 

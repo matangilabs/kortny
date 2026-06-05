@@ -52,6 +52,7 @@ from kortny.db.models import (
     TaskEvent,
     TaskEventType,
     TaskStatus,
+    WitnessOpportunityCandidate,
     WorkspaceState,
 )
 from kortny.knowledge_graph.provenance import (
@@ -752,6 +753,84 @@ class KnowledgeGraphDashboard:
     relationships_url: str
     entities: tuple[KnowledgeGraphEntityRow, ...]
     edges: tuple[KnowledgeGraphEdgeRow, ...]
+
+
+@dataclass(frozen=True)
+class WitnessEvidencePreview:
+    source_label: str
+    snippet: str
+
+
+@dataclass(frozen=True)
+class WitnessCandidateRow:
+    candidate: WitnessOpportunityCandidate
+    channel: IdentityLabel | None
+    target_user: IdentityLabel | None
+    scope: IdentityLabel
+    source_task: Task | None
+    source_profile: ObserveChannelProfile | None
+    evidence: tuple[WitnessEvidencePreview, ...]
+    tone: str
+    type_label: str
+    status_label: str
+    source_label: str
+    confidence_label: str
+    cooldown_label: str | None
+
+
+@dataclass(frozen=True)
+class WitnessCandidatePageInfo:
+    page: int
+    page_size: int
+    total_count: int
+
+    @property
+    def total_pages(self) -> int:
+        if self.total_count == 0:
+            return 1
+        return math.ceil(self.total_count / self.page_size)
+
+    @property
+    def previous_page(self) -> int | None:
+        if self.page <= 1:
+            return None
+        return self.page - 1
+
+    @property
+    def next_page(self) -> int | None:
+        if self.page >= self.total_pages:
+            return None
+        return self.page + 1
+
+    @property
+    def first_item(self) -> int:
+        if self.total_count == 0:
+            return 0
+        return ((self.page - 1) * self.page_size) + 1
+
+    @property
+    def last_item(self) -> int:
+        return min(self.page * self.page_size, self.total_count)
+
+
+@dataclass(frozen=True)
+class WitnessCandidatesDashboard:
+    total_count: int
+    candidate_count: int
+    due_candidate_count: int
+    sent_count: int
+    accepted_count: int
+    inactive_count: int
+    query: str
+    status_filter: str
+    type_filter: str
+    scope_filter: str
+    sort: str
+    page: WitnessCandidatePageInfo
+    previous_page_url: str | None
+    next_page_url: str | None
+    reset_url: str
+    rows: tuple[WitnessCandidateRow, ...]
 
 
 @dataclass(frozen=True)
@@ -2055,6 +2134,165 @@ def get_knowledge_graph_dashboard(
         relationships_url=relationships_url,
         entities=entities,
         edges=edges,
+    )
+
+
+def get_witness_candidates_dashboard(
+    session: Session,
+    *,
+    query: str | None = None,
+    status_filter: str = "candidate",
+    type_filter: str = "all",
+    scope_filter: str = "all",
+    sort: str | None = None,
+    page: int = 1,
+    page_size: int = DEFAULT_PAGE_SIZE,
+    installation_id: uuid.UUID | None = None,
+    base_path: str = "/witness",
+) -> WitnessCandidatesDashboard:
+    """Return read-only proactive work candidates for the Witness dashboard."""
+
+    normalized_query = " ".join((query or "").split())
+    normalized_page = max(page, 1)
+    normalized_size = min(max(page_size, 1), MAX_PAGE_SIZE)
+    normalized_status = (
+        status_filter if status_filter in _WITNESS_STATUSES else "candidate"
+    )
+    normalized_type = type_filter if type_filter in _WITNESS_TYPES else "all"
+    normalized_scope = scope_filter if scope_filter in _WITNESS_SCOPES else "all"
+    normalized_sort = sort if sort in _WITNESS_SORTS else "updated_desc"
+    now = datetime.now(UTC)
+
+    installation_scope = _kg_installation_filter(
+        WitnessOpportunityCandidate, installation_id
+    )
+    total_count = (
+        session.scalar(
+            select(func.count())
+            .select_from(WitnessOpportunityCandidate)
+            .where(*installation_scope)
+        )
+        or 0
+    )
+    candidate_count = (
+        session.scalar(
+            select(func.count())
+            .select_from(WitnessOpportunityCandidate)
+            .where(
+                *installation_scope,
+                WitnessOpportunityCandidate.status == "candidate",
+            )
+        )
+        or 0
+    )
+    due_candidate_count = (
+        session.scalar(
+            select(func.count())
+            .select_from(WitnessOpportunityCandidate)
+            .where(
+                *installation_scope,
+                WitnessOpportunityCandidate.status == "candidate",
+                or_(
+                    WitnessOpportunityCandidate.cooldown_until.is_(None),
+                    WitnessOpportunityCandidate.cooldown_until <= now,
+                ),
+            )
+        )
+        or 0
+    )
+    sent_count = (
+        session.scalar(
+            select(func.count())
+            .select_from(WitnessOpportunityCandidate)
+            .where(*installation_scope, WitnessOpportunityCandidate.status == "sent")
+        )
+        or 0
+    )
+    accepted_count = (
+        session.scalar(
+            select(func.count())
+            .select_from(WitnessOpportunityCandidate)
+            .where(
+                *installation_scope,
+                WitnessOpportunityCandidate.status == "accepted",
+            )
+        )
+        or 0
+    )
+    inactive_count = (
+        session.scalar(
+            select(func.count())
+            .select_from(WitnessOpportunityCandidate)
+            .where(
+                *installation_scope,
+                WitnessOpportunityCandidate.status.in_(
+                    ("dismissed", "cooldown", "superseded", "archived")
+                ),
+            )
+        )
+        or 0
+    )
+
+    row_total_count, resolved_page, rows = _witness_candidate_rows(
+        session,
+        query=normalized_query,
+        status_filter=normalized_status,
+        type_filter=normalized_type,
+        scope_filter=normalized_scope,
+        sort=normalized_sort,
+        page=normalized_page,
+        page_size=normalized_size,
+        installation_id=installation_id,
+        now=now,
+    )
+    page_info = WitnessCandidatePageInfo(
+        page=resolved_page,
+        page_size=normalized_size,
+        total_count=row_total_count,
+    )
+    return WitnessCandidatesDashboard(
+        total_count=int(total_count),
+        candidate_count=int(candidate_count),
+        due_candidate_count=int(due_candidate_count),
+        sent_count=int(sent_count),
+        accepted_count=int(accepted_count),
+        inactive_count=int(inactive_count),
+        query=normalized_query,
+        status_filter=normalized_status,
+        type_filter=normalized_type,
+        scope_filter=normalized_scope,
+        sort=normalized_sort,
+        page=page_info,
+        previous_page_url=(
+            _witness_candidates_url(
+                query=normalized_query,
+                status_filter=normalized_status,
+                type_filter=normalized_type,
+                scope_filter=normalized_scope,
+                sort=normalized_sort,
+                page=page_info.previous_page,
+                page_size=normalized_size,
+                base_path=base_path,
+            )
+            if page_info.previous_page is not None
+            else None
+        ),
+        next_page_url=(
+            _witness_candidates_url(
+                query=normalized_query,
+                status_filter=normalized_status,
+                type_filter=normalized_type,
+                scope_filter=normalized_scope,
+                sort=normalized_sort,
+                page=page_info.next_page,
+                page_size=normalized_size,
+                base_path=base_path,
+            )
+            if page_info.next_page is not None
+            else None
+        ),
+        reset_url=base_path,
+        rows=rows,
     )
 
 
@@ -4276,6 +4514,36 @@ _KG_ENTITY_SORTS = frozenset(
 _KG_EDGE_SORTS = frozenset(
     {"updated_desc", "created_desc", "confidence_desc", "relationship_asc"}
 )
+_WITNESS_STATUSES = frozenset(
+    {
+        "all",
+        "candidate",
+        "sent",
+        "accepted",
+        "dismissed",
+        "cooldown",
+        "superseded",
+        "archived",
+    }
+)
+_WITNESS_TYPES = frozenset(
+    {
+        "all",
+        "workflow_gap",
+        "artifact_followup",
+        "unresolved_decision",
+        "data_quality_issue",
+        "recurring_check",
+        "project_status_gap",
+        "general_help",
+    }
+)
+_WITNESS_SCOPES = frozenset(
+    {"all", "workspace", "channel", "private_channel", "dm", "user"}
+)
+_WITNESS_SORTS = frozenset(
+    {"updated_desc", "created_desc", "confidence_desc", "status_asc", "type_asc"}
+)
 
 
 def _normalize_memory_sort(view: str, sort: str | None) -> str:
@@ -5086,6 +5354,324 @@ def _knowledge_graph_page_url(
     if kind_filter != "all":
         params["kind"] = kind_filter
     return f"{base_path}?{urlencode(params)}"
+
+
+def _witness_candidate_rows(
+    session: Session,
+    *,
+    query: str,
+    status_filter: str,
+    type_filter: str,
+    scope_filter: str,
+    sort: str,
+    page: int,
+    page_size: int,
+    installation_id: uuid.UUID | None,
+    now: datetime,
+) -> tuple[int, int, tuple[WitnessCandidateRow, ...]]:
+    filters = _witness_candidate_filters(
+        query=query,
+        status_filter=status_filter,
+        type_filter=type_filter,
+        scope_filter=scope_filter,
+        installation_id=installation_id,
+    )
+    total_count = (
+        session.scalar(
+            select(func.count())
+            .select_from(WitnessOpportunityCandidate)
+            .where(*filters)
+        )
+        or 0
+    )
+    resolved_page = _resolved_page(
+        page=page, page_size=page_size, total_count=total_count
+    )
+    candidates = tuple(
+        session.scalars(
+            select(WitnessOpportunityCandidate)
+            .where(*filters)
+            .order_by(*_witness_candidate_order(sort))
+            .offset((resolved_page - 1) * page_size)
+            .limit(page_size)
+        )
+    )
+    tasks = _tasks_by_id(
+        session, [candidate.source_task_id for candidate in candidates]
+    )
+    profile_ids = tuple(
+        {candidate.source_profile_id for candidate in candidates if candidate.source_profile_id}
+    )
+    profiles = (
+        {
+            profile.id: profile
+            for profile in session.scalars(
+                select(ObserveChannelProfile).where(
+                    ObserveChannelProfile.id.in_(profile_ids)
+                )
+            )
+        }
+        if profile_ids
+        else {}
+    )
+    identities = _identity_map_from_keys(
+        session, _witness_candidate_identity_keys(candidates)
+    )
+    return (
+        int(total_count),
+        resolved_page,
+        tuple(
+            WitnessCandidateRow(
+                candidate=candidate,
+                channel=(
+                    _identity_label(
+                        identities,
+                        installation_id=candidate.installation_id,
+                        kind="channel",
+                        slack_id=candidate.channel_id,
+                    )
+                    if candidate.channel_id
+                    else None
+                ),
+                target_user=(
+                    _identity_label(
+                        identities,
+                        installation_id=candidate.installation_id,
+                        kind="user",
+                        slack_id=candidate.target_slack_user_id,
+                    )
+                    if candidate.target_slack_user_id
+                    else None
+                ),
+                scope=_kg_scope_label(
+                    identities,
+                    installation_id=candidate.installation_id,
+                    scope_type=candidate.visibility_scope_type,
+                    scope_id=candidate.visibility_scope_id,
+                ),
+                source_task=(
+                    tasks.get(candidate.source_task_id)
+                    if candidate.source_task_id is not None
+                    else None
+                ),
+                source_profile=(
+                    profiles.get(candidate.source_profile_id)
+                    if candidate.source_profile_id is not None
+                    else None
+                ),
+                evidence=_witness_evidence_preview(candidate),
+                tone=_witness_status_tone(candidate.status, candidate.cooldown_until, now),
+                type_label=_labelize(candidate.candidate_type),
+                status_label=_labelize(candidate.status),
+                source_label=_labelize(candidate.source_type),
+                confidence_label=_confidence_label(candidate.confidence_score),
+                cooldown_label=_witness_cooldown_label(candidate.cooldown_until, now),
+            )
+            for candidate in candidates
+        ),
+    )
+
+
+def _witness_candidate_filters(
+    *,
+    query: str,
+    status_filter: str,
+    type_filter: str,
+    scope_filter: str,
+    installation_id: uuid.UUID | None,
+) -> list[ColumnElement[bool]]:
+    filters = _kg_installation_filter(WitnessOpportunityCandidate, installation_id)
+    if status_filter != "all":
+        filters.append(WitnessOpportunityCandidate.status == status_filter)
+    if type_filter != "all":
+        filters.append(WitnessOpportunityCandidate.candidate_type == type_filter)
+    if scope_filter != "all":
+        filters.append(WitnessOpportunityCandidate.visibility_scope_type == scope_filter)
+    if query:
+        pattern = f"%{query}%"
+        channel_identity_match = (
+            select(SlackIdentity.id)
+            .where(
+                SlackIdentity.installation_id
+                == WitnessOpportunityCandidate.installation_id,
+                SlackIdentity.kind == "channel",
+                SlackIdentity.slack_id == WitnessOpportunityCandidate.channel_id,
+                or_(
+                    SlackIdentity.display_name.ilike(pattern),
+                    SlackIdentity.raw_name.ilike(pattern),
+                ),
+            )
+            .exists()
+        )
+        user_identity_match = (
+            select(SlackIdentity.id)
+            .where(
+                SlackIdentity.installation_id
+                == WitnessOpportunityCandidate.installation_id,
+                SlackIdentity.kind == "user",
+                SlackIdentity.slack_id
+                == WitnessOpportunityCandidate.target_slack_user_id,
+                or_(
+                    SlackIdentity.display_name.ilike(pattern),
+                    SlackIdentity.raw_name.ilike(pattern),
+                ),
+            )
+            .exists()
+        )
+        filters.append(
+            or_(
+                WitnessOpportunityCandidate.title.ilike(pattern),
+                WitnessOpportunityCandidate.summary.ilike(pattern),
+                WitnessOpportunityCandidate.suggested_action.ilike(pattern),
+                WitnessOpportunityCandidate.suggested_message.ilike(pattern),
+                WitnessOpportunityCandidate.channel_id.ilike(pattern),
+                WitnessOpportunityCandidate.target_slack_user_id.ilike(pattern),
+                WitnessOpportunityCandidate.visibility_scope_id.ilike(pattern),
+                WitnessOpportunityCandidate.source_id.ilike(pattern),
+                WitnessOpportunityCandidate.dedupe_key.ilike(pattern),
+                cast(WitnessOpportunityCandidate.evidence_json, Text).ilike(pattern),
+                cast(WitnessOpportunityCandidate.metadata_json, Text).ilike(pattern),
+                channel_identity_match,
+                user_identity_match,
+            )
+        )
+    return filters
+
+
+def _witness_candidate_order(sort: str) -> tuple[Any, ...]:
+    if sort == "created_desc":
+        return (
+            WitnessOpportunityCandidate.created_at.desc(),
+            WitnessOpportunityCandidate.id.desc(),
+        )
+    if sort == "confidence_desc":
+        return (
+            WitnessOpportunityCandidate.confidence_score.desc(),
+            WitnessOpportunityCandidate.updated_at.desc(),
+        )
+    if sort == "status_asc":
+        return (
+            WitnessOpportunityCandidate.status.asc(),
+            WitnessOpportunityCandidate.updated_at.desc(),
+        )
+    if sort == "type_asc":
+        return (
+            WitnessOpportunityCandidate.candidate_type.asc(),
+            WitnessOpportunityCandidate.updated_at.desc(),
+        )
+    return (
+        WitnessOpportunityCandidate.updated_at.desc(),
+        WitnessOpportunityCandidate.created_at.desc(),
+    )
+
+
+def _witness_candidate_identity_keys(
+    candidates: Sequence[WitnessOpportunityCandidate],
+) -> tuple[IdentityKey, ...]:
+    keys: list[IdentityKey] = []
+    for candidate in candidates:
+        if candidate.channel_id:
+            keys.append((candidate.installation_id, "channel", candidate.channel_id))
+        if candidate.target_slack_user_id:
+            keys.append(
+                (candidate.installation_id, "user", candidate.target_slack_user_id)
+            )
+        scope_key = _kg_scope_identity_key(candidate)
+        if scope_key is not None:
+            keys.append(scope_key)
+    return tuple(keys)
+
+
+def _witness_evidence_preview(
+    candidate: WitnessOpportunityCandidate,
+) -> tuple[WitnessEvidencePreview, ...]:
+    evidence = candidate.evidence_json if isinstance(candidate.evidence_json, list) else []
+    previews: list[WitnessEvidencePreview] = []
+    for item in evidence:
+        if not isinstance(item, dict):
+            continue
+        source_label = _labelize(str(item.get("type") or "evidence"))
+        snippet = _witness_evidence_snippet(item)
+        previews.append(WitnessEvidencePreview(source_label=source_label, snippet=snippet))
+        if len(previews) >= 3:
+            break
+    if not previews and candidate.confidence_reason:
+        previews.append(
+            WitnessEvidencePreview(
+                source_label="Confidence",
+                snippet=_truncate(candidate.confidence_reason, 220),
+            )
+        )
+    return tuple(previews)
+
+
+def _witness_evidence_snippet(item: Mapping[str, Any]) -> str:
+    for key in ("snippet", "summary", "message", "text", "title"):
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            return _truncate(value, 220)
+    return _truncate(json.dumps(item, sort_keys=True, default=str), 220)
+
+
+def _witness_status_tone(
+    status: str,
+    cooldown_until: datetime | None,
+    now: datetime,
+) -> str:
+    if status == "accepted":
+        return "success"
+    if status == "sent":
+        return "accent"
+    if status == "candidate":
+        if cooldown_until is not None and cooldown_until > now:
+            return "warning"
+        return "success"
+    if status == "cooldown":
+        return "warning"
+    if status in {"dismissed", "superseded", "archived"}:
+        return "neutral"
+    return "neutral"
+
+
+def _witness_cooldown_label(
+    cooldown_until: datetime | None,
+    now: datetime,
+) -> str | None:
+    if cooldown_until is None:
+        return None
+    if cooldown_until > now:
+        return f"Cooling down until {cooldown_until:%Y-%m-%d %H:%M UTC}"
+    return "Cooldown elapsed"
+
+
+def _witness_candidates_url(
+    *,
+    query: str,
+    status_filter: str,
+    type_filter: str,
+    scope_filter: str,
+    sort: str,
+    page: int | None,
+    page_size: int,
+    base_path: str = "/witness",
+) -> str:
+    params: dict[str, str | int] = {
+        "status": status_filter,
+        "sort": sort,
+        "page": page or 1,
+        "page_size": page_size,
+    }
+    if query:
+        params["q"] = query
+    if type_filter != "all":
+        params["type"] = type_filter
+    if scope_filter != "all":
+        params["scope"] = scope_filter
+    return f"{base_path}?{urlencode(params)}"
+
+
+def _labelize(value: str) -> str:
+    return value.replace("_", " ").strip().title()
 
 
 def _memory_fact_rows(

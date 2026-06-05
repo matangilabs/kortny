@@ -1,0 +1,193 @@
+{% extends "base.html" %}
+
+{% block title %}Witness - Kortny Dashboard{% endblock %}
+
+{% block content %}
+  <section class="page-heading">
+    <div>
+      <h1>Witness</h1>
+      <p>Review proactive work candidates before Kortny is allowed to privately suggest them.</p>
+    </div>
+    <div class="heading-actions">
+      <a class="btn-ghost" href="/knowledge-graph">View Graph</a>
+      <a class="btn-ghost" href="/tasks">View Tasks</a>
+    </div>
+  </section>
+
+  <section class="summary-grid witness-summary" aria-label="Witness candidate overview">
+    <div class="card metric-card">
+      <span>Total</span>
+      <strong>{{ witness.total_count|number }}</strong>
+      <small>All recorded opportunity candidates</small>
+    </div>
+    <div class="card metric-card metric-success">
+      <span>Candidates</span>
+      <strong>{{ witness.candidate_count|number }}</strong>
+      <small>{{ witness.due_candidate_count|number }} due now</small>
+    </div>
+    <div class="card metric-card">
+      <span>Sent</span>
+      <strong>{{ witness.sent_count|number }}</strong>
+      <small>Private suggestions already attempted</small>
+    </div>
+    <div class="card metric-card metric-success">
+      <span>Accepted</span>
+      <strong>{{ witness.accepted_count|number }}</strong>
+      <small>Suggestions that became useful work</small>
+    </div>
+    <div class="card metric-card metric-warning">
+      <span>Inactive</span>
+      <strong>{{ witness.inactive_count|number }}</strong>
+      <small>Dismissed, cooled down, superseded, or archived</small>
+    </div>
+  </section>
+
+  <section class="memory-toolbar graph-toolbar" aria-label="Witness candidate result count">
+    <p>
+      Showing {{ witness.page.first_item|number }}-{{ witness.page.last_item|number }}
+      of {{ witness.page.total_count|number }} candidates.
+    </p>
+  </section>
+
+  <section class="card detail-section witness-panel">
+    <header>
+      <h2>Opportunity Candidates</h2>
+      <p>Read-only backlog of evidence-backed moments where Kortny may be able to help.</p>
+    </header>
+
+    <form class="filters panel-filters witness-filters" method="get" action="/witness">
+      <label>
+        Search
+        <input class="input" type="search" name="q" value="{{ witness.query }}" placeholder="channel, user, source, evidence">
+      </label>
+      <label>
+        Status
+        <select class="input" name="status">
+          <option value="candidate" {{ "selected" if witness.status_filter == "candidate" else "" }}>Candidate</option>
+          <option value="all" {{ "selected" if witness.status_filter == "all" else "" }}>All statuses</option>
+          <option value="sent" {{ "selected" if witness.status_filter == "sent" else "" }}>Sent</option>
+          <option value="accepted" {{ "selected" if witness.status_filter == "accepted" else "" }}>Accepted</option>
+          <option value="dismissed" {{ "selected" if witness.status_filter == "dismissed" else "" }}>Dismissed</option>
+          <option value="cooldown" {{ "selected" if witness.status_filter == "cooldown" else "" }}>Cooldown</option>
+          <option value="superseded" {{ "selected" if witness.status_filter == "superseded" else "" }}>Superseded</option>
+          <option value="archived" {{ "selected" if witness.status_filter == "archived" else "" }}>Archived</option>
+        </select>
+      </label>
+      <label>
+        Type
+        <select class="input" name="type">
+          <option value="all" {{ "selected" if witness.type_filter == "all" else "" }}>All types</option>
+          <option value="workflow_gap" {{ "selected" if witness.type_filter == "workflow_gap" else "" }}>Workflow gap</option>
+          <option value="artifact_followup" {{ "selected" if witness.type_filter == "artifact_followup" else "" }}>Artifact follow-up</option>
+          <option value="unresolved_decision" {{ "selected" if witness.type_filter == "unresolved_decision" else "" }}>Unresolved decision</option>
+          <option value="data_quality_issue" {{ "selected" if witness.type_filter == "data_quality_issue" else "" }}>Data quality issue</option>
+          <option value="recurring_check" {{ "selected" if witness.type_filter == "recurring_check" else "" }}>Recurring check</option>
+          <option value="project_status_gap" {{ "selected" if witness.type_filter == "project_status_gap" else "" }}>Project status gap</option>
+          <option value="general_help" {{ "selected" if witness.type_filter == "general_help" else "" }}>General help</option>
+        </select>
+      </label>
+      <label>
+        Scope
+        <select class="input" name="scope">
+          <option value="all" {{ "selected" if witness.scope_filter == "all" else "" }}>All scopes</option>
+          <option value="workspace" {{ "selected" if witness.scope_filter == "workspace" else "" }}>Workspace</option>
+          <option value="channel" {{ "selected" if witness.scope_filter == "channel" else "" }}>Channel</option>
+          <option value="private_channel" {{ "selected" if witness.scope_filter == "private_channel" else "" }}>Private channel</option>
+          <option value="dm" {{ "selected" if witness.scope_filter == "dm" else "" }}>DM</option>
+          <option value="user" {{ "selected" if witness.scope_filter == "user" else "" }}>User</option>
+        </select>
+      </label>
+      <label>
+        Sort
+        <select class="input" name="sort">
+          <option value="updated_desc" {{ "selected" if witness.sort == "updated_desc" else "" }}>Recently updated</option>
+          <option value="created_desc" {{ "selected" if witness.sort == "created_desc" else "" }}>Recently created</option>
+          <option value="confidence_desc" {{ "selected" if witness.sort == "confidence_desc" else "" }}>Confidence</option>
+          <option value="status_asc" {{ "selected" if witness.sort == "status_asc" else "" }}>Status</option>
+          <option value="type_asc" {{ "selected" if witness.sort == "type_asc" else "" }}>Type</option>
+        </select>
+      </label>
+      <button class="btn" type="submit">Apply</button>
+      <a class="btn-ghost" href="{{ witness.reset_url }}">Reset</a>
+    </form>
+
+    <div class="witness-list" role="list" aria-label="Witness opportunity candidates">
+      {% for row in witness.rows %}
+        <article class="witness-row" role="listitem">
+          <div class="witness-main">
+            <div class="witness-title">
+              <strong>{{ row.candidate.title }}</strong>
+              <span class="badge badge-{{ row.tone }}">{{ row.status_label }}</span>
+              <span class="badge badge-accent">{{ row.type_label }}</span>
+              <span class="badge badge-neutral">{{ row.confidence_label }} confidence</span>
+            </div>
+            <p class="witness-summary-text">{{ row.candidate.summary }}</p>
+            {% if row.candidate.suggested_message %}
+              <div class="witness-message-preview">
+                <span>Draft DM</span>
+                <p>{{ row.candidate.suggested_message }}</p>
+              </div>
+            {% endif %}
+            <div class="witness-meta">
+              <span>{{ row.scope.name }}{% if row.scope.secondary %} - {{ row.scope.secondary }}{% endif %}</span>
+              {% if row.channel %}
+                <span>{{ row.channel.name }}{% if row.channel.secondary %} - {{ row.channel.secondary }}{% endif %}</span>
+              {% endif %}
+              {% if row.target_user %}
+                <span>{{ row.target_user.name }}{% if row.target_user.secondary %} - {{ row.target_user.secondary }}{% endif %}</span>
+              {% endif %}
+              <span>{{ row.source_label }}</span>
+              <span>Updated {{ row.candidate.updated_at|datetime }}</span>
+              {% if row.cooldown_label %}
+                <span>{{ row.cooldown_label }}</span>
+              {% endif %}
+            </div>
+          </div>
+          <aside class="witness-side">
+            <section class="witness-panel-box">
+              <h3>Evidence</h3>
+              {% for evidence in row.evidence %}
+                <div class="witness-evidence">
+                  <span>{{ evidence.source_label }}</span>
+                  <p>{{ evidence.snippet }}</p>
+                </div>
+              {% else %}
+                <span class="identity-id">No evidence preview recorded</span>
+              {% endfor %}
+            </section>
+            <section class="witness-panel-box">
+              <h3>Source</h3>
+              <div class="witness-source-grid">
+                {% if row.source_task %}
+                  <a href="/tasks/{{ row.source_task.id }}">Task {{ row.source_task.id }}</a>
+                {% else %}
+                  <span>No source task</span>
+                {% endif %}
+                {% if row.source_profile %}
+                  <span>Profile v{{ row.source_profile.profile_version }}</span>
+                {% endif %}
+                <code class="inline-code">{{ row.candidate.dedupe_key }}</code>
+              </div>
+            </section>
+          </aside>
+        </article>
+      {% else %}
+        <p class="empty attention-empty">No Witness candidates match these filters.</p>
+      {% endfor %}
+    </div>
+  </section>
+
+  <nav class="pager" role="navigation" aria-label="Witness candidate pages">
+    {% if witness.previous_page_url %}
+      <a class="btn-ghost" href="{{ witness.previous_page_url }}">Previous</a>
+    {% else %}
+      <span class="btn-ghost disabled" aria-disabled="true">Previous</span>
+    {% endif %}
+    <strong>Page {{ witness.page.page|number }} of {{ witness.page.total_pages|number }}</strong>
+    {% if witness.next_page_url %}
+      <a class="btn-ghost" href="{{ witness.next_page_url }}">Next</a>
+    {% else %}
+      <span class="btn-ghost disabled" aria-disabled="true">Next</span>
+    {% endif %}
+  </nav>
+{% endblock %}

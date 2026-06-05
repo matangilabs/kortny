@@ -50,6 +50,7 @@ from kortny.db.models import (
     TaskEvent,
     TaskEventType,
     TaskStatus,
+    WitnessOpportunityCandidate,
     WorkspaceState,
 )
 from kortny.db.session import make_engine, make_session_factory, normalize_database_url
@@ -3525,6 +3526,91 @@ def test_dashboard_knowledge_graph_page_shows_entities_relationships_and_evidenc
     assert "slack_channel:CCost" not in candidate_response.text
 
 
+def test_dashboard_witness_page_shows_candidates_and_filters(
+    client: tuple[TestClient, Session],
+) -> None:
+    test_client, session = client
+    task = create_dashboard_task(session)
+    candidate = WitnessOpportunityCandidate(
+        installation_id=task.installation_id,
+        channel_id=task.slack_channel_id,
+        target_slack_user_id=task.slack_user_id,
+        visibility_scope_type="channel",
+        visibility_scope_id=task.slack_channel_id,
+        candidate_type="data_quality_issue",
+        title="Data quality watch: flag unresolved placeholders",
+        summary="Kortny should watch this channel for unresolved CSV placeholders.",
+        suggested_action="Check recent files for unresolved placeholders.",
+        suggested_message=(
+            "I noticed this channel has recurring CSV placeholder issues. "
+            "Want me to monitor the next report?"
+        ),
+        evidence_json=[
+            {
+                "type": "semantic_evidence",
+                "snippet": "Report had {TICKER} placeholders in a recent upload.",
+            },
+            {
+                "type": "channel_profile",
+                "summary": "Daily blotter channel with generated reports.",
+            },
+        ],
+        source_type="channel_profile",
+        source_id="profile-123",
+        source_task_id=task.id,
+        dedupe_key="witness-test-dedupe-key",
+        confidence_score=Decimal("0.770"),
+        confidence_reason="Channel assessment found recurring report quality issues.",
+        status="candidate",
+        metadata_json={"channel_name": "ops-desk"},
+    )
+    other_candidate = WitnessOpportunityCandidate(
+        installation_id=task.installation_id,
+        channel_id=task.slack_channel_id,
+        target_slack_user_id=None,
+        visibility_scope_type="channel",
+        visibility_scope_id=task.slack_channel_id,
+        candidate_type="recurring_check",
+        title="Recurring check: morning project scan",
+        summary="A recurring project scan may help this channel.",
+        suggested_action="Create a recurring project scan.",
+        suggested_message="Want me to check this every morning?",
+        evidence_json=[],
+        source_type="manual",
+        source_id="manual-1",
+        dedupe_key="witness-test-recurring-key",
+        confidence_score=Decimal("0.600"),
+        status="dismissed",
+        metadata_json={},
+    )
+    session.add_all([candidate, other_candidate])
+    session.commit()
+    login(test_client)
+
+    response = test_client.get("/witness")
+
+    assert response.status_code == 200
+    assert "Witness" in response.text
+    assert "Opportunity Candidates" in response.text
+    assert "Data quality watch: flag unresolved placeholders" in response.text
+    assert "77% confidence" in response.text
+    assert "#ops-desk" in response.text
+    assert "Aneesh Melkot" in response.text
+    assert "Report had {TICKER} placeholders" in response.text
+    assert "Daily blotter channel with generated reports." in response.text
+    assert f"/tasks/{task.id}" in response.text
+    assert "witness-test-dedupe-key" in response.text
+    assert "Recurring check: morning project scan" not in response.text
+    assert 'href="/witness"' in response.text
+    assert "LLM Providers" in response.text
+
+    filtered_response = test_client.get("/witness?status=all&type=recurring_check")
+
+    assert filtered_response.status_code == 200
+    assert "Recurring check: morning project scan" in filtered_response.text
+    assert "Data quality watch: flag unresolved placeholders" not in filtered_response.text
+
+
 def test_dashboard_knowledge_graph_refresh_queues_channel_assessment_tasks(
     client: tuple[TestClient, Session],
 ) -> None:
@@ -4327,6 +4413,7 @@ def cleanup_database(session: Session) -> None:
         KnowledgeGraphEvidence,
         KnowledgeGraphEdge,
         KnowledgeGraphEntity,
+        WitnessOpportunityCandidate,
         Artifact,
         LLMUsage,
         WorkspaceState,

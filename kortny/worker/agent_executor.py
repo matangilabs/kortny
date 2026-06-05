@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
@@ -36,7 +37,7 @@ from kortny.knowledge_graph import (
     TaskSummaryGraphExtractionService,
     is_dashboard_graph_refresh_task,
 )
-from kortny.llm import LLMProvider, LLMService, ModelRoute, ModelRouter
+from kortny.llm import ChatMessage, LLMProvider, LLMService, ModelRoute, ModelRouter
 from kortny.llm.routing import ModelRouteTier, effective_intent_decision
 from kortny.llm.runtime_config import (
     RuntimeModelSelection,
@@ -117,9 +118,9 @@ GENERIC_FAILURE_TEXT = (
 MEMORY_CONFIRMATION_PURPOSE = "memory_confirmation"
 PLANNED_WORKFLOW_PROGRESS_PURPOSE = "planned_progress_start"
 PLANNED_WORKFLOW_PROGRESS_TEXT = (
-    "I'm going to split this into a few workstreams, check the most useful "
-    "sources/tools, and then pull it back into a concise answer."
+    "I'll check the relevant context and tools, then send a concise answer here."
 )
+PLANNED_WORKFLOW_PROGRESS_PROMPT_NAME = "kortny.planned_progress_status"
 ADK_QUICK_FINAL_AUTHORS = frozenset(
     {
         "quick_response_agent",
@@ -1330,6 +1331,12 @@ class AgentTaskExecutor:
                 SlackPostingClient,
                 WebClient(token=settings.slack_bot_token),
             )
+        progress_text, progress_source = self._planned_workflow_progress_text(
+            settings=settings,
+            session=session,
+            task=task,
+            task_service=task_service,
+        )
         try:
             message_ts = SlackPoster(
                 session=session,
@@ -1337,7 +1344,7 @@ class AgentTaskExecutor:
                 task_service=task_service,
             ).post_message(
                 SlackThread.from_task(task),
-                PLANNED_WORKFLOW_PROGRESS_TEXT,
+                progress_text,
                 purpose=PLANNED_WORKFLOW_PROGRESS_PURPOSE,
             )
         except Exception as exc:
@@ -1377,7 +1384,8 @@ class AgentTaskExecutor:
                 "phase": "started",
                 "purpose": PLANNED_WORKFLOW_PROGRESS_PURPOSE,
                 "message_ts": message_ts,
-                "text_chars": len(PLANNED_WORKFLOW_PROGRESS_TEXT),
+                "text_chars": len(progress_text),
+                "text_source": progress_source,
             },
         )
         log_observation(
@@ -1388,8 +1396,110 @@ class AgentTaskExecutor:
             phase="started",
             purpose=PLANNED_WORKFLOW_PROGRESS_PURPOSE,
             message_ts=message_ts,
-            text_chars=len(PLANNED_WORKFLOW_PROGRESS_TEXT),
+            text_chars=len(progress_text),
+            text_source=progress_source,
         )
+
+    def _planned_workflow_progress_text(
+        self,
+        *,
+        settings: Settings,
+        session: Session,
+        task: Task,
+        task_service: TaskService,
+    ) -> tuple[str, str]:
+        model_route = ModelRouter(settings).route_for_tier(
+            ModelRouteTier.cheap_fast,
+            reason="planned_progress_status",
+        )
+        provider: LLMProvider
+        if self.llm_provider is None:
+            selection = self._select_runtime_model(
+                settings=settings,
+                session=session,
+                task=task,
+                model_route=model_route,
+            )
+            model_route = selection.model_route
+            provider = create_provider_for_selection(
+                settings=settings,
+                selection=selection,
+            )
+            provider_name: DbLLMProvider | str = selection.provider_name
+        else:
+            provider = self.llm_provider
+            provider_name = self.provider_name or DbLLMProvider(
+                settings.llm_provider.value
+            )
+
+        llm = LLMService(
+            session=session,
+            provider=provider,
+            provider_name=provider_name,
+            task_service=task_service,
+            model_route=model_route,
+        )
+        messages = (
+            ChatMessage(
+                role="system",
+                content=(
+                    "You write Kortny's first Slack progress update for a task that "
+                    "will take more than a quick answer. Return JSON only with a "
+                    "`message` string. Constraints: one sentence, 70-180 characters, "
+                    "first person as Kortny, warm but not chatty, specific to the "
+                    "user request, no user mentions, no emoji, no markdown headings, "
+                    "no backend/agent/model/runtime/tool language, no explanation of "
+                    "what the user is asking, no phrase `split this into workstreams`."
+                ),
+            ),
+            ChatMessage(
+                role="user",
+                content=json.dumps(
+                    {
+                        "slack_surface": (
+                            "dm"
+                            if task.slack_channel_id.startswith("D")
+                            else "channel"
+                        ),
+                        "user_request": task.input,
+                    },
+                    sort_keys=True,
+                ),
+            ),
+        )
+        try:
+            completion = llm.complete(
+                task_id=task.id,
+                messages=messages,
+                response_format={"type": "json_object"},
+                prompt_name=PLANNED_WORKFLOW_PROGRESS_PROMPT_NAME,
+            )
+            text = _planned_progress_text_from_completion(completion.content)
+        except Exception as exc:
+            task_service.append_event(
+                task,
+                TaskEventType.error,
+                {
+                    "message": "planned_task_progress_synthesis_failed",
+                    "runtime": "adk",
+                    "phase": "started",
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                },
+            )
+            log_observation(
+                logger,
+                "planned_task_progress_synthesis_failed",
+                task=task,
+                runtime="adk",
+                phase="started",
+                error_type=type(exc).__name__,
+                error_summary=str(exc)[:500],
+            )
+            return PLANNED_WORKFLOW_PROGRESS_TEXT, "fallback"
+        if text is None:
+            return PLANNED_WORKFLOW_PROGRESS_TEXT, "fallback"
+        return text, "llm"
 
     def _mark_channel_assessment_completed(
         self,
@@ -2146,6 +2256,45 @@ def _input_words(text: str) -> set[str]:
         for raw in text.replace("/", " ").replace("-", " ").replace("_", " ").split()
         if raw.strip()
     } - {""}
+
+
+def _planned_progress_text_from_completion(content: str | None) -> str | None:
+    if not content:
+        return None
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    message = payload.get("message")
+    if not isinstance(message, str):
+        return None
+    text = normalize_slack_mrkdwn(message).strip().strip('"')
+    text = " ".join(text.split())
+    if len(text) < 20 or len(text) > 220:
+        return None
+    lowered = text.casefold()
+    blocked_terms = (
+        "according to",
+        "agent",
+        "backend",
+        "cheap_fast",
+        "guidelines",
+        "inference",
+        "i should",
+        "model",
+        "runtime",
+        "split this into",
+        "the user",
+        "tool",
+        "user asks",
+        "workstreams",
+        "workstream",
+    )
+    if any(term in lowered for term in blocked_terms):
+        return None
+    return text
 
 
 def _intent_needs_no_external_tools(decision: dict[str, Any]) -> bool:
