@@ -59,6 +59,20 @@ def test_sanitize_humanized_response_strips_planned_workflow_preamble() -> None:
     )
 
 
+def test_sanitize_humanized_response_strips_quick_response_scratchpad() -> None:
+    leaked = (
+        "The user is asking if I'm up, which is a simple check for my availability. "
+        "According to my guidelines, I should be concise and avoid internal routing.\n\n"
+        "I'll keep it brief and natural.\n"
+        "Yep, I'm up and ready to help with anything lightweight in our Slack threads."
+    )
+
+    assert (
+        sanitize_humanized_response(leaked, fallback=leaked)
+        == "Yep, I'm up and ready to help with anything lightweight in our Slack threads."
+    )
+
+
 def test_sanitize_humanized_response_golden_slack_cases() -> None:
     cases = [
         (

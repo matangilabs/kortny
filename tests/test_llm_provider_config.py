@@ -21,7 +21,7 @@ from kortny.db.models import (
     LLMTierAssignment,
 )
 from kortny.db.session import make_engine, make_session_factory, normalize_database_url
-from kortny.llm.openrouter import OpenRouterProvider
+from kortny.llm.litellm_provider import LiteLLMProvider
 from kortny.llm.provider_config import (
     ModelConfigService,
     bootstrap_llm_provider_config_from_env,
@@ -91,7 +91,7 @@ def test_env_bootstrap_seeds_provider_models_tiers_and_audit(
     assert result.skipped_reason is None
     assert result.provider_account_id is not None
     assert result.model_count == 5
-    assert result.tier_assignment_count == 5
+    assert result.tier_assignment_count == 6
     assert provider is not None
     assert provider.provider_kind == "openrouter"
     assert provider.status == "active"
@@ -116,6 +116,7 @@ def test_env_bootstrap_seeds_provider_models_tiers_and_audit(
         "analysis": "anthropic/claude-sonnet-4.6",
         "document": "openai/gpt-5.1",
         "high_reasoning": "anthropic/claude-opus-4.8",
+        "humanizer": "deepseek/deepseek-v4-pro",
     }
     assert audit is not None
     assert audit.action == "bootstrap"
@@ -245,10 +246,12 @@ def test_model_config_service_resolves_db_chain_in_priority_order(
         "api_key": "secret-llm-key",
         "extra_headers": {"X-Test": "ok"},
     }
-    assert chain.primary.direct_provider_kwargs == {
+    assert chain.primary.litellm_provider_kwargs == {
         "api_key": "secret-llm-key",
-        "model": "anthropic/claude-sonnet-4.6",
+        "model": "openrouter/anthropic/claude-sonnet-4.6",
+        "extra_headers": {"X-Test": "ok"},
     }
+    assert chain.primary.direct_provider_kwargs == chain.primary.litellm_provider_kwargs
 
 
 def test_model_config_service_force_env_bypasses_db_config(
@@ -472,9 +475,47 @@ def test_runtime_selection_builds_provider_from_db_model_config(
     assert selection.model_route.model == "deepseek/deepseek-db-standard"
     assert selection.model_route.reason == "test_route"
     assert selection.event_payload["model_config_source"] == "db"
-    assert isinstance(provider, OpenRouterProvider)
-    assert provider.model == "deepseek/deepseek-db-standard"
+    assert isinstance(provider, LiteLLMProvider)
+    assert provider.model == "openrouter/deepseek/deepseek-db-standard"
     assert provider.api_key == "env-key"
+
+
+def test_runtime_selection_uses_litellm_prefixed_model_for_direct_provider(
+    db_session: Session,
+) -> None:
+    installation = create_installation(db_session)
+    create_provider_model_assignment(
+        db_session,
+        installation_id=installation.id,
+        model_identifier="openrouter/qwen/qwen3.5-flash-02-23",
+        tier=ModelRouteTier.cheap_fast,
+        priority=1,
+    )
+    db_session.flush()
+    settings = build_settings(
+        LLM_API_KEY="env-key",
+        LLM_CHEAP_MODEL="deepseek/deepseek-env-fast",
+    )
+
+    selection = select_runtime_model(
+        session=db_session,
+        settings=settings,
+        installation_id=installation.id,
+        model_route=ModelRoute(
+            tier=ModelRouteTier.cheap_fast,
+            model="deepseek/deepseek-env-fast",
+            reason="test_route",
+        ),
+    )
+    provider = create_provider_for_selection(settings=settings, selection=selection)
+
+    assert selection.chain.source == "db"
+    assert selection.model.model == "openrouter/qwen/qwen3.5-flash-02-23"
+    assert selection.model.litellm_model == "openrouter/qwen/qwen3.5-flash-02-23"
+    assert selection.model.litellm_provider_kwargs["model"] == (
+        "openrouter/qwen/qwen3.5-flash-02-23"
+    )
+    assert provider.model == "openrouter/qwen/qwen3.5-flash-02-23"
 
 
 def cleanup_database(session: Session) -> None:

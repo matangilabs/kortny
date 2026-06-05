@@ -746,6 +746,7 @@ def test_adk_runtime_uses_cheaper_models_for_lightweight_specialists(
     monkeypatch.setenv("LLM_CHEAP_MODEL", "deepseek/deepseek-v4-flash")
     monkeypatch.setenv("LLM_STANDARD_MODEL", "openai/gpt-5.4-mini")
     monkeypatch.setenv("LLM_HIGH_REASONING_MODEL", "anthropic/opus-review")
+    monkeypatch.setenv("LLM_HUMANIZER_MODEL", "qwen/qwen3.5-flash-humanizer")
     settings = load_settings(env_file=None)
     task = Task(
         id=uuid.UUID("4c53f4e1-9d72-468d-ab18-5021d9e15dad"),
@@ -780,7 +781,8 @@ def test_adk_runtime_uses_cheaper_models_for_lightweight_specialists(
         == "openrouter/anthropic/sonnet-routed"
     )
     assert (
-        agent_by_name["humanizer_agent"].model.model == "openrouter/openai/gpt-5.4-mini"
+        agent_by_name["humanizer_agent"].model.model
+        == "openrouter/qwen/qwen3.5-flash-humanizer"
     )
     assert agent_by_name["eval_agent"].model.model == "openrouter/anthropic/opus-review"
 

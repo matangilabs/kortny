@@ -18,6 +18,7 @@ def make_settings() -> Settings:
             "LLM_ANALYSIS_MODEL": "anthropic/sonnet",
             "LLM_DOCUMENT_MODEL": "openai/document",
             "LLM_HIGH_REASONING_MODEL": "openai/reasoning",
+            "LLM_HUMANIZER_MODEL": "anthropic/humanizer",
             "POSTGRES_URL": "postgresql://kortny:kortny@localhost/kortny",
         }
     )
@@ -39,6 +40,13 @@ def test_model_router_resolves_configured_tiers() -> None:
             reason="test",
         ).model
         == "openai/document"
+    )
+    assert (
+        router.route_for_tier(
+            ModelRouteTier.humanizer,
+            reason="test",
+        ).model
+        == "anthropic/humanizer"
     )
 
 

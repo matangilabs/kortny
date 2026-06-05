@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from kortny.config import Settings
 from kortny.db.models import LLMProvider as DbLLMProvider
-from kortny.llm.openrouter import create_llm_provider
+from kortny.llm.litellm_provider import create_litellm_provider
 from kortny.llm.provider_config import (
     ModelConfigService,
     ResolvedLLMModel,
@@ -91,12 +91,9 @@ def create_provider_for_selection(
 ) -> LLMProvider:
     """Create the direct LLM provider for a resolved runtime model."""
 
-    return create_llm_provider(
+    return create_litellm_provider(
         settings,
-        provider_kind=selection.model.provider_kind,
-        model=selection.model.model,
-        api_key=selection.model.api_key,
-        endpoint=selection.model.base_url,
+        **selection.model.litellm_provider_kwargs,
     )
 
 

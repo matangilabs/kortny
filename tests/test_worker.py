@@ -1440,6 +1440,85 @@ def test_agent_executor_skips_humanizer_for_adk_quick_fast_path(
     )
 
 
+def test_agent_executor_sanitizes_adk_quick_scratchpad_before_skip(
+    db_session: Session,
+) -> None:
+    task = create_task(db_session, event_id="EvAdkQuickScratchpad")
+    task.input = "are you up?"
+    task_service = TaskService(db_session)
+    task_service.append_event(
+        task,
+        TaskEventType.log,
+        {
+            "message": "model_route_selected",
+            "runtime": "adk",
+            "tier": "cheap_fast",
+            "model": "qwen/qwen3.5-flash-02-23",
+            "reason": "intent_classifier",
+        },
+    )
+    task_service.append_event(
+        task,
+        TaskEventType.log,
+        {
+            "message": "adk_runtime_completed",
+            "runtime": "adk",
+            "mode": "orchestrated",
+            "event_count": 3,
+            "final_author": "quick_response_agent",
+            "authors": ["kortny_root_orchestrator", "quick_response_agent"],
+            "result_chars": 260,
+        },
+    )
+    settings = Settings.model_validate(
+        {
+            "SLACK_BOT_TOKEN": "xoxb-test",
+            "SLACK_APP_TOKEN": "xapp-test",
+            "SLACK_SIGNING_SECRET": "signing-secret",
+            "LLM_PROVIDER": SettingsLLMProvider.openrouter,
+            "LLM_API_KEY": "openrouter-key",
+            "LLM_MODEL": "anthropic/sonnet-default",
+            "LLM_CHEAP_MODEL": "qwen/qwen3.5-flash-02-23",
+            "POSTGRES_URL": "postgresql://kortny:kortny@localhost/kortny",
+            "AGENT_RUNTIME": "adk",
+            "RESPONSE_HUMANIZER_ENABLED": True,
+        }
+    )
+    slack_client = FakeSlackClient()
+
+    AgentTaskExecutor(
+        settings=settings,
+        llm_provider=FakeAgentProvider([]),
+        slack_client=slack_client,
+    )._post_outputs(
+        settings=settings,
+        session=db_session,
+        task=task,
+        task_service=task_service,
+        result_summary=(
+            "The user is asking if I'm up, which is a simple availability check. "
+            "According to my guidelines, I should avoid internal routing details.\n\n"
+            "I'll keep it brief and natural.\n"
+            "Yep, I'm up and ready to help."
+        ),
+    )
+
+    events = task_events(db_session, task)
+
+    assert slack_client.messages[-1]["text"] == "Yep, I'm up and ready to help."
+    assert any(
+        event.payload.get("message") == "final_response_sanitized" for event in events
+    )
+    assert any(
+        event.payload.get("message") == "response_humanizer_skipped"
+        and event.payload.get("reason") == "adk_quick_fast_path"
+        for event in events
+    )
+    assert not any(
+        event.payload.get("message") == "response_humanizer_started" for event in events
+    )
+
+
 def test_agent_executor_humanizes_adk_planned_merger_final(
     db_session: Session,
 ) -> None:
@@ -1667,7 +1746,7 @@ def test_agent_executor_humanizes_final_text_before_posting(
         if event.type is TaskEventType.llm_call
         and event.payload.get("prompt_name") == "kortny.response_humanizer"
     )
-    assert humanizer_llm_event.payload["model_tier"] == "cheap_fast"
+    assert humanizer_llm_event.payload["model_tier"] == "humanizer"
     assert any(
         event.payload.get("message") == "response_humanizer_started" for event in events
     )

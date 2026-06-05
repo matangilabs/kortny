@@ -255,7 +255,7 @@ class LLMTierAssignment(Base):
     __table_args__ = (
         CheckConstraint(
             "tier in ('cheap_fast', 'standard', 'analysis', 'document', "
-            "'high_reasoning')",
+            "'high_reasoning', 'humanizer')",
             name="ck_llm_tier_assignments_tier",
         ),
         CheckConstraint("priority >= 1", name="ck_llm_tier_assignments_priority"),
@@ -345,7 +345,7 @@ class LLMBudgetPolicy(Base):
     __table_args__ = (
         CheckConstraint(
             "tier is null or tier in ('cheap_fast', 'standard', 'analysis', "
-            "'document', 'high_reasoning')",
+            "'document', 'high_reasoning', 'humanizer')",
             name="ck_llm_budget_policies_tier",
         ),
         CheckConstraint(

@@ -54,6 +54,9 @@ class Settings(BaseSettings):
     llm_high_reasoning_model: str | None = Field(
         default=None, validation_alias="LLM_HIGH_REASONING_MODEL"
     )
+    llm_humanizer_model: str | None = Field(
+        default=None, validation_alias="LLM_HUMANIZER_MODEL"
+    )
     llm_config_force_env: bool = Field(
         default=False, validation_alias="LLM_CONFIG_FORCE_ENV"
     )
@@ -187,9 +190,7 @@ class Settings(BaseSettings):
     kortny_version: str | None = Field(default=None, validation_alias="KORTNY_VERSION")
 
     postgres_url: str = Field(validation_alias="POSTGRES_URL", min_length=1)
-    encryption_key: str | None = Field(
-        default=None, validation_alias="ENCRYPTION_KEY"
-    )
+    encryption_key: str | None = Field(default=None, validation_alias="ENCRYPTION_KEY")
 
     @field_validator(
         "composio_api_key",
@@ -200,6 +201,7 @@ class Settings(BaseSettings):
         "llm_analysis_model",
         "llm_document_model",
         "llm_high_reasoning_model",
+        "llm_humanizer_model",
         "otel_exporter_otlp_endpoint",
         "otel_exporter_otlp_headers",
         "langfuse_host",
@@ -222,6 +224,7 @@ class Settings(BaseSettings):
         "llm_analysis_model",
         "llm_document_model",
         "llm_high_reasoning_model",
+        "llm_humanizer_model",
     )
     @classmethod
     def _strip_optional_model(cls, value: str | None) -> str | None:

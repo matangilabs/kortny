@@ -96,8 +96,10 @@ HUMANIZER_LEAK_MARKERS = frozenset(
     {
         "_mode is",
         "answer_shape",
+        "according to my guidelines",
         "branch outputs",
         "final_mode",
+        "i should",
         "i'm the planned_workflow_merger",
         "i am the planned_workflow_merger",
         "i can see that the integration branch",
@@ -105,6 +107,8 @@ HUMANIZER_LEAK_MARKERS = frozenset(
         "i can see that the research branch",
         "i'll present this as kortny's final answer",
         "i’ll present this as kortny's final answer",
+        "i'll keep it",
+        "i’ll keep it",
         "let me check",
         "let me write",
         "my job is to merge",
@@ -117,6 +121,7 @@ HUMANIZER_LEAK_MARKERS = frozenset(
         "renderer_constraints",
         "response_record",
         "the user said",
+        "the user is asking",
     }
 )
 FINAL_ANSWER_MARKERS = (
@@ -132,10 +137,14 @@ FINAL_ANSWER_LINE_PREFIXES = (
     "bottom line",
     "here's",
     "here is",
+    "i'm",
+    "i’m",
     "quick take",
     "recommendation",
     "short version",
     "the short version",
+    "yep",
+    "yes",
 )
 MEMORY_TOOL_NAMES = frozenset(
     {"remember_fact", "recall_fact", "inspect_memory", "forget_fact"}
@@ -608,10 +617,10 @@ def synthesize_response(
                 "message": "response_humanizer_failed",
                 "error_type": type(exc).__name__,
                 "error": str(exc),
-                "fallback": "raw_answer",
+                "fallback": "sanitized_raw_answer",
             },
         )
-        return cast(str, normalize_slack_mrkdwn(raw_text))
+        return sanitize_humanized_response(None, fallback=raw_text)
 
     task_service.append_event(
         task,
@@ -675,8 +684,15 @@ def strip_internal_response_preamble(text: str) -> str:
             continue
         if _looks_like_final_answer_start(stripped):
             candidate = "\n".join(lines[index:]).strip()
-            if _usable_final_answer_candidate(candidate):
+            if _usable_final_answer_candidate(
+                candidate
+            ) or _usable_short_final_answer_candidate(candidate):
                 return candidate
+    for candidate in reversed(_paragraphs(raw)[1:]):
+        if _usable_final_answer_candidate(candidate) and not _looks_like_humanizer_leak(
+            candidate
+        ):
+            return candidate
     return raw
 
 
@@ -703,8 +719,27 @@ def _looks_like_final_answer_start(line: str) -> bool:
     return normalized.startswith(FINAL_ANSWER_LINE_PREFIXES)
 
 
+def _paragraphs(text: str) -> list[str]:
+    paragraphs: list[str] = []
+    current: list[str] = []
+    for line in text.splitlines():
+        if line.strip():
+            current.append(line)
+            continue
+        if current:
+            paragraphs.append("\n".join(current).strip())
+            current = []
+    if current:
+        paragraphs.append("\n".join(current).strip())
+    return paragraphs
+
+
 def _usable_final_answer_candidate(text: str) -> bool:
     return len(text.strip()) >= 40
+
+
+def _usable_short_final_answer_candidate(text: str) -> bool:
+    return len(text.strip()) >= 8
 
 
 def build_response_record(
@@ -849,7 +884,7 @@ def _response_skills_from_activations(
 
 def _route_tier(response_record: ResponseRecord) -> ModelRouteTier:
     del response_record
-    return ModelRouteTier.cheap_fast
+    return ModelRouteTier.humanizer
 
 
 def _synthesis_payload(

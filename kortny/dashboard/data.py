@@ -2864,6 +2864,7 @@ def _runtime_checks(settings: Settings) -> tuple[SystemCheck, ...]:
                 settings.llm_analysis_model,
                 settings.llm_document_model,
                 settings.llm_high_reasoning_model,
+                settings.llm_humanizer_model,
             )
             if model
         )
@@ -3062,6 +3063,10 @@ def _config_sections(
                         "High reasoning model",
                         runtime_settings.llm_high_reasoning_model,
                     ),
+                    _model_row(
+                        "Humanizer model",
+                        runtime_settings.llm_humanizer_model,
+                    ),
                 ),
             ),
             SystemConfigSection(
@@ -3172,6 +3177,7 @@ def _integration_cards(
             settings.llm_analysis_model,
             settings.llm_document_model,
             settings.llm_high_reasoning_model,
+            settings.llm_humanizer_model,
         )
         if model
     )
@@ -6631,6 +6637,7 @@ def _tier_description(tier: str) -> str:
         "analysis": "Planner and deeper synthesis work where quality matters more.",
         "document": "Long-form document and artifact generation.",
         "high_reasoning": "Highest-effort planning, audits, and difficult reasoning.",
+        "humanizer": "Final Slack response synthesis and tone polishing.",
     }
     return descriptions.get(tier, "Model tier route.")
 

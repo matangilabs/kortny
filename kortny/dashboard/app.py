@@ -1366,6 +1366,7 @@ def register_routes(app: FastAPI) -> None:
             "analysis",
             "document",
             "high_reasoning",
+            "humanizer",
         }:
             return _redirect_with_notice(
                 next_path,

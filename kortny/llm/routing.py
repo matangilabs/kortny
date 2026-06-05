@@ -26,6 +26,7 @@ class ModelRouteTier(StrEnum):
     analysis = "analysis"
     document = "document"
     high_reasoning = "high_reasoning"
+    humanizer = "humanizer"
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,6 +96,13 @@ class ModelRouter:
                 self.settings.llm_document_model
                 or self.settings.llm_analysis_model
                 or self.settings.llm_standard_model
+                or default
+            )
+        if tier is ModelRouteTier.humanizer:
+            return (
+                self.settings.llm_humanizer_model
+                or self.settings.llm_standard_model
+                or self.settings.llm_cheap_model
                 or default
             )
         return (

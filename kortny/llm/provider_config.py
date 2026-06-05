@@ -35,6 +35,7 @@ CONFIG_TIERS: tuple[ModelRouteTier, ...] = (
     ModelRouteTier.analysis,
     ModelRouteTier.document,
     ModelRouteTier.high_reasoning,
+    ModelRouteTier.humanizer,
 )
 
 
@@ -102,12 +103,22 @@ class ResolvedLLMModel:
     def direct_provider_kwargs(self) -> dict[str, object]:
         """Return kwargs for Kortny's direct provider adapters."""
 
+        return self.litellm_provider_kwargs
+
+    @property
+    def litellm_provider_kwargs(self) -> dict[str, object]:
+        """Return kwargs for Kortny's direct LiteLLM provider adapter."""
+
         kwargs: dict[str, object] = {
             "api_key": self.api_key,
-            "model": self.model,
+            "model": self.litellm_model,
         }
         if self.base_url is not None:
-            kwargs["endpoint"] = self.base_url
+            kwargs["api_base"] = self.base_url
+        if self.api_version is not None:
+            kwargs["api_version"] = self.api_version
+        if self.extra_headers:
+            kwargs["extra_headers"] = dict(self.extra_headers)
         return kwargs
 
 

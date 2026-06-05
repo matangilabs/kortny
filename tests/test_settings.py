@@ -15,6 +15,7 @@ SETTINGS_ENV_VARS = {
     "LLM_ANALYSIS_MODEL",
     "LLM_DOCUMENT_MODEL",
     "LLM_HIGH_REASONING_MODEL",
+    "LLM_HUMANIZER_MODEL",
     "AGENT_RUNTIME",
     "KORTNY_PLANNED_WORKFLOWS_ENABLED",
     "KORTNY_PLANNED_WORKFLOW_MAX_PARALLEL_BRANCHES",
@@ -122,6 +123,7 @@ def test_settings_loads_optional_environment(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("SLACK_APP_NAME", "Courtney")
     monkeypatch.setenv("LLM_CHEAP_MODEL", "anthropic/claude-haiku-test")
     monkeypatch.setenv("LLM_DOCUMENT_MODEL", "anthropic/claude-sonnet-test")
+    monkeypatch.setenv("LLM_HUMANIZER_MODEL", "anthropic/claude-haiku-humanizer")
     monkeypatch.setenv("AGENT_RUNTIME", "adk")
     monkeypatch.setenv("KORTNY_PLANNED_WORKFLOWS_ENABLED", "false")
     monkeypatch.setenv("KORTNY_PLANNED_WORKFLOW_MAX_PARALLEL_BRANCHES", "4")
@@ -164,6 +166,7 @@ def test_settings_loads_optional_environment(monkeypatch: pytest.MonkeyPatch) ->
     assert settings.slack_app_name == "Courtney"
     assert settings.llm_cheap_model == "anthropic/claude-haiku-test"
     assert settings.llm_document_model == "anthropic/claude-sonnet-test"
+    assert settings.llm_humanizer_model == "anthropic/claude-haiku-humanizer"
     assert settings.agent_runtime == "adk"
     assert settings.planned_workflows_enabled is False
     assert settings.planned_workflow_max_parallel_branches == 4
@@ -201,6 +204,7 @@ def test_blank_optional_environment_values_are_none(
     monkeypatch.setenv("COMPOSIO_API_KEY", "")
     monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "")
     monkeypatch.setenv("LLM_CHEAP_MODEL", "")
+    monkeypatch.setenv("LLM_HUMANIZER_MODEL", "")
     monkeypatch.setenv("LANGFUSE_HOST", "")
     monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "")
     monkeypatch.setenv("LANGFUSE_SECRET_KEY", "")
@@ -211,6 +215,7 @@ def test_blank_optional_environment_values_are_none(
     assert settings.composio_api_key is None
     assert settings.brave_search_api_key is None
     assert settings.llm_cheap_model is None
+    assert settings.llm_humanizer_model is None
     assert settings.langfuse_host is None
     assert settings.langfuse_public_key is None
     assert settings.langfuse_secret_key is None
