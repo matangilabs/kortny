@@ -119,7 +119,7 @@ def litellm_provider_option(kind: str) -> LiteLLMProviderOption | None:
 def litellm_model_candidates(
     provider_kind: str,
     *,
-    limit: int = 24,
+    limit: int | None = 24,
 ) -> tuple[LiteLLMModelCandidate, ...]:
     """Return local LiteLLM model-cost-map candidates for a provider."""
 
@@ -134,7 +134,10 @@ def litellm_model_candidates(
         for model_identifier, info in model_cost.items()
         if _model_cost_row_matches(provider_kind, model_identifier, info)
     ]
-    return tuple(_rank_candidates(provider_kind, candidates)[:limit])
+    ranked = _rank_candidates(provider_kind, candidates)
+    if limit is None:
+        return tuple(ranked)
+    return tuple(ranked[:limit])
 
 
 def model_candidate_for_identifier(
@@ -167,9 +170,12 @@ def litellm_endpoint_model_candidates(
     *,
     api_key: str,
     api_base: str | None = None,
-    limit: int = 24,
+    limit: int | None = 24,
 ) -> tuple[LiteLLMModelCandidate, ...]:
     """Ask LiteLLM/provider endpoint for valid models when supported."""
+
+    if provider_kind == "openrouter":
+        return openrouter_model_candidates(limit=limit)
 
     option = litellm_provider_option(provider_kind)
     if option is None or not option.supports_endpoint_discovery:
@@ -215,9 +221,26 @@ def litellm_endpoint_model_candidates(
                     output_price_per_mtok=None,
                 )
             )
-        if len(candidates) >= limit:
+        if limit is not None and len(candidates) >= limit:
             break
     return tuple(candidates)
+
+
+def openrouter_model_candidates(
+    *,
+    limit: int | None = None,
+) -> tuple[LiteLLMModelCandidate, ...]:
+    """Return full OpenRouter catalog candidates from the OpenRouter models API."""
+
+    candidates: list[LiteLLMModelCandidate] = []
+    for item in _openrouter_model_items():
+        candidate = _openrouter_model_candidate_from_item(item)
+        if candidate is None:
+            continue
+        candidates.append(candidate)
+        if limit is not None and len(candidates) >= limit:
+            break
+    return tuple(_rank_candidates("openrouter", candidates))
 
 
 def check_litellm_provider_key(
@@ -280,10 +303,13 @@ def _local_model_candidate_for_identifier(
             info=info,
             source="litellm_catalog",
         )
-        if lookup_identifier == model_identifier:
+        if (
+            lookup_identifier == model_identifier
+            and candidate.model_identifier == model_identifier
+        ):
             return candidate
         return LiteLLMModelCandidate(
-            model_identifier=candidate.model_identifier,
+            model_identifier=model_identifier,
             display_name=candidate.display_name,
             provider_kind=candidate.provider_kind,
             source=candidate.source,
@@ -341,28 +367,42 @@ def _openrouter_model_candidate_for_identifier(
         keys.update(f"openrouter/{value}" for value in tuple(keys))
         if keys.isdisjoint(lookup_values):
             continue
-        pricing = item.get("pricing")
-        if not isinstance(pricing, dict):
-            return None
-        input_price = _price_per_mtok(pricing.get("prompt"))
-        output_price = _price_per_mtok(pricing.get("completion"))
-        if input_price is None and output_price is None:
-            return None
-        return LiteLLMModelCandidate(
+        return _openrouter_model_candidate_from_item(
+            item,
             model_identifier=model_identifier,
-            display_name=(
-                str(item.get("name")).strip()
-                if isinstance(item.get("name"), str) and str(item.get("name")).strip()
-                else _display_name(model_identifier)
-            ),
-            provider_kind="openrouter",
-            source="provider_api",
-            capabilities=_openrouter_capabilities(item),
-            metadata=_openrouter_metadata(item),
-            input_price_per_mtok=input_price,
-            output_price_per_mtok=output_price,
         )
     return None
+
+
+def _openrouter_model_candidate_from_item(
+    item: Mapping[str, Any],
+    *,
+    model_identifier: str | None = None,
+) -> LiteLLMModelCandidate | None:
+    raw_identifier = model_identifier or item.get("id") or item.get("canonical_slug")
+    if not isinstance(raw_identifier, str) or not raw_identifier.strip():
+        return None
+    resolved_identifier = raw_identifier.strip()
+    if model_identifier is None:
+        resolved_identifier = resolved_identifier.removeprefix("openrouter/")
+    raw_name = item.get("name")
+    display_name = (
+        raw_name.strip()
+        if isinstance(raw_name, str) and raw_name.strip()
+        else _display_name(resolved_identifier)
+    )
+    pricing = item.get("pricing")
+    pricing_map = pricing if isinstance(pricing, Mapping) else {}
+    return LiteLLMModelCandidate(
+        model_identifier=resolved_identifier,
+        display_name=display_name,
+        provider_kind="openrouter",
+        source="provider_api",
+        capabilities=_openrouter_capabilities(item),
+        metadata=_openrouter_metadata(item),
+        input_price_per_mtok=_price_per_mtok(pricing_map.get("prompt")),
+        output_price_per_mtok=_price_per_mtok(pricing_map.get("completion")),
+    )
 
 
 @lru_cache(maxsize=1)
@@ -401,6 +441,8 @@ def _openrouter_capabilities(item: Mapping[str, Any]) -> dict[str, object]:
         ]
     architecture = item.get("architecture")
     if isinstance(architecture, dict):
+        input_modalities = architecture.get("input_modalities")
+        output_modalities = architecture.get("output_modalities")
         for key in (
             "input_modalities",
             "output_modalities",
@@ -410,6 +452,18 @@ def _openrouter_capabilities(item: Mapping[str, Any]) -> dict[str, object]:
             value = architecture.get(key)
             if value is not None:
                 capabilities[key] = value
+        supports_text_input = (
+            isinstance(input_modalities, list) and "text" in input_modalities
+        )
+        supports_text_output = (
+            isinstance(output_modalities, list) and "text" in output_modalities
+        )
+        capabilities["runtime_routable"] = supports_text_input and supports_text_output
+        capabilities["runtime_routing_reason"] = (
+            "text_input_output"
+            if supports_text_input and supports_text_output
+            else "non_text_modalities"
+        )
     return capabilities
 
 
@@ -437,28 +491,36 @@ def _candidate_from_model_cost(
     info: Mapping[str, Any],
     source: str,
 ) -> LiteLLMModelCandidate:
+    resolved_identifier = (
+        model_identifier.removeprefix("openrouter/")
+        if provider_kind == "openrouter"
+        else model_identifier
+    )
+    metadata = {
+        key: value
+        for key, value in info.items()
+        if key
+        in {
+            "litellm_provider",
+            "max_input_tokens",
+            "max_output_tokens",
+            "max_tokens",
+            "mode",
+            "source",
+            "supported_endpoints",
+            "supported_modalities",
+            "supported_output_modalities",
+        }
+    }
+    if resolved_identifier != model_identifier:
+        metadata["litellm_model_identifier"] = model_identifier
     return LiteLLMModelCandidate(
-        model_identifier=model_identifier,
-        display_name=_display_name(model_identifier),
+        model_identifier=resolved_identifier,
+        display_name=_display_name(resolved_identifier),
         provider_kind=provider_kind,
         source=source,
         capabilities=_capabilities_from_model_cost(info),
-        metadata={
-            key: value
-            for key, value in info.items()
-            if key
-            in {
-                "litellm_provider",
-                "max_input_tokens",
-                "max_output_tokens",
-                "max_tokens",
-                "mode",
-                "source",
-                "supported_endpoints",
-                "supported_modalities",
-                "supported_output_modalities",
-            }
-        },
+        metadata=metadata,
         input_price_per_mtok=_price_per_mtok(info.get("input_cost_per_token")),
         output_price_per_mtok=_price_per_mtok(info.get("output_cost_per_token")),
     )
@@ -487,6 +549,9 @@ def _rank_candidates(
 ) -> list[LiteLLMModelCandidate]:
     preferred = {
         "openrouter": (
+            "openai/gpt-4o-mini",
+            "anthropic/claude-sonnet-4",
+            "deepseek/deepseek-chat",
             "openrouter/openai/gpt-4o-mini",
             "openrouter/anthropic/claude-sonnet-4",
             "openrouter/deepseek/deepseek-chat",

@@ -153,17 +153,22 @@
           <h2>Model Catalog</h2>
           <p>Provider-specific model rows available for tier assignment and runtime routing.</p>
         </header>
-        {% if detail.models|length > 10 %}
-          <div class="model-provider-catalog-toolbar" data-model-catalog-search>
+        {% if detail.model_total_count > 10 %}
+          <div
+            class="model-provider-catalog-toolbar"
+            data-model-catalog-toolbar
+            data-model-catalog-endpoint="/admin/models/providers/{{ detail.provider.id }}/models"
+            data-model-catalog-limit="{{ detail.model_page_size }}"
+          >
             <label class="model-provider-catalog-search-box" for="model-catalog-search">
               <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
                 <circle cx="11" cy="11" r="8"></circle>
                 <path d="m21 21-4.35-4.35"></path>
               </svg>
               <span class="sr-only">Search models</span>
-              <input id="model-catalog-search" class="input model-provider-catalog-search-input" type="search" placeholder="Search models by name, id, tier, pricing, or source" autocomplete="off">
+              <input id="model-catalog-search" class="input model-provider-catalog-search-input" type="search" placeholder="Search models by name, id, or source" autocomplete="off">
             </label>
-            <span class="model-provider-catalog-count" data-model-catalog-count>{{ detail.models|length }} models</span>
+            <span class="model-provider-catalog-count" data-model-catalog-count>{{ detail.models|length }} shown of {{ detail.model_total_count }} models</span>
           </div>
         {% endif %}
         <div class="table-wrap">
@@ -179,57 +184,28 @@
                 <th>Controls</th>
               </tr>
             </thead>
-            <tbody>
-              {% for row in detail.models %}
-                <tr data-model-catalog-row data-model-search-text="{{ row.model.display_name }} {{ row.model.model_identifier }} {{ 'enabled' if row.model.is_enabled else 'disabled' }} {{ row.model.source }} {% for label in row.assignment_labels %}{{ label }} {% endfor %}{% if row.latest_pricing %}{{ row.latest_pricing.input_price_per_mtok }} {{ row.latest_pricing.output_price_per_mtok }} {{ row.latest_pricing.currency }}{% else %}missing pricing{% endif %}">
-                  <td>
-                    <strong>{{ row.model.display_name }}</strong>
-                    <code class="inline-code">{{ row.model.model_identifier }}</code>
-                  </td>
-                  <td><span class="badge badge-{{ row.tone }}">{{ "enabled" if row.model.is_enabled else "disabled" }}</span></td>
-                  <td>
-                    {% if row.assignment_labels %}
-                      <div class="model-tag-list">
-                        {% for label in row.assignment_labels %}
-                          <span class="badge badge-neutral">{{ label }}</span>
-                        {% endfor %}
-                      </div>
-                    {% else %}
-                      <span class="identity-id">Unused</span>
-                    {% endif %}
-                  </td>
-                  <td>
-                    {% if row.latest_pricing %}
-                      <span>{{ row.latest_pricing.input_price_per_mtok or "?" }} / {{ row.latest_pricing.output_price_per_mtok or "?" }} {{ row.latest_pricing.currency }}</span>
-                    {% else %}
-                      <span class="badge badge-warning">Missing</span>
-                    {% endif %}
-                  </td>
-                  <td>{{ row.model.source.replace("_", " ").title() }}</td>
-                  <td>
-                    <form method="post" action="/admin/models/catalog/{{ row.model.id }}/status" onsubmit="return confirm('Update {{ row.model.display_name }} model status?');">
-                      <input type="hidden" name="next" value="/admin/models/providers/{{ detail.provider.id }}">
-                      <select class="input compact-input" name="is_enabled">
-                        <option value="true" {{ "selected" if row.model.is_enabled else "" }}>Enabled</option>
-                        <option value="false" {{ "selected" if not row.model.is_enabled else "" }}>Disabled</option>
-                      </select>
-                      <button class="btn-ghost" type="submit">Save</button>
-                    </form>
-                  </td>
-                </tr>
-                {% if loop.last and detail.models|length > 10 %}
-                  <tr class="model-provider-catalog-empty-row" data-model-catalog-empty hidden>
-                    <td colspan="6">No models match this search.</td>
-                  </tr>
-                {% endif %}
-              {% else %}
-                <tr>
-                  <td colspan="6">No models have been synced for this provider yet.</td>
-                </tr>
-              {% endfor %}
+            <tbody data-model-catalog-body>
+              {% set model_rows = detail.models %}
+              {% set provider_id = detail.provider.id %}
+              {% set next_path = "/admin/models/providers/" ~ detail.provider.id %}
+              {% set empty_message = "No models have been synced for this provider yet." %}
+              {% include "_model_catalog_rows.html" %}
             </tbody>
           </table>
         </div>
+        {% if detail.model_total_count > detail.model_page_size %}
+          <div class="model-provider-catalog-footer">
+            <button
+              class="btn-ghost"
+              type="button"
+              data-model-catalog-load-more
+              data-next-offset="{{ detail.model_next_offset or detail.model_page_size }}"
+              {{ "hidden" if not detail.model_has_more else "" }}
+            >
+              Load more models
+            </button>
+          </div>
+        {% endif %}
       </section>
     </div>
 
@@ -326,34 +302,81 @@
 
   <script>
     (() => {
-      const toolbar = document.querySelector('[data-model-catalog-search]');
-      if (!toolbar) return;
+      const toolbar = document.querySelector('[data-model-catalog-toolbar]');
+      const body = document.querySelector('[data-model-catalog-body]');
+      if (!toolbar || !body) return;
 
       const input = toolbar.querySelector('#model-catalog-search');
       const count = toolbar.querySelector('[data-model-catalog-count]');
-      const rows = Array.from(document.querySelectorAll('[data-model-catalog-row]'));
-      const emptyRow = document.querySelector('[data-model-catalog-empty]');
+      const loadMore = document.querySelector('[data-model-catalog-load-more]');
+      const endpoint = toolbar.dataset.modelCatalogEndpoint;
+      const limit = Number.parseInt(toolbar.dataset.modelCatalogLimit || '25', 10);
+      let query = '';
+      let loading = false;
+      let debounceId = null;
 
-      const updateRows = () => {
-        const query = input.value.trim().toLowerCase();
-        let visibleCount = 0;
+      const rowCount = () => body.querySelectorAll('[data-model-catalog-row]').length;
 
-        rows.forEach((row) => {
-          const searchableText = (row.dataset.modelSearchText || '').toLowerCase();
-          const visible = !query || searchableText.includes(query);
-          row.hidden = !visible;
-          if (visible) visibleCount += 1;
-        });
-
+      const updateControls = (payload) => {
+        const total = Number(payload.total_count || 0);
+        const shown = rowCount();
         if (count) {
-          count.textContent = query ? `${visibleCount} of ${rows.length} shown` : `${rows.length} models`;
+          count.textContent = query
+            ? `${shown} shown of ${total} matches`
+            : `${shown} shown of ${total} models`;
         }
-        if (emptyRow) {
-          emptyRow.hidden = visibleCount !== 0;
+        if (loadMore) {
+          loadMore.hidden = !payload.has_more;
+          if (payload.next_offset !== null && payload.next_offset !== undefined) {
+            loadMore.dataset.nextOffset = String(payload.next_offset);
+          }
         }
       };
 
-      input.addEventListener('input', updateRows);
+      const fetchPage = async ({ append, offset }) => {
+        if (loading || !endpoint) return;
+        loading = true;
+        if (loadMore) loadMore.disabled = true;
+        const params = new URLSearchParams({
+          offset: String(offset),
+          limit: String(limit),
+        });
+        if (query) params.set('q', query);
+
+        try {
+          const response = await fetch(`${endpoint}?${params.toString()}`, {
+            headers: { Accept: 'application/json' },
+          });
+          if (!response.ok) throw new Error('model catalog request failed');
+          const payload = await response.json();
+          if (append) {
+            body.insertAdjacentHTML('beforeend', payload.html);
+          } else {
+            body.innerHTML = payload.html;
+          }
+          updateControls(payload);
+        } catch (_error) {
+          if (count) count.textContent = 'Could not load models';
+        } finally {
+          loading = false;
+          if (loadMore) loadMore.disabled = false;
+        }
+      };
+
+      input.addEventListener('input', () => {
+        window.clearTimeout(debounceId);
+        debounceId = window.setTimeout(() => {
+          query = input.value.trim();
+          fetchPage({ append: false, offset: 0 });
+        }, 220);
+      });
+
+      if (loadMore) {
+        loadMore.addEventListener('click', () => {
+          const offset = Number.parseInt(loadMore.dataset.nextOffset || String(rowCount()), 10);
+          fetchPage({ append: true, offset });
+        });
+      }
     })();
   </script>
 {% endblock %}

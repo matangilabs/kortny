@@ -1215,6 +1215,101 @@ def test_dashboard_admin_can_test_provider_and_import_models(
     assert pricing.input_price_per_mtok == Decimal("0.250000")
 
 
+def test_dashboard_admin_imports_full_openrouter_catalog(
+    client: tuple[TestClient, Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    test_client, session = client
+    set_runtime_settings_env(monkeypatch)
+    installation = Installation(
+        slack_team_id="TOpenRouterFull", team_name="OpenRouter Full Team"
+    )
+    session.add(installation)
+    session.flush()
+    provider = LLMProviderAccount(
+        installation_id=installation.id,
+        provider_kind="openrouter",
+        display_name="OpenRouter provider",
+        status="active",
+        health_status="ok",
+        metadata_json={"credential_source": "env", "source": "env_bootstrap"},
+    )
+    session.add(provider)
+    session.commit()
+    candidates = tuple(
+        LiteLLMModelCandidate(
+            model_identifier=f"vendor/model-{index:03d}",
+            display_name=f"Vendor Model {index:03d}",
+            provider_kind="openrouter",
+            source="provider_api",
+            capabilities={"runtime_routable": True},
+            metadata={"litellm_provider": "openrouter"},
+            input_price_per_mtok=Decimal("0.010000"),
+            output_price_per_mtok=Decimal("0.020000"),
+        )
+        for index in range(105)
+    )
+
+    def endpoint_candidates(
+        _provider_kind: str,
+        *,
+        api_key: str,
+        api_base: str | None = None,
+        limit: int | None = 24,
+    ) -> tuple[LiteLLMModelCandidate, ...]:
+        assert _provider_kind == "openrouter"
+        assert api_key
+        assert api_base is None
+        assert limit is None
+        return candidates
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setattr(
+        "kortny.dashboard.app.litellm_model_candidates",
+        lambda _provider_kind, *, limit=24: (),
+    )
+    monkeypatch.setattr(
+        "kortny.dashboard.app.litellm_endpoint_model_candidates",
+        endpoint_candidates,
+    )
+    monkeypatch.setattr(
+        "kortny.dashboard.app.model_candidate_for_identifier",
+        lambda *_args, **_kwargs: None,
+    )
+    login(test_client)
+
+    response = test_client.post(
+        f"/admin/models/providers/{provider.id}/import-models",
+        data={"next": f"/admin/models/providers/{provider.id}", "limit": "100"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    session.expire_all()
+    model_count = session.scalar(
+        select(func.count())
+        .select_from(LLMModelCatalog)
+        .where(LLMModelCatalog.provider_account_id == provider.id)
+    )
+    pricing_count = session.scalar(
+        select(func.count())
+        .select_from(LLMModelPricing)
+        .where(LLMModelPricing.provider_account_id == provider.id)
+    )
+    audit = session.scalar(
+        select(LLMConfigAudit).where(
+            LLMConfigAudit.installation_id == installation.id,
+            LLMConfigAudit.entity_type == "llm_provider_account",
+            LLMConfigAudit.entity_id == str(provider.id),
+        )
+    )
+    assert model_count == 105
+    assert pricing_count == 105
+    assert audit is not None
+    assert audit.new_value["operation"] == "import_models"
+    assert audit.new_value["candidate_count"] == 105
+
+
 def test_dashboard_admin_can_inspect_provider_detail_page(
     client: tuple[TestClient, Session],
 ) -> None:
@@ -1444,10 +1539,64 @@ def test_dashboard_provider_detail_shows_model_catalog_search_after_ten_rows(
 
     assert detail_response.status_code == 200
     assert "Search models" in detail_response.text
-    assert "Search models by name, id, tier, pricing, or source" in detail_response.text
-    assert "11 models" in detail_response.text
+    assert "Search models by name, id, or source" in detail_response.text
+    assert "11 shown of 11 models" in detail_response.text
     assert "data-model-catalog-row" in detail_response.text
-    assert "No models match this search." in detail_response.text
+
+
+def test_dashboard_provider_detail_lazy_loads_model_catalog_page(
+    client: tuple[TestClient, Session],
+) -> None:
+    test_client, session = client
+    installation = Installation(slack_team_id="TProviderLazy", team_name="Lazy Team")
+    session.add(installation)
+    session.flush()
+    provider = LLMProviderAccount(
+        installation_id=installation.id,
+        provider_kind="openrouter",
+        display_name="OpenRouter lazy provider",
+        status="active",
+        health_status="ok",
+        metadata_json={"credential_source": "env", "source": "env_bootstrap"},
+    )
+    session.add(provider)
+    session.flush()
+    for index in range(30):
+        session.add(
+            LLMModelCatalog(
+                provider_account_id=provider.id,
+                model_identifier=f"openrouter/paged-model-{index:02d}",
+                display_name=f"Paged Model {index:02d}",
+                is_enabled=True,
+                source="provider_api",
+            )
+        )
+    session.commit()
+    login(test_client)
+
+    detail_response = test_client.get(f"/admin/models/providers/{provider.id}")
+    next_response = test_client.get(
+        f"/admin/models/providers/{provider.id}/models?offset=25&limit=25"
+    )
+    search_response = test_client.get(
+        f"/admin/models/providers/{provider.id}/models?q=Paged+Model+29&offset=0&limit=25"
+    )
+
+    assert detail_response.status_code == 200
+    assert "Paged Model 00" in detail_response.text
+    assert "Paged Model 29" not in detail_response.text
+    assert "25 shown of 30 models" in detail_response.text
+    assert "Load more models" in detail_response.text
+    assert next_response.status_code == 200
+    next_payload = next_response.json()
+    assert next_payload["total_count"] == 30
+    assert next_payload["shown_count"] == 30
+    assert next_payload["has_more"] is False
+    assert "Paged Model 29" in next_payload["html"]
+    assert search_response.status_code == 200
+    search_payload = search_response.json()
+    assert search_payload["total_count"] == 1
+    assert "Paged Model 29" in search_payload["html"]
 
 
 def test_dashboard_admin_can_assign_fallback_model_tier(

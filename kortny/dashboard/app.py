@@ -36,6 +36,7 @@ from kortny.dashboard.auth import (
 from kortny.dashboard.data import (
     DEFAULT_PAGE_SIZE,
     MAX_PAGE_SIZE,
+    MODEL_CATALOG_PAGE_SIZE,
     TaskListPage,
     get_composio_catalog_dashboard,
     get_composio_toolkit_detail,
@@ -44,6 +45,7 @@ from kortny.dashboard.data import (
     get_knowledge_graph_dashboard,
     get_llm_model_config_dashboard,
     get_llm_provider_config_detail,
+    get_llm_provider_model_catalog_page,
     get_memory_dashboard,
     get_system_health,
     get_task_detail,
@@ -774,6 +776,48 @@ def register_routes(app: FastAPI) -> None:
             },
         )
 
+    @app.get(
+        "/admin/models/providers/{provider_account_id}/models",
+        response_class=JSONResponse,
+    )
+    def model_config_provider_models(
+        provider_account_id: UUID,
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        session: Annotated[Session, Depends(get_session)],
+        q: Annotated[str | None, Query()] = None,
+        offset: Annotated[int, Query(ge=0)] = 0,
+        limit: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)] = MODEL_CATALOG_PAGE_SIZE,
+    ) -> JSONResponse:
+        model_page = get_llm_provider_model_catalog_page(
+            session=session,
+            provider_account_id=provider_account_id,
+            installation_id=_dashboard_installation_id(session, principal),
+            offset=offset,
+            limit=limit,
+            query=q,
+        )
+        if model_page is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+        html = templates.env.get_template("_model_catalog_rows.html").render(
+            model_rows=model_page.rows,
+            provider_id=provider_account_id,
+            next_path=f"/admin/models/providers/{provider_account_id}",
+            empty_message=(
+                "No models match this search."
+                if q and q.strip()
+                else "No models have been synced for this provider yet."
+            ),
+        )
+        return JSONResponse(
+            {
+                "html": html,
+                "total_count": model_page.total_count,
+                "shown_count": model_page.offset + len(model_page.rows),
+                "next_offset": model_page.next_offset,
+                "has_more": model_page.has_more,
+            }
+        )
+
     @app.post("/admin/models/bootstrap")
     async def model_config_bootstrap(
         request: Request,
@@ -931,14 +975,17 @@ def register_routes(app: FastAPI) -> None:
         )
         session.add(provider)
         session.flush()
-        candidates = list(litellm_model_candidates(provider.provider_kind, limit=24))
+        candidate_limit = _model_discovery_limit(provider.provider_kind, default=24)
+        candidates = list(
+            litellm_model_candidates(provider.provider_kind, limit=candidate_limit)
+        )
         discovery_error: str | None = None
         try:
             endpoint_candidates = litellm_endpoint_model_candidates(
                 provider.provider_kind,
                 api_key=api_key,
                 api_base=provider.base_url,
-                limit=24,
+                limit=candidate_limit,
             )
             candidates = _merge_model_candidates(endpoint_candidates, candidates)
         except Exception as exc:
@@ -946,7 +993,7 @@ def register_routes(app: FastAPI) -> None:
         imported_count, pricing_count = _upsert_model_candidates(
             session,
             provider=provider,
-            candidates=tuple(candidates[:24]),
+            candidates=tuple(candidates),
         )
         _append_llm_config_audit(
             session,
@@ -1093,7 +1140,13 @@ def register_routes(app: FastAPI) -> None:
             if runtime_settings is not None
             else None
         )
-        candidates = list(litellm_model_candidates(provider.provider_kind, limit=limit))
+        candidate_limit = _model_discovery_limit(
+            provider.provider_kind,
+            default=limit,
+        )
+        candidates = list(
+            litellm_model_candidates(provider.provider_kind, limit=candidate_limit)
+        )
         discovery_error: str | None = None
         if api_key is not None:
             try:
@@ -1101,7 +1154,7 @@ def register_routes(app: FastAPI) -> None:
                     provider.provider_kind,
                     api_key=api_key,
                     api_base=provider.base_url,
-                    limit=limit,
+                    limit=candidate_limit,
                 )
                 candidates = _merge_model_candidates(endpoint_candidates, candidates)
             except Exception as exc:
@@ -1109,7 +1162,7 @@ def register_routes(app: FastAPI) -> None:
         imported_count, pricing_count = _upsert_model_candidates(
             session,
             provider=provider,
-            candidates=tuple(candidates[:limit]),
+            candidates=tuple(candidates),
         )
         pricing_count += _backfill_model_pricing_for_provider(
             session,
@@ -1130,7 +1183,7 @@ def register_routes(app: FastAPI) -> None:
                 "provider_kind": provider.provider_kind,
                 "imported_count": imported_count,
                 "pricing_count": pricing_count,
-                "candidate_count": len(candidates[:limit]),
+                "candidate_count": len(candidates),
                 "discovery_error": discovery_error,
             },
         )
@@ -3153,6 +3206,12 @@ def _positive_int(value: str, *, default: int, maximum: int) -> int:
     if parsed < 1:
         return default
     return min(parsed, maximum)
+
+
+def _model_discovery_limit(provider_kind: str, *, default: int) -> int | None:
+    if provider_kind == "openrouter":
+        return None
+    return default
 
 
 def _resolve_composio_auth_config_id(

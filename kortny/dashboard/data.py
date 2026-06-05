@@ -77,6 +77,7 @@ from kortny.tools.workspace_memory import (
 
 DEFAULT_PAGE_SIZE = 25
 MAX_PAGE_SIZE = 100
+MODEL_CATALOG_PAGE_SIZE = 25
 COMPOSIO_DETAIL_TOOL_LIMIT = 12
 KG_GRAPH_NODE_LIMIT = 18
 KG_GRAPH_EDGE_LIMIT = 30
@@ -993,10 +994,24 @@ class LLMProviderConfigDetail:
     routed_models: tuple[LLMModelConfigRow, ...]
     attention_models: tuple[LLMModelConfigRow, ...]
     missing_pricing_count: int
+    model_total_count: int
+    model_page_size: int
+    model_next_offset: int | None
+    model_has_more: bool
     audits: tuple[LLMAuditConfigRow, ...]
     metrics: tuple[SystemMetric, ...]
     api_version_label: str
     base_url_label: str
+
+
+@dataclass(frozen=True)
+class LLMProviderModelCatalogPage:
+    rows: tuple[LLMModelConfigRow, ...]
+    total_count: int
+    offset: int
+    limit: int
+    next_offset: int | None
+    has_more: bool
 
 
 def list_tasks(
@@ -2449,11 +2464,11 @@ def get_llm_provider_config_detail(
         if model_ids
         else ()
     )
-    assignments_by_model: dict[uuid.UUID, list[LLMTierAssignment]] = defaultdict(list)
-    for assignment in assignments:
-        assignments_by_model[assignment.model_catalog_id].append(assignment)
-
-    pricing_by_model = _latest_llm_pricing_by_model(session, (provider.id,))
+    model_rows = _llm_provider_model_rows(
+        session,
+        provider=provider,
+        models=models,
+    )
     pricing_count = int(
         session.scalar(
             select(func.count())
@@ -2462,18 +2477,12 @@ def get_llm_provider_config_detail(
         )
         or 0
     )
-    model_rows = tuple(
-        LLMModelConfigRow(
-            model=model,
-            provider=provider,
-            assignment_labels=tuple(
-                _tier_assignment_label(assignment)
-                for assignment in assignments_by_model.get(model.id, ())
-            ),
-            latest_pricing=pricing_by_model.get((provider.id, model.model_identifier)),
-            tone="success" if model.is_enabled else "neutral",
-        )
-        for model in models
+    model_page = get_llm_provider_model_catalog_page(
+        session=session,
+        provider_account_id=provider.id,
+        installation_id=provider.installation_id,
+        offset=0,
+        limit=MODEL_CATALOG_PAGE_SIZE,
     )
     routed_models = tuple(row for row in model_rows if row.assignment_labels)
     missing_pricing_count = sum(1 for row in model_rows if row.latest_pricing is None)
@@ -2553,14 +2562,130 @@ def get_llm_provider_config_detail(
         installation_label=installation_label,
         provider=provider,
         provider_row=provider_row,
-        models=model_rows,
+        models=model_page.rows if model_page is not None else (),
         routed_models=routed_models,
         attention_models=attention_models[:5],
         missing_pricing_count=missing_pricing_count,
+        model_total_count=model_page.total_count if model_page is not None else 0,
+        model_page_size=model_page.limit
+        if model_page is not None
+        else MODEL_CATALOG_PAGE_SIZE,
+        model_next_offset=model_page.next_offset if model_page is not None else None,
+        model_has_more=model_page.has_more if model_page is not None else False,
         audits=tuple(_audit_config_row(audit) for audit in audits),
         metrics=metrics,
         api_version_label=str(metadata.get("api_version") or "Not configured"),
         base_url_label=provider.base_url or "Default LiteLLM endpoint",
+    )
+
+
+def get_llm_provider_model_catalog_page(
+    *,
+    session: Session,
+    provider_account_id: uuid.UUID,
+    installation_id: uuid.UUID | None = None,
+    offset: int = 0,
+    limit: int = MODEL_CATALOG_PAGE_SIZE,
+    query: str | None = None,
+) -> LLMProviderModelCatalogPage | None:
+    """Return a lazy-load page of provider model catalog rows."""
+
+    provider = session.get(LLMProviderAccount, provider_account_id)
+    if provider is None:
+        return None
+    if installation_id is not None and provider.installation_id != installation_id:
+        return None
+
+    normalized_offset = max(offset, 0)
+    normalized_limit = min(max(limit, 1), MAX_PAGE_SIZE)
+    cleaned_query = (query or "").strip()
+    model_stmt = select(LLMModelCatalog).where(
+        LLMModelCatalog.provider_account_id == provider.id
+    )
+    if cleaned_query:
+        pattern = f"%{cleaned_query}%"
+        model_stmt = model_stmt.where(
+            or_(
+                LLMModelCatalog.display_name.ilike(pattern),
+                LLMModelCatalog.model_identifier.ilike(pattern),
+                LLMModelCatalog.source.ilike(pattern),
+            )
+        )
+
+    total_count = int(
+        session.scalar(
+            select(func.count()).select_from(model_stmt.order_by(None).subquery())
+        )
+        or 0
+    )
+    models = tuple(
+        session.scalars(
+            model_stmt.order_by(
+                LLMModelCatalog.is_enabled.desc(),
+                LLMModelCatalog.display_name.asc(),
+                LLMModelCatalog.model_identifier.asc(),
+            )
+            .offset(normalized_offset)
+            .limit(normalized_limit)
+        )
+    )
+    next_offset = normalized_offset + len(models)
+    has_more = next_offset < total_count
+    return LLMProviderModelCatalogPage(
+        rows=_llm_provider_model_rows(
+            session,
+            provider=provider,
+            models=models,
+        ),
+        total_count=total_count,
+        offset=normalized_offset,
+        limit=normalized_limit,
+        next_offset=next_offset if has_more else None,
+        has_more=has_more,
+    )
+
+
+def _llm_provider_model_rows(
+    session: Session,
+    *,
+    provider: LLMProviderAccount,
+    models: Sequence[LLMModelCatalog],
+) -> tuple[LLMModelConfigRow, ...]:
+    model_ids = tuple(model.id for model in models)
+    assignments = (
+        tuple(
+            session.scalars(
+                select(LLMTierAssignment)
+                .where(
+                    LLMTierAssignment.installation_id == provider.installation_id,
+                    LLMTierAssignment.model_catalog_id.in_(model_ids),
+                )
+                .order_by(
+                    LLMTierAssignment.tier.asc(),
+                    LLMTierAssignment.priority.asc(),
+                    LLMTierAssignment.created_at.asc(),
+                )
+            )
+        )
+        if model_ids
+        else ()
+    )
+    assignments_by_model: dict[uuid.UUID, list[LLMTierAssignment]] = defaultdict(list)
+    for assignment in assignments:
+        assignments_by_model[assignment.model_catalog_id].append(assignment)
+    pricing_by_model = _latest_llm_pricing_by_model(session, (provider.id,))
+    return tuple(
+        LLMModelConfigRow(
+            model=model,
+            provider=provider,
+            assignment_labels=tuple(
+                _tier_assignment_label(assignment)
+                for assignment in assignments_by_model.get(model.id, ())
+            ),
+            latest_pricing=pricing_by_model.get((provider.id, model.model_identifier)),
+            tone="success" if model.is_enabled else "neutral",
+        )
+        for model in models
     )
 
 

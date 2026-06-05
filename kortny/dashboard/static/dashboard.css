@@ -3428,6 +3428,18 @@ pre {
   font-weight: 700;
 }
 
+.model-provider-catalog-footer {
+  align-items: center;
+  border-top: 1px solid var(--border);
+  display: flex;
+  justify-content: center;
+  padding: 12px 16px;
+}
+
+.model-provider-catalog-footer .btn-ghost {
+  min-width: 160px;
+}
+
 .model-provider-compact-list > div,
 .model-provider-empty {
   background: color-mix(in srgb, var(--muted) 34%, transparent);
