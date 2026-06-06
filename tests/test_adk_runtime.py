@@ -280,17 +280,15 @@ def test_adk_runtime_short_availability_check_uses_direct_quick_agent(
     assert agent.name == "quick_response_agent"
     assert agent.model.model == "openrouter/deepseek/deepseek-v4-flash"
     assert not factory_called
-    assert task_service.events == [
-        (
-            task,
-            {
-                "message": "adk_quick_response_selected",
-                "runtime": "adk",
-                "agent": "quick_response_agent",
-                "reason": "runtime_handoff_quick_conversation",
-            },
-        )
-    ]
+    assert task_service.events[0][1]["message"] == "routing_decision_recorded"
+    assert task_service.events[0][1]["actual_path"] == "quick_response_agent"
+    assert task_service.events[0][1]["runtime_class"] == "quick_response"
+    assert task_service.events[1][1] == {
+        "message": "adk_quick_response_selected",
+        "runtime": "adk",
+        "agent": "quick_response_agent",
+        "reason": "runtime_handoff_quick_conversation",
+    }
 
 
 def test_adk_runtime_uses_model_config_service_for_task_bound_model(
@@ -846,8 +844,11 @@ def test_adk_runtime_builds_planned_parallel_pipeline_for_planned_candidate(
         "planned_workspace_result": "openrouter/deepseek/deepseek-v4-flash",
         "planned_integration_result": "openrouter/deepseek/deepseek-v4-flash",
     }
-    assert task_service.events[0][1]["message"] == "adk_planned_workflow_selected"
-    assert task_service.events[0][1]["mode"] == "planned_parallel"
+    assert task_service.events[0][1]["message"] == "routing_decision_recorded"
+    assert task_service.events[0][1]["actual_path"] == "planned_parallel"
+    assert task_service.events[0][1]["shadow_route"] == "planned_candidate"
+    assert task_service.events[1][1]["message"] == "adk_planned_workflow_selected"
+    assert task_service.events[1][1]["mode"] == "planned_parallel"
 
 
 def test_adk_runtime_respects_planned_workflow_disable_flag(

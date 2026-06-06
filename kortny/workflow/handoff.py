@@ -14,6 +14,7 @@ from typing import Literal
 
 from kortny.config import Settings
 from kortny.db.models import Task
+from kortny.schedule_intent import is_schedule_state_question
 from kortny.tools.types import JsonObject
 
 
@@ -68,7 +69,9 @@ def evaluate_runtime_handoff(
     normalized_input = _normalize(task.input)
     reason_codes = _reason_codes(task, normalized_input)
 
-    if task.identity_kind == "scheduled" or "scheduled_or_recurring" in reason_codes:
+    if "schedule_state_query" in reason_codes:
+        runtime_class = TaskRuntimeClass.inline_tool_task
+    elif task.identity_kind == "scheduled" or "scheduled_or_recurring" in reason_codes:
         runtime_class = TaskRuntimeClass.scheduled_workflow_task
     elif _is_quick_response(normalized_input, reason_codes):
         runtime_class = TaskRuntimeClass.quick_response
@@ -106,6 +109,9 @@ def _reason_codes(task: Task, normalized_input: str) -> list[str]:
     reasons: list[str] = []
     if task.identity_kind == "scheduled":
         reasons.append("scheduled_task_identity")
+    if is_schedule_state_question(normalized_input):
+        reasons.append("schedule_state_query")
+        return reasons
     if _SCHEDULE_RE.search(normalized_input):
         reasons.append("scheduled_or_recurring")
     if _LONG_RUNNING_RE.search(normalized_input):
@@ -136,6 +142,8 @@ def _decision_reason(
     if runtime_class is TaskRuntimeClass.quick_response:
         return "Short conversational request with no durable workflow signals."
     if runtime_class is TaskRuntimeClass.inline_tool_task:
+        if "schedule_state_query" in reason_codes:
+            return "User is asking about existing scheduler state; keep the scheduler truth lookup inline."
         return "No durable workflow signals detected; keep current inline worker path."
     if runtime_class is TaskRuntimeClass.scheduled_workflow_task:
         return "Scheduled or recurring work should eventually be owned by a durable workflow."

@@ -76,6 +76,17 @@ def test_classifier_marks_recurring_task_as_planned_candidate() -> None:
     assert decision.confidence >= 0.9
 
 
+def test_classifier_keeps_schedule_state_questions_inline() -> None:
+    decision = classify_planned_workflow(
+        task=_task("Do I have an active stock market update scheduled?")
+    )
+
+    assert decision.route is PlannedWorkflowRoute.inline
+    assert decision.planned_candidate is False
+    assert decision.estimated_subtask_count == 1
+    assert decision.reason_codes == ("schedule_state_query",)
+
+
 def _task(input_text: str) -> Task:
     return cast(
         Any,

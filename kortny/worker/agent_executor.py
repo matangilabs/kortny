@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -54,6 +55,15 @@ from kortny.observe.assessment import (
     is_channel_assessment_task,
 )
 from kortny.observe.profiles import ObserveChannelProfileService
+from kortny.routing import (
+    ROUTING_DECISION_RECORDED_MESSAGE,
+    RoutingDecisionTrace,
+)
+from kortny.schedule_intent import (
+    is_schedule_state_question,
+    schedule_state_query_text,
+    schedule_state_status_filter,
+)
 from kortny.slack import SlackPoster, SlackThread
 from kortny.slack.comments import (
     ArtifactCommentGenerator,
@@ -93,6 +103,7 @@ from kortny.tool_selection import (
 from kortny.tools import (
     ForgetFactTool,
     InspectMemoryTool,
+    JsonObject,
     ListIntegrationsTool,
     ObservationChannelHistoryCache,
     PdfGeneratorTool,
@@ -104,6 +115,15 @@ from kortny.tools import (
     Tool,
     ToolRegistry,
     WebSearchTool,
+)
+from kortny.tools.schedules import (
+    CancelScheduleTool,
+    CreateScheduleTool,
+    GetScheduleTool,
+    ListSchedulesTool,
+    PauseScheduleTool,
+    ResumeScheduleTool,
+    UpdateScheduleTool,
 )
 from kortny.witness import (
     WITNESS_OPPORTUNITY_CANDIDATES_PROJECTED_MESSAGE,
@@ -197,7 +217,13 @@ class AgentTaskExecutor:
         try:
             logger.info("agent executor started task_id=%s", task.id)
             with task_workspace(task.id, base_dir=self.workspace_base_dir) as workspace:
-                if is_dashboard_graph_refresh_task(session, task):
+                if is_schedule_state_question(task.input) and task.identity_kind != "scheduled":
+                    agent_result = self._run_schedule_state_fast_path(
+                        session=session,
+                        task=task,
+                        task_service=task_service,
+                    )
+                elif is_dashboard_graph_refresh_task(session, task):
                     agent_result = self._run_channel_graph_refresh_pipeline(
                         settings=settings,
                         session=session,
@@ -219,6 +245,13 @@ class AgentTaskExecutor:
                     task=task,
                     task_service=task_service,
                     result_summary=agent_result.result_summary,
+                )
+                self._record_routing_chain_completed(
+                    session=session,
+                    task=task,
+                    task_service=task_service,
+                    result_summary=agent_result.result_summary,
+                    posted_response_text=posted_response_text,
                 )
                 self._project_witness_opportunities_from_result(
                     settings=settings,
@@ -327,6 +360,23 @@ class AgentTaskExecutor:
         task_service.append_event(
             task,
             TaskEventType.log,
+            RoutingDecisionTrace(
+                stage="tier0_system_of_record",
+                route_tier="tier0",
+                source="dashboard_graph_refresh",
+                runtime_class="inline_tool_task",
+                intent="knowledge_graph.refresh",
+                confidence=1.0,
+                escalated=False,
+                selected_runtime="kg_channel_refresh_pipeline",
+                selected_backend="inline",
+                actual_path="kg_channel_refresh_pipeline",
+                reason="dashboard_knowledge_graph_refresh",
+            ).to_payload(),
+        )
+        task_service.append_event(
+            task,
+            TaskEventType.log,
             {
                 "message": "agent_runtime_selected",
                 "runtime": "kg_channel_refresh_pipeline",
@@ -373,6 +423,144 @@ class AgentTaskExecutor:
             turns=0,
             artifact_count=result.artifact_count,
         )
+
+    def _run_schedule_state_fast_path(
+        self,
+        *,
+        session: Session,
+        task: Task,
+        task_service: TaskService,
+    ) -> AgentRunResult:
+        """Answer scheduler state questions from the scheduler DB directly."""
+
+        query = schedule_state_query_text(task.input)
+        status = schedule_state_status_filter(task.input)
+        task_service.append_event(
+            task,
+            TaskEventType.log,
+            RoutingDecisionTrace(
+                stage="tier0_system_of_record",
+                route_tier="tier0",
+                source="schedule_state_fast_path",
+                runtime_class="inline_tool_task",
+                intent="scheduler.query",
+                confidence=1.0,
+                escalated=False,
+                selected_runtime="schedule_state_fast_path",
+                selected_backend="inline",
+                actual_path="schedule_state_fast_path",
+                reason="schedule_truth_lookup",
+                reason_codes=("schedule_state_query",),
+                metadata={
+                    "query": query,
+                    "status": status,
+                },
+            ).to_payload(),
+        )
+        task_service.append_event(
+            task,
+            TaskEventType.log,
+            {
+                "message": "agent_runtime_selected",
+                "runtime": "schedule_state_fast_path",
+                "reason": "schedule_truth_lookup",
+                "query": query,
+                "status": status,
+            },
+        )
+        log_observation(
+            logger,
+            "agent_runtime_selected",
+            task=task,
+            runtime="schedule_state_fast_path",
+            reason="schedule_truth_lookup",
+            query=query,
+            status=status,
+        )
+        output = self._invoke_list_schedules_fast_path(
+            session=session,
+            task=task,
+            task_service=task_service,
+            args={
+                "scope": "visible",
+                "status": status,
+                **({"query": query} if query is not None else {}),
+                "limit": 10,
+            },
+        )
+        fallback_used = False
+        if query is not None and output.get("count") == 0:
+            fallback_used = True
+            output = self._invoke_list_schedules_fast_path(
+                session=session,
+                task=task,
+                task_service=task_service,
+                args={
+                    "scope": "visible",
+                    "status": status,
+                    "limit": 10,
+                },
+            )
+        summary = _schedule_state_fast_path_response(
+            output,
+            query=query,
+            status=status,
+            fallback_used=fallback_used,
+        )
+        task_service.append_event(
+            task,
+            TaskEventType.log,
+            {
+                "message": "schedule_state_fast_path_completed",
+                "runtime": "schedule_state_fast_path",
+                "query": query,
+                "status": status,
+                "fallback_used": fallback_used,
+                "schedule_count": output.get("count"),
+            },
+        )
+        return AgentRunResult(
+            task_id=task.id,
+            result_summary=summary,
+            turns=0,
+            artifact_count=0,
+        )
+
+    def _invoke_list_schedules_fast_path(
+        self,
+        *,
+        session: Session,
+        task: Task,
+        task_service: TaskService,
+        args: JsonObject,
+    ) -> JsonObject:
+        tool = ListSchedulesTool(session=session, task=task)
+        task_service.append_event(
+            task,
+            TaskEventType.tool_call,
+            {
+                "tool": tool.name,
+                "runtime": "schedule_state_fast_path",
+                "arguments": args,
+                "argument_keys": sorted(args),
+            },
+        )
+        started = time.perf_counter()
+        result = tool.invoke(args)
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        task_service.append_event(
+            task,
+            TaskEventType.tool_result,
+            {
+                "tool": tool.name,
+                "runtime": "schedule_state_fast_path",
+                "output": result.output,
+                "latency_ms": latency_ms,
+                "artifact_count": len(result.artifacts),
+                "cost_usd": "0",
+            },
+        )
+        return result.output
 
     def _build_llm(
         self,
@@ -468,16 +656,18 @@ class AgentTaskExecutor:
         working_dir: Path,
     ) -> AgentRunResult:
         planned_workflow_candidate = False
+        planned_workflow_payload: JsonObject | None = None
         try:
             planned_workflow = classify_planned_workflow(
                 task=task,
                 events=_task_events(session, task),
             )
             planned_workflow_candidate = planned_workflow.planned_candidate
+            planned_workflow_payload = planned_workflow.to_payload()
             task_service.append_event(
                 task,
                 TaskEventType.log,
-                planned_workflow.to_payload(),
+                planned_workflow_payload,
             )
             log_observation(
                 logger,
@@ -544,6 +734,40 @@ class AgentTaskExecutor:
         task_service.append_event(
             task,
             TaskEventType.log,
+            RoutingDecisionTrace(
+                stage="worker_runtime_handoff",
+                route_tier="handoff_shadow",
+                source="runtime_handoff",
+                runtime_class=handoff.runtime_class.value,
+                intent=_routing_intent_from_handoff(
+                    handoff_reason_codes=handoff.reason_codes,
+                    planned_workflow_payload=planned_workflow_payload,
+                ),
+                confidence=_routing_confidence_from_planned_payload(
+                    planned_workflow_payload
+                ),
+                escalated=handoff.durable_candidate or planned_workflow_candidate,
+                selected_runtime=settings.agent_runtime,
+                selected_backend=handoff.selected_backend,
+                actual_path="pending_runtime_selection",
+                reason=handoff.reason,
+                reason_codes=handoff.reason_codes,
+                shadow_runtime_class=handoff.runtime_class.value,
+                shadow_route=_routing_payload_str(planned_workflow_payload, "route"),
+                shadow_planned_candidate=planned_workflow_candidate,
+                shadow_confidence=_routing_confidence_from_planned_payload(
+                    planned_workflow_payload
+                ),
+                metadata={
+                    "recommended_backend": handoff.recommended_backend,
+                    "configured_backend": handoff.configured_backend,
+                    "fallback_reason": handoff.fallback_reason,
+                },
+            ).to_payload(),
+        )
+        task_service.append_event(
+            task,
+            TaskEventType.log,
             {
                 "message": "agent_runtime_selected",
                 "runtime": settings.agent_runtime,
@@ -554,6 +778,39 @@ class AgentTaskExecutor:
             "agent_runtime_selected",
             task=task,
             runtime=settings.agent_runtime,
+        )
+        task_service.append_event(
+            task,
+            TaskEventType.log,
+            RoutingDecisionTrace(
+                stage="worker_runtime_selected",
+                route_tier=(
+                    "tier2_orchestrator"
+                    if settings.agent_runtime == "adk"
+                    else "custom_runtime"
+                ),
+                source="agent_executor",
+                runtime_class=handoff.runtime_class.value,
+                intent=_routing_intent_from_handoff(
+                    handoff_reason_codes=handoff.reason_codes,
+                    planned_workflow_payload=planned_workflow_payload,
+                ),
+                confidence=_routing_confidence_from_planned_payload(
+                    planned_workflow_payload
+                ),
+                escalated=settings.agent_runtime == "adk",
+                selected_runtime=settings.agent_runtime,
+                selected_backend=handoff.selected_backend,
+                actual_path=settings.agent_runtime,
+                reason="Worker selected configured agent runtime.",
+                reason_codes=handoff.reason_codes,
+                shadow_runtime_class=handoff.runtime_class.value,
+                shadow_route=_routing_payload_str(planned_workflow_payload, "route"),
+                shadow_planned_candidate=planned_workflow_candidate,
+                shadow_confidence=_routing_confidence_from_planned_payload(
+                    planned_workflow_payload
+                ),
+            ).to_payload(),
         )
         if settings.agent_runtime == "adk":
             from kortny.agent.adk_runtime import AdkAgentRuntime
@@ -794,6 +1051,35 @@ class AgentTaskExecutor:
         inspect_memory = InspectMemoryTool(service=memory_service, task=task)
         forget_fact = ForgetFactTool(service=memory_service, task=task)
         query_workspace_graph = QueryWorkspaceGraphTool(session=session, task=task)
+        schedule_tools: tuple[Tool, ...] = (
+            ListSchedulesTool(session=session, task=task),
+            GetScheduleTool(session=session, task=task),
+            CreateScheduleTool(
+                session=session,
+                task=task,
+                task_service=task_service,
+            ),
+            UpdateScheduleTool(
+                session=session,
+                task=task,
+                task_service=task_service,
+            ),
+            PauseScheduleTool(
+                session=session,
+                task=task,
+                task_service=task_service,
+            ),
+            ResumeScheduleTool(
+                session=session,
+                task=task,
+                task_service=task_service,
+            ),
+            CancelScheduleTool(
+                session=session,
+                task=task,
+                task_service=task_service,
+            ),
+        )
         native_tools: list[Tool] = [
             pdf_generator,
             slack_channel_history,
@@ -803,6 +1089,7 @@ class AgentTaskExecutor:
             inspect_memory,
             forget_fact,
             query_workspace_graph,
+            *schedule_tools,
         ]
         if web_search is not None:
             native_tools.insert(0, web_search)
@@ -1094,6 +1381,29 @@ class AgentTaskExecutor:
             ),
         }
         task_service.append_event(task, TaskEventType.log, payload)
+        task_service.append_event(
+            task,
+            TaskEventType.log,
+            RoutingDecisionTrace(
+                stage="tool_scope_selected",
+                route_tier="tool_scope",
+                source="tool_selector",
+                candidate_tool_count=candidate_count,
+                selector_candidate_count=selector_candidate_count,
+                selected_tool_names=tuple(
+                    item.registry_name for item in selection.selected_tools
+                ),
+                suppressed_tool_names=tuple(selection.suppressed_native_tools),
+                reason=selection.route_reason,
+                metadata={
+                    "fallback_used": selection.fallback_used,
+                    "rejected_tool_count": len(selection.rejected_tools),
+                    "budget_omitted_candidate_count": len(
+                        selection.budget_omitted_candidate_names
+                    ),
+                },
+            ).to_payload(),
+        )
         log_observation(
             logger,
             "tool_selection_completed",
@@ -1110,6 +1420,75 @@ class AgentTaskExecutor:
                 selection.budget_omitted_candidate_names
             ),
         )
+
+    def _record_routing_chain_completed(
+        self,
+        *,
+        session: Session,
+        task: Task,
+        task_service: TaskService,
+        result_summary: str,
+        posted_response_text: str | None,
+    ) -> None:
+        events = _task_events(session, task)
+        route_events = [
+            event.payload
+            for event in events
+            if event.type is TaskEventType.log
+            and event.payload.get("message") == ROUTING_DECISION_RECORDED_MESSAGE
+        ]
+        selected_runtime = _latest_payload_event(
+            events,
+            message="agent_runtime_selected",
+        )
+        adk_completed = _latest_payload_event(events, message="adk_runtime_completed")
+        tool_selection = _latest_payload_event(events, message="tool_selection_completed")
+        final_route = next(
+            (
+                payload
+                for payload in reversed(route_events)
+                if payload.get("actual_path") is not None
+            ),
+            route_events[-1] if route_events else {},
+        )
+        final_intent_route = next(
+            (
+                payload
+                for payload in reversed(route_events)
+                if payload.get("intent") is not None
+            ),
+            final_route,
+        )
+        payload: JsonObject = {
+            "message": "routing_chain_completed",
+            "route_event_count": len(route_events),
+            "selected_runtime": (
+                selected_runtime.get("runtime")
+                if isinstance(selected_runtime, dict)
+                else None
+            ),
+            "final_actual_path": final_route.get("actual_path"),
+            "final_runtime_class": final_route.get("runtime_class"),
+            "final_intent": final_intent_route.get("intent"),
+            "result_chars": len(result_summary),
+            "posted_response_chars": (
+                len(posted_response_text) if posted_response_text is not None else 0
+            ),
+        }
+        if adk_completed is not None:
+            payload["adk_mode"] = adk_completed.get("mode")
+            payload["adk_final_author"] = adk_completed.get("final_author")
+        if tool_selection is not None:
+            payload["candidate_tool_count"] = tool_selection.get("candidate_count")
+            payload["selector_candidate_count"] = tool_selection.get(
+                "selector_candidate_count"
+            )
+            payload["selected_tool_names"] = [
+                item.get("registry_name")
+                for item in tool_selection.get("selected_tools", [])
+                if isinstance(item, dict)
+            ]
+        task_service.append_event(task, TaskEventType.log, payload)
 
     def _build_external_tool_providers(
         self,
@@ -2109,6 +2488,84 @@ def _task_events(session: Session, task: Task) -> tuple[TaskEvent, ...]:
     )
 
 
+def _schedule_state_fast_path_response(
+    output: JsonObject,
+    *,
+    query: str | None,
+    status: str,
+    fallback_used: bool,
+) -> str:
+    schedules = output.get("schedules")
+    schedule_rows = schedules if isinstance(schedules, list) else []
+    status_label = {
+        "active": "active",
+        "paused": "paused",
+        "proposed": "draft",
+        "open": "open",
+        "all": "",
+    }.get(status, status)
+    query_label = f" matching `{query}`" if query and not fallback_used else ""
+    if not schedule_rows:
+        target = f" {status_label}" if status_label else ""
+        return (
+            f"I checked the scheduler and don't see any{target} schedules"
+            f"{query_label}."
+        )
+
+    if fallback_used and query:
+        lead = (
+            f"I didn't find an exact schedule match for `{query}`, but I found "
+            f"{len(schedule_rows)} {status_label or 'visible'} schedule"
+            f"{'' if len(schedule_rows) == 1 else 's'}."
+        )
+    else:
+        lead = (
+            f"Yes — I found {len(schedule_rows)} {status_label or 'visible'} "
+            f"schedule{'' if len(schedule_rows) == 1 else 's'}{query_label}."
+        )
+
+    details = [
+        _schedule_state_row(row)
+        for row in schedule_rows[:5]
+        if isinstance(row, dict)
+    ]
+    if len(schedule_rows) > 5:
+        details.append(f"• Plus {len(schedule_rows) - 5} more.")
+    suffix = "Scheduler DB is the source of truth here."
+    return "\n".join([lead, "", *details, "", suffix]).strip()
+
+
+def _schedule_state_row(row: Mapping[str, Any]) -> str:
+    title = _plain_text(row.get("title")) or "Scheduled task"
+    cadence = _nested_plain(row, "cadence", "label")
+    next_run = _plain_text(row.get("next_run_human"))
+    delivery = _nested_plain(row, "delivery", "label")
+    fragments: list[str] = []
+    if cadence:
+        fragments.append(cadence)
+    if next_run:
+        fragments.append(f"next run {next_run}")
+    if delivery:
+        fragments.append(f"delivery: {delivery}")
+    if not fragments:
+        return f"• *{title}*"
+    return f"• *{title}* — {'; '.join(fragments)}"
+
+
+def _nested_plain(row: Mapping[str, Any], key: str, nested_key: str) -> str | None:
+    value = row.get(key)
+    if not isinstance(value, Mapping):
+        return None
+    return _plain_text(value.get(nested_key))
+
+
+def _plain_text(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = " ".join(value.split()).strip()
+    return normalized or None
+
+
 def _response_humanizer_skip_reason(
     *,
     settings: Settings,
@@ -2122,6 +2579,9 @@ def _response_humanizer_skip_reason(
         return None
 
     events = _task_events(session, task)
+
+    if _latest_payload_event(events, message="schedule_state_fast_path_completed") is not None:
+        return "schedule_state_fast_path"
 
     if len(raw_text.strip()) >= settings.response_humanizer_min_chars:
         return None
@@ -2156,6 +2616,8 @@ def _should_skip_witness_extraction(session: Session, task: Task) -> bool:
     if _is_witness_autopilot_task(task):
         return True
     events = _task_events(session, task)
+    if _latest_payload_event(events, message="schedule_state_fast_path_completed") is not None:
+        return True
     if _latest_payload_event(events, message="adk_quick_response_selected") is not None:
         return True
     completed = _latest_payload_event(events, message="adk_runtime_completed")
@@ -2182,6 +2644,57 @@ def _latest_payload_event(
         if event.payload.get("message") != message:
             continue
         return cast(dict[str, Any], event.payload)
+    return None
+
+
+def _routing_intent_from_handoff(
+    *,
+    handoff_reason_codes: tuple[str, ...],
+    planned_workflow_payload: Mapping[str, Any] | None,
+) -> str:
+    reason_set = set(handoff_reason_codes)
+    planned_reasons = (
+        planned_workflow_payload.get("reason_codes", ())
+        if planned_workflow_payload is not None
+        else ()
+    )
+    if isinstance(planned_reasons, list | tuple | set):
+        reason_set.update(str(reason) for reason in planned_reasons)
+    if "schedule_state_query" in reason_set:
+        return "scheduler.query"
+    if "scheduled_or_recurring" in reason_set or "scheduled_task_identity" in reason_set:
+        return "scheduler.create_or_run"
+    if "quick_conversation" in reason_set:
+        return "conversation.quick"
+    if "write_or_destructive_intent" in reason_set:
+        return "integration.write_or_approval"
+    if "broad_research" in reason_set or "research_synthesis_work" in reason_set:
+        return "research.synthesis"
+    if "multi_source_synthesis" in reason_set:
+        return "workspace.multi_source"
+    if "integration_tool_work" in reason_set or "integration_scope_present" in reason_set:
+        return "integration.read"
+    return "task.general"
+
+
+def _routing_payload_str(
+    payload: Mapping[str, Any] | None,
+    key: str,
+) -> str | None:
+    if payload is None:
+        return None
+    value = payload.get(key)
+    return value if isinstance(value, str) and value else None
+
+
+def _routing_confidence_from_planned_payload(
+    payload: Mapping[str, Any] | None,
+) -> float | None:
+    if payload is None:
+        return None
+    value = payload.get("confidence")
+    if isinstance(value, int | float):
+        return float(value)
     return None
 
 

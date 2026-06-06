@@ -43,6 +43,7 @@ from kortny.llm.runtime_config import db_provider_name
 from kortny.llm.service import calculate_cost_usd
 from kortny.llm.types import TokenUsage
 from kortny.observability import log_observation
+from kortny.routing import RoutingDecisionTrace
 from kortny.tasks import TaskService
 from kortny.tools import ToolRegistry
 
@@ -167,6 +168,11 @@ integrations, and approval policy.
 
 - Use tools when the answer depends on Slack history, files, memory,
   integrations, live data, or generated artifacts.
+- For scheduled work, treat list_schedules/get_schedule and the schedule
+  mutation tools as the source of truth. Do not answer schedule state from
+  memory, workspace graph, or Slack history when schedule tools are available.
+  When a schedule tool returns assistant_summary, reuse that substance in
+  natural coworker language and avoid exposing schedule IDs unless asked.
 - Do not claim you checked a source unless you actually used the matching tool
   or the source is present in the assembled context.
 - If a needed tool is unavailable, say plainly what is missing and what the user
@@ -518,6 +524,27 @@ class AdkAgentRuntime:
             task=task,
             context_package=context_package,
         )
+        if task is not None and self.task_service is not None:
+            handoff_payload = self._latest_log_payload(
+                task=task,
+                message="runtime_handoff_evaluated",
+            )
+            self.task_service.append_event(
+                task,
+                TaskEventType.log,
+                RoutingDecisionTrace(
+                    stage="adk_agent_selected",
+                    route_tier="tier2_orchestrator",
+                    source="adk_runtime",
+                    runtime_class=_payload_str(handoff_payload, "runtime_class"),
+                    selected_runtime="adk",
+                    selected_backend=_payload_str(handoff_payload, "selected_backend"),
+                    actual_path="kortny_root_orchestrator",
+                    reason="ADK root orchestrator selected specialist-agent routing.",
+                    reason_codes=_payload_str_tuple(handoff_payload, "reason_codes"),
+                    escalated=True,
+                ).to_payload(),
+            )
         return Agent(
             name="kortny_root_orchestrator",
             model=self._adk_model(task=task),
@@ -594,7 +621,42 @@ class AdkAgentRuntime:
             output_key=None,
             tools=[],
         )
-        if task is not None:
+        if task is not None and self.task_service is not None:
+            self.task_service.append_event(
+                task,
+                TaskEventType.log,
+                RoutingDecisionTrace(
+                    stage="adk_agent_selected",
+                    route_tier="tier2_orchestrator",
+                    source="adk_runtime",
+                    runtime_class="durable_workflow_task",
+                    confidence=_payload_float(planned_workflow_payload, "confidence"),
+                    escalated=True,
+                    selected_runtime="adk",
+                    selected_backend="inline",
+                    actual_path="planned_parallel",
+                    reason="ADK planned workflow selected for planned candidate.",
+                    reason_codes=_payload_str_tuple(
+                        planned_workflow_payload,
+                        "reason_codes",
+                    ),
+                    shadow_route=_payload_str(planned_workflow_payload, "route"),
+                    shadow_planned_candidate=(
+                        planned_workflow_payload or {}
+                    ).get("planned_candidate")
+                    is True,
+                    shadow_confidence=_payload_float(
+                        planned_workflow_payload,
+                        "confidence",
+                    ),
+                    metadata={
+                        "planner_agent": planner.name,
+                        "parallel_agent": "planned_parallel_fanout",
+                        "merger_agent": merger.name,
+                        "branch_agents": [worker.name for worker in workers],
+                    },
+                ).to_payload(),
+            )
             self.task_service.append_event(
                 task,
                 TaskEventType.log,
@@ -669,7 +731,25 @@ class AdkAgentRuntime:
         context_package: ContextPackage | None,
     ) -> Agent:
         context = _render_context_for_instruction(context_package)
-        if task is not None:
+        if task is not None and self.task_service is not None:
+            self.task_service.append_event(
+                task,
+                TaskEventType.log,
+                RoutingDecisionTrace(
+                    stage="adk_agent_selected",
+                    route_tier="tier2_shortcut",
+                    source="adk_runtime",
+                    runtime_class="quick_response",
+                    intent="conversation.quick",
+                    confidence=1.0,
+                    escalated=False,
+                    selected_runtime="adk",
+                    selected_backend="inline",
+                    actual_path="quick_response_agent",
+                    reason="runtime_handoff_quick_conversation",
+                    reason_codes=("quick_conversation",),
+                ).to_payload(),
+            )
             self.task_service.append_event(
                 task,
                 TaskEventType.log,
@@ -2092,6 +2172,31 @@ def _string_or_none(value: object) -> str | None:
     if value is None:
         return None
     return str(value)
+
+
+def _payload_str(payload: dict[str, Any] | None, key: str) -> str | None:
+    if payload is None:
+        return None
+    value = payload.get(key)
+    return value if isinstance(value, str) and value else None
+
+
+def _payload_float(payload: dict[str, Any] | None, key: str) -> float | None:
+    if payload is None:
+        return None
+    value = payload.get(key)
+    if isinstance(value, int | float):
+        return float(value)
+    return None
+
+
+def _payload_str_tuple(payload: dict[str, Any] | None, key: str) -> tuple[str, ...]:
+    if payload is None:
+        return ()
+    value = payload.get(key)
+    if not isinstance(value, list | tuple | set):
+        return ()
+    return tuple(item for item in value if isinstance(item, str) and item)
 
 
 def _task_id_from_context(callback_context: CallbackContext) -> uuid.UUID | None:

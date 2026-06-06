@@ -64,6 +64,20 @@ def test_handoff_classifies_scheduled_identity_as_scheduled_workflow() -> None:
     assert "scheduled_task_identity" in decision.reason_codes
 
 
+def test_handoff_keeps_schedule_state_questions_inline() -> None:
+    decision = evaluate_runtime_handoff(
+        settings=_settings(KORTNY_WORKFLOW_BACKEND="temporal"),
+        task=_task("Do I have an active stock market update scheduled?"),
+    )
+
+    assert decision.runtime_class is TaskRuntimeClass.inline_tool_task
+    assert decision.durable_candidate is False
+    assert decision.recommended_backend == "inline"
+    assert decision.selected_backend == "inline"
+    assert decision.fallback_reason is None
+    assert "schedule_state_query" in decision.reason_codes
+
+
 def _task(input_text: str, *, identity_kind: str | None = None) -> Task:
     return cast(Any, SimpleNamespace(input=input_text, identity_kind=identity_kind))
 

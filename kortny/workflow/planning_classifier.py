@@ -15,6 +15,7 @@ from typing import Any
 
 from kortny.db.models import Task, TaskEvent
 from kortny.llm.routing import effective_intent_decision, latest_intent_decision
+from kortny.schedule_intent import is_schedule_state_question
 from kortny.tools.types import JsonObject
 
 
@@ -85,6 +86,21 @@ def classify_planned_workflow(
         needs_context=needs_context,
         detected_integrations=integrations,
     )
+
+    if is_schedule_state_question(normalized_input):
+        return PlannedWorkflowDecision(
+            route=PlannedWorkflowRoute.inline,
+            confidence=0.95,
+            estimated_subtask_count=1,
+            reason_codes=("schedule_state_query",),
+            reason=(
+                "User is asking for scheduler state; keep the schedule truth "
+                "tool path inline instead of planned workflow."
+            ),
+            detected_integrations=integrations,
+            likely_tools=likely_tools,
+            needs_context=needs_context,
+        )
 
     if _is_quick_conversation(normalized_input, reason_codes):
         return PlannedWorkflowDecision(

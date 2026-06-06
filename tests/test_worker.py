@@ -38,6 +38,7 @@ from kortny.db.models import (
     ObservationEvent,
     ObserveChannelProfile,
     ProceduralSkillInvocation,
+    Schedule,
     SlackChannelMembership,
     SlackSideEffect,
     Task,
@@ -878,6 +879,126 @@ def test_agent_executor_records_planned_workflow_classifier_event_for_complex_ta
         and event.payload.get("selected_backend") == "inline"
         for event in events
     )
+    route_events = [
+        event.payload
+        for event in events
+        if event.payload.get("message") == "routing_decision_recorded"
+    ]
+    assert any(
+        payload.get("stage") == "worker_runtime_handoff"
+        and payload.get("runtime_class") == "inline_tool_task"
+        and payload.get("shadow_route") == "planned_candidate"
+        and payload.get("shadow_planned_candidate") is True
+        for payload in route_events
+    )
+    assert any(
+        payload.get("stage") == "worker_runtime_selected"
+        and payload.get("selected_runtime") == "adk"
+        and payload.get("actual_path") == "adk"
+        for payload in route_events
+    )
+
+
+def test_agent_executor_answers_schedule_state_question_with_fast_path(
+    db_session: Session,
+) -> None:
+    task = create_task(db_session, event_id="EvScheduleStateFastPath")
+    task.input = "Do I have an active stock market update scheduled?"
+    task.slack_channel_id = "D123"
+    task.slack_thread_ts = "D123"
+    task.slack_message_ts = "1780764480.613429"
+    task.slack_user_id = "U123"
+    schedule = Schedule(
+        installation_id=task.installation_id,
+        owner_type="user",
+        owner_slack_user_id="U123",
+        title="Daily stock market update",
+        spec_kind="cron",
+        cron_expr="0 8 * * *",
+        timezone="America/Chicago",
+        next_run_at=datetime(2026, 6, 7, 13, 0, tzinfo=UTC),
+        catchup_policy="skip",
+        catchup_window_seconds=300,
+        overlap_policy="skip",
+        status="active",
+        delivery_kind="slack_dm",
+        delivery_slack_user_id="U123",
+        delivery_slack_channel_id="D123",
+        delivery_slack_thread_ts="D123",
+        artifact_delivery_policy="message_only",
+        task_template={
+            "input": "send me a stock market update",
+            "slack_user_id": "U123",
+            "slack_channel_id": "D123",
+            "slack_thread_ts": "D123",
+            "delivery_surface": "dm",
+        },
+        planned_cost_ceiling_usd=Decimal("0.2500"),
+        created_by_slack_user_id="U123",
+        metadata_json={"cadence_label": "Every morning at 8:00 AM Central"},
+    )
+    db_session.add(schedule)
+    db_session.commit()
+    task_service = TaskService(db_session)
+    settings = Settings.model_validate(
+        {
+            "SLACK_BOT_TOKEN": "xoxb-test",
+            "SLACK_APP_TOKEN": "xapp-test",
+            "SLACK_SIGNING_SECRET": "signing-secret",
+            "LLM_PROVIDER": SettingsLLMProvider.openrouter,
+            "LLM_API_KEY": "openrouter-key",
+            "LLM_MODEL": "anthropic/sonnet-default",
+            "LLM_CHEAP_MODEL": "deepseek/deepseek-v4-flash",
+            "POSTGRES_URL": "postgresql://kortny:kortny@localhost/kortny",
+            "AGENT_RUNTIME": "adk",
+            "KORTNY_WORKFLOW_BACKEND": "temporal",
+            "RESPONSE_HUMANIZER_ENABLED": True,
+        }
+    )
+    slack_client = FakeSlackClient()
+
+    result = AgentTaskExecutor(
+        settings=settings,
+        llm_provider=FakeAgentProvider([]),
+        slack_client=slack_client,
+    ).execute(
+        session=db_session,
+        task=task,
+        task_service=task_service,
+    )
+
+    events = task_events(db_session, task)
+    event_messages = [event.payload.get("message") for event in events]
+
+    assert result.result_summary.startswith("Yes")
+    assert "Daily stock market update" in slack_client.messages[-1]["text"]
+    assert "Scheduler DB is the source of truth here" in slack_client.messages[-1]["text"]
+    assert "schedule_state_fast_path_completed" in event_messages
+    assert "routing_decision_recorded" in event_messages
+    assert "routing_chain_completed" in event_messages
+    assert "response_humanizer_skipped" in event_messages
+    assert "planned_workflow_classified" not in event_messages
+    assert "runtime_handoff_evaluated" not in event_messages
+    assert "adk_runtime_started" not in event_messages
+    assert "response_humanizer_started" not in event_messages
+    assert "witness_opportunity_candidates_projected" not in event_messages
+    route_event = next(
+        event
+        for event in events
+        if event.payload.get("message") == "routing_decision_recorded"
+    )
+    assert route_event.payload["route_tier_resolved"] == "tier0"
+    assert route_event.payload["runtime_class"] == "inline_tool_task"
+    assert route_event.payload["intent"] == "scheduler.query"
+    assert route_event.payload["actual_path"] == "schedule_state_fast_path"
+    completed_route = next(
+        event
+        for event in events
+        if event.payload.get("message") == "routing_chain_completed"
+    )
+    assert completed_route.payload["selected_runtime"] == "schedule_state_fast_path"
+    assert completed_route.payload["final_actual_path"] == "schedule_state_fast_path"
+    assert completed_route.payload["final_intent"] == "scheduler.query"
 
 
 def test_agent_executor_posts_planned_workflow_progress_update(
@@ -3888,6 +4009,7 @@ def cleanup_database(session: Session) -> None:
         TaskEvent,
         SlackSideEffect,
         Task,
+        Schedule,
         ModelPricing,
         EncryptedSecret,
         Installation,
