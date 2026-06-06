@@ -3,6 +3,7 @@ import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 from urllib.parse import parse_qs as parse_url_qs
 from urllib.parse import urlsplit
 
@@ -3600,6 +3601,7 @@ def test_dashboard_witness_page_shows_candidates_and_filters(
     assert "Daily blotter channel with generated reports." in response.text
     assert f"/tasks/{task.id}" in response.text
     assert "witness-test-dedupe-key" in response.text
+    assert "Run scan" in response.text
     assert "Mark useful" in response.text
     assert "Snooze" in response.text
     assert "Dismiss" in response.text
@@ -3661,6 +3663,76 @@ def test_dashboard_witness_candidate_lifecycle_action_updates_row(
     assert refreshed.status == "cooldown"
     assert refreshed.cooldown_until is not None
     assert refreshed.feedback_json["last_action"]["action"] == "snoozed"
+
+
+def test_dashboard_witness_run_scan_uses_selected_workspace(
+    client: tuple[TestClient, Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    test_client, session = client
+    task = create_dashboard_task(session)
+    session.commit()
+    set_runtime_settings_env(monkeypatch)
+    calls: list[dict[str, object]] = []
+
+    class FakeWitnessRunner:
+        def __init__(
+            self,
+            runner_session: Session,
+            *,
+            settings: object,
+            runner_id: str,
+        ) -> None:
+            calls.append(
+                {
+                    "session": runner_session,
+                    "settings": settings,
+                    "runner_id": runner_id,
+                }
+            )
+
+        def run_once(self, **kwargs: object) -> object:
+            calls.append(kwargs)
+            return SimpleNamespace(
+                projections=(
+                    SimpleNamespace(
+                        created_count=2,
+                        updated_count=1,
+                        skipped_count=0,
+                    ),
+                ),
+                deliveries=(),
+            )
+
+    monkeypatch.setattr("kortny.dashboard.app.WitnessRunner", FakeWitnessRunner)
+    login(test_client)
+
+    response = test_client.post(
+        "/witness/run",
+        data={"next": "/witness?status=all"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    location = response.headers["location"]
+    assert location.startswith("/witness?status=all")
+    query = parse_url_qs(urlsplit(location).query)
+    assert query["notice_tone"] == ["success"]
+    assert "created 2 candidates" in query["notice"][0]
+    assert len(calls) == 2
+    init_call, run_call = calls
+    assert isinstance(init_call["session"], Session)
+    assert str(init_call["runner_id"]).startswith("dashboard:")
+    assert run_call["installation_id"] == task.installation_id
+    assert run_call["profile_limit"] == 10
+    assert run_call["delivery_limit"] == 0
+    assert run_call["deliver_private"] is False
+    assert run_call["use_advisory_lock"] is False
+    assert run_call["min_scan_interval"] == timedelta(seconds=0)
+
+    notice_response = test_client.get(location)
+    assert notice_response.status_code == 200
+    assert "Witness scan complete" in notice_response.text
 
 
 def test_dashboard_knowledge_graph_refresh_queues_channel_assessment_tasks(
@@ -4027,6 +4099,7 @@ def set_runtime_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SLACK_APP_TOKEN", "xapp-dashboard-secret")
     monkeypatch.setenv("SLACK_SIGNING_SECRET", "dashboard-signing-secret")
     monkeypatch.setenv("SLACK_APP_NAME", "kortny")
+    monkeypatch.setenv("COMPOSIO_API_KEY", "composio-dashboard-secret")
     monkeypatch.setenv("COMPOSIO_CATALOG_ENABLED", "false")
     monkeypatch.setenv("LLM_PROVIDER", "openrouter")
     monkeypatch.setenv("LLM_API_KEY", "llm-dashboard-secret")

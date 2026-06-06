@@ -112,6 +112,8 @@ from kortny.llm.provider_config import (
 from kortny.secrets import SecretEncryptionError, encrypt_secret_value
 from kortny.witness import (
     DEFAULT_WITNESS_SNOOZE,
+    WitnessRunner,
+    WitnessRunResult,
     accept_candidate,
     archive_candidate,
     dismiss_candidate,
@@ -596,6 +598,8 @@ def register_routes(app: FastAPI) -> None:
         sort: Annotated[str | None, Query()] = None,
         page: Annotated[int, Query(ge=1)] = 1,
         page_size: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)] = DEFAULT_PAGE_SIZE,
+        notice: Annotated[str | None, Query()] = None,
+        notice_tone: Annotated[str, Query()] = "success",
     ) -> Response:
         candidates = get_witness_candidates_dashboard(
             session,
@@ -615,8 +619,52 @@ def register_routes(app: FastAPI) -> None:
                 **_dashboard_context(principal, active_page="witness"),
                 "witness": candidates,
                 "witness_return_path": _request_path(request),
+                "notice": notice,
+                "notice_tone": _notice_tone(notice_tone),
             },
         )
+
+    @app.post("/witness/run")
+    async def witness_run_scan(
+        request: Request,
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> RedirectResponse:
+        form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+        next_path = _safe_next_path(form.get("next", ["/witness"])[0])
+        installation_id = _dashboard_installation_id(session, principal)
+        if installation_id is None:
+            return _redirect_with_notice(
+                next_path,
+                "Witness scan requires a selected workspace.",
+                tone="danger",
+            )
+        try:
+            runtime_settings = load_settings()
+            if not runtime_settings.witness_enabled:
+                return _redirect_with_notice(
+                    next_path,
+                    "Witness is disabled in runtime settings.",
+                    tone="warning",
+                )
+            actor = principal.slack_user_id or dashboard_actor(principal.display_name)
+            result = WitnessRunner(
+                session,
+                settings=runtime_settings,
+                runner_id=f"dashboard:{actor}",
+            ).run_once(
+                installation_id=installation_id,
+                profile_limit=runtime_settings.witness_profile_scan_limit,
+                delivery_limit=0,
+                deliver_private=False,
+                min_scan_interval=timedelta(seconds=0),
+                use_advisory_lock=False,
+            )
+            session.commit()
+        except (SettingsError, ValueError) as exc:
+            session.rollback()
+            return _redirect_with_notice(next_path, str(exc), tone="danger")
+        return _redirect_with_notice(next_path, _witness_run_notice(result))
 
     @app.post("/witness/candidates/{candidate_id}/{action}")
     async def witness_candidate_action(
@@ -4083,6 +4131,23 @@ def _graph_refresh_notice(result: object) -> str:
         pieces.append(f"skipped {skipped_count:,} already active or recent")
     pieces.append(f"across {known_channel_count:,} known active channel")
     return "; ".join(pieces) + f"{'' if known_channel_count == 1 else 's'}."
+
+
+def _witness_run_notice(result: WitnessRunResult) -> str:
+    projected_count = len(result.projections)
+    created_count = sum(outcome.created_count for outcome in result.projections)
+    updated_count = sum(outcome.updated_count for outcome in result.projections)
+    skipped_count = sum(outcome.skipped_count for outcome in result.projections)
+    if projected_count == 0:
+        return "Witness scan complete: no active channel profiles needed a refresh."
+    return (
+        "Witness scan complete: "
+        f"scanned {projected_count:,} profile"
+        f"{'' if projected_count == 1 else 's'}, "
+        f"created {created_count:,} candidate"
+        f"{'' if created_count == 1 else 's'}, "
+        f"updated {updated_count:,}, skipped {skipped_count:,}."
+    )
 
 
 def _redirect_with_notice(

@@ -9,10 +9,18 @@
       <p>Review, pause, dismiss, and send tightly scoped proactive suggestions.</p>
     </div>
     <div class="heading-actions">
+      <form method="post" action="/witness/run">
+        <input type="hidden" name="next" value="{{ witness_return_path }}">
+        <button class="btn" type="submit">Run scan</button>
+      </form>
       <a class="btn-ghost" href="/knowledge-graph">View Graph</a>
       <a class="btn-ghost" href="/tasks">View Tasks</a>
     </div>
   </section>
+
+  {% if notice %}
+    <div class="notice notice-{{ notice_tone }}" role="status">{{ notice }}</div>
+  {% endif %}
 
   <section class="summary-grid witness-summary" aria-label="Witness candidate overview">
     <div class="card metric-card">
