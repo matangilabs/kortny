@@ -1279,7 +1279,7 @@ def add_connection(
 
 def build_settings(
     *,
-    composio_api_key: str | None = None,
+    composio_api_key: str = "composio-key",
     brave_search_api_key: str | None = "test-brave-key",
     tool_selector_max_external_candidates: int | None = None,
 ) -> Settings:

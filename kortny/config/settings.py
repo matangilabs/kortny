@@ -124,6 +124,30 @@ class Settings(BaseSettings):
         default=759340185,
         validation_alias="KORTNY_SCHEDULER_ADVISORY_LOCK_KEY",
     )
+    witness_enabled: bool = Field(
+        default=True,
+        validation_alias="KORTNY_WITNESS_ENABLED",
+    )
+    witness_deliver_private: bool = Field(
+        default=False,
+        validation_alias="KORTNY_WITNESS_DELIVER_PRIVATE",
+    )
+    witness_poll_interval_seconds: float = Field(
+        default=300.0,
+        validation_alias="KORTNY_WITNESS_POLL_INTERVAL_SECONDS",
+    )
+    witness_profile_scan_limit: int = Field(
+        default=10,
+        validation_alias="KORTNY_WITNESS_PROFILE_SCAN_LIMIT",
+    )
+    witness_delivery_limit: int = Field(
+        default=5,
+        validation_alias="KORTNY_WITNESS_DELIVERY_LIMIT",
+    )
+    witness_scan_interval_seconds: int = Field(
+        default=21_600,
+        validation_alias="KORTNY_WITNESS_SCAN_INTERVAL_SECONDS",
+    )
     tool_selector_max_external_candidates: int = Field(
         default=24, validation_alias="TOOL_SELECTOR_MAX_EXTERNAL_CANDIDATES"
     )
@@ -134,9 +158,7 @@ class Settings(BaseSettings):
         default=8000, validation_alias="TOOL_RESULT_PROMPT_MAX_CHARS"
     )
 
-    composio_api_key: str | None = Field(
-        default=None, validation_alias="COMPOSIO_API_KEY"
-    )
+    composio_api_key: str = Field(validation_alias="COMPOSIO_API_KEY", min_length=1)
     composio_catalog_enabled: bool = Field(
         default=True, validation_alias="COMPOSIO_CATALOG_ENABLED"
     )
@@ -193,7 +215,6 @@ class Settings(BaseSettings):
     encryption_key: str | None = Field(default=None, validation_alias="ENCRYPTION_KEY")
 
     @field_validator(
-        "composio_api_key",
         "brave_search_api_key",
         "encryption_key",
         "llm_cheap_model",
@@ -217,6 +238,14 @@ class Settings(BaseSettings):
         if isinstance(value, str) and value.strip() == "":
             return None
         return value
+
+    @field_validator("composio_api_key")
+    @classmethod
+    def _strip_required_composio_api_key(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("COMPOSIO_API_KEY cannot be blank")
+        return stripped
 
     @field_validator(
         "llm_cheap_model",
@@ -328,6 +357,36 @@ class Settings(BaseSettings):
             raise ValueError(
                 "KORTNY_SCHEDULER_MATERIALIZE_LIMIT must be between 1 and 500"
             )
+        return value
+
+    @field_validator("witness_poll_interval_seconds")
+    @classmethod
+    def _valid_witness_poll_interval_seconds(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("KORTNY_WITNESS_POLL_INTERVAL_SECONDS must be positive")
+        return value
+
+    @field_validator("witness_profile_scan_limit")
+    @classmethod
+    def _valid_witness_profile_scan_limit(cls, value: int) -> int:
+        if value < 0 or value > 500:
+            raise ValueError(
+                "KORTNY_WITNESS_PROFILE_SCAN_LIMIT must be between 0 and 500"
+            )
+        return value
+
+    @field_validator("witness_delivery_limit")
+    @classmethod
+    def _valid_witness_delivery_limit(cls, value: int) -> int:
+        if value < 0 or value > 100:
+            raise ValueError("KORTNY_WITNESS_DELIVERY_LIMIT must be between 0 and 100")
+        return value
+
+    @field_validator("witness_scan_interval_seconds")
+    @classmethod
+    def _valid_witness_scan_interval_seconds(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("KORTNY_WITNESS_SCAN_INTERVAL_SECONDS cannot be negative")
         return value
 
     @field_validator("tool_selector_max_external_candidates")

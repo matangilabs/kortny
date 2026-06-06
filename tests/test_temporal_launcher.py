@@ -101,6 +101,7 @@ def _settings() -> Settings:
         LLM_PROVIDER="openrouter",
         LLM_API_KEY="llm-key",
         LLM_MODEL="openai/gpt-4o",
+        COMPOSIO_API_KEY="composio-key",
         POSTGRES_URL="postgresql://kortny:kortny@localhost/kortny",
         KORTNY_WORKFLOW_BACKEND="temporal",
     )

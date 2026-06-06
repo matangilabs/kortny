@@ -6,7 +6,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
-from pydantic import Field, ValidationError, field_validator
+from pydantic import Field, ValidationError, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -82,6 +82,19 @@ class DashboardSettings(BaseSettings):
             return None
         stripped = value.strip()
         return stripped or None
+
+    @model_validator(mode="after")
+    def _require_slack_login_config_for_slack_modes(self) -> DashboardSettings:
+        if (
+            self.auth_mode in {DashboardAuthMode.slack, DashboardAuthMode.hybrid}
+            and not self.slack_login_configured
+        ):
+            raise ValueError(
+                "DASHBOARD_SLACK_CLIENT_ID, DASHBOARD_SLACK_CLIENT_SECRET, "
+                "and DASHBOARD_SLACK_REDIRECT_URI are required when "
+                "DASHBOARD_AUTH_MODE is slack or hybrid"
+            )
+        return self
 
     @property
     def bootstrap_login_enabled(self) -> bool:

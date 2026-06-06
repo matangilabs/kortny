@@ -78,7 +78,7 @@ built for exactly that.
 ### Prerequisites
 - Docker and Docker Compose
 - An LLM provider key (OpenAI, Anthropic, or OpenRouter)
-- A Composio API key if you plan to use external integrations
+- A Composio API key for the integration catalog and connected-account tooling
 
 ### 1. Create your Slack app
 
@@ -92,6 +92,9 @@ built for exactly that.
 6. Copy your **Bot Token** (`xoxb-...`), **App-Level Token**
    (`xapp-...` with `connections:write` for Socket Mode), and
    **Signing Secret**
+7. Copy the app's **Client ID** and **Client Secret** for dashboard
+   Sign in with Slack
+8. Add `http://localhost:8080/auth/slack/callback` as an OAuth redirect URL
 
 If you update an existing Slack app from this repo's manifest, apply the
 manifest changes in Slack and reinstall the app to the workspace so new event
@@ -115,24 +118,21 @@ LLM_PROVIDER=openai          # openai | anthropic | openrouter
 LLM_API_KEY=sk-...
 LLM_MODEL=gpt-4o             # or claude-3-5-sonnet, etc.
 COMPOSIO_API_KEY=...
-BRAVE_SEARCH_API_KEY=...
-DASHBOARD_AUTH_MODE=bootstrap
-DASHBOARD_USERNAME=kortny
-DASHBOARD_PASSWORD=change-me
-DASHBOARD_SESSION_SECRET=change-me-dashboard-session-secret
-DASHBOARD_SECURE_COOKIES=false
-DASHBOARD_SLACK_CLIENT_ID=
-DASHBOARD_SLACK_CLIENT_SECRET=
+DASHBOARD_AUTH_MODE=hybrid
+DASHBOARD_SLACK_CLIENT_ID=...
+DASHBOARD_SLACK_CLIENT_SECRET=...
 DASHBOARD_SLACK_REDIRECT_URI=http://localhost:8080/auth/slack/callback
-POSTGRES_URL=postgresql://kortny:kortny@localhost:5432/kortny
-POSTGRES_DB=kortny
-POSTGRES_USER=kortny
-POSTGRES_PASSWORD=kortny
-POSTGRES_HOST_PORT=5432
-KORTNY_WORKFLOW_BACKEND=temporal
-KORTNY_SCHEDULER_POLL_INTERVAL_SECONDS=5
-KORTNY_SCHEDULER_MATERIALIZE_LIMIT=50
 ```
+
+That is enough for the default Docker Compose stack. Everything else in
+`.env.example` is optional and has a local-development default: bootstrap
+dashboard fallback credentials, Postgres credentials, Temporal, scheduler,
+Witness, and observability.
+
+Set `BRAVE_SEARCH_API_KEY` only if you want the built-in Brave-backed web
+search tool; search can also be provided by a connected Composio integration.
+Set `ENCRYPTION_KEY` before saving dashboard-managed provider or integration
+secrets.
 
 ### 3. Start Kortny
 
@@ -142,30 +142,35 @@ docker compose up -d --force-recreate
 
 This starts Postgres on `localhost:5432`, runs the Alembic migration, starts
 the Slack Socket Mode ingress service, starts the task worker, starts the
-Postgres-native schedule materializer, and serves the read-only operator
-dashboard at `http://localhost:8080`. It also starts the local Temporal dev
-server and Temporal worker so durable-workflow wiring is available during
-normal development.
+Postgres-native schedule materializer, starts the Witness candidate runner, and
+serves the operator dashboard at `http://localhost:8080`. It also starts the
+local Temporal dev server and Temporal worker so durable-workflow wiring is
+available during normal development.
 
 This does not start optional observability services such as Phoenix.
 
-The dashboard has a local bootstrap login backed by a signed session cookie.
-Use `DASHBOARD_USERNAME` and `DASHBOARD_PASSWORD` to sign in, and change
-`DASHBOARD_SESSION_SECRET` before exposing the dashboard beyond local
-development. It is bound to `127.0.0.1` by default; change
+Witness is conservative by default: it can create proactive opportunity
+candidates for the dashboard, but it will not send proactive DMs unless you set
+`KORTNY_WITNESS_DELIVER_PRIVATE=true`.
+
+The dashboard uses Sign in with Slack for per-user identity. In the default
+`hybrid` mode, a local bootstrap login remains available for development and
+recovery. Use `DASHBOARD_USERNAME` and `DASHBOARD_PASSWORD` for that fallback,
+and change `DASHBOARD_SESSION_SECRET` before exposing the dashboard beyond
+local development. It is bound to `127.0.0.1` by default; change
 `DASHBOARD_HOST_PORT` only if you need a different local port.
 
-For per-user dashboard identity, set `DASHBOARD_AUTH_MODE=hybrid` or
-`DASHBOARD_AUTH_MODE=slack`, configure the `DASHBOARD_SLACK_*` OpenID values,
-and add `http://localhost:8080/auth/slack/callback` as a Slack OAuth redirect
-URL. Slack login uses Sign in with Slack and stores a local dashboard user for
+If you explicitly need local-only dashboard auth, set
+`DASHBOARD_AUTH_MODE=bootstrap`. Slack login stores a local dashboard user for
 future personal dashboards and user-scoped integrations.
 
 ### 4. Develop against the local database
 
-Host-side commands use the same `POSTGRES_URL` from `.env`:
+Host-side commands need a local `POSTGRES_URL`; the Compose containers receive
+their internal `POSTGRES_URL` automatically:
 
 ```
+export POSTGRES_URL=postgresql://kortny:kortny@localhost:5432/kortny
 make migrate
 docker compose exec postgres createdb -U kortny kortny_test
 KORTNY_TEST_POSTGRES_URL=postgresql://kortny:kortny@localhost:5432/kortny_test uv run pytest tests/test_task_service.py tests/test_queue.py
@@ -183,6 +188,12 @@ To process at most one pending task from your host shell:
 
 ```
 uv run python -m kortny.worker --once
+```
+
+To run one Witness candidate-generation tick from your host shell:
+
+```
+uv run python -m kortny.witness --once
 ```
 
 To inspect task costs and LLM usage, open:

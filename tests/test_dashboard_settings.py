@@ -41,6 +41,24 @@ def test_dashboard_settings_enables_slack_login_when_configured() -> None:
     assert settings.slack_login_enabled is True
 
 
+def test_dashboard_settings_requires_slack_config_for_hybrid_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in (
+        "DASHBOARD_SLACK_CLIENT_ID",
+        "DASHBOARD_SLACK_CLIENT_SECRET",
+        "DASHBOARD_SLACK_REDIRECT_URI",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    with pytest.raises(ValueError, match="DASHBOARD_SLACK_CLIENT_ID"):
+        DashboardSettings(
+            _env_file=None,
+            postgres_url="postgresql://kortny:kortny@localhost/kortny",
+            session_secret="test-dashboard-session-secret",
+            auth_mode=DashboardAuthMode.hybrid,
+        )
+
+
 def test_dashboard_settings_rejects_invalid_state_ttl() -> None:
     with pytest.raises(ValueError):
         DashboardSettings(

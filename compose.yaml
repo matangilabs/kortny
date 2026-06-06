@@ -115,6 +115,36 @@ services:
       - .:/app
       - uv-cache:/tmp/uv-cache
 
+  witness:
+    image: ghcr.io/astral-sh/uv:python3.11-bookworm-slim
+    working_dir: /app
+    command: ["uv", "run", "python", "-m", "kortny.witness"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    env_file:
+      - .env
+    environment:
+      KORTNY_WITNESS_ENABLED: ${KORTNY_WITNESS_ENABLED:-true}
+      KORTNY_WITNESS_DELIVER_PRIVATE: ${KORTNY_WITNESS_DELIVER_PRIVATE:-false}
+      KORTNY_WITNESS_POLL_INTERVAL_SECONDS: ${KORTNY_WITNESS_POLL_INTERVAL_SECONDS:-300}
+      KORTNY_WITNESS_PROFILE_SCAN_LIMIT: ${KORTNY_WITNESS_PROFILE_SCAN_LIMIT:-10}
+      KORTNY_WITNESS_DELIVERY_LIMIT: ${KORTNY_WITNESS_DELIVERY_LIMIT:-5}
+      KORTNY_WITNESS_SCAN_INTERVAL_SECONDS: ${KORTNY_WITNESS_SCAN_INTERVAL_SECONDS:-21600}
+      OBSERVABILITY_ENABLED: ${OBSERVABILITY_ENABLED:-true}
+      OBSERVABILITY_CAPTURE_CONTENT: ${OBSERVABILITY_CAPTURE_CONTENT:-metadata}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      OTEL_EXPORTER_OTLP_HEADERS: ${OTEL_EXPORTER_OTLP_HEADERS:-}
+      OTEL_SERVICE_NAME: ${OTEL_WITNESS_SERVICE_NAME:-kortny-witness}
+      OTEL_TRACE_SAMPLING_RATIO: ${OTEL_TRACE_SAMPLING_RATIO:-1.0}
+      POSTGRES_URL: postgresql://${POSTGRES_USER:-kortny}:${POSTGRES_PASSWORD:-kortny}@postgres:5432/${POSTGRES_DB:-kortny}
+      UV_CACHE_DIR: /tmp/uv-cache
+      UV_LINK_MODE: copy
+      UV_PROJECT_ENVIRONMENT: /tmp/kortny-venv
+    volumes:
+      - .:/app
+      - uv-cache:/tmp/uv-cache
+
   dashboard:
     image: ghcr.io/astral-sh/uv:python3.11-bookworm-slim
     working_dir: /app
@@ -136,7 +166,7 @@ services:
     env_file:
       - .env
     environment:
-      DASHBOARD_AUTH_MODE: ${DASHBOARD_AUTH_MODE:-bootstrap}
+      DASHBOARD_AUTH_MODE: ${DASHBOARD_AUTH_MODE:-hybrid}
       DASHBOARD_USERNAME: ${DASHBOARD_USERNAME:-kortny}
       DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD:-change-me}
       DASHBOARD_SESSION_SECRET: ${DASHBOARD_SESSION_SECRET:-change-me-dashboard-session-secret}

@@ -31,6 +31,12 @@ SETTINGS_ENV_VARS = {
     "KORTNY_SCHEDULER_POLL_INTERVAL_SECONDS",
     "KORTNY_SCHEDULER_MATERIALIZE_LIMIT",
     "KORTNY_SCHEDULER_ADVISORY_LOCK_KEY",
+    "KORTNY_WITNESS_ENABLED",
+    "KORTNY_WITNESS_DELIVER_PRIVATE",
+    "KORTNY_WITNESS_POLL_INTERVAL_SECONDS",
+    "KORTNY_WITNESS_PROFILE_SCAN_LIMIT",
+    "KORTNY_WITNESS_DELIVERY_LIMIT",
+    "KORTNY_WITNESS_SCAN_INTERVAL_SECONDS",
     "COMPOSIO_API_KEY",
     "COMPOSIO_CATALOG_ENABLED",
     "COMPOSIO_CATALOG_LIMIT",
@@ -67,6 +73,7 @@ def set_required_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LLM_PROVIDER", "openrouter")
     monkeypatch.setenv("LLM_API_KEY", "llm-key")
     monkeypatch.setenv("LLM_MODEL", "openai/gpt-4o")
+    monkeypatch.setenv("COMPOSIO_API_KEY", "composio-key")
     monkeypatch.setenv("POSTGRES_URL", "postgresql://kortny:kortny@localhost/kortny")
 
 
@@ -96,6 +103,13 @@ def test_settings_loads_required_environment(monkeypatch: pytest.MonkeyPatch) ->
     assert settings.scheduler_poll_interval_seconds == 5.0
     assert settings.scheduler_materialize_limit == 50
     assert settings.scheduler_advisory_lock_key == 759340185
+    assert settings.witness_enabled is True
+    assert settings.witness_deliver_private is False
+    assert settings.witness_poll_interval_seconds == 300.0
+    assert settings.witness_profile_scan_limit == 10
+    assert settings.witness_delivery_limit == 5
+    assert settings.witness_scan_interval_seconds == 21600
+    assert settings.composio_api_key == "composio-key"
     assert settings.composio_catalog_enabled is True
     assert settings.composio_catalog_limit == 60
     assert settings.composio_request_timeout_seconds == 10.0
@@ -139,6 +153,12 @@ def test_settings_loads_optional_environment(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("KORTNY_SCHEDULER_POLL_INTERVAL_SECONDS", "2.5")
     monkeypatch.setenv("KORTNY_SCHEDULER_MATERIALIZE_LIMIT", "25")
     monkeypatch.setenv("KORTNY_SCHEDULER_ADVISORY_LOCK_KEY", "123456")
+    monkeypatch.setenv("KORTNY_WITNESS_ENABLED", "false")
+    monkeypatch.setenv("KORTNY_WITNESS_DELIVER_PRIVATE", "true")
+    monkeypatch.setenv("KORTNY_WITNESS_POLL_INTERVAL_SECONDS", "90")
+    monkeypatch.setenv("KORTNY_WITNESS_PROFILE_SCAN_LIMIT", "7")
+    monkeypatch.setenv("KORTNY_WITNESS_DELIVERY_LIMIT", "2")
+    monkeypatch.setenv("KORTNY_WITNESS_SCAN_INTERVAL_SECONDS", "3600")
     monkeypatch.setenv("OBSERVABILITY_CAPTURE_CONTENT", "summaries")
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://otel:4318")
     monkeypatch.setenv(
@@ -182,6 +202,12 @@ def test_settings_loads_optional_environment(monkeypatch: pytest.MonkeyPatch) ->
     assert settings.scheduler_poll_interval_seconds == 2.5
     assert settings.scheduler_materialize_limit == 25
     assert settings.scheduler_advisory_lock_key == 123456
+    assert settings.witness_enabled is False
+    assert settings.witness_deliver_private is True
+    assert settings.witness_poll_interval_seconds == 90
+    assert settings.witness_profile_scan_limit == 7
+    assert settings.witness_delivery_limit == 2
+    assert settings.witness_scan_interval_seconds == 3600
     assert settings.observability_capture_content == "summaries"
     assert settings.otel_exporter_otlp_endpoint == "http://otel:4318"
     assert (
@@ -201,7 +227,6 @@ def test_blank_optional_environment_values_are_none(
 ) -> None:
     clear_settings_env(monkeypatch)
     set_required_settings_env(monkeypatch)
-    monkeypatch.setenv("COMPOSIO_API_KEY", "")
     monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "")
     monkeypatch.setenv("LLM_CHEAP_MODEL", "")
     monkeypatch.setenv("LLM_HUMANIZER_MODEL", "")
@@ -212,7 +237,6 @@ def test_blank_optional_environment_values_are_none(
 
     settings = load_settings(env_file=None)
 
-    assert settings.composio_api_key is None
     assert settings.brave_search_api_key is None
     assert settings.llm_cheap_model is None
     assert settings.llm_humanizer_model is None
@@ -233,7 +257,21 @@ def test_load_settings_reports_missing_required_keys(
     message = str(exc_info.value)
     assert "SLACK_BOT_TOKEN" in message
     assert "SLACK_APP_TOKEN" in message
+    assert "COMPOSIO_API_KEY" in message
     assert "POSTGRES_URL" in message
+
+
+def test_load_settings_rejects_blank_required_composio_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clear_settings_env(monkeypatch)
+    set_required_settings_env(monkeypatch)
+    monkeypatch.setenv("COMPOSIO_API_KEY", "")
+
+    with pytest.raises(SettingsError) as exc_info:
+        load_settings(env_file=None)
+
+    assert "COMPOSIO_API_KEY" in str(exc_info.value)
 
 
 def test_settings_rejects_unknown_llm_provider(

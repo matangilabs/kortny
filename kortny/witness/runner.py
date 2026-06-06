@@ -604,6 +604,7 @@ class WitnessWorker:
         poll_interval_seconds: float = DEFAULT_WITNESS_POLL_INTERVAL_SECONDS,
         profile_limit: int = DEFAULT_WITNESS_PROFILE_SCAN_LIMIT,
         delivery_limit: int = DEFAULT_WITNESS_DELIVERY_LIMIT,
+        scan_interval: timedelta = DEFAULT_WITNESS_SCAN_INTERVAL,
         deliver_private: bool = False,
         use_advisory_lock: bool = True,
     ) -> None:
@@ -613,6 +614,7 @@ class WitnessWorker:
         self.poll_interval_seconds = poll_interval_seconds
         self.profile_limit = profile_limit
         self.delivery_limit = delivery_limit
+        self.scan_interval = scan_interval
         self.deliver_private = deliver_private
         self.use_advisory_lock = use_advisory_lock
 
@@ -633,6 +635,7 @@ class WitnessWorker:
                 profile_limit=self.profile_limit,
                 delivery_limit=self.delivery_limit,
                 deliver_private=self.deliver_private,
+                min_scan_interval=self.scan_interval,
                 use_advisory_lock=self.use_advisory_lock,
             )
             logger.info(
@@ -760,24 +763,29 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument(
         "--profile-limit",
         type=int,
-        default=DEFAULT_WITNESS_PROFILE_SCAN_LIMIT,
+        default=None,
         help="Maximum channel profiles to scan per tick",
     )
     parser.add_argument(
         "--delivery-limit",
         type=int,
-        default=DEFAULT_WITNESS_DELIVERY_LIMIT,
+        default=None,
         help="Maximum private suggestions to deliver per tick",
     )
     parser.add_argument(
         "--deliver-private",
         action="store_true",
+        default=None,
         help="Send eligible DM-scoped suggestions",
     )
     args = parser.parse_args(argv)
 
     settings = load_settings()
     configure_tracing(settings)
+    if not settings.witness_enabled:
+        logger.info("witness runner disabled by KORTNY_WITNESS_ENABLED=false")
+        print("witness runner disabled")
+        return
 
     worker = WitnessWorker(
         settings=settings,
@@ -785,11 +793,24 @@ def main(argv: Sequence[str] | None = None) -> None:
         poll_interval_seconds=(
             args.poll_interval
             if args.poll_interval is not None
-            else DEFAULT_WITNESS_POLL_INTERVAL_SECONDS
+            else settings.witness_poll_interval_seconds
         ),
-        profile_limit=args.profile_limit,
-        delivery_limit=args.delivery_limit,
-        deliver_private=args.deliver_private,
+        profile_limit=(
+            args.profile_limit
+            if args.profile_limit is not None
+            else settings.witness_profile_scan_limit
+        ),
+        delivery_limit=(
+            args.delivery_limit
+            if args.delivery_limit is not None
+            else settings.witness_delivery_limit
+        ),
+        scan_interval=timedelta(seconds=settings.witness_scan_interval_seconds),
+        deliver_private=(
+            args.deliver_private
+            if args.deliver_private is not None
+            else settings.witness_deliver_private
+        ),
     )
     logger.info(
         "witness runner started runner_id=%s once=%s deliver_private=%s",

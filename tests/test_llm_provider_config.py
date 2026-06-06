@@ -601,6 +601,7 @@ def build_settings(**overrides: Any) -> Settings:
         "LLM_ANALYSIS_MODEL": "anthropic/claude-sonnet-4.6",
         "LLM_DOCUMENT_MODEL": "openai/gpt-5.1",
         "LLM_HIGH_REASONING_MODEL": "anthropic/claude-opus-4.8",
+        "COMPOSIO_API_KEY": "composio-key",
         "POSTGRES_URL": TEST_POSTGRES_URL,
     }
     values.update(overrides)
