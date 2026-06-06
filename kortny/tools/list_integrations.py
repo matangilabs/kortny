@@ -8,17 +8,19 @@ from sqlalchemy.orm import Session
 
 from kortny.composio import ComposioConnectionResolver
 from kortny.db.models import Task
+from kortny.tools.catalog import ToolDescriptor, tool_descriptors
 from kortny.tools.types import JsonObject, JsonSchema, Tool, ToolResult
 
 
-class ListIntegrationsTool:
-    """List native tools and scoped external integrations available to a task."""
+class DescribeToolsTool:
+    """Describe native tools and scoped external integrations available to a task."""
 
-    name = "list_integrations"
+    name = "describe_tools"
     description = (
-        "Lists Kortny's currently available native tools and connected Composio "
-        "integrations for this Slack task. Use when the user asks what Kortny "
-        "can do, what tools it has, or what integrations are connected."
+        "Describes Kortny's currently available native tools and connected "
+        "Composio integrations for this Slack task. Use when the user asks "
+        "what Kortny can do, what tools it has, what integrations are connected, "
+        "or why a capability is or is not available."
     )
     parameters: JsonSchema = {
         "type": "object",
@@ -43,15 +45,14 @@ class ListIntegrationsTool:
             self.session,
             self.task,
         ).allowed_connections()
+        native_descriptors = tool_descriptors(self.native_tools)
         return ToolResult(
             output={
-                "native_tools": [
-                    {
-                        "name": tool.name,
-                        "description": tool.description,
-                    }
-                    for tool in self.native_tools
-                ],
+                "native_tools": [_native_tool_payload(tool) for tool in native_descriptors],
+                "native_tool_count": len(native_descriptors),
+                "native_categories": sorted(
+                    {descriptor.category for descriptor in native_descriptors}
+                ),
                 "connected_integrations": [
                     {
                         "toolkit_slug": connection.toolkit_slug,
@@ -69,3 +70,19 @@ class ListIntegrationsTool:
                 ),
             }
         )
+
+
+class ListIntegrationsTool(DescribeToolsTool):
+    """Compatibility alias for older prompts that call list_integrations."""
+
+    name = "list_integrations"
+    description = (
+        "Compatibility alias for describe_tools. Lists native tools and connected "
+        "Composio integrations visible to this Slack task."
+    )
+
+
+def _native_tool_payload(descriptor: ToolDescriptor) -> JsonObject:
+    payload = descriptor.to_payload()
+    payload.pop("parameters", None)
+    return payload

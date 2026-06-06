@@ -7,8 +7,10 @@ from kortny.tool_selection import (
     HeuristicToolSelector,
     LLMToolSelector,
     ToolCard,
+    ToolCatalogService,
     compact_tool_cards,
 )
+from kortny.tools import EchoTool
 from kortny.tools.types import JsonObject, JsonSchema
 
 
@@ -198,6 +200,16 @@ def test_compact_tool_cards_keeps_relevant_candidates_under_budget() -> None:
     assert compaction.original_candidate_count == 11
     assert compaction.selected_candidate_count == 3
     assert "composio_firecrawl_search" in {card.registry_name for card in selected}
+
+
+def test_native_tool_cards_use_catalog_metadata() -> None:
+    cards = ToolCatalogService().native_cards((EchoTool(),))
+
+    assert cards[0].registry_name == "echo"
+    assert cards[0].display_name == "Echo"
+    assert cards[0].capabilities == ("diagnostic",)
+    assert cards[0].side_effect == "read"
+    assert cards[0].required_fields == ("message",)
 
 
 def native_web_search_card() -> ToolCard:

@@ -6,7 +6,7 @@ from collections.abc import Sequence
 
 from kortny.tool_selection.models import ToolCard
 from kortny.tool_selection.providers import ExternalToolProvider
-from kortny.tools import Tool
+from kortny.tools import Tool, tool_descriptor
 
 
 class ToolCatalogService:
@@ -26,33 +26,14 @@ class ToolCatalogService:
 
 
 def _native_tool_card(tool: Tool) -> ToolCard:
+    descriptor = tool_descriptor(tool)
     return ToolCard(
-        registry_name=tool.name,
+        registry_name=descriptor.name,
         provider="native",
-        display_name=tool.name,
-        description=tool.description,
-        capabilities=_native_capabilities(tool.name),
-        side_effect=_native_side_effect(tool.name),
+        display_name=descriptor.display_name,
+        description=descriptor.description,
+        capabilities=descriptor.capabilities,
+        side_effect=descriptor.side_effect,
+        required_fields=descriptor.required_args,
+        can_replace_native_tools=descriptor.can_replace_native_tools,
     )
-
-
-def _native_capabilities(tool_name: str) -> tuple[str, ...]:
-    if tool_name == "web_search":
-        return ("web_search", "current_research")
-    if tool_name == "pdf_generator":
-        return ("document_generation", "artifact_generation")
-    if tool_name == "slack_channel_history":
-        return ("slack_history", "thread_context")
-    if tool_name == "slack_file_read":
-        return ("slack_file_read", "file_analysis")
-    if tool_name in {"remember_fact", "recall_fact", "inspect_memory", "forget_fact"}:
-        return ("workspace_memory",)
-    return ()
-
-
-def _native_side_effect(tool_name: str) -> str:
-    if tool_name == "pdf_generator":
-        return "write"
-    if tool_name in {"remember_fact", "forget_fact"}:
-        return "write"
-    return "read"

@@ -189,7 +189,7 @@ def _with_mixed_follow_up_memory_override(
             "preference."
         ),
         should_execute=True,
-        likely_tools=["slack_channel_history", "list_integrations"],
+        likely_tools=["slack_channel_history", "describe_tools"],
         route="tool_worker",
         needs_channel_context=False,
         needs_thread_context=True,

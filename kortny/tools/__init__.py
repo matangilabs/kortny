@@ -1,8 +1,16 @@
 """Tool contracts and registry helpers."""
 
+from kortny.tools.catalog import (
+    ToolDescriptor,
+    ToolMetadata,
+    tool_descriptor,
+    tool_descriptor_from_class,
+    tool_descriptors,
+    tool_metadata,
+)
 from kortny.tools.composio_execute import ComposioExecuteTool
 from kortny.tools.echo import EchoTool
-from kortny.tools.list_integrations import ListIntegrationsTool
+from kortny.tools.list_integrations import DescribeToolsTool, ListIntegrationsTool
 from kortny.tools.pdf_generator import PdfGeneratorTool
 from kortny.tools.registry import DuplicateToolError, ToolNotFoundError, ToolRegistry
 from kortny.tools.slack_channel_history import (
@@ -30,6 +38,7 @@ from kortny.tools.workspace_memory import (
 
 __all__ = [
     "ComposioExecuteTool",
+    "DescribeToolsTool",
     "DuplicateToolError",
     "EchoTool",
     "ForgetFactTool",
@@ -47,10 +56,16 @@ __all__ = [
     "SlackChannelHistoryTool",
     "SlackFileReadError",
     "SlackFileReadTool",
+    "ToolDescriptor",
+    "ToolMetadata",
     "Tool",
     "ToolArtifact",
     "ToolNotFoundError",
     "ToolRegistry",
     "ToolResult",
     "WebSearchTool",
+    "tool_descriptor",
+    "tool_descriptor_from_class",
+    "tool_descriptors",
+    "tool_metadata",
 ]

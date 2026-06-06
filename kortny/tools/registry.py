@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
+from kortny.config import Settings
+from kortny.tools.catalog import ToolDescriptor, tool_descriptor
 from kortny.tools.types import JsonObject, JsonSchema, Tool, ToolResult
 
 
@@ -59,6 +61,17 @@ class ToolRegistry:
                 "parameters": tool.parameters,
             }
             for tool in self._tools.values()
+        )
+
+    def descriptors(
+        self,
+        *,
+        settings: Settings | None = None,
+    ) -> tuple[ToolDescriptor, ...]:
+        """Return metadata-rich descriptors for registered tools."""
+
+        return tuple(
+            tool_descriptor(tool, settings=settings) for tool in self._tools.values()
         )
 
     def names(self) -> tuple[str, ...]:

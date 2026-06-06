@@ -1126,7 +1126,7 @@ def test_worker_registry_exposes_integration_inventory_for_capability_lookup(
                 "needs_channel_context": False,
                 "needs_thread_context": False,
                 "needs_file_context": False,
-                "likely_tools": ["list_integrations", "tool_metadata_lookup"],
+                "likely_tools": ["describe_tools", "tool_metadata_lookup"],
                 "model_tier": "cheap",
                 "reason": "Capability lookup.",
             },
@@ -1147,18 +1147,27 @@ def test_worker_registry_exposes_integration_inventory_for_capability_lookup(
         task_service=task_service,
         working_dir=tmp_path,
     )
-    result = registry.invoke("list_integrations", {})
+    result = registry.invoke("describe_tools", {})
 
     assert composio_client.list_tool_calls == []
-    assert {tool["name"] for tool in result.output["native_tools"]} >= {
+    native_tools = result.output["native_tools"]
+    assert {tool["name"] for tool in native_tools} >= {
         "web_search",
         "slack_channel_history",
         "slack_file_read",
+        "describe_tools",
     }
+    web_search = next(tool for tool in native_tools if tool["name"] == "web_search")
+    assert web_search["category"] == "Research"
+    assert web_search["side_effect"] == "read"
+    assert web_search["capabilities"] == ["web_search", "current_research"]
+    assert web_search["required_env_vars"] == ["BRAVE_SEARCH_API_KEY"]
     assert {
         connection["toolkit_slug"]
         for connection in result.output["connected_integrations"]
     } == {"firecrawl", "notion"}
+    alias_result = registry.invoke("list_integrations", {})
+    assert alias_result.output["native_tool_count"] == result.output["native_tool_count"]
     assert any(
         event.payload.get("message") == "external_tool_selection_skipped"
         and event.payload.get("reason") == "intent_no_external_tools"

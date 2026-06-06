@@ -104,6 +104,7 @@ from kortny.tool_selection import (
     compact_tool_cards,
 )
 from kortny.tools import (
+    DescribeToolsTool,
     ForgetFactTool,
     InspectMemoryTool,
     JsonObject,
@@ -1278,17 +1279,28 @@ class AgentTaskExecutor:
             intent_classification=native_scope.intent_classification,
             likely_tools=list(native_scope.likely_tools),
         )
-        native_inventory_tools = tuple(native_tools)
+        describe_tools = DescribeToolsTool(
+            session=session,
+            task=task,
+            native_tools=(),
+        )
+        list_integrations = ListIntegrationsTool(
+            session=session,
+            task=task,
+            native_tools=(),
+        )
+        native_inventory_tools = (
+            *tuple(native_tools),
+            describe_tools,
+            list_integrations,
+        )
+        describe_tools.native_tools = native_inventory_tools
+        list_integrations.native_tools = native_inventory_tools
         native_tools = [
             cast(Tool, scoped_tool) for scoped_tool in native_scope.selected_tools
         ]
-        native_tools.append(
-            ListIntegrationsTool(
-                session=session,
-                task=task,
-                native_tools=native_inventory_tools,
-            )
-        )
+        native_tools.append(describe_tools)
+        native_tools.append(list_integrations)
         _record_deferred_secondary_intents(
             session=session,
             task=task,
@@ -3299,6 +3311,7 @@ WORKER_TASK_CLASSIFICATIONS = frozenset(
 NO_EXTERNAL_TOOL_HINTS = frozenset(
     {
         "capability_lookup",
+        "describe_tools",
         "list_capabilities",
         "list_integrations",
         "native_tool_registry",

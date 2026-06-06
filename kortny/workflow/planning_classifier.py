@@ -385,6 +385,7 @@ CAPABILITY_LOOKUP_TOOL_HINTS = frozenset(
     {
         "capability_lookup",
         "get_capabilities",
+        "describe_tools",
         "list_capabilities",
         "list_integrations",
         "list_tools",

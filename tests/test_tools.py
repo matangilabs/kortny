@@ -3,6 +3,7 @@ from decimal import Decimal
 import pytest
 
 from kortny.tools import (
+    DescribeToolsTool,
     DuplicateToolError,
     EchoTool,
     ForgetFactTool,
@@ -13,6 +14,7 @@ from kortny.tools import (
     ToolRegistry,
     ToolResult,
 )
+from kortny.tools.catalog import tool_descriptor_from_class, tool_metadata
 from kortny.tools.types import JsonObject, JsonSchema
 
 
@@ -58,6 +60,38 @@ def test_registry_exposes_provider_neutral_schemas() -> None:
             "parameters": EchoTool.parameters,
         },
     )
+
+
+def test_registry_exposes_metadata_rich_descriptors() -> None:
+    registry = ToolRegistry([EchoTool()])
+
+    descriptor = registry.descriptors()[0]
+
+    assert descriptor.name == "echo"
+    assert descriptor.namespace == "native.diagnostics"
+    assert descriptor.category == "Diagnostics"
+    assert descriptor.side_effect == "read"
+    assert descriptor.enabled is True
+    assert descriptor.required_args == ("message",)
+    assert descriptor.to_payload()["parameters"] == EchoTool.parameters
+
+
+def test_native_tool_metadata_captures_safety_and_scope() -> None:
+    metadata = tool_metadata("slack_channel_history")
+
+    assert metadata.namespace == "native.slack"
+    assert metadata.side_effect == "read"
+    assert "channels:history" in metadata.required_slack_scopes
+    assert "slack_rate_limited" in metadata.plan_gates
+
+
+def test_describe_tools_metadata_is_read_only_runtime_inventory() -> None:
+    descriptor = tool_descriptor_from_class(DescribeToolsTool)
+
+    assert descriptor.name == "describe_tools"
+    assert descriptor.category == "Runtime"
+    assert descriptor.side_effect == "read"
+    assert "tool_inventory" in descriptor.capabilities
 
 
 def test_remember_fact_tool_schema_requires_faithful_memory_details() -> None:

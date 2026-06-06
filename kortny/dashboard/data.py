@@ -65,10 +65,22 @@ from kortny.llm.litellm_catalog import (
     litellm_provider_options,
 )
 from kortny.llm.provider_config import CONFIG_TIERS
+from kortny.tools.catalog import ToolDescriptor, tool_descriptor_from_class
+from kortny.tools.list_integrations import DescribeToolsTool, ListIntegrationsTool
 from kortny.tools.pdf_generator import PdfGeneratorTool
+from kortny.tools.schedules import (
+    CancelScheduleTool,
+    CreateScheduleTool,
+    GetScheduleTool,
+    ListSchedulesTool,
+    PauseScheduleTool,
+    ResumeScheduleTool,
+    UpdateScheduleTool,
+)
 from kortny.tools.slack_channel_history import SlackChannelHistoryTool
 from kortny.tools.slack_file_read import SlackFileReadTool
 from kortny.tools.web_search import WebSearchTool
+from kortny.tools.workspace_graph import QueryWorkspaceGraphTool
 from kortny.tools.workspace_memory import (
     ForgetFactTool,
     InspectMemoryTool,
@@ -116,6 +128,26 @@ PLANNED_TRACE_MESSAGES = frozenset(
         "planned_workflow_cost_ceiling_exceeded",
         "final_response_sanitized",
     }
+)
+_NATIVE_DASHBOARD_TOOL_CLASSES: tuple[type[Any], ...] = (
+    WebSearchTool,
+    SlackChannelHistoryTool,
+    SlackFileReadTool,
+    QueryWorkspaceGraphTool,
+    ListSchedulesTool,
+    GetScheduleTool,
+    CreateScheduleTool,
+    UpdateScheduleTool,
+    PauseScheduleTool,
+    ResumeScheduleTool,
+    CancelScheduleTool,
+    PdfGeneratorTool,
+    RememberFactTool,
+    RecallFactTool,
+    InspectMemoryTool,
+    ForgetFactTool,
+    DescribeToolsTool,
+    ListIntegrationsTool,
 )
 
 
@@ -4107,118 +4139,64 @@ def _short_error(value: str, *, max_chars: int = 220) -> str:
 def _tool_capability_groups(
     settings: Settings | None,
 ) -> tuple[ToolCapabilityGroup, ...]:
-    runtime_available = settings is not None
-    slack_available = settings is not None
-    web_available = bool(settings and settings.brave_search_api_key)
-    return (
+    config_available = settings is not None
+    grouped: dict[str, list[ToolCapability]] = defaultdict(list)
+    for tool in _NATIVE_DASHBOARD_TOOL_CLASSES:
+        descriptor = tool_descriptor_from_class(
+            tool,
+            settings=settings,
+            config_available=config_available,
+        )
+        grouped[descriptor.category].append(_tool_capability(descriptor))
+
+    return tuple(
         ToolCapabilityGroup(
-            name="Research",
-            description="Tools that gather external or Slack-grounded context.",
-            tools=(
-                _tool_capability(
-                    WebSearchTool,
-                    group="Research",
-                    available=web_available,
-                    unavailable_note="Requires BRAVE_SEARCH_API_KEY.",
-                ),
-                _tool_capability(
-                    SlackChannelHistoryTool,
-                    group="Research",
-                    available=slack_available,
-                    unavailable_note="Requires valid Slack runtime settings.",
-                ),
-                _tool_capability(
-                    SlackFileReadTool,
-                    group="Research",
-                    available=slack_available,
-                    unavailable_note="Requires valid Slack runtime settings.",
-                ),
-            ),
-        ),
-        ToolCapabilityGroup(
-            name="Documents",
-            description="Tools that create task artifacts.",
-            tools=(
-                _tool_capability(
-                    PdfGeneratorTool,
-                    group="Documents",
-                    available=runtime_available,
-                    unavailable_note="Requires valid runtime settings and worker task storage.",
-                ),
-            ),
-        ),
-        ToolCapabilityGroup(
-            name="Memory",
-            description="Confirm-gated fact memory and operator-visible recall tools.",
-            tools=(
-                _tool_capability(
-                    RememberFactTool,
-                    group="Memory",
-                    available=runtime_available,
-                    unavailable_note="Requires Postgres and Slack confirmation flow.",
-                ),
-                _tool_capability(
-                    RecallFactTool,
-                    group="Memory",
-                    available=runtime_available,
-                    unavailable_note="Requires Postgres-backed workspace_state.",
-                ),
-                _tool_capability(
-                    InspectMemoryTool,
-                    group="Memory",
-                    available=runtime_available,
-                    unavailable_note="Requires Postgres-backed workspace_state.",
-                ),
-                _tool_capability(
-                    ForgetFactTool,
-                    group="Memory",
-                    available=runtime_available,
-                    unavailable_note="Requires Postgres-backed workspace_state.",
-                ),
-            ),
-        ),
+            name=category,
+            description=_tool_group_description(category),
+            tools=tuple(tools),
+        )
+        for category, tools in grouped.items()
     )
 
 
-def _tool_capability(
-    tool: type[Any],
-    *,
-    group: str,
-    available: bool,
-    unavailable_note: str,
-) -> ToolCapability:
-    required_args, optional_args = _tool_argument_names(tool.parameters)
+def _tool_capability(descriptor: ToolDescriptor) -> ToolCapability:
     return ToolCapability(
-        name=tool.name,
-        group=group,
-        status="Available" if available else "Needs setup",
-        tone="success" if available else "warning",
-        description=tool.description,
-        required_args=required_args,
-        optional_args=optional_args,
+        name=descriptor.name,
+        group=descriptor.category,
+        status="Available" if descriptor.enabled else "Needs setup",
+        tone="success" if descriptor.enabled else "warning",
+        description=descriptor.description,
+        required_args=descriptor.required_args,
+        optional_args=descriptor.optional_args,
         notes=(
-            "Provider-neutral JSON tool contract.",
-            unavailable_note
-            if not available
-            else "Registered by the worker agent executor.",
+            f"Side effect: {descriptor.side_effect}.",
+            f"Approval: {descriptor.approval}.",
+            (
+                f"Scopes: {', '.join(descriptor.required_slack_scopes)}."
+                if descriptor.required_slack_scopes
+                else "No Slack scope beyond runtime context."
+            ),
+            (
+                descriptor.disabled_reason
+                if not descriptor.enabled and descriptor.disabled_reason
+                else "Registered through the native tool catalog."
+            ),
+            *descriptor.notes,
         ),
     )
 
 
-def _tool_argument_names(
-    schema: dict[str, Any],
-) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    properties = schema.get("properties")
-    if not isinstance(properties, dict):
-        return (), ()
-    required_values = schema.get("required", ())
-    required = tuple(
-        name for name in required_values if isinstance(name, str) and name in properties
-    )
-    optional = tuple(
-        name for name in properties if isinstance(name, str) and name not in required
-    )
-    return required, optional
+def _tool_group_description(category: str) -> str:
+    descriptions = {
+        "Documents": "Tools that create or manage task artifacts.",
+        "Memory": "Confirm-gated fact memory and operator-visible recall tools.",
+        "Research": "Tools that gather external context.",
+        "Runtime": "Meta-tools that describe current capabilities and integrations.",
+        "Scheduling": "Tools that create and manage recurring or future work.",
+        "Slack context": "Tools that read Slack messages, threads, and files.",
+        "Workspace context": "Tools that query Kortny's workspace knowledge graph.",
+    }
+    return descriptions.get(category, "Native tools registered by Kortny.")
 
 
 def _integration_observability_status(settings: Settings) -> str:

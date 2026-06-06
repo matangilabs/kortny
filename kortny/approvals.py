@@ -130,6 +130,7 @@ READ_ONLY_NATIVE_TOOLS = frozenset(
         "slack_file_read",
         "recall_fact",
         "inspect_memory",
+        "describe_tools",
         "list_integrations",
     }
 )
