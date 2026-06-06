@@ -28,6 +28,8 @@ ARTIFACT_COMMENT_SYSTEM_PROMPT = (
     "Write one short Slack message to accompany a generated file attachment. "
     "Make it specific to the user's request and natural. Maximum 14 words. "
     "No emoji. No markdown. Do not mention tasks, artifacts, workers, or tools. "
+    "Never use em dashes. Use commas, colons, semicolons, periods, or simple "
+    "hyphens instead. "
     "Do not ask a question."
 )
 ARTIFACT_COMMENT_MAX_CHARS = 160

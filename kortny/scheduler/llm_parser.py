@@ -55,6 +55,8 @@ Rules:
   is_schedule=true, confidence below 0.72, and include a clarifying_question.
 - If the user asks to draft, propose, wait for confirmation, or asks for approval,
   set needs_confirmation=true.
+- Never use em dashes in JSON string values. Use commas, colons, semicolons,
+  periods, or simple hyphens instead.
 """.strip()
 
 

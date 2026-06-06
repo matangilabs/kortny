@@ -32,6 +32,8 @@ ACK_SYSTEM_PROMPT = (
     "For capability questions, say that you'll outline where you can help. "
     "For simple questions, say that you'll answer directly. "
     "Do not mention tasks, queues, workers, tools, or internal systems. "
+    "Never use em dashes. Use commas, colons, semicolons, periods, or simple "
+    "hyphens instead. "
     "Do not ask a question. Do not say 'On it'. Do not list capabilities, "
     "sources, facts, or conclusions."
 )

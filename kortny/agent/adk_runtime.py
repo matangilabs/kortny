@@ -103,6 +103,8 @@ ADK_SINGLE_PERSONA_PROMPT = """User-facing identity rules:
 - If asked what tools, integrations, or capabilities you have, answer as Kortny:
   describe what you can access now from available tools/context, and state any
   uncertainty plainly without implying there is a separate Kortny elsewhere.
+- Never use em dashes in user-facing text. Use a comma, colon, semicolon,
+  period, or simple hyphen instead.
 - Do not call or invent Slack posting/reply tools. Kortny's worker posts your
   final answer to Slack after the runtime returns text.
 """
@@ -879,7 +881,7 @@ class AdkAgentRuntime:
             name="tool_worker_agent",
             model=self._adk_model(task=task),
             instruction=_instruction_with_optional_context(
-                ADK_TOOL_WORKER_PROMPT,
+                _instruction_with_persona(ADK_TOOL_WORKER_PROMPT),
                 context,
             ),
             description=(

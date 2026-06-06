@@ -182,11 +182,17 @@ def test_adk_runtime_prompts_keep_single_kortny_persona(
     worker_instruction = agent_by_name["tool_worker_agent"].instruction
 
     assert "Speak as Kortny, a single Slack-native coworker" in root_instruction
+    assert "Never use em dashes in user-facing text" in root_instruction
+    assert chr(0x2014) not in root_instruction
     assert "use tool_worker_agent when it is available" in root_instruction
     assert "Do not call or invent Slack posting/reply tools" in root_instruction
     assert "Speak as Kortny, a single Slack-native coworker" in quick_instruction
+    assert "Never use em dashes in user-facing text" in quick_instruction
+    assert chr(0x2014) not in quick_instruction
     assert "Do not say actual tool access lives in another agent" in quick_instruction
     assert "answer as Kortny" in worker_instruction
+    assert "Never use em dashes in user-facing text" in worker_instruction
+    assert chr(0x2014) not in worker_instruction
     assert "actual tool access lives in the main Kortny agent" not in quick_instruction
     assert "actual tool access lives in the main Kortny agent" not in worker_instruction
 

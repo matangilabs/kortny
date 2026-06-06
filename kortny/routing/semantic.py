@@ -253,7 +253,9 @@ def _semantic_router_messages(request: SemanticRouteRequest) -> tuple[ChatMessag
                 "The JSON schema is: runtime_class string, intent string, "
                 "execution_path string, confidence number 0..1, margin number 0..1, "
                 "candidate_capabilities array of strings, needs_clarification "
-                "boolean, reason string under 400 characters."
+                "boolean, reason string under 400 characters. Never use em "
+                "dashes in JSON string values. Use commas, colons, semicolons, "
+                "periods, or simple hyphens instead."
             ),
         ),
         ChatMessage(

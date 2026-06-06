@@ -35,6 +35,13 @@ def test_normalize_slack_mrkdwn_preserves_code() -> None:
     assert normalize_slack_mrkdwn(text) == text
 
 
+def test_normalize_slack_mrkdwn_replaces_em_dash_outside_code() -> None:
+    em_dash = chr(0x2014)
+    text = f"Use this {em_dash} not that. Keep `{em_dash}` literal."
+
+    assert normalize_slack_mrkdwn(text) == "Use this - not that. Keep `\u2014` literal."
+
+
 def test_normalize_slack_mrkdwn_preserves_plain_urls() -> None:
     assert normalize_slack_mrkdwn("Open https://docs.slack.dev for details.") == (
         "Open https://docs.slack.dev for details."

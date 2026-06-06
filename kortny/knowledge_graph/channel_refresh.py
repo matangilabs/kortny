@@ -320,7 +320,9 @@ class ChannelGraphRefreshPipeline:
                             "only JSON. Do not mention internal runtimes, agents, "
                             "prompts, tools, or orchestration. Do not infer DMs or "
                             "private context. Keep every field short and grounded "
-                            "in the provided message snippets."
+                            "in the provided message snippets. Never use em "
+                            "dashes in JSON string values. Use commas, colons, "
+                            "semicolons, periods, or simple hyphens instead."
                         ),
                     ),
                     ChatMessage(

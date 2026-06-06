@@ -185,6 +185,8 @@ def _task_response_messages(
                 "\"evidence\":[\"short evidence from the answer or request\"],"
                 "\"confidence_score\":0.0,\"confidence_reason\":\"why\"}],"
                 "\"skipped_reason\":\"only when no candidates\"}. "
+                "Never use em dashes in JSON string values. Use commas, colons, "
+                "semicolons, periods, or simple hyphens instead. "
                 "Only create candidates that would make Kortny more useful later. "
                 "Return no candidates for routine greetings, generic answers, or "
                 "claims without evidence."
@@ -240,7 +242,9 @@ def _channel_profile_messages(
                 "from the profile\"],\"confidence_score\":0.0,"
                 "\"confidence_reason\":\"why\"}],\"skipped_reason\":\"only when "
                 "no candidates\"}. Only create candidates that would make Kortny "
-                "more useful later. Return no candidates when the profile is too "
+                "more useful later. Never use em dashes in JSON string values. "
+                "Use commas, colons, semicolons, periods, or simple hyphens "
+                "instead. Return no candidates when the profile is too "
                 "thin, too speculative, or lacks actionable future help."
             ),
         ),

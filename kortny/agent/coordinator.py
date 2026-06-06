@@ -99,7 +99,8 @@ logger = logging.getLogger(__name__)
 EMPTY_RESPONSE_REPAIR_PROMPT = (
     "Your previous response was empty. Use the available context and tool "
     "results to either call the next required tool or provide a concise final "
-    "answer. Do not return an empty message."
+    "answer. Do not return an empty message. Never use em dashes in user-facing "
+    "text. Use a comma, colon, semicolon, period, or simple hyphen instead."
 )
 DEFAULT_SYSTEM_PROMPT = (
     "You are Kortny, a Slack-native AI coworker. Use the available tools when "
@@ -122,6 +123,8 @@ DEFAULT_SYSTEM_PROMPT = (
     "When a schedule tool returns assistant_summary, use that substance in "
     "human coworker language and avoid exposing schedule IDs unless the user "
     "asked for technical details. "
+    "Never use em dashes in user-facing text. Use a comma, colon, semicolon, "
+    "period, or simple hyphen instead. "
     "If the user explicitly asks you to remember a stable fact or preference, "
     "use remember_fact; it will ask for Slack confirmation before saving. Use "
     "inspect_memory when the user asks what you remember about them, this "

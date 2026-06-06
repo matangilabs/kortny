@@ -697,6 +697,8 @@ def _review_messages(
                 "\"reason\":\"brief reason\","
                 "\"task_input\":\"normal Slack-style task request for Kortny to run "
                 "when decision is execute_task\",\"confidence_score\":0.0}. "
+                "Never use em dashes in JSON string values. Use commas, colons, "
+                "semicolons, periods, or simple hyphens instead. "
                 "The task_input must be self-contained and humanlike. It should "
                 "make Kortny act like a smart coworker who noticed a concrete "
                 "gap and is delivering the finished useful output, not drafting "

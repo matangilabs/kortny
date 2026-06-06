@@ -2028,7 +2028,8 @@ class AgentTaskExecutor:
                     "when it helps but never stiff, no user mentions, no emoji, "
                     "no markdown headings, "
                     "no backend/agent/model/runtime/tool language, no explanation of "
-                    "what the user is asking, no phrase `split this into workstreams`."
+                    "what the user is asking, no em dashes, no phrase "
+                    "`split this into workstreams`."
                 ),
             ),
             ChatMessage(
@@ -2709,7 +2710,7 @@ def _schedule_state_fast_path_response(
         )
     else:
         lead = (
-            f"Yes — I found {len(schedule_rows)} {status_label or 'visible'} "
+            f"Yes, I found {len(schedule_rows)} {status_label or 'visible'} "
             f"schedule{'' if len(schedule_rows) == 1 else 's'}{query_label}."
         )
 
@@ -2738,7 +2739,7 @@ def _schedule_state_row(row: Mapping[str, Any]) -> str:
         fragments.append(f"delivery: {delivery}")
     if not fragments:
         return f"• *{title}*"
-    return f"• *{title}* — {'; '.join(fragments)}"
+    return f"• *{title}*: {'; '.join(fragments)}"
 
 
 def _nested_plain(row: Mapping[str, Any], key: str, nested_key: str) -> str | None:

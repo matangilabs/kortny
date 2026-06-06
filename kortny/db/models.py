@@ -1,5 +1,5 @@
 """
-Kortny — database models.
+Kortny database models.
 
 Postgres-specific types are used throughout (UUID, JSONB, BYTEA, timestamptz,
 native enums), so the canonical path to a live database is the Alembic

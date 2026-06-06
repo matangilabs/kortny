@@ -17,6 +17,18 @@ def test_sanitize_humanized_response_normalizes_slack_mrkdwn() -> None:
     )
 
 
+def test_sanitize_humanized_response_replaces_em_dash() -> None:
+    em_dash = chr(0x2014)
+
+    assert (
+        sanitize_humanized_response(
+            f'{{"message":"I checked {em_dash} it is active."}}',
+            fallback="fallback",
+        )
+        == "I checked - it is active."
+    )
+
+
 def test_sanitize_humanized_response_accepts_json_message_contract() -> None:
     assert (
         sanitize_humanized_response(

@@ -19,6 +19,7 @@ def normalize_slack_mrkdwn(text: str) -> str:
         return text
 
     protected_text, protected_segments = _protect_code(text)
+    protected_text = re.sub(r"\s*\u2014\s*", " - ", protected_text)
     normalized = MARKDOWN_LINK_RE.sub(_markdown_link_to_slack, protected_text)
     normalized = MARKDOWN_BOLD_RE.sub(r"*\1*", normalized)
     normalized = MARKDOWN_HEADING_RE.sub(_markdown_heading_to_slack, normalized)

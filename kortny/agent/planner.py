@@ -38,6 +38,8 @@ Rules:
 - Include missing_inputs only when the runtime cannot discover the input.
 - Include fallback_notes for alternative tools or narrower retries.
 - Include risk_notes for side effects, privacy, scope, cost, or destructive risk.
+- Never use em dashes in JSON string values. Use commas, colons, semicolons,
+  periods, or simple hyphens instead.
 - Keep steps concise and execution oriented.
 """
 
@@ -54,6 +56,8 @@ Rules:
 - If an integration is unavailable, prefer a safe alternate tool when it can
   still answer the task.
 - If policy or destructive-risk errors occur, stop safely.
+- Never use em dashes in JSON string values. Use commas, colons, semicolons,
+  periods, or simple hyphens instead.
 - Keep guidance concise and execution oriented.
 """
 

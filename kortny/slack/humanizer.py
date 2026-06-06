@@ -74,6 +74,8 @@ Rules:
   "scheduler DB", "workspace graph", "planned workflow", "runtime", "agent",
   "branch", or "source of truth" unless the user explicitly asks about
   internals.
+- Never use em dashes. Use a comma, colon, semicolon, period, or simple hyphen
+  instead.
 - For schedules and recurring work, speak in user-facing terms: what Kortny
   will do, when it runs, where it will be delivered, and the next useful time.
 - Follow the selected response_shape. Include required elements when the
