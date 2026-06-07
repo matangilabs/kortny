@@ -10,9 +10,16 @@ from alembic.config import Config
 from sqlalchemy import Engine, delete, select
 from sqlalchemy.orm import Session
 
-from kortny.db.models import Installation, SlackIdentity
+from kortny.db.models import (
+    Installation,
+    SlackChannelMembership,
+    SlackIdentity,
+    Task,
+    TaskStatus,
+)
 from kortny.db.session import make_engine, make_session_factory, normalize_database_url
 from kortny.slack.identity import SlackIdentityService
+from kortny.tools.resolve_slack_identity import ResolveSlackIdentityTool
 
 TEST_POSTGRES_URL = os.environ.get("KORTNY_TEST_POSTGRES_URL")
 
@@ -318,8 +325,152 @@ def test_identity_service_keeps_stale_cache_when_slack_api_fails(
     assert identity.last_seen_at == now
 
 
+def test_resolve_slack_identity_tool_resolves_cached_user_and_channel(
+    db_session: Session,
+) -> None:
+    installation = create_installation(db_session)
+    now = datetime(2026, 5, 25, 10, 0, tzinfo=UTC)
+    db_session.add_all(
+        [
+            SlackIdentity(
+                installation_id=installation.id,
+                kind="user",
+                slack_id="U123",
+                display_name="Aneesh Melkot",
+                raw_name="aneesh",
+                refreshed_at=now,
+                last_seen_at=now,
+            ),
+            SlackIdentity(
+                installation_id=installation.id,
+                kind="channel",
+                slack_id="C123",
+                display_name="#research-room",
+                raw_name="research-room",
+                refreshed_at=now,
+                last_seen_at=now,
+            ),
+        ]
+    )
+    task = create_task(db_session, installation, user_id="U123", channel_id="C123")
+    db_session.flush()
+
+    result = ResolveSlackIdentityTool(session=db_session, task=task).invoke(
+        {"slack_ids": ["U123", "C123"]}
+    )
+
+    assert result.output["resolved_count"] == 2
+    identities = {
+        identity["slack_id"]: identity for identity in result.output["identities"]
+    }
+    assert identities["U123"]["kind"] == "user"
+    assert identities["U123"]["display_name"] == "Aneesh Melkot"
+    assert identities["U123"]["source"] == "slack_identities"
+    assert identities["C123"]["kind"] == "channel"
+    assert identities["C123"]["display_name"] == "#research-room"
+    assert identities["C123"]["source"] == "slack_identities"
+    assert "No Slack API call was made" in result.output["source_note"]
+
+
+def test_resolve_slack_identity_tool_falls_back_to_active_channel_membership(
+    db_session: Session,
+) -> None:
+    installation = create_installation(db_session)
+    now = datetime(2026, 5, 25, 10, 0, tzinfo=UTC)
+    db_session.add(
+        SlackChannelMembership(
+            installation_id=installation.id,
+            channel_id="C456",
+            channel_name="rag",
+            channel_type="public_channel",
+            membership_status="active",
+            discovered_via="manual_backfill",
+            first_seen_at=now,
+            last_seen_at=now,
+        )
+    )
+    task = create_task(db_session, installation)
+    db_session.flush()
+
+    result = ResolveSlackIdentityTool(session=db_session, task=task).invoke(
+        {"slack_ids": ["C456"]}
+    )
+
+    identity = result.output["identities"][0]
+    assert identity["resolved"] is True
+    assert identity["display_name"] == "#rag"
+    assert identity["source"] == "slack_channel_memberships"
+
+
+def test_resolve_slack_identity_tool_does_not_leak_other_installation_cache(
+    db_session: Session,
+) -> None:
+    current_installation = create_installation(db_session)
+    other_installation = create_installation(db_session)
+    now = datetime(2026, 5, 25, 10, 0, tzinfo=UTC)
+    db_session.add(
+        SlackIdentity(
+            installation_id=other_installation.id,
+            kind="user",
+            slack_id="U999",
+            display_name="Other Workspace User",
+            raw_name="Other Workspace User",
+            refreshed_at=now,
+            last_seen_at=now,
+        )
+    )
+    task = create_task(db_session, current_installation)
+    db_session.flush()
+
+    result = ResolveSlackIdentityTool(session=db_session, task=task).invoke(
+        {"slack_ids": ["U999"]}
+    )
+
+    identity = result.output["identities"][0]
+    assert result.output["resolved_count"] == 0
+    assert identity["resolved"] is False
+    assert identity["display_name"] == "U999"
+    assert identity["source"] == "unresolved"
+
+
+def test_resolve_slack_identity_tool_defaults_to_current_task_context(
+    db_session: Session,
+) -> None:
+    installation = create_installation(db_session)
+    now = datetime(2026, 5, 25, 10, 0, tzinfo=UTC)
+    db_session.add_all(
+        [
+            SlackIdentity(
+                installation_id=installation.id,
+                kind="user",
+                slack_id="U123",
+                display_name="Aneesh Melkot",
+                raw_name="aneesh",
+                refreshed_at=now,
+                last_seen_at=now,
+            ),
+            SlackIdentity(
+                installation_id=installation.id,
+                kind="channel",
+                slack_id="C123",
+                display_name="#research-room",
+                raw_name="research-room",
+                refreshed_at=now,
+                last_seen_at=now,
+            ),
+        ]
+    )
+    task = create_task(db_session, installation, user_id="U123", channel_id="C123")
+    db_session.flush()
+
+    result = ResolveSlackIdentityTool(session=db_session, task=task).invoke({})
+
+    assert result.output["requested_ids"] == ["U123", "C123"]
+    assert result.output["resolved_count"] == 2
+
+
 def cleanup_database(session: Session) -> None:
-    for model in (SlackIdentity, Installation):
+    for model in (Task, SlackChannelMembership, SlackIdentity, Installation):
         session.execute(delete(model))
 
 
@@ -328,3 +479,25 @@ def create_installation(session: Session) -> Installation:
     session.add(installation)
     session.flush()
     return installation
+
+
+def create_task(
+    session: Session,
+    installation: Installation,
+    *,
+    user_id: str = "U123",
+    channel_id: str = "C123",
+) -> Task:
+    task = Task(
+        installation_id=installation.id,
+        slack_event_id=f"Ev{uuid.uuid4().hex}",
+        slack_channel_id=channel_id,
+        slack_thread_ts="1779673337.889359",
+        slack_message_ts="1779673337.889359",
+        slack_user_id=user_id,
+        input="resolve Slack identities",
+        status=TaskStatus.pending,
+    )
+    session.add(task)
+    session.flush()
+    return task

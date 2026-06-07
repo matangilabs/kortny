@@ -13,6 +13,7 @@ from kortny.tools.echo import EchoTool
 from kortny.tools.list_integrations import DescribeToolsTool, ListIntegrationsTool
 from kortny.tools.pdf_generator import PdfGeneratorTool
 from kortny.tools.registry import DuplicateToolError, ToolNotFoundError, ToolRegistry
+from kortny.tools.resolve_slack_identity import ResolveSlackIdentityTool
 from kortny.tools.search_observed_slack_history import SearchObservedSlackHistoryTool
 from kortny.tools.slack_channel_history import (
     ObservationChannelHistoryCache,
@@ -53,6 +54,7 @@ __all__ = [
     "RecallFactTool",
     "RecoverableToolError",
     "RememberFactTool",
+    "ResolveSlackIdentityTool",
     "SearchObservedSlackHistoryTool",
     "SlackChannelHistoryError",
     "SlackChannelHistoryTool",

@@ -114,6 +114,7 @@ from kortny.tools import (
     QueryWorkspaceGraphTool,
     RecallFactTool,
     RememberFactTool,
+    ResolveSlackIdentityTool,
     SearchObservedSlackHistoryTool,
     SlackChannelHistoryTool,
     SlackFileReadTool,
@@ -1224,6 +1225,7 @@ class AgentTaskExecutor:
             pdf_generator,
             slack_channel_history,
             SearchObservedSlackHistoryTool(session=session, task=task),
+            ResolveSlackIdentityTool(session=session, task=task),
             slack_file_read,
             remember_fact,
             recall_fact,
@@ -3349,6 +3351,7 @@ NATIVE_SLACK_CONTEXT_HINTS = frozenset(
     {
         "slack_channel_history",
         "search_observed_slack_history",
+        "resolve_slack_identity",
     }
 )
 

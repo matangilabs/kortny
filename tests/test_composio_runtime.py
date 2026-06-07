@@ -1053,6 +1053,7 @@ def test_worker_registry_skips_composio_catalog_for_native_slack_context_only(
 
     assert composio_client.list_tool_calls == []
     assert "search_observed_slack_history" in registry.names()
+    assert "resolve_slack_identity" in registry.names()
     assert all(not name.startswith("composio_") for name in registry.names())
     assert any(
         event.payload.get("message") == "external_tool_selection_skipped"
@@ -1236,6 +1237,7 @@ def test_worker_registry_exposes_integration_inventory_for_capability_lookup(
         "web_search",
         "slack_channel_history",
         "search_observed_slack_history",
+        "resolve_slack_identity",
         "slack_file_read",
         "describe_tools",
     }

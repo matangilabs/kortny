@@ -128,6 +128,7 @@ READ_ONLY_NATIVE_TOOLS = frozenset(
         "web_search",
         "slack_channel_history",
         "search_observed_slack_history",
+        "resolve_slack_identity",
         "slack_file_read",
         "recall_fact",
         "inspect_memory",

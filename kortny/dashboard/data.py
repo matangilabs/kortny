@@ -68,6 +68,7 @@ from kortny.llm.provider_config import CONFIG_TIERS
 from kortny.tools.catalog import ToolDescriptor, tool_descriptor_from_class
 from kortny.tools.list_integrations import DescribeToolsTool, ListIntegrationsTool
 from kortny.tools.pdf_generator import PdfGeneratorTool
+from kortny.tools.resolve_slack_identity import ResolveSlackIdentityTool
 from kortny.tools.schedules import (
     CancelScheduleTool,
     CreateScheduleTool,
@@ -134,6 +135,7 @@ _NATIVE_DASHBOARD_TOOL_CLASSES: tuple[type[Any], ...] = (
     WebSearchTool,
     SlackChannelHistoryTool,
     SearchObservedSlackHistoryTool,
+    ResolveSlackIdentityTool,
     SlackFileReadTool,
     QueryWorkspaceGraphTool,
     ListSchedulesTool,

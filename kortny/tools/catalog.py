@@ -130,6 +130,23 @@ NATIVE_TOOL_METADATA: dict[str, ToolMetadata] = {
         result_budget="bounded_results",
         notes=("Searches Kortny's local observed Slack cache without Slack API calls.",),
     ),
+    "resolve_slack_identity": ToolMetadata(
+        name="resolve_slack_identity",
+        namespace="native.slack",
+        category="Slack context",
+        display_name="Resolve Slack identity",
+        capabilities=(
+            "slack_identity_resolution",
+            "user_name_resolution",
+            "channel_name_resolution",
+            "slack_context",
+        ),
+        side_effect="read",
+        required_env_vars=("POSTGRES_URL",),
+        plan_gates=("scope_guarded_context",),
+        result_budget="small_lookup",
+        notes=("Resolves cached Slack user and channel names without Slack API calls.",),
+    ),
     "slack_file_read": ToolMetadata(
         name="slack_file_read",
         namespace="native.slack",
