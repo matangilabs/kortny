@@ -145,9 +145,13 @@ _USER_CAPABILITY_GROUPS: tuple[tuple[str, JsonObject], ...] = (
         "Slack context",
         {
             "label": "Slack context",
-            "summary": "I can read recent channel history, threads, and shared files I can access.",
+            "summary": (
+                "I can read recent channel history, search observed Slack "
+                "messages, and inspect shared files I can access."
+            ),
             "examples": [
                 "summarize recent decisions",
+                "find where a topic came up before",
                 "pull context from a thread or uploaded file",
             ],
         },

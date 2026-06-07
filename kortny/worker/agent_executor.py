@@ -114,6 +114,7 @@ from kortny.tools import (
     QueryWorkspaceGraphTool,
     RecallFactTool,
     RememberFactTool,
+    SearchObservedSlackHistoryTool,
     SlackChannelHistoryTool,
     SlackFileReadTool,
     Tool,
@@ -1222,6 +1223,7 @@ class AgentTaskExecutor:
         native_tools: list[Tool] = [
             pdf_generator,
             slack_channel_history,
+            SearchObservedSlackHistoryTool(session=session, task=task),
             slack_file_read,
             remember_fact,
             recall_fact,
@@ -2964,6 +2966,12 @@ def _external_tool_skip_reason(
             "classification": classification,
         }
 
+    if _intent_prefers_native_slack_context(decision):
+        return {
+            "reason": "intent_native_slack_context_only",
+            "classification": classification,
+        }
+
     if native_web_search_available and _intent_prefers_native_web_search(
         decision,
         task.input,
@@ -3272,6 +3280,16 @@ def _intent_prefers_native_web_search(
     return not any(trigger in lowered for trigger in EXTERNAL_WEB_TOOL_TRIGGERS)
 
 
+def _intent_prefers_native_slack_context(decision: dict[str, Any]) -> bool:
+    """Return whether local Slack context tools are sufficient."""
+
+    classification = _payload_str(decision, "classification")
+    if classification not in {"task_request", "follow_up"}:
+        return False
+    likely_tools = _likely_tools(decision)
+    return bool(likely_tools) and likely_tools <= NATIVE_SLACK_CONTEXT_HINTS
+
+
 def _truthy_bool(value: object) -> bool:
     return isinstance(value, bool) and value
 
@@ -3324,6 +3342,13 @@ NATIVE_WEB_SEARCH_HINTS = frozenset(
     {
         "current_research",
         "web_search",
+    }
+)
+
+NATIVE_SLACK_CONTEXT_HINTS = frozenset(
+    {
+        "slack_channel_history",
+        "search_observed_slack_history",
     }
 )
 

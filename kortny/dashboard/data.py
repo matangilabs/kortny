@@ -77,6 +77,7 @@ from kortny.tools.schedules import (
     ResumeScheduleTool,
     UpdateScheduleTool,
 )
+from kortny.tools.search_observed_slack_history import SearchObservedSlackHistoryTool
 from kortny.tools.slack_channel_history import SlackChannelHistoryTool
 from kortny.tools.slack_file_read import SlackFileReadTool
 from kortny.tools.web_search import WebSearchTool
@@ -132,6 +133,7 @@ PLANNED_TRACE_MESSAGES = frozenset(
 _NATIVE_DASHBOARD_TOOL_CLASSES: tuple[type[Any], ...] = (
     WebSearchTool,
     SlackChannelHistoryTool,
+    SearchObservedSlackHistoryTool,
     SlackFileReadTool,
     QueryWorkspaceGraphTool,
     ListSchedulesTool,

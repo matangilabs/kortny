@@ -113,6 +113,23 @@ NATIVE_TOOL_METADATA: dict[str, ToolMetadata] = {
         result_budget="history_window",
         notes=("Uses observed local cache first when available.",),
     ),
+    "search_observed_slack_history": ToolMetadata(
+        name="search_observed_slack_history",
+        namespace="native.slack",
+        category="Slack context",
+        display_name="Search observed Slack history",
+        capabilities=(
+            "slack_context",
+            "observed_history_search",
+            "decision_recall",
+            "channel_memory",
+        ),
+        side_effect="read",
+        required_env_vars=("POSTGRES_URL",),
+        plan_gates=("scope_guarded_context",),
+        result_budget="bounded_results",
+        notes=("Searches Kortny's local observed Slack cache without Slack API calls.",),
+    ),
     "slack_file_read": ToolMetadata(
         name="slack_file_read",
         namespace="native.slack",

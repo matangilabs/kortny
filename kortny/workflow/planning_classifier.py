@@ -436,6 +436,7 @@ _INTEGRATION_PATTERNS = {
 _TOOL_TO_INTEGRATION = {
     "web_search": "web",
     "slack_channel_history": "slack",
+    "search_observed_slack_history": "slack",
     "slack_file_read": "slack",
     "pdf_generator": "documents",
 }

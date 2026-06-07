@@ -85,6 +85,16 @@ def test_native_tool_metadata_captures_safety_and_scope() -> None:
     assert "slack_rate_limited" in metadata.plan_gates
 
 
+def test_observed_slack_search_metadata_is_local_and_read_only() -> None:
+    metadata = tool_metadata("search_observed_slack_history")
+
+    assert metadata.namespace == "native.slack"
+    assert metadata.category == "Slack context"
+    assert metadata.side_effect == "read"
+    assert metadata.required_env_vars == ("POSTGRES_URL",)
+    assert "observed_history_search" in metadata.capabilities
+
+
 def test_describe_tools_metadata_is_read_only_runtime_inventory() -> None:
     descriptor = tool_descriptor_from_class(DescribeToolsTool)
 

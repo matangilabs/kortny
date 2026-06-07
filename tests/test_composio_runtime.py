@@ -999,6 +999,69 @@ def test_worker_registry_skips_composio_catalog_for_native_web_search_only(
     )
 
 
+def test_worker_registry_skips_composio_catalog_for_native_slack_context_only(
+    db_session: Session,
+    tmp_path: Path,
+) -> None:
+    task = create_task(db_session, slack_channel_id="CSlack", slack_user_id="UAneesh")
+    task.input = "search this channel for the Langfuse decision"
+    add_connection(
+        db_session,
+        task,
+        connected_account_id="ca_notion",
+        scope_type="workspace",
+        scope_id=None,
+        toolkit_slug="notion",
+    )
+    task_service = TaskService(db_session)
+    task_service.append_event(
+        task,
+        TaskEventType.log,
+        {
+            "message": "intent_classification_completed",
+            "source": "app_mention",
+            "decision": {
+                "addressed_to_kortny": True,
+                "classification": "task_request",
+                "confidence": 0.95,
+                "should_create_task": True,
+                "should_ack_with_reaction": True,
+                "needs_channel_context": True,
+                "needs_thread_context": False,
+                "needs_file_context": False,
+                "likely_tools": ["search_observed_slack_history"],
+                "model_tier": "standard",
+                "reason": "Local Slack context search.",
+            },
+        },
+    )
+    db_session.commit()
+    settings = build_settings(composio_api_key="composio-key")
+    composio_client = FakeComposioClient()
+
+    registry = AgentTaskExecutor(
+        settings=settings,
+        web_search_tool=StaticWebSearchTool(),
+        composio_client=composio_client,
+    )._build_registry(
+        settings=settings,
+        session=db_session,
+        task=task,
+        task_service=task_service,
+        working_dir=tmp_path,
+    )
+
+    assert composio_client.list_tool_calls == []
+    assert "search_observed_slack_history" in registry.names()
+    assert all(not name.startswith("composio_") for name in registry.names())
+    assert any(
+        event.payload.get("message") == "external_tool_selection_skipped"
+        and event.payload.get("reason") == "intent_native_slack_context_only"
+        and event.payload.get("classification") == "task_request"
+        for event in task_events(db_session, task)
+    )
+
+
 def test_worker_registry_falls_back_to_composio_search_when_brave_missing(
     db_session: Session,
     tmp_path: Path,
@@ -1172,6 +1235,7 @@ def test_worker_registry_exposes_integration_inventory_for_capability_lookup(
     assert {tool["name"] for tool in native_tools} >= {
         "web_search",
         "slack_channel_history",
+        "search_observed_slack_history",
         "slack_file_read",
         "describe_tools",
     }
