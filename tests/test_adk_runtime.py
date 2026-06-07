@@ -191,6 +191,7 @@ def test_adk_runtime_prompts_keep_single_kortny_persona(
     assert chr(0x2014) not in quick_instruction
     assert "Do not say actual tool access lives in another agent" in quick_instruction
     assert "answer as Kortny" in worker_instruction
+    assert "user_facing_summary" in worker_instruction
     assert "Never use em dashes in user-facing text" in worker_instruction
     assert chr(0x2014) not in worker_instruction
     assert "actual tool access lives in the main Kortny agent" not in quick_instruction

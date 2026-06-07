@@ -1150,6 +1150,24 @@ def test_worker_registry_exposes_integration_inventory_for_capability_lookup(
     result = registry.invoke("describe_tools", {})
 
     assert composio_client.list_tool_calls == []
+    user_summary = result.output["user_facing_summary"]
+    assert user_summary["preferred_opening"] == (
+        "Here are the things I can help with right now:"
+    )
+    assert {
+        group["label"] for group in user_summary["capability_groups"]
+    } >= {
+        "Research and current info",
+        "Slack context",
+        "Scheduled work",
+        "Workspace knowledge",
+    }
+    assert "Runtime" not in {
+        group["label"] for group in user_summary["capability_groups"]
+    }
+    assert {
+        (app["app"], app["scope"]) for app in user_summary["connected_apps"]
+    } == {("Firecrawl", "personal"), ("Notion", "workspace")}
     native_tools = result.output["native_tools"]
     assert {tool["name"] for tool in native_tools} >= {
         "web_search",
