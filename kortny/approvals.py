@@ -93,7 +93,11 @@ class ToolApprovalPolicy:
     def requirement_for(self, tool: Tool, args: JsonObject) -> ToolApprovalRequirement:
         del args
         tool_name = tool.name.casefold()
-        if tool_name in READ_ONLY_NATIVE_TOOLS or tool_name in SELF_GATED_NATIVE_TOOLS:
+        if (
+            tool_name in READ_ONLY_NATIVE_TOOLS
+            or tool_name in SELF_GATED_NATIVE_TOOLS
+            or tool_name in LOW_RISK_NATIVE_WRITE_TOOLS
+        ):
             return NO_APPROVAL_REQUIRED
         if tool_name in USER_APPROVAL_NATIVE_TOOLS:
             return ToolApprovalRequirement(
@@ -137,6 +141,12 @@ READ_ONLY_NATIVE_TOOLS = frozenset(
     }
 )
 SELF_GATED_NATIVE_TOOLS = frozenset({"remember_fact"})
+LOW_RISK_NATIVE_WRITE_TOOLS = frozenset(
+    {
+        "slack_reply_thread",
+        "slack_add_reaction",
+    }
+)
 USER_APPROVAL_NATIVE_TOOLS = frozenset({"forget_fact"})
 WRITE_VERBS = frozenset(
     {

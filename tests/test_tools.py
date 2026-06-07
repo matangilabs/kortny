@@ -1,7 +1,9 @@
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
+from kortny.approvals import ApprovalScope, ToolApprovalPolicy
 from kortny.tools import (
     DescribeToolsTool,
     DuplicateToolError,
@@ -103,6 +105,36 @@ def test_resolve_slack_identity_metadata_is_local_and_read_only() -> None:
     assert metadata.side_effect == "read"
     assert metadata.required_env_vars == ("POSTGRES_URL",)
     assert "slack_identity_resolution" in metadata.capabilities
+
+
+def test_slack_action_metadata_is_current_scope_and_write_classed() -> None:
+    reply = tool_metadata("slack_reply_thread")
+    reaction = tool_metadata("slack_add_reaction")
+
+    assert reply.category == "Slack actions"
+    assert reply.side_effect == "write"
+    assert reply.required_slack_scopes == ("chat:write",)
+    assert "current_thread_only" in reply.plan_gates
+    assert reaction.category == "Slack actions"
+    assert reaction.side_effect == "write"
+    assert reaction.required_slack_scopes == ("reactions:write",)
+    assert "current_message_only" in reaction.plan_gates
+
+
+def test_slack_action_tools_do_not_require_human_approval_by_default() -> None:
+    policy = ToolApprovalPolicy()
+
+    reply = policy.requirement_for(
+        SimpleNamespace(name="slack_reply_thread", description="Post a reply"),
+        {},
+    )
+    reaction = policy.requirement_for(
+        SimpleNamespace(name="slack_add_reaction", description="Add a reaction"),
+        {},
+    )
+
+    assert reply.scope is ApprovalScope.none
+    assert reaction.scope is ApprovalScope.none
 
 
 def test_describe_tools_metadata_is_read_only_runtime_inventory() -> None:

@@ -79,6 +79,7 @@ from kortny.tools.schedules import (
     UpdateScheduleTool,
 )
 from kortny.tools.search_observed_slack_history import SearchObservedSlackHistoryTool
+from kortny.tools.slack_actions import SlackAddReactionTool, SlackReplyThreadTool
 from kortny.tools.slack_channel_history import SlackChannelHistoryTool
 from kortny.tools.slack_file_read import SlackFileReadTool
 from kortny.tools.web_search import WebSearchTool
@@ -136,6 +137,8 @@ _NATIVE_DASHBOARD_TOOL_CLASSES: tuple[type[Any], ...] = (
     SlackChannelHistoryTool,
     SearchObservedSlackHistoryTool,
     ResolveSlackIdentityTool,
+    SlackReplyThreadTool,
+    SlackAddReactionTool,
     SlackFileReadTool,
     QueryWorkspaceGraphTool,
     ListSchedulesTool,
@@ -4197,6 +4200,7 @@ def _tool_group_description(category: str) -> str:
         "Research": "Tools that gather external context.",
         "Runtime": "Meta-tools that describe current capabilities and integrations.",
         "Scheduling": "Tools that create and manage recurring or future work.",
+        "Slack actions": "Tools that perform bounded Slack replies and reactions.",
         "Slack context": "Tools that read Slack messages, threads, and files.",
         "Workspace context": "Tools that query Kortny's workspace knowledge graph.",
     }

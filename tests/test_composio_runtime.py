@@ -1223,6 +1223,7 @@ def test_worker_registry_exposes_integration_inventory_for_capability_lookup(
     } >= {
         "Research and current info",
         "Slack context",
+        "Slack actions",
         "Scheduled work",
         "Workspace knowledge",
     }
@@ -1238,6 +1239,8 @@ def test_worker_registry_exposes_integration_inventory_for_capability_lookup(
         "slack_channel_history",
         "search_observed_slack_history",
         "resolve_slack_identity",
+        "slack_reply_thread",
+        "slack_add_reaction",
         "slack_file_read",
         "describe_tools",
     }

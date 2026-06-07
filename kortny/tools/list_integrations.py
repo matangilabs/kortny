@@ -159,6 +159,20 @@ _USER_CAPABILITY_GROUPS: tuple[tuple[str, JsonObject], ...] = (
         },
     ),
     (
+        "Slack actions",
+        {
+            "label": "Slack actions",
+            "summary": (
+                "I can reply in the active Slack thread or add a reaction to "
+                "the current message when that is the right lightweight action."
+            ),
+            "examples": [
+                "leave a quick follow-up in this thread",
+                "add a reaction to the message I am handling",
+            ],
+        },
+    ),
+    (
         "Workspace context",
         {
             "label": "Workspace knowledge",

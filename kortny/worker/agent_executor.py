@@ -116,8 +116,10 @@ from kortny.tools import (
     RememberFactTool,
     ResolveSlackIdentityTool,
     SearchObservedSlackHistoryTool,
+    SlackAddReactionTool,
     SlackChannelHistoryTool,
     SlackFileReadTool,
+    SlackReplyThreadTool,
     Tool,
     ToolRegistry,
     WebSearchTool,
@@ -1178,12 +1180,13 @@ class AgentTaskExecutor:
             working_dir=working_dir,
             max_file_size_bytes=settings.slack_file_read_max_bytes,
         )
+        slack_action_client = self._build_slack_posting_client(settings)
         memory_service = WorkspaceStateService(
             session,
             task_service=task_service,
             poster=SlackPoster(
                 session=session,
-                client=self._build_slack_posting_client(settings),
+                client=slack_action_client,
                 task_service=task_service,
             ),
         )
@@ -1226,6 +1229,18 @@ class AgentTaskExecutor:
             slack_channel_history,
             SearchObservedSlackHistoryTool(session=session, task=task),
             ResolveSlackIdentityTool(session=session, task=task),
+            SlackReplyThreadTool(
+                client=slack_action_client,
+                session=session,
+                task=task,
+                task_service=task_service,
+            ),
+            SlackAddReactionTool(
+                client=slack_action_client,
+                session=session,
+                task=task,
+                task_service=task_service,
+            ),
             slack_file_read,
             remember_fact,
             recall_fact,
