@@ -438,6 +438,8 @@ _TOOL_TO_INTEGRATION = {
     "slack_channel_history": "slack",
     "search_observed_slack_history": "slack",
     "resolve_slack_identity": "slack",
+    "slack_user_info": "slack",
+    "slack_channel_info": "slack",
     "slack_reply_thread": "slack",
     "slack_add_reaction": "slack",
     "slack_pin_message": "slack",

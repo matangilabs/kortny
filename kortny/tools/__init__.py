@@ -27,6 +27,7 @@ from kortny.tools.slack_channel_history import (
     SlackChannelHistoryTool,
 )
 from kortny.tools.slack_file_read import SlackFileReadError, SlackFileReadTool
+from kortny.tools.slack_identity_info import SlackChannelInfoTool, SlackUserInfoTool
 from kortny.tools.types import (
     JsonObject,
     JsonSchema,
@@ -68,6 +69,8 @@ __all__ = [
     "SlackChannelHistoryTool",
     "SlackFileReadError",
     "SlackFileReadTool",
+    "SlackChannelInfoTool",
+    "SlackUserInfoTool",
     "SlackPinMessageTool",
     "SlackReplyThreadTool",
     "ToolDescriptor",

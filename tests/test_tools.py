@@ -107,6 +107,20 @@ def test_resolve_slack_identity_metadata_is_local_and_read_only() -> None:
     assert "slack_identity_resolution" in metadata.capabilities
 
 
+def test_slack_identity_info_metadata_is_read_only_slack_refresh() -> None:
+    user = tool_metadata("slack_user_info")
+    channel = tool_metadata("slack_channel_info")
+
+    assert user.category == "Slack context"
+    assert user.side_effect == "read"
+    assert user.required_slack_scopes == ("users:read",)
+    assert "identity_cache_refresh" in user.plan_gates
+    assert channel.category == "Slack context"
+    assert channel.side_effect == "read"
+    assert "channels:read" in channel.required_slack_scopes
+    assert "current_channel_only" in channel.plan_gates
+
+
 def test_slack_action_metadata_is_current_scope_and_write_classed() -> None:
     reply = tool_metadata("slack_reply_thread")
     reaction = tool_metadata("slack_add_reaction")

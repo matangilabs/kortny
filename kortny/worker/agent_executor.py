@@ -119,9 +119,11 @@ from kortny.tools import (
     SlackAddBookmarkTool,
     SlackAddReactionTool,
     SlackChannelHistoryTool,
+    SlackChannelInfoTool,
     SlackFileReadTool,
     SlackPinMessageTool,
     SlackReplyThreadTool,
+    SlackUserInfoTool,
     Tool,
     ToolRegistry,
     WebSearchTool,
@@ -1182,6 +1184,7 @@ class AgentTaskExecutor:
             working_dir=working_dir,
             max_file_size_bytes=settings.slack_file_read_max_bytes,
         )
+        slack_identity_client = self._build_slack_identity_client(settings)
         slack_action_client = self._build_slack_posting_client(settings)
         memory_service = WorkspaceStateService(
             session,
@@ -1231,6 +1234,16 @@ class AgentTaskExecutor:
             slack_channel_history,
             SearchObservedSlackHistoryTool(session=session, task=task),
             ResolveSlackIdentityTool(session=session, task=task),
+            SlackUserInfoTool(
+                client=slack_identity_client,
+                session=session,
+                task=task,
+            ),
+            SlackChannelInfoTool(
+                client=slack_identity_client,
+                session=session,
+                task=task,
+            ),
             SlackReplyThreadTool(
                 client=slack_action_client,
                 session=session,
@@ -1755,6 +1768,14 @@ class AgentTaskExecutor:
 
     def _build_slack_file_client(self, settings: Settings) -> Any:
         if self.slack_client is not None and hasattr(self.slack_client, "files_info"):
+            return self.slack_client
+        return WebClient(token=settings.slack_bot_token)
+
+    def _build_slack_identity_client(self, settings: Settings) -> Any:
+        if self.slack_client is not None and (
+            hasattr(self.slack_client, "users_info")
+            or hasattr(self.slack_client, "conversations_info")
+        ):
             return self.slack_client
         return WebClient(token=settings.slack_bot_token)
 
@@ -3381,6 +3402,8 @@ NATIVE_SLACK_CONTEXT_HINTS = frozenset(
         "slack_channel_history",
         "search_observed_slack_history",
         "resolve_slack_identity",
+        "slack_user_info",
+        "slack_channel_info",
     }
 )
 

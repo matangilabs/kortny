@@ -20,6 +20,7 @@ from kortny.db.models import (
 from kortny.db.session import make_engine, make_session_factory, normalize_database_url
 from kortny.slack.identity import SlackIdentityService
 from kortny.tools.resolve_slack_identity import ResolveSlackIdentityTool
+from kortny.tools.slack_identity_info import SlackChannelInfoTool, SlackUserInfoTool
 
 TEST_POSTGRES_URL = os.environ.get("KORTNY_TEST_POSTGRES_URL")
 
@@ -467,6 +468,143 @@ def test_resolve_slack_identity_tool_defaults_to_current_task_context(
 
     assert result.output["requested_ids"] == ["U123", "C123"]
     assert result.output["resolved_count"] == 2
+
+
+def test_slack_user_info_tool_refreshes_missing_current_user(
+    db_session: Session,
+) -> None:
+    installation = create_installation(db_session)
+    task = create_task(db_session, installation, user_id="U123", channel_id="C123")
+    client = FakeIdentityClient(
+        user_response={
+            "ok": True,
+            "user": {
+                "id": "U123",
+                "name": "aneesh",
+                "profile": {"real_name": "Aneesh Melkot"},
+            },
+        }
+    )
+
+    result = SlackUserInfoTool(
+        client=client,
+        session=db_session,
+        task=task,
+    ).invoke({})
+
+    identity = db_session.scalar(
+        select(SlackIdentity).where(
+            SlackIdentity.installation_id == installation.id,
+            SlackIdentity.kind == "user",
+            SlackIdentity.slack_id == "U123",
+        )
+    )
+    assert result.output["successful"] is True
+    assert result.output["display_name"] == "Aneesh Melkot"
+    assert result.output["refreshed"] is True
+    assert identity is not None
+    assert identity.display_name == "Aneesh Melkot"
+    assert client.calls == [{"method": "users_info", "id": "U123"}]
+
+
+def test_slack_user_info_tool_force_refreshes_fresh_cache(
+    db_session: Session,
+) -> None:
+    installation = create_installation(db_session)
+    refreshed_at = datetime(2026, 5, 25, 9, 0, tzinfo=UTC)
+    db_session.add(
+        SlackIdentity(
+            installation_id=installation.id,
+            kind="user",
+            slack_id="U123",
+            display_name="Cached User",
+            raw_name="Cached User",
+            refreshed_at=refreshed_at,
+            last_seen_at=refreshed_at,
+        )
+    )
+    task = create_task(db_session, installation, user_id="U123", channel_id="C123")
+    client = FakeIdentityClient(
+        user_response={
+            "ok": True,
+            "user": {
+                "id": "U123",
+                "name": "aneesh",
+                "profile": {"real_name": "Aneesh Melkot"},
+            },
+        }
+    )
+
+    result = SlackUserInfoTool(
+        client=client,
+        session=db_session,
+        task=task,
+    ).invoke({"force_refresh": True})
+
+    assert result.output["display_name"] == "Aneesh Melkot"
+    assert result.output["refreshed"] is True
+    assert client.calls == [{"method": "users_info", "id": "U123"}]
+
+
+def test_slack_channel_info_tool_refreshes_current_channel(
+    db_session: Session,
+) -> None:
+    installation = create_installation(db_session)
+    task = create_task(db_session, installation, user_id="U123", channel_id="C123")
+    client = FakeIdentityClient(
+        channel_response={
+            "ok": True,
+            "channel": {
+                "id": "C123",
+                "name": "research-room",
+                "is_private": True,
+            },
+        }
+    )
+
+    result = SlackChannelInfoTool(
+        client=client,
+        session=db_session,
+        task=task,
+    ).invoke({})
+
+    identity = db_session.scalar(
+        select(SlackIdentity).where(
+            SlackIdentity.installation_id == installation.id,
+            SlackIdentity.kind == "channel",
+            SlackIdentity.slack_id == "C123",
+        )
+    )
+    assert result.output["successful"] is True
+    assert result.output["display_name"] == "#research-room"
+    assert result.output["is_private"] is True
+    assert result.output["refreshed"] is True
+    assert identity is not None
+    assert identity.display_name == "#research-room"
+    assert identity.is_private is True
+    assert client.calls == [{"method": "conversations_info", "id": "C123"}]
+
+
+def test_slack_channel_info_tool_rejects_other_channel(
+    db_session: Session,
+) -> None:
+    installation = create_installation(db_session)
+    task = create_task(db_session, installation, user_id="U123", channel_id="C123")
+    client = FakeIdentityClient(
+        channel_response={
+            "ok": True,
+            "channel": {"id": "C999", "name": "other-channel"},
+        }
+    )
+
+    with pytest.raises(ValueError, match="current Slack channel"):
+        SlackChannelInfoTool(
+            client=client,
+            session=db_session,
+            task=task,
+        ).invoke({"channel_id": "C999"})
+
+    assert client.calls == []
 
 
 def cleanup_database(session: Session) -> None:

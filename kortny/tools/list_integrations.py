@@ -148,12 +148,14 @@ _USER_CAPABILITY_GROUPS: tuple[tuple[str, JsonObject], ...] = (
             "summary": (
                 "I can read recent channel history, search observed Slack "
                 "messages, resolve Slack IDs to names, and inspect shared "
-                "files I can access."
+                "files I can access. When cached names are missing, I can "
+                "refresh the current Slack user or channel identity."
             ),
             "examples": [
                 "summarize recent decisions",
                 "find where a topic came up before",
                 "turn user and channel IDs into names",
+                "refresh a missing Slack display name",
                 "pull context from a thread or uploaded file",
             ],
         },

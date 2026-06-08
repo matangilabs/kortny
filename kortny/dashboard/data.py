@@ -87,6 +87,7 @@ from kortny.tools.slack_actions import (
 )
 from kortny.tools.slack_channel_history import SlackChannelHistoryTool
 from kortny.tools.slack_file_read import SlackFileReadTool
+from kortny.tools.slack_identity_info import SlackChannelInfoTool, SlackUserInfoTool
 from kortny.tools.web_search import WebSearchTool
 from kortny.tools.workspace_graph import QueryWorkspaceGraphTool
 from kortny.tools.workspace_memory import (
@@ -142,6 +143,8 @@ _NATIVE_DASHBOARD_TOOL_CLASSES: tuple[type[Any], ...] = (
     SlackChannelHistoryTool,
     SearchObservedSlackHistoryTool,
     ResolveSlackIdentityTool,
+    SlackUserInfoTool,
+    SlackChannelInfoTool,
     SlackReplyThreadTool,
     SlackAddReactionTool,
     SlackPinMessageTool,
