@@ -98,6 +98,14 @@ class Settings(BaseSettings):
         default=True,
         validation_alias="KORTNY_PLANNED_WORKFLOW_PROGRESS_UPDATES_ENABLED",
     )
+    sandbox_runner_url: str | None = Field(
+        default=None,
+        validation_alias="KORTNY_SANDBOX_RUNNER_URL",
+    )
+    sandbox_runner_timeout_seconds: float = Field(
+        default=70.0,
+        validation_alias="KORTNY_SANDBOX_RUNNER_TIMEOUT_SECONDS",
+    )
     temporal_address: str = Field(
         default="temporal:7233",
         validation_alias="TEMPORAL_ADDRESS",
@@ -244,6 +252,7 @@ class Settings(BaseSettings):
         "langfuse_prompt_label",
         "kortny_release",
         "kortny_version",
+        "sandbox_runner_url",
         mode="before",
     )
     @classmethod
@@ -354,6 +363,21 @@ class Settings(BaseSettings):
             raise ValueError(
                 "KORTNY_PLANNED_WORKFLOW_MAX_TOTAL_TOOL_CALLS must be between 0 and 200"
             )
+        return value
+
+    @field_validator("sandbox_runner_url")
+    @classmethod
+    def _strip_optional_sandbox_runner_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip().rstrip("/")
+        return stripped or None
+
+    @field_validator("sandbox_runner_timeout_seconds")
+    @classmethod
+    def _valid_sandbox_runner_timeout_seconds(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("KORTNY_SANDBOX_RUNNER_TIMEOUT_SECONDS must be positive")
         return value
 
     @field_validator("scheduler_poll_interval_seconds")

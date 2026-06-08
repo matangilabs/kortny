@@ -26,6 +26,8 @@ SETTINGS_ENV_VARS = {
     "KORTNY_PLANNED_WORKFLOW_MAX_BRANCH_TOOL_CALLS",
     "KORTNY_PLANNED_WORKFLOW_MAX_TOTAL_TOOL_CALLS",
     "KORTNY_PLANNED_WORKFLOW_PROGRESS_UPDATES_ENABLED",
+    "KORTNY_SANDBOX_RUNNER_URL",
+    "KORTNY_SANDBOX_RUNNER_TIMEOUT_SECONDS",
     "KORTNY_WORKFLOW_BACKEND",
     "TEMPORAL_ADDRESS",
     "TEMPORAL_NAMESPACE",
@@ -101,6 +103,8 @@ def test_settings_loads_required_environment(monkeypatch: pytest.MonkeyPatch) ->
     assert settings.planned_workflow_max_branch_model_calls == 3
     assert settings.planned_workflow_max_branch_tool_calls == 8
     assert settings.planned_workflow_max_total_tool_calls == 12
+    assert settings.sandbox_runner_url is None
+    assert settings.sandbox_runner_timeout_seconds == 70.0
     assert settings.workflow_backend == "inline"
     assert settings.temporal_address == "temporal:7233"
     assert settings.temporal_namespace == "default"
@@ -154,6 +158,8 @@ def test_settings_loads_optional_environment(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("KORTNY_PLANNED_WORKFLOW_MAX_BRANCH_TOOL_CALLS", "13")
     monkeypatch.setenv("KORTNY_PLANNED_WORKFLOW_MAX_TOTAL_TOOL_CALLS", "21")
     monkeypatch.setenv("KORTNY_PLANNED_WORKFLOW_PROGRESS_UPDATES_ENABLED", "false")
+    monkeypatch.setenv("KORTNY_SANDBOX_RUNNER_URL", "http://sandbox-runner:8090/")
+    monkeypatch.setenv("KORTNY_SANDBOX_RUNNER_TIMEOUT_SECONDS", "12.5")
     monkeypatch.setenv("KORTNY_WORKFLOW_BACKEND", "temporal")
     monkeypatch.setenv("TEMPORAL_ADDRESS", "temporal.example:7233")
     monkeypatch.setenv("TEMPORAL_NAMESPACE", "kortny-dev")
@@ -206,6 +212,8 @@ def test_settings_loads_optional_environment(monkeypatch: pytest.MonkeyPatch) ->
     assert settings.planned_workflow_max_branch_tool_calls == 13
     assert settings.planned_workflow_max_total_tool_calls == 21
     assert settings.planned_workflow_progress_updates_enabled is False
+    assert settings.sandbox_runner_url == "http://sandbox-runner:8090"
+    assert settings.sandbox_runner_timeout_seconds == 12.5
     assert settings.workflow_backend == "temporal"
     assert settings.temporal_address == "temporal.example:7233"
     assert settings.temporal_namespace == "kortny-dev"
@@ -248,6 +256,7 @@ def test_blank_optional_environment_values_are_none(
     monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "")
     monkeypatch.setenv("LANGFUSE_SECRET_KEY", "")
     monkeypatch.setenv("LANGFUSE_PROMPT_LABEL", "")
+    monkeypatch.setenv("KORTNY_SANDBOX_RUNNER_URL", "")
 
     settings = load_settings(env_file=None)
 
@@ -258,6 +267,7 @@ def test_blank_optional_environment_values_are_none(
     assert settings.langfuse_public_key is None
     assert settings.langfuse_secret_key is None
     assert settings.langfuse_prompt_label is None
+    assert settings.sandbox_runner_url is None
 
 
 def test_load_settings_reports_missing_required_keys(
