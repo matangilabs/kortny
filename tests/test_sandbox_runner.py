@@ -129,6 +129,190 @@ def test_sandbox_runner_docker_smoke_reports_unavailable_proxy() -> None:
     assert payload["docker_api"]["error"] == "connection refused"
 
 
+def test_sandbox_runner_run_contract_rejects_execution_while_disabled() -> None:
+    settings = SandboxRunnerSettings(
+        runner_name="test-runner",
+        docker_host="tcp://sandbox-docker-proxy:2375",
+    )
+
+    with TestClient(create_app(settings=settings)) as client:
+        response = client.post(
+            "/run",
+            json={
+                "image": "kortny/sandbox-python:latest",
+                "command": ["python", "-c", "print('hello')"],
+                "workspace_path": "/tmp/kortny-task-123",
+                "artifacts_path": "/tmp/kortny-task-123/artifacts",
+                "network": "none",
+                "env": {"SAFE_FLAG": "1", "SECRET_TOKEN": "do-not-leak"},
+                "resource_limits": {
+                    "cpus": 1.5,
+                    "memory_mb": 256,
+                    "pids_limit": 32,
+                    "timeout_seconds": 10,
+                },
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is False
+    assert payload["status"] == "execution_disabled"
+    assert payload["execution_enabled"] is False
+    assert payload["execution_attempted"] is False
+    assert payload["request"] == {
+        "image": "kortny/sandbox-python:latest",
+        "command": ["python", "-c", "print('hello')"],
+        "workspace_path": "/tmp/kortny-task-123",
+        "artifacts_path": "/tmp/kortny-task-123/artifacts",
+        "network": "none",
+        "egress_allowlist": [],
+        "env_keys": ["SAFE_FLAG", "SECRET_TOKEN"],
+        "resource_limits": {
+            "cpus": 1.5,
+            "memory_mb": 256,
+            "pids_limit": 32,
+            "timeout_seconds": 10,
+        },
+    }
+    assert "do-not-leak" not in str(payload)
+
+
+def test_sandbox_runner_run_contract_reports_enabled_execution_as_unimplemented() -> (
+    None
+):
+    settings = SandboxRunnerSettings(execution_enabled=True)
+
+    with TestClient(create_app(settings=settings)) as client:
+        response = client.post(
+            "/run",
+            json={
+                "image": "kortny/sandbox-python:latest",
+                "command": ["python", "-c", "print('hello')"],
+                "workspace_path": "/tmp/kortny-task-123",
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is False
+    assert payload["status"] == "execution_not_implemented"
+    assert payload["execution_enabled"] is True
+    assert payload["execution_attempted"] is False
+
+
+def test_sandbox_runner_run_contract_accepts_allowlist_network_shape() -> None:
+    with TestClient(create_app(settings=SandboxRunnerSettings())) as client:
+        response = client.post(
+            "/run",
+            json={
+                "image": "kortny/sandbox-python:latest",
+                "command": ["python", "-c", "print('hello')"],
+                "workspace_path": "/tmp/kortny-task-123",
+                "network": "allowlist",
+                "egress_allowlist": ["pypi.org", "files.pythonhosted.org"],
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["execution_attempted"] is False
+    assert payload["request"]["network"] == "allowlist"
+    assert payload["request"]["egress_allowlist"] == [
+        "pypi.org",
+        "files.pythonhosted.org",
+    ]
+
+
+def test_sandbox_runner_run_contract_rejects_allowlist_without_hosts() -> None:
+    with TestClient(create_app(settings=SandboxRunnerSettings())) as client:
+        response = client.post(
+            "/run",
+            json={
+                "image": "kortny/sandbox-python:latest",
+                "command": ["python", "-c", "print('hello')"],
+                "workspace_path": "/tmp/kortny-task-123",
+                "network": "allowlist",
+            },
+        )
+
+    assert response.status_code == 422
+
+
+def test_sandbox_runner_run_contract_rejects_allowlist_hosts_on_no_network() -> None:
+    with TestClient(create_app(settings=SandboxRunnerSettings())) as client:
+        response = client.post(
+            "/run",
+            json={
+                "image": "kortny/sandbox-python:latest",
+                "command": ["python", "-c", "print('hello')"],
+                "workspace_path": "/tmp/kortny-task-123",
+                "network": "none",
+                "egress_allowlist": ["pypi.org"],
+            },
+        )
+
+    assert response.status_code == 422
+
+
+def test_sandbox_runner_run_contract_rejects_empty_command() -> None:
+    with TestClient(create_app(settings=SandboxRunnerSettings())) as client:
+        response = client.post(
+            "/run",
+            json={
+                "image": "kortny/sandbox-python:latest",
+                "command": [],
+                "workspace_path": "/tmp/kortny-task-123",
+            },
+        )
+
+    assert response.status_code == 422
+
+
+def test_sandbox_runner_run_contract_rejects_empty_command_part() -> None:
+    with TestClient(create_app(settings=SandboxRunnerSettings())) as client:
+        response = client.post(
+            "/run",
+            json={
+                "image": "kortny/sandbox-python:latest",
+                "command": ["python", ""],
+                "workspace_path": "/tmp/kortny-task-123",
+            },
+        )
+
+    assert response.status_code == 422
+
+
+def test_sandbox_runner_run_contract_rejects_empty_env_key() -> None:
+    with TestClient(create_app(settings=SandboxRunnerSettings())) as client:
+        response = client.post(
+            "/run",
+            json={
+                "image": "kortny/sandbox-python:latest",
+                "command": ["python", "-c", "print('hello')"],
+                "workspace_path": "/tmp/kortny-task-123",
+                "env": {"": "nope"},
+            },
+        )
+
+    assert response.status_code == 422
+
+
+def test_sandbox_runner_run_contract_rejects_bad_resource_limits() -> None:
+    with TestClient(create_app(settings=SandboxRunnerSettings())) as client:
+        response = client.post(
+            "/run",
+            json={
+                "image": "kortny/sandbox-python:latest",
+                "command": ["python", "-c", "print('hello')"],
+                "workspace_path": "/tmp/kortny-task-123",
+                "resource_limits": {"cpus": 0},
+            },
+        )
+
+    assert response.status_code == 422
+
+
 def test_sandbox_runner_settings_load_from_env_without_secrets() -> None:
     settings = load_sandbox_runner_settings(
         {

@@ -5,9 +5,10 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Literal
 
 from fastapi import FastAPI
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from kortny.execution import SandboxResourceLimits, ToolSandboxPolicy
 from kortny.sandbox_runner.docker_api import DockerApiClient, DockerApiProbeClient
@@ -56,6 +57,70 @@ class SandboxSmokeRequest(BaseModel):
     """Smoke-test request that does not execute user code."""
 
     message: str = Field(default="ping", max_length=200)
+
+
+class SandboxResourceLimitsRequest(BaseModel):
+    """Resource limit shape accepted by the worker-facing run contract."""
+
+    cpus: float = Field(default=1.0, gt=0)
+    memory_mb: int = Field(default=512, gt=0)
+    pids_limit: int = Field(default=128, gt=0)
+    timeout_seconds: int = Field(default=60, gt=0)
+
+    def to_contract(self) -> SandboxResourceLimits:
+        return SandboxResourceLimits(
+            cpus=self.cpus,
+            memory_mb=self.memory_mb,
+            pids_limit=self.pids_limit,
+            timeout_seconds=self.timeout_seconds,
+        )
+
+
+class SandboxRunRequest(BaseModel):
+    """Validated worker-facing sandbox run request.
+
+    This contract is intentionally non-executing until a later slice enables
+    container creation behind `KORTNY_SANDBOX_EXECUTION_ENABLED`.
+    """
+
+    image: str = Field(min_length=1, max_length=256)
+    command: list[str] = Field(min_length=1, max_length=64)
+    workspace_path: str = Field(min_length=1, max_length=1024)
+    artifacts_path: str | None = Field(default=None, max_length=1024)
+    network: Literal["none", "allowlist"] = "none"
+    egress_allowlist: list[str] = Field(default_factory=list, max_length=64)
+    env: dict[str, str] = Field(default_factory=dict, max_length=64)
+    resource_limits: SandboxResourceLimitsRequest = Field(
+        default_factory=SandboxResourceLimitsRequest
+    )
+
+    @model_validator(mode="after")
+    def validate_run_shape(self) -> SandboxRunRequest:
+        if any(not part.strip() for part in self.command):
+            raise ValueError("command entries must be non-empty")
+        if any(not host.strip() for host in self.egress_allowlist):
+            raise ValueError("egress_allowlist entries must be non-empty")
+        if self.network == "allowlist" and not self.egress_allowlist:
+            raise ValueError("allowlist network requires egress hosts")
+        if self.network == "none" and self.egress_allowlist:
+            raise ValueError("egress_allowlist requires allowlist network")
+        if any(not key.strip() for key in self.env):
+            raise ValueError("env keys must be non-empty")
+        return self
+
+    def redacted_payload(self) -> dict[str, object]:
+        """Return a JSON-safe request summary without env values."""
+
+        return {
+            "image": self.image,
+            "command": self.command,
+            "workspace_path": self.workspace_path,
+            "artifacts_path": self.artifacts_path,
+            "network": self.network,
+            "egress_allowlist": self.egress_allowlist,
+            "env_keys": sorted(self.env),
+            "resource_limits": self.resource_limits.to_contract().to_payload(),
+        }
 
 
 def load_sandbox_runner_settings(
@@ -143,6 +208,33 @@ def create_app(
             "execution_enabled": resolved_settings.execution_enabled,
             "execution_attempted": False,
             "docker_api": probe.to_payload(),
+        }
+
+    @app.post("/run")
+    def run(request: SandboxRunRequest) -> dict[str, object]:
+        status = (
+            "execution_not_implemented"
+            if resolved_settings.execution_enabled
+            else "execution_disabled"
+        )
+        reason = (
+            "Sandbox execution is enabled in settings, but container launch is "
+            "not implemented in this slice."
+            if resolved_settings.execution_enabled
+            else (
+                "Sandbox execution is not enabled. This endpoint currently "
+                "validates the request contract only."
+            )
+        )
+        return {
+            "ok": False,
+            "service": SERVICE_NAME,
+            "runner": resolved_settings.runner_name,
+            "execution_enabled": resolved_settings.execution_enabled,
+            "execution_attempted": False,
+            "status": status,
+            "reason": reason,
+            "request": request.redacted_payload(),
         }
 
     return app
