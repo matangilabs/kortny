@@ -37,6 +37,7 @@ from kortny.tools.types import (
 )
 
 _LAZY_EXPORTS = {
+    "CodeExecTool": "kortny.tools.code_exec",
     "ComposioExecuteTool": "kortny.tools.composio_execute",
     "DescribeToolsTool": "kortny.tools.list_integrations",
     "EchoTool": "kortny.tools.echo",
@@ -78,7 +79,9 @@ def __getattr__(name: str) -> Any:
     globals()[name] = value
     return value
 
+
 __all__ = [
+    "CodeExecTool",
     "ComposioExecuteTool",
     "DescribeToolsTool",
     "DuplicateToolError",

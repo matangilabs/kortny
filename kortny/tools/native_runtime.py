@@ -11,9 +11,11 @@ from sqlalchemy.orm import Session
 
 from kortny.config import Settings
 from kortny.db.models import Task
+from kortny.execution import create_sandbox_runner_from_settings
 from kortny.memory import WorkspaceStateService
 from kortny.tasks import TaskService
 from kortny.tools.catalog import dashboard_native_tool_names, runtime_native_tool_names
+from kortny.tools.code_exec import CodeExecTool
 from kortny.tools.list_integrations import DescribeToolsTool, ListIntegrationsTool
 from kortny.tools.pdf_generator import PdfGeneratorTool
 from kortny.tools.resolve_slack_identity import ResolveSlackIdentityTool
@@ -193,11 +195,34 @@ def _build_list_integrations_tool(
     )
 
 
+def _build_code_exec_tool(context: NativeToolBuildContext) -> Tool | None:
+    runner = create_sandbox_runner_from_settings(context.settings)
+    if runner is None:
+        context.task_service.append_event(
+            context.task,
+            "log",
+            {
+                "message": "native_tool_unavailable",
+                "tool": "code_exec",
+                "reason": "missing_sandbox_runner_url",
+                "env_var": "KORTNY_SANDBOX_RUNNER_URL",
+            },
+        )
+        return None
+    return CodeExecTool(
+        runner=runner,
+        image=context.settings.sandbox_default_image,
+        task=context.task,
+        task_service=context.task_service,
+    )
+
+
 NATIVE_TOOL_REGISTRATIONS: tuple[NativeToolRegistration, ...] = (
     NativeToolRegistration("web_search", WebSearchTool, _build_web_search_tool),
     NativeToolRegistration(
         "pdf_generator", PdfGeneratorTool, _build_pdf_generator_tool
     ),
+    NativeToolRegistration("code_exec", CodeExecTool, _build_code_exec_tool),
     NativeToolRegistration(
         "slack_channel_history",
         SlackChannelHistoryTool,

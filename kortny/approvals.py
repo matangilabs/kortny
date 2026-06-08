@@ -111,6 +111,12 @@ class ToolApprovalPolicy:
                 risk="workspace_state_mutation",
                 reason=f"{tool.name} can change Kortny's stored state.",
             )
+        if tool_name in ADMIN_APPROVAL_NATIVE_TOOLS:
+            return ToolApprovalRequirement(
+                scope=ApprovalScope.admin,
+                risk="sandboxed_code_execution",
+                reason=(f"{tool.name} can execute untrusted code in Kortny's sandbox."),
+            )
         if _tool_is_explicitly_read_only(tool):
             return NO_APPROVAL_REQUIRED
         risky_verbs = _risky_verbs(tool)
@@ -137,6 +143,7 @@ READ_ONLY_NATIVE_TOOLS = read_only_native_tool_names()
 SELF_GATED_NATIVE_TOOLS = native_tool_names_by_approval("self_gated")
 LOW_RISK_NATIVE_WRITE_TOOLS = low_risk_native_write_tool_names()
 USER_APPROVAL_NATIVE_TOOLS = native_tool_names_by_approval("user_approval")
+ADMIN_APPROVAL_NATIVE_TOOLS = native_tool_names_by_approval("admin_approval")
 WRITE_VERBS = frozenset(
     {
         "add",

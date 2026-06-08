@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from kortny.config import Settings
-from kortny.execution.sandbox import ToolSandboxPolicy
+from kortny.execution.sandbox import SandboxResourceLimits, ToolSandboxPolicy
 from kortny.tools.types import JsonObject, JsonSchema, Tool
 
 ToolSideEffect = Literal["read", "write", "destructive"]
@@ -359,6 +359,39 @@ NATIVE_TOOL_METADATA: dict[str, ToolMetadata] = {
         approval="none",
         result_budget="artifact",
         notes=("Creates local task artifacts only when explicitly useful.",),
+    ),
+    "code_exec": ToolMetadata(
+        name="code_exec",
+        namespace="native.execution",
+        category="Execution",
+        display_name="Code execution",
+        capabilities=("sandboxed_code_execution", "python_execution"),
+        side_effect="destructive",
+        approval="admin_approval",
+        required_env_vars=("KORTNY_SANDBOX_RUNNER_URL",),
+        plan_gates=(
+            "explicit_user_request_required",
+            "admin_approval_required",
+            "sandbox_required",
+            "network_disabled",
+        ),
+        result_budget="bounded_stdout",
+        notes=(
+            "Runs short Python snippets only through the isolated sandbox runner.",
+            "No network, package installation, secrets, or host filesystem access.",
+        ),
+        sandbox=ToolSandboxPolicy(
+            requires_sandbox=True,
+            profile="code",
+            network="none",
+            resource_limits=SandboxResourceLimits(
+                cpus=1.0,
+                memory_mb=512,
+                pids_limit=64,
+                timeout_seconds=30,
+            ),
+            reason="Untrusted code must run outside the worker process.",
+        ),
     ),
     "remember_fact": ToolMetadata(
         name="remember_fact",
@@ -769,6 +802,7 @@ _NAMESPACE_INTEGRATIONS = {
     "native.context": "workspace",
     "native.diagnostics": "diagnostics",
     "native.documents": "documents",
+    "native.execution": "execution",
     "native.memory": "memory",
     "native.meta": "runtime",
     "native.research": "web",
@@ -781,6 +815,7 @@ _SETTINGS_ENV_ATTRS = {
     "BRAVE_SEARCH_API_KEY": "brave_search_api_key",
     "COMPOSIO_API_KEY": "composio_api_key",
     "POSTGRES_URL": "postgres_url",
+    "KORTNY_SANDBOX_RUNNER_URL": "sandbox_runner_url",
     "SLACK_APP_TOKEN": "slack_app_token",
     "SLACK_BOT_TOKEN": "slack_bot_token",
     "SLACK_SIGNING_SECRET": "slack_signing_secret",

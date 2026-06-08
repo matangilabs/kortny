@@ -105,6 +105,7 @@ def test_settings_loads_required_environment(monkeypatch: pytest.MonkeyPatch) ->
     assert settings.planned_workflow_max_total_tool_calls == 12
     assert settings.sandbox_runner_url is None
     assert settings.sandbox_runner_timeout_seconds == 70.0
+    assert settings.sandbox_default_image == "kortny/sandbox-python:latest"
     assert settings.workflow_backend == "inline"
     assert settings.temporal_address == "temporal:7233"
     assert settings.temporal_namespace == "default"
@@ -160,6 +161,7 @@ def test_settings_loads_optional_environment(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("KORTNY_PLANNED_WORKFLOW_PROGRESS_UPDATES_ENABLED", "false")
     monkeypatch.setenv("KORTNY_SANDBOX_RUNNER_URL", "http://sandbox-runner:8090/")
     monkeypatch.setenv("KORTNY_SANDBOX_RUNNER_TIMEOUT_SECONDS", "12.5")
+    monkeypatch.setenv("KORTNY_SANDBOX_DEFAULT_IMAGE", "python:3.11-slim")
     monkeypatch.setenv("KORTNY_WORKFLOW_BACKEND", "temporal")
     monkeypatch.setenv("TEMPORAL_ADDRESS", "temporal.example:7233")
     monkeypatch.setenv("TEMPORAL_NAMESPACE", "kortny-dev")
@@ -214,6 +216,7 @@ def test_settings_loads_optional_environment(monkeypatch: pytest.MonkeyPatch) ->
     assert settings.planned_workflow_progress_updates_enabled is False
     assert settings.sandbox_runner_url == "http://sandbox-runner:8090"
     assert settings.sandbox_runner_timeout_seconds == 12.5
+    assert settings.sandbox_default_image == "python:3.11-slim"
     assert settings.workflow_backend == "temporal"
     assert settings.temporal_address == "temporal.example:7233"
     assert settings.temporal_namespace == "kortny-dev"

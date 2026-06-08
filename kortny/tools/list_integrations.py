@@ -52,7 +52,9 @@ class DescribeToolsTool:
                     native_descriptors=native_descriptors,
                     connections=connections,
                 ),
-                "native_tools": [_native_tool_payload(tool) for tool in native_descriptors],
+                "native_tools": [
+                    _native_tool_payload(tool) for tool in native_descriptors
+                ],
                 "native_tool_count": len(native_descriptors),
                 "native_categories": sorted(
                     {descriptor.category for descriptor in native_descriptors}
@@ -101,7 +103,9 @@ def _user_facing_summary(
     connected_apps = [_connected_app_summary(connection) for connection in connections]
     limitations: list[str] = []
     if not connected_apps:
-        limitations.append("No connected app accounts are visible in this conversation.")
+        limitations.append(
+            "No connected app accounts are visible in this conversation."
+        )
     if not any(descriptor.name == "web_search" for descriptor in native_descriptors):
         limitations.append("Web search is not available in this conversation.")
     return {
@@ -222,6 +226,20 @@ _USER_CAPABILITY_GROUPS: tuple[tuple[str, JsonObject], ...] = (
             "examples": [
                 "turn a researched brief into a PDF",
                 "generate an artifact for a task",
+            ],
+        },
+    ),
+    (
+        "Execution",
+        {
+            "label": "Sandboxed code checks",
+            "summary": (
+                "When enabled and approved, I can run short Python snippets in "
+                "an isolated sandbox with no network or host filesystem access."
+            ),
+            "examples": [
+                "verify a small calculation",
+                "run a tiny self-contained Python script",
             ],
         },
     ),

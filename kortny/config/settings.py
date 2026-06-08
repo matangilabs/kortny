@@ -106,6 +106,11 @@ class Settings(BaseSettings):
         default=70.0,
         validation_alias="KORTNY_SANDBOX_RUNNER_TIMEOUT_SECONDS",
     )
+    sandbox_default_image: str = Field(
+        default="kortny/sandbox-python:latest",
+        validation_alias="KORTNY_SANDBOX_DEFAULT_IMAGE",
+        min_length=1,
+    )
     temporal_address: str = Field(
         default="temporal:7233",
         validation_alias="TEMPORAL_ADDRESS",
@@ -379,6 +384,14 @@ class Settings(BaseSettings):
         if value <= 0:
             raise ValueError("KORTNY_SANDBOX_RUNNER_TIMEOUT_SECONDS must be positive")
         return value
+
+    @field_validator("sandbox_default_image")
+    @classmethod
+    def _strip_sandbox_default_image(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("KORTNY_SANDBOX_DEFAULT_IMAGE cannot be blank")
+        return stripped
 
     @field_validator("scheduler_poll_interval_seconds")
     @classmethod
