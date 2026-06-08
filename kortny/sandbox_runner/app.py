@@ -5,13 +5,18 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 from typing import Literal
 
 from fastapi import FastAPI
 from pydantic import BaseModel, Field, model_validator
 
 from kortny.execution import SandboxResourceLimits, ToolSandboxPolicy
-from kortny.sandbox_runner.docker_api import DockerApiClient, DockerApiProbeClient
+from kortny.sandbox_runner.docker_api import (
+    DockerApiClient,
+    DockerApiRunnerClient,
+    DockerContainerRunSpec,
+)
 
 SERVICE_NAME = "kortny-sandbox-runner"
 
@@ -98,6 +103,17 @@ class SandboxRunRequest(BaseModel):
     def validate_run_shape(self) -> SandboxRunRequest:
         if any(not part.strip() for part in self.command):
             raise ValueError("command entries must be non-empty")
+        if not _is_safe_workspace_path(self.workspace_path):
+            raise ValueError("workspace_path must be /workspace or a child path")
+        if self.artifacts_path is not None and not _is_safe_workspace_path(
+            self.artifacts_path
+        ):
+            raise ValueError("artifacts_path must be /workspace or a child path")
+        if self.artifacts_path is not None and not _is_child_path(
+            child=self.artifacts_path,
+            parent=self.workspace_path,
+        ):
+            raise ValueError("artifacts_path must be inside workspace_path")
         if any(not host.strip() for host in self.egress_allowlist):
             raise ValueError("egress_allowlist entries must be non-empty")
         if self.network == "allowlist" and not self.egress_allowlist:
@@ -121,6 +137,17 @@ class SandboxRunRequest(BaseModel):
             "env_keys": sorted(self.env),
             "resource_limits": self.resource_limits.to_contract().to_payload(),
         }
+
+    def to_run_spec(self) -> DockerContainerRunSpec:
+        """Return the Docker runner spec for an already-validated request."""
+
+        return DockerContainerRunSpec(
+            image=self.image,
+            command=tuple(self.command),
+            workspace_path=self.workspace_path,
+            env=dict(self.env),
+            resource_limits=self.resource_limits.to_contract(),
+        )
 
 
 def load_sandbox_runner_settings(
@@ -159,7 +186,7 @@ def load_sandbox_runner_settings(
 
 def create_app(
     settings: SandboxRunnerSettings | None = None,
-    docker_client: DockerApiProbeClient | None = None,
+    docker_client: DockerApiRunnerClient | None = None,
 ) -> FastAPI:
     """Create the internal sandbox-runner control-plane app."""
 
@@ -212,32 +239,78 @@ def create_app(
 
     @app.post("/run")
     def run(request: SandboxRunRequest) -> dict[str, object]:
-        status = (
-            "execution_not_implemented"
-            if resolved_settings.execution_enabled
-            else "execution_disabled"
-        )
-        reason = (
-            "Sandbox execution is enabled in settings, but container launch is "
-            "not implemented in this slice."
-            if resolved_settings.execution_enabled
-            else (
-                "Sandbox execution is not enabled. This endpoint currently "
-                "validates the request contract only."
+        if not resolved_settings.execution_enabled:
+            return {
+                "ok": False,
+                "service": SERVICE_NAME,
+                "runner": resolved_settings.runner_name,
+                "execution_enabled": False,
+                "execution_attempted": False,
+                "status": "execution_disabled",
+                "reason": (
+                    "Sandbox execution is not enabled. This endpoint currently "
+                    "validates the request contract only."
+                ),
+                "request": request.redacted_payload(),
+            }
+        if request.image != resolved_settings.default_image:
+            return _rejected_run_payload(
+                settings=resolved_settings,
+                request=request,
+                status="image_not_allowed",
+                reason="Sandbox execution only allows the configured default image.",
             )
-        )
+        if request.network != "none":
+            return _rejected_run_payload(
+                settings=resolved_settings,
+                request=request,
+                status="network_not_implemented",
+                reason="Sandbox execution currently supports only network: none.",
+            )
+
+        result = resolved_docker_client.run_container(request.to_run_spec())
         return {
-            "ok": False,
+            "ok": result.ok,
             "service": SERVICE_NAME,
             "runner": resolved_settings.runner_name,
             "execution_enabled": resolved_settings.execution_enabled,
-            "execution_attempted": False,
-            "status": status,
-            "reason": reason,
+            "execution_attempted": result.execution_attempted,
+            "status": result.status,
             "request": request.redacted_payload(),
+            "result": result.to_payload(),
         }
 
     return app
+
+
+def _rejected_run_payload(
+    *,
+    settings: SandboxRunnerSettings,
+    request: SandboxRunRequest,
+    status: str,
+    reason: str,
+) -> dict[str, object]:
+    return {
+        "ok": False,
+        "service": SERVICE_NAME,
+        "runner": settings.runner_name,
+        "execution_enabled": settings.execution_enabled,
+        "execution_attempted": False,
+        "status": status,
+        "reason": reason,
+        "request": request.redacted_payload(),
+    }
+
+
+def _is_safe_workspace_path(value: str) -> bool:
+    if value != "/workspace" and not value.startswith("/workspace/"):
+        return False
+    return ".." not in PurePosixPath(value).parts
+
+
+def _is_child_path(*, child: str, parent: str) -> bool:
+    normalized_parent = parent.rstrip("/")
+    return child == normalized_parent or child.startswith(f"{normalized_parent}/")
 
 
 def _env_bool(value: str | None, *, default: bool) -> bool:

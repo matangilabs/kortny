@@ -12,12 +12,18 @@ from kortny.sandbox_runner.docker_api import (
     DockerApiClient,
     DockerApiProbe,
     DockerApiProbeClient,
+    DockerApiRunnerClient,
+    DockerContainerRunResult,
+    DockerContainerRunSpec,
 )
 
 __all__ = [
     "DockerApiClient",
     "DockerApiProbe",
     "DockerApiProbeClient",
+    "DockerApiRunnerClient",
+    "DockerContainerRunResult",
+    "DockerContainerRunSpec",
     "SandboxResourceLimitsRequest",
     "SandboxRunRequest",
     "SandboxRunnerSettings",
