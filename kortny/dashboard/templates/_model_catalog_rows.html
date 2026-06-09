@@ -3,7 +3,7 @@
   <tr data-model-catalog-row>
     <!-- Model Column -->
     <td class="model-catalog-model-cell">
-      <div class="model-catalog-model-title" style="display: flex; flex-direction: column; gap: 4px; align-items: flex-start;">
+      <div class="model-catalog-model-title">
         <strong>{{ row.model.display_name }}</strong>
         <span class="model-identifier-subtle">{{ row.model.model_identifier }}</span>
       </div>
@@ -57,15 +57,15 @@
 
     <!-- Tier Routing Column -->
     <td class="model-catalog-route-cell">
-      <div style="display: flex; flex-direction: column; gap: 8px; align-items: flex-start;">
+      <div class="route-cell-stack">
         {% if row.assignment_labels %}
-          <div class="model-tag-list" style="display: flex; flex-wrap: wrap; gap: 4px;">
+          <div class="model-tag-list">
             {% for label in row.assignment_labels %}
               <span class="badge badge-success">{{ label }}</span>
             {% endfor %}
           </div>
         {% else %}
-          <span class="identity-id" style="font-style: italic; color: var(--muted-foreground);">Unused</span>
+          <span class="route-unused">Unused</span>
         {% endif %}
         
         <div class="route-select-wrapper">
@@ -90,7 +90,7 @@
 
     <!-- Status Column -->
     <td class="model-catalog-status-cell">
-      <div style="display: flex; justify-content: center; align-items: center; min-height: 32px;">
+      <div class="status-cell-center">
         <div class="switch-control">
           <label class="switch" for="status-{{ row.model.id }}">
             <span class="sr-only">Toggle status for {{ row.model.display_name }}</span>

@@ -6,9 +6,9 @@
   <section class="page-heading">
     <div>
       <a class="eyebrow-link" href="/admin/models">LLM Providers</a>
-      <h1 style="display: flex; align-items: center; gap: 12px;">
+      <h1 class="provider-detail-title">
         {{ detail.provider.display_name }}
-        <span class="badge badge-{{ 'success' if detail.provider.status == 'active' else 'warning' }}" id="provider-header-status-badge" style="font-size: 12px; padding: 4px 8px; border-radius: 99px;">
+        <span class="badge badge-{{ 'success' if detail.provider.status == 'active' else 'warning' }}" id="provider-header-status-badge">
           {{ detail.provider.status }}
         </span>
       </h1>
@@ -50,29 +50,29 @@
 
   <!-- Tab Panel 1: Model Catalog (Full Width) -->
   <div class="tab-content active" id="tab-catalog" role="tabpanel" aria-labelledby="btn-tab-catalog">
-    <section class="model-provider-model-workspace" aria-label="Provider model management" style="grid-template-columns: minmax(0, 1fr);">
+    <section class="model-provider-model-workspace is-full" aria-label="Provider model management">
       <div class="model-provider-main-stack">
-        
+
         <!-- Collapsible Needs Attention banner (outside catalog card) -->
-        <div id="attention-notice-container" style="width: 100%;">
+        <div id="attention-notice-container">
           {% if detail.attention_models %}
-            <div class="notice notice-warning" id="attention-notice" style="margin-bottom: 6px; border-radius: var(--radius); position: relative; padding-right: 40px;">
-              <button 
-                type="button" 
-                onclick="document.getElementById('attention-notice').remove()" 
-                style="position: absolute; right: 14px; top: 14px; background: none; border: none; font-size: 20px; font-weight: 700; cursor: pointer; color: var(--warning); line-height: 1; padding: 0;"
+            <div class="notice notice-warning attention-notice" id="attention-notice">
+              <button
+                type="button"
+                class="attention-notice-close"
+                onclick="document.getElementById('attention-notice').remove()"
                 aria-label="Dismiss warning"
               >
                 &times;
               </button>
               <details>
-                <summary style="font-weight: 800; cursor: pointer; display: flex; align-items: center; gap: 8px;">
+                <summary>
                   <span>{{ detail.attention_models|length }} model(s) require attention</span>
                 </summary>
-                <ul style="margin: 10px 0 0; padding-left: 20px; font-size: 13px; line-height: 1.6;">
+                <ul class="attention-notice-list">
                   {% for row in detail.attention_models %}
                     <li>
-                      <strong>{{ row.model.display_name }}</strong> (<code>{{ row.model.model_identifier }}</code>) - 
+                      <strong>{{ row.model.display_name }}</strong> (<code>{{ row.model.model_identifier }}</code>) -
                       {% if row.latest_pricing is none %}<span class="badge badge-warning">Missing pricing</span>{% endif %}
                       {% if not row.model.is_enabled %}<span class="badge badge-danger">Disabled</span>{% endif %}
                       {% for label in row.assignment_labels %}
@@ -87,8 +87,8 @@
         </div>
 
         <!-- Model Catalog Card (Swappable) -->
-        <section class="card detail-section model-config-panel model-provider-catalog-card" id="catalog-card" style="width: 100%; margin-top: 0;">
-          <header style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 16px;">
+        <section class="card detail-section model-config-panel model-provider-catalog-card" id="catalog-card">
+          <header class="catalog-card-header">
             <div>
               <h2>Model Catalog</h2>
               <p>Provider-specific model rows available for tier assignment and runtime routing.</p>
@@ -103,9 +103,8 @@
               data-model-catalog-endpoint="/admin/models/providers/{{ detail.provider.id }}/models"
               data-model-catalog-limit="{{ detail.model_page_size }}"
             >
-              <div style="display: flex; gap: 12px; align-items: center; width: 100%; flex-wrap: wrap;">
-                <!-- Search Box -->
-                <label class="model-provider-catalog-search-box" for="model-catalog-search" style="flex: 1; min-width: 240px; margin: 0;">
+              <div class="catalog-search-row">
+                <label class="model-provider-catalog-search-box" for="model-catalog-search">
                   <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
                     <circle cx="11" cy="11" r="8"></circle>
                     <path d="m21 21-4.35-4.35"></path>
@@ -113,39 +112,36 @@
                   <span class="sr-only">Search models</span>
                   <input id="model-catalog-search" class="input model-provider-catalog-search-input" type="search" placeholder="Search models by name, id, or source" autocomplete="off">
                 </label>
-                
-                <!-- Filters inline -->
-                <div class="catalog-filters-row" style="margin-top: 0; display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
-                  <select class="filter-pill-select" id="filter-capability" aria-label="Filter by capability">
-                    <option value="">All Capabilities</option>
-                    <option value="chat">Chat</option>
-                    <option value="vision">Vision</option>
-                    <option value="tools">Tool Calling</option>
-                  </select>
-                  
-                  <select class="filter-pill-select" id="filter-routing" aria-label="Filter by routing status">
-                    <option value="">All Routing</option>
-                    <option value="routed">Routed Only</option>
-                    <option value="unused">Unrouted Only</option>
-                  </select>
-                  
-                  <select class="filter-pill-select" id="filter-status" aria-label="Filter by status">
-                    <option value="">All Statuses</option>
-                    <option value="enabled">Enabled Only</option>
-                    <option value="disabled">Disabled Only</option>
-                  </select>
-                  
-                  <button class="btn-ghost" type="button" id="btn-clear-filters" style="font-size: 11px; padding: 4px 8px; min-height: 28px; border-radius: 999px;" hidden>Clear filters</button>
-                </div>
-                
-                <!-- Count text aligned on right -->
-                <span class="model-provider-catalog-count" data-model-catalog-count data-total-count="{{ detail.model_total_count }}" style="margin-left: auto; white-space: nowrap;">{{ detail.models|length }} shown of {{ detail.model_total_count }} models</span>
+                <span class="model-provider-catalog-count" data-model-catalog-count data-total-count="{{ detail.model_total_count }}">{{ detail.models|length }} shown of {{ detail.model_total_count }} models</span>
+              </div>
+
+              <div class="catalog-filters-row">
+                <select class="filter-pill-select" id="filter-capability" aria-label="Filter by capability">
+                  <option value="">All Capabilities</option>
+                  <option value="chat">Chat</option>
+                  <option value="vision">Vision</option>
+                  <option value="tools">Tool Calling</option>
+                </select>
+
+                <select class="filter-pill-select" id="filter-routing" aria-label="Filter by routing status">
+                  <option value="">All Routing</option>
+                  <option value="routed">Routed Only</option>
+                  <option value="unused">Unrouted Only</option>
+                </select>
+
+                <select class="filter-pill-select" id="filter-status" aria-label="Filter by status">
+                  <option value="">All Statuses</option>
+                  <option value="enabled">Enabled Only</option>
+                  <option value="disabled">Disabled Only</option>
+                </select>
+
+                <button class="btn-ghost catalog-clear-filters" type="button" id="btn-clear-filters" hidden>Clear filters</button>
               </div>
             </div>
           {% endif %}
           
           <div class="table-wrap">
-            <table class="table model-config-table model-catalog-table" style="width: 100%;">
+            <table class="table model-config-table model-catalog-table">
               <caption>Provider model rows, pricing, tier usage, and status controls.</caption>
               <thead>
                 <tr>
@@ -175,9 +171,8 @@
                 data-next-offset="{{ detail.model_next_offset or detail.model_page_size }}"
                 {{ "hidden" if not detail.model_has_more else "" }}
                 aria-live="polite"
-                style="background: transparent; border: none; min-height: auto; padding: 0; cursor: pointer; display: flex; align-items: center; gap: 8px;"
               >
-                <span class="catalog-load-status" style="font-weight: 500; color: var(--muted-foreground);">Loading more models</span>
+                <span class="catalog-load-status">Loading more models</span>
               </div>
             </div>
           {% endif %}
@@ -188,15 +183,15 @@
 
   <!-- Tab Panel 2: Routed Models (Full Width) -->
   <div class="tab-content" id="tab-routing" role="tabpanel" aria-labelledby="btn-tab-routing">
-    <section class="model-provider-model-workspace" aria-label="Provider model management" style="grid-template-columns: minmax(0, 1fr);">
+    <section class="model-provider-model-workspace is-full" aria-label="Provider model management">
       <div class="model-provider-main-stack">
-        <article class="card detail-section model-config-panel model-provider-models" id="routed-models-card" style="width: 100%;">
+        <article class="card detail-section model-config-panel model-provider-models" id="routed-models-card">
           <header>
             <h2>Routed Models</h2>
             <p>Models currently used by Kortny runtime tiers.</p>
           </header>
           <div class="table-wrap">
-            <table class="table model-config-table model-catalog-table" style="width: 100%;">
+            <table class="table model-config-table model-catalog-table">
               <thead>
                 <tr>
                   <th>Model</th>
@@ -222,7 +217,7 @@
                       </div>
                     </td>
                     <td class="model-catalog-pricing-cell">
-                      <div style="display: flex; flex-direction: column; gap: 4px; align-items: flex-start;">
+                      <div class="cell-stack">
                         {% if row.latest_pricing %}
                           <strong>{{ row.pricing_label }}</strong>
                           <span>{{ row.pricing_detail }}</span>
@@ -232,7 +227,7 @@
                       </div>
                     </td>
                     <td class="model-catalog-status-cell">
-                      <div style="display: flex; flex-direction: column; gap: 6px; align-items: flex-start;">
+                      <div class="routed-status-stack">
                         <div class="switch-control">
                           <label class="switch" for="routed-status-{{ row.model.id }}">
                             <span class="sr-only">Toggle status for {{ row.model.display_name }}</span>
@@ -255,7 +250,7 @@
                   </tr>
                 {% else %}
                   <tr>
-                    <td colspan="4" class="model-provider-empty" style="text-align: center; padding: 40px;">
+                    <td colspan="4" class="model-provider-empty empty-state">
                       <strong>No routed models use this provider yet.</strong>
                       <span>Assign a model to a tier from the Models page when this provider should serve runtime traffic.</span>
                     </td>
@@ -271,7 +266,7 @@
 
   <!-- Tab Panel 3: Connection & Settings -->
   <div class="tab-content" id="tab-connection" role="tabpanel" aria-labelledby="btn-tab-connection">
-    <section class="model-provider-layout" aria-label="Provider controls" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px;">
+    <section class="model-provider-layout is-split" aria-label="Provider controls">
       <article class="card detail-section model-config-panel">
         <header>
           <h2>Connection</h2>
@@ -348,7 +343,7 @@
 
   <!-- Tab Panel 4: Activity Logs -->
   <div class="tab-content" id="tab-audits" role="tabpanel" aria-labelledby="btn-tab-audits">
-    <section class="card detail-section model-config-panel" id="audit-trail-card" style="width: 100%;">
+    <section class="card detail-section model-config-panel" id="audit-trail-card">
       <header>
         <h2>Recent Provider Audit</h2>
         <p>Configuration changes tied to this provider, its models, and assigned tiers.</p>
@@ -389,28 +384,28 @@
   <!-- Add Manual Model Dialog Modal -->
   <dialog id="add-model-dialog">
     <div class="dialog-header">
-      <h2 style="margin: 0; font-size: 16px; font-weight: 800;">Add Manual Model</h2>
+      <h2>Add Manual Model</h2>
       <button type="button" class="toast-close" onclick="document.getElementById('add-model-dialog').close()" aria-label="Close dialog">&times;</button>
     </div>
     <form class="model-config-form" method="post" action="/admin/models/catalog">
       <div class="dialog-body">
-        <p style="color: var(--muted-foreground); font-size: 12px; margin: 0 0 4px; line-height: 1.45;">Use this only when the model is not returned by sync yet.</p>
+        <p class="dialog-hint">Use this only when the model is not returned by sync yet.</p>
         <input type="hidden" name="provider_account_id" value="{{ detail.provider.id }}">
         <input type="hidden" name="next" value="/admin/models/providers/{{ detail.provider.id }}">
         
-        <label style="display: grid; gap: 6px; font-size: 11px; font-weight: 800; text-transform: uppercase; color: var(--muted-foreground);">
+        <label class="dialog-field">
           Model identifier
-          <input class="input" name="model_identifier" placeholder="provider/model-name" required style="font-weight: 500;">
+          <input class="input" name="model_identifier" placeholder="provider/model-name" required>
         </label>
         
-        <label style="display: grid; gap: 6px; font-size: 11px; font-weight: 800; text-transform: uppercase; color: var(--muted-foreground);">
+        <label class="dialog-field">
           Display name
-          <input class="input" name="display_name" placeholder="Optional friendly name" style="font-weight: 500;">
+          <input class="input" name="display_name" placeholder="Optional friendly name">
         </label>
       </div>
       <div class="dialog-footer">
-        <button class="btn-ghost" type="button" onclick="document.getElementById('add-model-dialog').close()" style="min-height: 36px; padding: 0 16px;">Cancel</button>
-        <button class="btn" type="submit" style="min-height: 36px; padding: 0 16px;">Add Model</button>
+        <button class="btn-ghost" type="button" onclick="document.getElementById('add-model-dialog').close()">Cancel</button>
+        <button class="btn" type="submit">Add Model</button>
       </div>
     </form>
   </dialog>
