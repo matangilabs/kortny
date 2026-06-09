@@ -2928,71 +2928,292 @@ pre {
   color: var(--foreground);
 }
 
+/* Schedules — controls bar (scope + status pills + count) */
+.schedules-controls {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 16px;
+  justify-content: space-between;
+  margin-bottom: 20px;
+}
+
+.schedules-controls-main {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.schedules-count {
+  color: var(--muted-foreground);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  margin: 0;
+}
+
+.schedules-section-header {
+  margin-bottom: 14px;
+}
+
+/* Schedules — card list */
 .schedule-list {
   display: grid;
   gap: 12px;
-  padding: 0 16px 16px;
 }
 
-.schedule-row {
-  align-items: stretch;
-  background: var(--payload-bg);
-  border: 1px solid var(--border);
-  border-radius: 10px;
+.schedule-card {
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  border-left: 3px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
   display: grid;
-  gap: 16px;
-  grid-template-columns: minmax(0, 1fr) minmax(220px, 0.32fr);
-  padding: 14px;
+  gap: 14px;
+  padding: 16px;
+  transition: box-shadow 200ms ease, border-color 200ms ease, transform 200ms ease;
 }
 
-.schedule-main,
-.schedule-side {
-  min-width: 0;
+.schedule-card:hover {
+  box-shadow: 0 4px 14px rgb(21 24 26 / 6%), var(--shadow);
+  transform: translateY(-1px);
 }
 
-.schedule-title {
+.schedule-card-success {
+  border-left-color: var(--success);
+}
+
+.schedule-card-warning {
+  border-left-color: var(--warning);
+}
+
+.schedule-card-danger {
+  border-left-color: var(--destructive);
+}
+
+.schedule-card-accent {
+  border-left-color: var(--accent);
+}
+
+.schedule-card-top {
+  align-items: flex-start;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.schedule-card-id {
   align-items: center;
   display: flex;
+  flex-wrap: wrap;
   gap: 10px;
   min-width: 0;
 }
 
-.schedule-title strong {
+.schedule-card-title {
+  color: var(--foreground);
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1.3;
   overflow-wrap: anywhere;
 }
 
-.schedule-meta,
-.schedule-run-times {
-  display: grid;
-  gap: 10px;
-  margin: 12px 0 0;
-}
-
-.schedule-meta {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-}
-
-.schedule-meta div,
-.schedule-run-times div {
-  min-width: 0;
-}
-
-.schedule-meta dt,
-.schedule-run-times dt {
-  color: var(--muted-foreground);
+/* Status pill with dot */
+.schedule-status-pill {
+  align-items: center;
+  border-radius: 999px;
+  display: inline-flex;
+  flex-shrink: 0;
   font-size: 11px;
-  font-weight: 800;
+  font-weight: 700;
+  gap: 6px;
+  letter-spacing: 0.02em;
+  padding: 3px 9px;
   text-transform: uppercase;
 }
 
-.schedule-meta dd,
-.schedule-run-times dd {
-  color: var(--foreground);
-  font-weight: 650;
-  margin: 2px 0 0;
-  overflow-wrap: anywhere;
+.schedule-status-pill .status-dot {
+  border-radius: 50%;
+  height: 7px;
+  width: 7px;
 }
 
+.schedule-status-success {
+  background: var(--success-bg);
+  color: var(--success);
+}
+
+.schedule-status-success .status-dot {
+  background: var(--success);
+}
+
+.schedule-status-warning {
+  background: var(--warning-bg);
+  color: var(--warning);
+}
+
+.schedule-status-warning .status-dot {
+  background: var(--warning);
+}
+
+.schedule-status-danger {
+  background: var(--destructive-bg);
+  color: var(--destructive);
+}
+
+.schedule-status-danger .status-dot {
+  background: var(--destructive);
+}
+
+.schedule-status-accent {
+  background: var(--accent-bg);
+  color: var(--accent-strong);
+}
+
+.schedule-status-accent .status-dot {
+  background: var(--accent);
+}
+
+.schedule-status-neutral {
+  background: var(--muted);
+  color: var(--muted-foreground);
+}
+
+.schedule-status-neutral .status-dot {
+  background: var(--muted-foreground);
+}
+
+/* Next-run badge (prominent, right of title) */
+.schedule-next {
+  align-items: center;
+  background: var(--accent-bg);
+  border: 1px solid var(--accent-border);
+  border-radius: 8px;
+  color: var(--accent-strong);
+  display: inline-flex;
+  flex-shrink: 0;
+  gap: 8px;
+  padding: 6px 11px;
+}
+
+.schedule-next svg {
+  height: 16px;
+  width: 16px;
+}
+
+.schedule-next-text {
+  display: grid;
+  gap: 1px;
+  line-height: 1.2;
+}
+
+.schedule-next-label {
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  opacity: 0.75;
+  text-transform: uppercase;
+}
+
+.schedule-next-value {
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 750;
+}
+
+/* Meta chips (cadence / owner / delivery / budget) */
+.schedule-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.schedule-meta-chip {
+  align-items: center;
+  background: color-mix(in srgb, var(--muted) 70%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  color: var(--foreground);
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: 650;
+  gap: 6px;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  padding: 5px 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.schedule-meta-chip svg {
+  color: var(--muted-foreground);
+  flex-shrink: 0;
+  height: 13px;
+  width: 13px;
+}
+
+/* Footer — last run + actions */
+.schedule-card-foot {
+  align-items: center;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: space-between;
+  padding-top: 12px;
+}
+
+.schedule-foot-last {
+  align-items: center;
+  color: var(--muted-foreground);
+  display: inline-flex;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  gap: 6px;
+}
+
+.schedule-foot-last svg {
+  flex-shrink: 0;
+  height: 13px;
+  opacity: 0.8;
+  width: 13px;
+}
+
+.schedule-card-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.schedule-card-actions form {
+  margin: 0;
+}
+
+.schedule-card-actions .btn,
+.schedule-card-actions .btn-ghost {
+  font-size: 13px;
+  min-height: 32px;
+  padding: 6px 12px;
+}
+
+.schedule-no-controls {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-style: italic;
+}
+
+.schedule-empty {
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius);
+}
+
+/* Shared action-row base (used by schedule_detail.html via
+   .schedule-actions .schedule-detail-actions) */
 .schedule-actions {
   align-items: center;
   display: flex;
@@ -3004,10 +3225,6 @@ pre {
 
 .schedule-actions form {
   margin: 0;
-}
-
-.schedules-toolbar {
-  margin-top: 18px;
 }
 
 .schedule-detail-grid {
@@ -6036,8 +6253,6 @@ pre {
     grid-template-columns: 1fr;
   }
 
-  .schedule-row,
-  .schedule-meta,
   .schedule-detail-grid,
   .schedule-form-grid {
     grid-template-columns: 1fr;
@@ -6045,6 +6260,11 @@ pre {
 
   .schedule-actions {
     justify-content: flex-start;
+  }
+
+  .schedule-card-actions {
+    justify-content: flex-start;
+    width: 100%;
   }
 
   .schedule-edit-actions {
@@ -8199,32 +8419,6 @@ details[open] > summary::after {
   padding: 2px 6px;
 }
 
-/* Schedule next-run prominence */
-.schedule-next-run-badge {
-  align-items: center;
-  background: var(--accent-bg);
-  border: 1px solid var(--accent-border);
-  border-radius: 6px;
-  color: var(--accent-strong);
-  display: inline-flex;
-  font-size: 12px;
-  font-weight: 700;
-  gap: 5px;
-  padding: 3px 8px;
-}
-
-.schedule-next-run-badge.overdue {
-  background: var(--destructive-bg);
-  border-color: color-mix(in srgb, var(--destructive) 28%, transparent);
-  color: var(--destructive);
-}
-
-.schedule-next-run-badge.due-soon {
-  background: var(--warning-bg);
-  border-color: color-mix(in srgb, var(--warning) 28%, transparent);
-  color: var(--warning);
-}
-
 /* Knowledge graph compact summary (4 cards) */
 .graph-summary-compact {
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -8346,23 +8540,6 @@ details[open] > summary::after {
 
 .usage-breakdown-body {
   padding-top: 4px;
-}
-
-/* Schedule row header (next-run prominence) */
-.schedule-row-header {
-  align-items: center;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
-  justify-content: space-between;
-  margin-bottom: 6px;
-}
-
-.schedule-chip-row {
-  align-items: center;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
 }
 
 /* Memory proposed-facts review banner */
@@ -8638,5 +8815,159 @@ details[open] > summary::after {
   display: grid;
   gap: 20px;
   grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+}
+
+
+/* Member dashboard — Recent Work card list (own namespace; the shared
+   .task-list-item grid expects a status-rail + body and would crush this) */
+.me-task-list {
+  display: grid;
+}
+
+.me-task-row {
+  align-items: start;
+  border-bottom: 1px solid var(--border);
+  border-left: 3px solid transparent;
+  color: var(--foreground);
+  display: grid;
+  gap: 12px;
+  grid-template-columns: 10px minmax(0, 1fr);
+  padding: 14px 16px;
+  text-decoration: none;
+  transition: background-color 200ms ease, border-color 200ms ease, transform 200ms ease, box-shadow 200ms ease;
+}
+
+.me-task-row:last-child {
+  border-bottom: 0;
+}
+
+.me-task-row:hover {
+  background: var(--table-row-hover);
+  text-decoration: none;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgb(21 24 26 / 5%);
+}
+
+.me-task-row.status-rail-succeeded:hover {
+  border-left-color: var(--success);
+}
+
+.me-task-row.status-rail-running:hover,
+.me-task-row.status-rail-pending:hover,
+.me-task-row.status-rail-waiting_approval:hover {
+  border-left-color: var(--warning);
+}
+
+.me-task-row.status-rail-failed:hover,
+.me-task-row.status-rail-crashed:hover,
+.me-task-row.status-rail-cancelled:hover {
+  border-left-color: var(--destructive);
+}
+
+.me-task-row:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+
+.me-task-rail {
+  align-items: center;
+  display: flex;
+  justify-content: center;
+  padding-top: 5px;
+}
+
+.me-task-body {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+}
+
+.me-task-top {
+  align-items: center;
+  color: var(--muted-foreground);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.me-task-time {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+}
+
+.me-task-cost {
+  color: var(--foreground);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 800;
+  margin-left: auto;
+}
+
+.me-task-title {
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  color: var(--foreground);
+  display: -webkit-box;
+  font-weight: 700;
+  line-height: 1.35;
+  overflow: hidden;
+  overflow-wrap: break-word;
+}
+
+.me-task-row:hover .me-task-title {
+  color: var(--accent-strong);
+}
+
+.me-task-summary {
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  color: var(--muted-foreground);
+  display: -webkit-box;
+  font-size: 13px;
+  line-height: 1.4;
+  overflow: hidden;
+  overflow-wrap: break-word;
+}
+
+.me-task-summary.is-danger {
+  color: var(--destructive);
+}
+
+.me-task-meta {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.me-task-chip {
+  align-items: center;
+  background: color-mix(in srgb, var(--muted) 70%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted-foreground);
+  display: inline-flex;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  gap: 5px;
+  max-width: 100%;
+  min-width: 0;
+  padding: 3px 9px;
+}
+
+.me-task-chip svg {
+  flex-shrink: 0;
+  height: 12px;
+  opacity: 0.7;
+  width: 12px;
+}
+
+.me-task-chip span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 

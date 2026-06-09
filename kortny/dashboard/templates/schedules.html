@@ -25,116 +25,120 @@
     {% endfor %}
   </section>
 
-  <section class="memory-toolbar schedules-toolbar" aria-label="Scheduled task view selector">
-    {% if dashboard_is_admin %}
-      <nav class="segmented-nav">
-        <a class="segmented-item {{ 'active' if schedule_page.active_view == 'all' else '' }}" href="{{ schedules_base_path }}?view=all&status={{ schedule_page.status_filter }}" {% if schedule_page.active_view == 'all' %}aria-current="page"{% endif %}>All</a>
-        <a class="segmented-item {{ 'active' if schedule_page.active_view == 'my' else '' }}" href="{{ schedules_base_path }}?view=my&status={{ schedule_page.status_filter }}" {% if schedule_page.active_view == 'my' %}aria-current="page"{% endif %}>My Tasks</a>
-        <a class="segmented-item {{ 'active' if schedule_page.active_view == 'system' else '' }}" href="{{ schedules_base_path }}?view=system&status={{ schedule_page.status_filter }}" {% if schedule_page.active_view == 'system' %}aria-current="page"{% endif %}>System Tasks</a>
+  <section class="schedules-controls" aria-label="Schedule filters">
+    <div class="schedules-controls-main">
+      {% if dashboard_is_admin %}
+        <nav class="segmented-nav" aria-label="Schedule scope">
+          <a class="segmented-item {{ 'active' if schedule_page.active_view == 'all' else '' }}" href="{{ schedules_base_path }}?view=all&status={{ schedule_page.status_filter }}" {% if schedule_page.active_view == 'all' %}aria-current="page"{% endif %}>All</a>
+          <a class="segmented-item {{ 'active' if schedule_page.active_view == 'my' else '' }}" href="{{ schedules_base_path }}?view=my&status={{ schedule_page.status_filter }}" {% if schedule_page.active_view == 'my' %}aria-current="page"{% endif %}>Mine</a>
+          <a class="segmented-item {{ 'active' if schedule_page.active_view == 'system' else '' }}" href="{{ schedules_base_path }}?view=system&status={{ schedule_page.status_filter }}" {% if schedule_page.active_view == 'system' %}aria-current="page"{% endif %}>System</a>
+        </nav>
+      {% endif %}
+      <nav class="quick-filter-pills" aria-label="Filter by status">
+        {% set _statuses = [("all", "All"), ("active", "Active"), ("paused", "Paused"), ("proposed", "Proposed"), ("completed", "Completed"), ("cancelled", "Cancelled")] %}
+        {% for val, label in _statuses %}
+          <a class="quick-filter-pill {{ 'active' if schedule_page.status_filter == val else '' }}" href="{{ schedules_base_path }}?{% if dashboard_is_admin %}view={{ schedule_page.active_view }}&{% endif %}status={{ val }}">{{ label }}</a>
+        {% endfor %}
       </nav>
-    {% else %}
-      <nav class="segmented-nav">
-        <a class="segmented-item active" href="{{ schedules_base_path }}?status={{ schedule_page.status_filter }}" aria-current="page">My Tasks</a>
-      </nav>
-    {% endif %}
-    <p>
+    </div>
+    <p class="schedules-count">
       Showing {{ schedule_page.first_item|number }}-{{ schedule_page.last_item|number }}
       of {{ schedule_page.total_count|number }} scheduled task{{ "" if schedule_page.total_count == 1 else "s" }}.
     </p>
   </section>
 
-  <section class="card detail-section">
-    <header>
+  <div class="section-header-row schedules-section-header">
+    <div>
       <h2>Schedule Registry</h2>
       <p>Active schedules are materialized into normal tasks when they become due.</p>
-    </header>
-
-    <form class="filters panel-filters schedules-filters" method="get" action="{{ schedules_base_path }}">
-      {% if dashboard_is_admin %}
-        <input type="hidden" name="view" value="{{ schedule_page.active_view }}">
-      {% endif %}
-      <label>
-        Status
-        <select class="input" name="status">
-          <option value="all" {{ "selected" if schedule_page.status_filter == "all" else "" }}>All statuses</option>
-          <option value="active" {{ "selected" if schedule_page.status_filter == "active" else "" }}>Active</option>
-          <option value="paused" {{ "selected" if schedule_page.status_filter == "paused" else "" }}>Paused</option>
-          <option value="proposed" {{ "selected" if schedule_page.status_filter == "proposed" else "" }}>Proposed</option>
-          <option value="completed" {{ "selected" if schedule_page.status_filter == "completed" else "" }}>Completed</option>
-          <option value="cancelled" {{ "selected" if schedule_page.status_filter == "cancelled" else "" }}>Cancelled</option>
-        </select>
-      </label>
-      <button class="btn" type="submit">Apply</button>
-      <a class="btn-ghost" href="{{ schedules_base_path }}">Reset</a>
-    </form>
-
-    <div class="schedule-list" role="list" aria-label="Scheduled tasks">
-      {% for row in schedule_page.rows %}
-        <article class="schedule-row" role="listitem">
-          <div class="schedule-main">
-            <div class="schedule-row-header">
-              <div class="schedule-title">
-                <span class="badge badge-{{ row.tone }}">{{ row.schedule.status }}</span>
-                <strong>{{ row.schedule.title }}</strong>
-              </div>
-              <span class="schedule-next-run-badge" title="Next scheduled run">
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-                {{ row.next_run }}
-              </span>
-            </div>
-            <div class="schedule-chip-row">
-              <span class="badge badge-neutral" title="Cadence">{{ row.cadence }}</span>
-              <span class="badge badge-neutral" title="Owner">{{ row.owner }}</span>
-              <span class="badge badge-neutral" title="Delivery">{{ row.delivery }}</span>
-              {% if row.budget and row.budget != '-' %}
-                <span class="badge badge-neutral" title="Budget">{{ row.budget }}</span>
-              {% endif %}
-            </div>
-          </div>
-          <aside class="schedule-side">
-            <dl class="schedule-run-times">
-              <div>
-                <dt>Last run</dt>
-                <dd>{{ row.last_run }}</dd>
-              </div>
-            </dl>
-            <div class="schedule-actions" aria-label="Schedule actions">
-              <a class="btn-ghost" href="{{ schedules_detail_base_path }}/{{ row.schedule.id }}">Details</a>
-              {% if row.can_activate %}
-                <form method="post" action="/schedules/{{ row.schedule.id }}/activate" onsubmit="return confirm('Activate this scheduled task?');">
-                  <input type="hidden" name="next" value="{{ schedules_return_path }}">
-                  <button class="btn" type="submit">Activate</button>
-                </form>
-              {% endif %}
-              {% if row.can_pause %}
-                <form method="post" action="/schedules/{{ row.schedule.id }}/pause" onsubmit="return confirm('Pause this scheduled task?');">
-                  <input type="hidden" name="next" value="{{ schedules_return_path }}">
-                  <button class="btn-ghost" type="submit">Pause</button>
-                </form>
-              {% endif %}
-              {% if row.can_resume %}
-                <form method="post" action="/schedules/{{ row.schedule.id }}/resume" onsubmit="return confirm('Resume this scheduled task?');">
-                  <input type="hidden" name="next" value="{{ schedules_return_path }}">
-                  <button class="btn" type="submit">Resume</button>
-                </form>
-              {% endif %}
-              {% if row.can_cancel %}
-                <form method="post" action="/schedules/{{ row.schedule.id }}/cancel" onsubmit="return confirm('Cancel this scheduled task? Audit history will remain.');">
-                  <input type="hidden" name="next" value="{{ schedules_return_path }}">
-                  <button class="btn-ghost btn-danger" type="submit">Cancel</button>
-                </form>
-              {% endif %}
-              {% if not row.can_activate and not row.can_pause and not row.can_resume and not row.can_cancel %}
-                <span class="identity-id">No active controls</span>
-              {% endif %}
-            </div>
-          </aside>
-        </article>
-      {% else %}
-        <p class="empty attention-empty">No scheduled tasks match these filters.</p>
-      {% endfor %}
     </div>
-  </section>
+  </div>
+
+  <div class="schedule-list" role="list" aria-label="Scheduled tasks">
+    {% for row in schedule_page.rows %}
+      <article class="schedule-card schedule-card-{{ row.tone }}" role="listitem">
+        <div class="schedule-card-top">
+          <div class="schedule-card-id">
+            <span class="schedule-status-pill schedule-status-{{ row.tone }}">
+              <span class="status-dot"></span>{{ row.schedule.status }}
+            </span>
+            <strong class="schedule-card-title">{{ row.schedule.title }}</strong>
+          </div>
+          <span class="schedule-next" title="Next scheduled run">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+            <span class="schedule-next-text">
+              <span class="schedule-next-label">Next run</span>
+              <span class="schedule-next-value">{{ row.next_run }}</span>
+            </span>
+          </span>
+        </div>
+
+        <div class="schedule-card-meta">
+          <span class="schedule-meta-chip" title="Cadence">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m17 2 4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/></svg>
+            {{ row.cadence }}
+          </span>
+          <span class="schedule-meta-chip" title="Owner">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+            {{ row.owner }}
+          </span>
+          <span class="schedule-meta-chip" title="Delivery">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="9" x2="20" y2="9"/><line x1="4" y1="15" x2="20" y2="15"/><line x1="10" y1="3" x2="8" y2="21"/><line x1="16" y1="3" x2="14" y2="21"/></svg>
+            {{ row.delivery }}
+          </span>
+          {% if row.budget and row.budget != '-' %}
+            <span class="schedule-meta-chip" title="Budget">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+              {{ row.budget }}
+            </span>
+          {% endif %}
+        </div>
+
+        <div class="schedule-card-foot">
+          <span class="schedule-foot-last">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3v5h5"/><path d="M3.05 13A9 9 0 1 0 6 5.3L3 8"/><path d="M12 7v5l4 2"/></svg>
+            Last run {{ row.last_run }}
+          </span>
+          <div class="schedule-card-actions" aria-label="Schedule actions">
+            <a class="btn-ghost" href="{{ schedules_detail_base_path }}/{{ row.schedule.id }}">Details</a>
+            {% if row.can_activate %}
+              <form method="post" action="/schedules/{{ row.schedule.id }}/activate" onsubmit="return confirm('Activate this scheduled task?');">
+                <input type="hidden" name="next" value="{{ schedules_return_path }}">
+                <button class="btn" type="submit">Activate</button>
+              </form>
+            {% endif %}
+            {% if row.can_pause %}
+              <form method="post" action="/schedules/{{ row.schedule.id }}/pause" onsubmit="return confirm('Pause this scheduled task?');">
+                <input type="hidden" name="next" value="{{ schedules_return_path }}">
+                <button class="btn-ghost" type="submit">Pause</button>
+              </form>
+            {% endif %}
+            {% if row.can_resume %}
+              <form method="post" action="/schedules/{{ row.schedule.id }}/resume" onsubmit="return confirm('Resume this scheduled task?');">
+                <input type="hidden" name="next" value="{{ schedules_return_path }}">
+                <button class="btn" type="submit">Resume</button>
+              </form>
+            {% endif %}
+            {% if row.can_cancel %}
+              <form method="post" action="/schedules/{{ row.schedule.id }}/cancel" onsubmit="return confirm('Cancel this scheduled task? Audit history will remain.');">
+                <input type="hidden" name="next" value="{{ schedules_return_path }}">
+                <button class="btn-ghost btn-danger" type="submit">Cancel</button>
+              </form>
+            {% endif %}
+            {% if not row.can_activate and not row.can_pause and not row.can_resume and not row.can_cancel %}
+              <span class="schedule-no-controls">No active controls</span>
+            {% endif %}
+          </div>
+        </div>
+      </article>
+    {% else %}
+      <div class="empty-state schedule-empty">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="18" x="3" y="4" rx="2"/><path d="M3 10h18"/><path d="M8 2v4"/><path d="M16 2v4"/></svg>
+        <span>No scheduled tasks match these filters.</span>
+        <small>Schedules are created when you ask Kortny to run recurring or delayed work from Slack.</small>
+      </div>
+    {% endfor %}
+  </div>
 
   <nav class="pager" role="navigation" aria-label="Scheduled task pages">
     {% if schedule_page.previous_page_url %}

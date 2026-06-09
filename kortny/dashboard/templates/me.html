@@ -105,45 +105,33 @@
         </div>
         <a class="btn-ghost" href="/me/tasks">View all</a>
       </header>
-      <div class="member-task-list">
+      <div class="me-task-list">
         {% for row in detail.tasks %}
-          <a class="task-list-item" href="/me/tasks/{{ row.task.id }}" aria-label="Open task: {{ row.task.input }}">
-            <span class="task-list-main">
-              <span class="task-list-copy">
-                <span class="task-list-title">{{ row.task.input }}</span>
-                {% if row.task.error %}
-                  <span class="task-list-summary task-list-summary-danger">Failure details recorded</span>
-                {% elif row.task.result_summary %}
-                  <span class="task-list-summary">{{ row.task.result_summary }}</span>
-                {% else %}
-                  <span class="task-list-summary">Trace and run details are available.</span>
-                {% endif %}
-              </span>
-              <span class="task-list-highlights">
+          <a class="me-task-row status-rail-{{ row.task.status.value }}" href="/me/tasks/{{ row.task.id }}" aria-label="Open task: {{ row.task.input }}">
+            <span class="me-task-rail" aria-hidden="true"><span class="task-status-dot"></span></span>
+            <span class="me-task-body">
+              <span class="me-task-top">
                 <span class="badge status-{{ row.task.status.value }}">{{ row.task.status.value.replace("_", " ").title() }}</span>
-                <span class="task-list-cost">{{ row.task.total_cost_usd|money }}</span>
-              </span>
-            </span>
-
-            <span class="task-list-meta" aria-label="Task metadata">
-              <span class="task-meta-field">
-                <span class="task-meta-label">Created</span>
-                <time class="task-meta-value" datetime="{{ row.task.created_at.isoformat() }}" title="{{ row.task.created_at|datetime }}">
+                <time class="me-task-time" datetime="{{ row.task.created_at.isoformat() }}" title="{{ row.task.created_at|datetime }}">
                   {{ row.task.created_at.strftime("%Y-%m-%d %H:%M") }}
                 </time>
+                <span class="me-task-cost">{{ row.task.total_cost_usd|money }}</span>
               </span>
-              <span class="task-meta-field">
-                <span class="task-meta-label">Channel</span>
-                <span class="task-meta-value" title="{{ row.channel.name }}">{{ row.channel.name }}</span>
-                {% if row.channel.secondary %}<span class="task-meta-id" title="{{ row.channel.secondary }}">{{ row.channel.secondary }}</span>{% endif %}
-              </span>
-              <span class="task-meta-field task-meta-compact">
-                <span class="task-meta-label">LLM Calls</span>
-                <span class="task-meta-value">{{ row.usage_count|number }}</span>
-              </span>
-              <span class="task-meta-field task-meta-compact">
-                <span class="task-meta-label">Artifacts</span>
-                <span class="task-meta-value">{{ row.artifact_count|number }}</span>
+              <span class="me-task-title">{{ row.task.input }}</span>
+              {% if row.task.error %}
+                <span class="me-task-summary is-danger">Failure details recorded</span>
+              {% elif row.task.result_summary %}
+                <span class="me-task-summary">{{ row.task.result_summary }}</span>
+              {% else %}
+                <span class="me-task-summary">Trace and run details are available.</span>
+              {% endif %}
+              <span class="me-task-meta">
+                <span class="me-task-chip">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="9" x2="20" y2="9"/><line x1="4" y1="15" x2="20" y2="15"/><line x1="10" y1="3" x2="8" y2="21"/><line x1="16" y1="3" x2="14" y2="21"/></svg>
+                  <span title="{{ row.channel.name }}">{{ row.channel.name }}</span>
+                </span>
+                <span class="me-task-chip">{{ row.usage_count|number }} LLM call{{ "" if row.usage_count == 1 else "s" }}</span>
+                <span class="me-task-chip">{{ row.artifact_count|number }} artifact{{ "" if row.artifact_count == 1 else "s" }}</span>
               </span>
             </span>
           </a>
