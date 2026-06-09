@@ -48,7 +48,7 @@ class FakeSlackClient:
         thread_ts: str | None = None,
         blocks: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        message = {
+        message: dict[str, Any] = {
             "channel": channel,
             "text": text,
             "thread_ts": thread_ts,
@@ -89,7 +89,7 @@ class FakeSlackSdkResponse:
 
 
 class FakeSlackSdkResponseClient(FakeSlackClient):
-    def chat_postMessage(
+    def chat_postMessage(  # type: ignore[override]
         self,
         *,
         channel: str,
@@ -97,7 +97,7 @@ class FakeSlackSdkResponseClient(FakeSlackClient):
         thread_ts: str | None = None,
         blocks: list[dict[str, Any]] | None = None,
     ) -> FakeSlackSdkResponse:
-        message = {
+        message: dict[str, Any] = {
             "channel": channel,
             "text": text,
             "thread_ts": thread_ts,
@@ -361,6 +361,62 @@ def test_post_message_normalizes_em_dash_at_slack_boundary(
     assert event.payload["text"] == expected_text
 
 
+def test_post_message_normalizes_block_text_at_slack_boundary(
+    db_session: Session,
+) -> None:
+    task = create_task(db_session)
+    client = FakeSlackClient()
+    em_dash = chr(0x2014)
+    blocks = [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"**Decision** {em_dash} ship it.",
+            },
+            "accessory": {
+                "type": "button",
+                "text": {"type": "plain_text", "text": f"Approve {em_dash} now"},
+                "value": f"internal{em_dash}value",
+            },
+        }
+    ]
+
+    SlackPoster(session=db_session, client=client).post_message(
+        SlackThread.from_task(task),
+        "Decision ready.",
+        blocks=blocks,
+    )
+
+    event = db_session.scalar(
+        select(TaskEvent)
+        .where(
+            TaskEvent.task_id == task.id,
+            TaskEvent.type == TaskEventType.message_posted,
+        )
+        .order_by(TaskEvent.seq.desc())
+        .limit(1)
+    )
+
+    expected_blocks = [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "*Decision* - ship it.",
+            },
+            "accessory": {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "Approve - now"},
+                "value": f"internal{em_dash}value",
+            },
+        }
+    ]
+    assert client.messages[0]["blocks"] == expected_blocks
+    assert event is not None
+    assert event.payload["blocks"] == expected_blocks
+
+
 def test_post_message_reuses_successful_side_effect(
     db_session: Session,
 ) -> None:
@@ -547,6 +603,35 @@ def test_upload_file_updates_artifact_and_logs_event(
     assert event.payload["artifact_id"] == str(artifact.id)
     assert event.payload["purpose"] == "file_upload"
     assert event.payload["idempotency_key"] == f"slack:file_upload:{artifact.id}"
+
+
+def test_upload_file_normalizes_initial_comment_at_slack_boundary(
+    db_session: Session,
+    tmp_path: Path,
+) -> None:
+    task = create_task(db_session)
+    report_path = tmp_path / "report.pdf"
+    report_path.write_bytes(b"%PDF-1.4 test")
+    db_session.add(
+        Artifact(
+            task_id=task.id,
+            filename="report.pdf",
+            mime_type="application/pdf",
+            size_bytes=report_path.stat().st_size,
+            storage_path=str(report_path),
+        )
+    )
+    db_session.flush()
+    client = FakeSlackClient()
+    em_dash = chr(0x2014)
+
+    SlackPoster(session=db_session, client=client).upload_file(
+        SlackThread.from_task(task),
+        report_path,
+        initial_comment=f"**Report** {em_dash} ready.",
+    )
+
+    assert client.uploads[0]["initial_comment"] == "*Report* - ready."
 
 
 def test_upload_file_in_dm_posts_without_thread_ts(

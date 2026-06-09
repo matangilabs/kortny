@@ -75,7 +75,6 @@ from kortny.slack.comments import (
     LLMArtifactCommentGenerator,
     generate_artifact_comment,
 )
-from kortny.slack.formatting import normalize_slack_mrkdwn
 from kortny.slack.humanizer import (
     LLMResponseSynthesizer,
     ResponseSynthesizer,
@@ -3272,7 +3271,7 @@ def _planned_progress_text_from_completion(content: str | None) -> str | None:
     message = payload.get("message")
     if not isinstance(message, str):
         return None
-    text = normalize_slack_mrkdwn(message).strip().strip('"')
+    text = message.strip().strip('"')
     text = " ".join(text.split())
     if len(text) < 20 or len(text) > 220:
         return None
@@ -3399,8 +3398,6 @@ def _tool_approval_prompt_from_completion(
 
 
 def _sanitize_tool_approval_prompt_body(text: str) -> str | None:
-    text = normalize_slack_mrkdwn(text)
-    text = text.replace("\u2014", ", ").replace("\u2013", "-")
     lines = []
     for raw_line in text.splitlines():
         line = " ".join(raw_line.strip().strip('"').split())

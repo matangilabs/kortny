@@ -100,6 +100,7 @@ class SlackPoster:
 
         post_thread_ts = _post_thread_ts(thread)
         slack_text = normalize_user_facing_text(text)
+        slack_blocks = _normalize_blocks(blocks)
         if thread.channel_id == "playground":
             import uuid
 
@@ -137,7 +138,7 @@ class SlackPoster:
                     channel=thread.channel_id,
                     text=slack_text,
                     thread_ts=post_thread_ts,
-                    blocks=blocks,
+                    blocks=slack_blocks,
                 )
             else:
                 task = self._resolve_task(thread.task_id)
@@ -147,8 +148,8 @@ class SlackPoster:
                     "text": slack_text,
                     "thread_ts": post_thread_ts,
                 }
-                if blocks is not None:
-                    request["blocks"] = blocks
+                if slack_blocks is not None:
+                    request["blocks"] = slack_blocks
                 result = SlackSideEffectOutbox(self.session).deliver(
                     installation_id=task.installation_id,
                     task_id=task.id,
@@ -162,18 +163,18 @@ class SlackPoster:
                         channel=thread.channel_id,
                         text=slack_text,
                         thread_ts=post_thread_ts,
-                        blocks=blocks,
+                        blocks=slack_blocks,
                     ),
                 )
                 response = result.response
                 side_effect_id = str(result.side_effect.id)
                 deduped = result.deduped
-            message_ts = _response_ts(response)
-            if message_ts is None:
+            posted_message_ts = _response_ts(response)
+            if posted_message_ts is None:
                 raise SlackPostingError("Slack chat_postMessage response is missing ts")
             set_span_attributes(
                 {
-                    "slack.posted_message_ts": message_ts,
+                    "slack.posted_message_ts": posted_message_ts,
                     "slack.side_effect_id": side_effect_id,
                     "slack.side_effect_deduped": deduped,
                 }
@@ -186,20 +187,20 @@ class SlackPoster:
             event_payload: dict[str, Any] = {
                 "channel": thread.channel_id,
                 "thread_ts": post_thread_ts,
-                "message_ts": message_ts,
+                "message_ts": posted_message_ts,
                 "text": slack_text,
                 "purpose": purpose,
                 "slack_side_effect_id": side_effect_id,
                 "idempotency_key": idempotency_key,
             }
-            if blocks is not None:
-                event_payload["blocks"] = blocks
+            if slack_blocks is not None:
+                event_payload["blocks"] = slack_blocks
             self.task_service.append_event(
                 thread.task_id,
                 TaskEventType.message_posted,
                 event_payload,
             )
-        return message_ts
+        return posted_message_ts
 
     def upload_file(
         self,
@@ -251,6 +252,11 @@ class SlackPoster:
             raise SlackPostingError("Artifact is posted but missing slack_file_id")
 
         post_thread_ts = _post_thread_ts(thread)
+        slack_initial_comment = (
+            normalize_user_facing_text(initial_comment)
+            if initial_comment is not None
+            else None
+        )
         with start_span(
             "slack.upload_file",
             attributes={
@@ -260,7 +266,7 @@ class SlackPoster:
                 "slack.thread_ts": post_thread_ts,
                 "file.name": file_path.name,
                 "file.size_bytes": file_path.stat().st_size,
-                "file.initial_comment_chars": len(initial_comment or ""),
+                "file.initial_comment_chars": len(slack_initial_comment or ""),
             },
         ):
             idempotency_key = slack_file_upload_key(artifact_obj.id)
@@ -277,7 +283,7 @@ class SlackPoster:
                     "filename": file_path.name,
                     "title": title or file_path.name,
                     "channel": thread.channel_id,
-                    "initial_comment": initial_comment,
+                    "initial_comment": slack_initial_comment,
                     "thread_ts": post_thread_ts,
                     "artifact_id": str(artifact_obj.id),
                 },
@@ -286,25 +292,25 @@ class SlackPoster:
                     filename=file_path.name,
                     title=title or file_path.name,
                     channel=thread.channel_id,
-                    initial_comment=initial_comment,
+                    initial_comment=slack_initial_comment,
                     thread_ts=post_thread_ts,
                 ),
             )
             response = result.response
-            slack_file_id = _response_file_id(response)
-            if slack_file_id is None:
+            uploaded_file_id = _response_file_id(response)
+            if uploaded_file_id is None:
                 raise SlackPostingError(
                     "Slack files_upload_v2 response is missing file id"
                 )
             set_span_attributes(
                 {
-                    "slack.file_id": slack_file_id,
+                    "slack.file_id": uploaded_file_id,
                     "slack.side_effect_id": str(result.side_effect.id),
                     "slack.side_effect_deduped": result.deduped,
                 }
             )
 
-        artifact_obj.slack_file_id = slack_file_id
+        artifact_obj.slack_file_id = uploaded_file_id
         artifact_obj.posted_at = now or datetime.now(UTC)
         self.session.flush()
 
@@ -318,7 +324,7 @@ class SlackPoster:
                 {
                     "channel": thread.channel_id,
                     "thread_ts": post_thread_ts,
-                    "slack_file_id": slack_file_id,
+                    "slack_file_id": uploaded_file_id,
                     "artifact_id": str(artifact_obj.id),
                     "filename": artifact_obj.filename,
                     "purpose": "file_upload",
@@ -326,7 +332,7 @@ class SlackPoster:
                     "idempotency_key": idempotency_key,
                 },
             )
-        return slack_file_id
+        return uploaded_file_id
 
     def _resolve_or_create_artifact(
         self,
@@ -436,6 +442,30 @@ def _post_thread_ts(thread: SlackThread) -> str | None:
     if thread.channel_id.startswith("D"):
         return None
     return thread.thread_ts
+
+
+def _normalize_blocks(
+    blocks: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]] | None:
+    if blocks is None:
+        return None
+    normalized = _normalize_block_value(blocks)
+    if not isinstance(normalized, list):
+        return None
+    return [item for item in normalized if isinstance(item, dict)]
+
+
+def _normalize_block_value(value: Any, *, key: str | None = None) -> Any:
+    if isinstance(value, str) and key in {"text", "alt_text"}:
+        return normalize_user_facing_text(value)
+    if isinstance(value, list):
+        return [_normalize_block_value(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            str(item_key): _normalize_block_value(item_value, key=str(item_key))
+            for item_key, item_value in value.items()
+        }
+    return value
 
 
 def _allows_root_delivery(task: Task) -> bool:

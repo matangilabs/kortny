@@ -13,21 +13,21 @@ from kortny.slack.synthesis import SynthesisContext, SynthesisOutcome
 
 def test_sanitize_humanized_response_falls_back_when_empty() -> None:
     assert sanitize_humanized_response("   ", fallback="Use **bold** here.") == (
-        "Use *bold* here."
+        "Use **bold** here."
     )
 
 
-def test_sanitize_humanized_response_normalizes_slack_mrkdwn() -> None:
+def test_sanitize_humanized_response_keeps_formatting_for_send_boundary() -> None:
     assert (
         sanitize_humanized_response(
             "## Findings\nRead [Slack docs](https://docs.slack.dev).",
             fallback="fallback",
         )
-        == "*Findings*\nRead <https://docs.slack.dev|Slack docs>."
+        == "## Findings\nRead [Slack docs](https://docs.slack.dev)."
     )
 
 
-def test_sanitize_humanized_response_replaces_em_dash() -> None:
+def test_sanitize_humanized_response_keeps_em_dash_for_send_boundary() -> None:
     em_dash = chr(0x2014)
 
     assert (
@@ -35,7 +35,7 @@ def test_sanitize_humanized_response_replaces_em_dash() -> None:
             f'{{"message":"I checked {em_dash} it is active."}}',
             fallback="fallback",
         )
-        == "I checked - it is active."
+        == f"I checked {em_dash} it is active."
     )
 
 
@@ -45,7 +45,7 @@ def test_sanitize_humanized_response_accepts_json_message_contract() -> None:
             '{"message":"**Ready:** I can help with research."}',
             fallback="fallback",
         )
-        == "*Ready:* I can help with research."
+        == "**Ready:** I can help with research."
     )
 
 
@@ -135,31 +135,31 @@ def test_sanitize_humanized_response_strips_quick_response_scratchpad() -> None:
     )
 
 
-def test_sanitize_humanized_response_golden_slack_cases() -> None:
+def test_sanitize_humanized_response_leaves_slack_formatting_to_send_boundary() -> None:
     cases = [
         (
             "Here are the **two tools** that matter most.",
-            "Here are the *two tools* that matter most.",
+            "Here are the **two tools** that matter most.",
         ),
         (
             "# Quick take\nLangfuse is the stronger default.",
-            "*Quick take*\nLangfuse is the stronger default.",
+            "# Quick take\nLangfuse is the stronger default.",
         ),
         (
             "See [Langfuse](https://langfuse.com) for tracing.",
-            "See <https://langfuse.com|Langfuse> for tracing.",
+            "See [Langfuse](https://langfuse.com) for tracing.",
         ),
         (
             "I checked the channel. **Nothing urgent** changed.",
-            "I checked the channel. *Nothing urgent* changed.",
+            "I checked the channel. **Nothing urgent** changed.",
         ),
         (
             "### Summary\n- Firecrawl worked\n- Brave is rate-limited",
-            "*Summary*\n- Firecrawl worked\n- Brave is rate-limited",
+            "### Summary\n- Firecrawl worked\n- Brave is rate-limited",
         ),
         (
             "The report is ready: [download](https://files.example/report.pdf).",
-            "The report is ready: <https://files.example/report.pdf|download>.",
+            "The report is ready: [download](https://files.example/report.pdf).",
         ),
         (
             "Use `**literal**` in code.",
@@ -175,7 +175,7 @@ def test_sanitize_humanized_response_golden_slack_cases() -> None:
         ),
         (
             "I found **3 themes** across [results](https://example.com).",
-            "I found *3 themes* across <https://example.com|results>.",
+            "I found **3 themes** across [results](https://example.com).",
         ),
     ]
 

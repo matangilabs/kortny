@@ -31,7 +31,10 @@ from kortny.tools.catalog import (
     tool_metadata,
 )
 from kortny.tools.list_integrations import _USER_CAPABILITY_GROUPS
-from kortny.tools.native_runtime import native_tool_classes_by_name
+from kortny.tools.native_runtime import (
+    native_dashboard_tool_classes,
+    native_tool_classes_by_name,
+)
 from kortny.tools.types import JsonObject, JsonSchema
 from kortny.worker.agent_executor import NATIVE_SLACK_CONTEXT_HINTS
 from kortny.workflow.planning_classifier import _TOOL_TO_INTEGRATION
@@ -88,11 +91,13 @@ def test_registry_exposes_metadata_rich_descriptors() -> None:
 
     assert descriptor.name == "echo"
     assert descriptor.namespace == "native.diagnostics"
+    assert descriptor.integration == "diagnostics"
     assert descriptor.category == "Diagnostics"
     assert descriptor.side_effect == "read"
     assert descriptor.enabled is True
     assert descriptor.required_args == ("message",)
     assert descriptor.to_payload()["parameters"] == EchoTool.parameters
+    assert descriptor.to_payload()["integration"] == "diagnostics"
     assert descriptor.sandbox.requires_sandbox is False
     assert descriptor.to_payload()["sandbox"]["requires_sandbox"] is False
 
@@ -100,9 +105,17 @@ def test_registry_exposes_metadata_rich_descriptors() -> None:
 def test_native_tool_surfaces_are_derived_from_metadata() -> None:
     runtime_names = set(runtime_native_tool_names())
     class_names = set(native_tool_classes_by_name())
+    dashboard_names = set(dashboard_native_tool_names())
+    dashboard_class_names = {
+        tool_class.name for tool_class in native_dashboard_tool_classes()
+    }
+    integration_map = native_tool_integration_map()
 
     assert class_names == runtime_names
-    assert set(dashboard_native_tool_names()) <= runtime_names
+    assert dashboard_names <= runtime_names
+    assert dashboard_class_names == dashboard_names
+    assert set(integration_map) == set(NATIVE_TOOL_METADATA)
+    assert all(integration_map.values())
     assert read_only_native_tool_names() == frozenset(
         name
         for name, metadata in NATIVE_TOOL_METADATA.items()
@@ -118,7 +131,7 @@ def test_native_tool_surfaces_are_derived_from_metadata() -> None:
         {"code_exec", "forget_fact"}
     )
     assert native_tool_names_by_approval("admin_approval") == frozenset()
-    assert native_tool_integration_map() == _TOOL_TO_INTEGRATION
+    assert integration_map == _TOOL_TO_INTEGRATION
     assert native_slack_context_hint_names() == NATIVE_SLACK_CONTEXT_HINTS
 
 

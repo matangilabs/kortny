@@ -44,6 +44,7 @@ class ToolDescriptor:
 
     name: str
     namespace: str
+    integration: str
     category: str
     display_name: str
     description: str
@@ -69,6 +70,7 @@ class ToolDescriptor:
         return {
             "name": self.name,
             "namespace": self.namespace,
+            "integration": self.integration,
             "category": self.category,
             "display_name": self.display_name,
             "description": self.description,
@@ -716,6 +718,7 @@ def _descriptor(
     return ToolDescriptor(
         name=metadata.name,
         namespace=metadata.namespace,
+        integration=_metadata_integration(metadata),
         category=metadata.category,
         display_name=metadata.display_name,
         description=description,

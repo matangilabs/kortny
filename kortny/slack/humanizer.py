@@ -31,7 +31,6 @@ from kortny.skills import (
     SkillActivation,
     SkillRegistryService,
 )
-from kortny.slack.formatting import normalize_user_facing_text
 from kortny.slack.synthesis import (
     EvidenceKind,
     EvidenceTrust,
@@ -438,7 +437,7 @@ class ResponseSynthesizer(Protocol):
 
 
 class StaticResponseSynthesizer:
-    """Deterministic fallback that only normalizes Slack mrkdwn."""
+    """Deterministic fallback that strips unusable response preambles."""
 
     uses_procedural_skills = False
 
@@ -453,11 +452,11 @@ class StaticResponseSynthesizer:
     ) -> ResponseSynthesisResult:
         del session, task, synthesis_context, task_service
         raw_text = response_record.raw_answer
-        normalized = normalize_user_facing_text(raw_text)
+        normalized = sanitize_humanized_response(None, fallback=raw_text)
         return ResponseSynthesisResult(
             text=normalized,
             changed=normalized != raw_text,
-            reason="static_mrkdwn_normalization",
+            reason="static_response_cleanup",
         )
 
 
@@ -493,7 +492,10 @@ class LLMResponseSynthesizer:
         task_service: TaskService,
     ) -> ResponseSynthesisResult:
         if _should_skip(response_record, min_chars=self.min_chars):
-            normalized = normalize_user_facing_text(response_record.raw_answer)
+            normalized = sanitize_humanized_response(
+                None,
+                fallback=response_record.raw_answer,
+            )
             return ResponseSynthesisResult(
                 text=normalized,
                 changed=normalized != response_record.raw_answer,
@@ -551,7 +553,7 @@ class LLMResponseSynthesizer:
         )
         return ResponseSynthesisResult(
             text=text,
-            changed=text != normalize_user_facing_text(response_record.raw_answer),
+            changed=text != response_record.raw_answer,
             reason="llm_humanizer",
         )
 
@@ -654,11 +656,9 @@ def synthesize_response(
 
 
 def sanitize_humanized_response(text: str | None, *, fallback: str) -> str:
-    """Normalize a model-generated Slack response."""
+    """Return usable Slack-facing response text without formatting normalization."""
 
-    safe_fallback = normalize_user_facing_text(
-        strip_internal_response_preamble(fallback)
-    )
+    safe_fallback = strip_internal_response_preamble(fallback).strip()
     if text is None:
         return safe_fallback
     message = _json_message(text)
@@ -671,7 +671,7 @@ def sanitize_humanized_response(text: str | None, *, fallback: str) -> str:
         return safe_fallback
     if len(normalized) > MAX_HUMANIZED_CHARS:
         normalized = normalized[: MAX_HUMANIZED_CHARS - 1].rstrip() + "."
-    return normalize_user_facing_text(normalized)
+    return normalized
 
 
 def strip_internal_response_preamble(text: str) -> str:
