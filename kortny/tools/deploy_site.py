@@ -142,6 +142,8 @@ class DeploySiteTool:
             return _error_result(code="sandbox_session_error", message=str(exc))
 
         staging = Path(f"/tmp/kortny-deploy-{uuid.uuid4().hex[:8]}")
+        staging.mkdir(parents=True, exist_ok=True)
+        staging = staging.resolve()
         try:
             extracted = extract_tar_to_dir(
                 tar_bytes, staging, max_bytes=MAX_DEPLOY_BYTES

@@ -304,6 +304,8 @@ class SandboxExportArtifactTool(_WorkbenchToolBase):
         staging_dir = (
             Path(self.working_dir) / f"sandbox-export-{uuid.uuid4().hex[:8]}"
         )
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        staging_dir = staging_dir.resolve()
         try:
             extracted = extract_tar_to_dir(tar_bytes, staging_dir)
         except UnsafeArchiveError as exc:
