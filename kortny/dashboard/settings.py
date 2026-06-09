@@ -66,6 +66,12 @@ class DashboardSettings(BaseSettings):
         ge=1,
         le=60,
     )
+    artifacts_dir: str | None = Field(
+        default=None, validation_alias="KORTNY_ARTIFACTS_DIR"
+    )
+    preview_signing_secret: str | None = Field(
+        default=None, validation_alias="KORTNY_PREVIEW_SIGNING_SECRET"
+    )
 
     @field_validator("username", "password", "session_secret")
     @classmethod
@@ -75,7 +81,13 @@ class DashboardSettings(BaseSettings):
             raise ValueError("cannot be blank")
         return stripped
 
-    @field_validator("slack_client_id", "slack_client_secret", "slack_redirect_uri")
+    @field_validator(
+        "slack_client_id",
+        "slack_client_secret",
+        "slack_redirect_uri",
+        "artifacts_dir",
+        "preview_signing_secret",
+    )
     @classmethod
     def _strip_optional_string(cls, value: str | None) -> str | None:
         if value is None:

@@ -14,7 +14,13 @@ from urllib.parse import parse_qs, parse_qsl, quote, urlencode, urlsplit, urluns
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    Response,
+)
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from slack_sdk import WebClient
@@ -93,6 +99,7 @@ from kortny.db.models import (
     TaskStatus,
 )
 from kortny.db.session import make_session_factory
+from kortny.execution.preview import verify_preview_token
 from kortny.knowledge_graph.refresh import KnowledgeGraphRefreshService
 from kortny.llm.litellm_catalog import (
     LiteLLMModelCandidate,
@@ -182,6 +189,42 @@ def create_app(
 
 def register_routes(app: FastAPI) -> None:
     """Register dashboard routes."""
+
+    @app.get("/preview/{token}/{task_id}/{slug}/{file_path:path}")
+    def preview_file(
+        request: Request,
+        token: str,
+        task_id: str,
+        slug: str,
+        file_path: str,
+    ) -> Response:
+        """Serve one published sandbox preview file at a capability URL.
+
+        Intentionally unauthenticated: the HMAC token in the path is the
+        access control, so links pasted into Slack open without dashboard
+        login.
+        """
+
+        settings = cast(DashboardSettings, request.app.state.dashboard_settings)
+        if not settings.artifacts_dir or not settings.preview_signing_secret:
+            raise HTTPException(status_code=404)
+        if not verify_preview_token(
+            settings.preview_signing_secret, task_id, slug, token
+        ):
+            raise HTTPException(status_code=404)
+
+        base = (Path(settings.artifacts_dir) / task_id / slug).resolve()
+        artifacts_root = Path(settings.artifacts_dir).resolve()
+        if not base.is_relative_to(artifacts_root):
+            raise HTTPException(status_code=404)
+        target = (base / (file_path or "index.html")).resolve()
+        if not target.is_relative_to(base):
+            raise HTTPException(status_code=404)
+        if target.is_dir():
+            target = target / "index.html"
+        if not target.is_file():
+            raise HTTPException(status_code=404)
+        return FileResponse(target)
 
     @app.get("/login", response_class=HTMLResponse)
     def login_form(request: Request) -> Response:

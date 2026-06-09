@@ -77,6 +77,9 @@ services:
       KORTNY_SANDBOX_RUNNER_URL: ${KORTNY_SANDBOX_RUNNER_URL:-http://sandbox-runner:8090}
       KORTNY_SANDBOX_RUNNER_TIMEOUT_SECONDS: ${KORTNY_SANDBOX_RUNNER_TIMEOUT_SECONDS:-70}
       KORTNY_SANDBOX_DEFAULT_IMAGE: ${KORTNY_SANDBOX_DEFAULT_IMAGE:-ghcr.io/astral-sh/uv:python3.11-bookworm-slim}
+      KORTNY_ARTIFACTS_DIR: ${KORTNY_ARTIFACTS_DIR:-/data/artifacts}
+      KORTNY_PUBLIC_BASE_URL: ${KORTNY_PUBLIC_BASE_URL:-}
+      KORTNY_PREVIEW_SIGNING_SECRET: ${KORTNY_PREVIEW_SIGNING_SECRET:-}
       POSTGRES_URL: postgresql://${POSTGRES_USER:-kortny}:${POSTGRES_PASSWORD:-kortny}@postgres:5432/${POSTGRES_DB:-kortny}
       UV_CACHE_DIR: /tmp/uv-cache
       UV_LINK_MODE: copy
@@ -84,6 +87,7 @@ services:
     volumes:
       - .:/app
       - uv-cache:/tmp/uv-cache
+      - task-artifacts:/data/artifacts
 
   scheduler:
     image: ghcr.io/astral-sh/uv:python3.11-bookworm-slim
@@ -172,6 +176,8 @@ services:
       DASHBOARD_SLACK_CLIENT_SECRET: ${DASHBOARD_SLACK_CLIENT_SECRET:-}
       DASHBOARD_SLACK_REDIRECT_URI: ${DASHBOARD_SLACK_REDIRECT_URI:-}
       DASHBOARD_SLACK_OAUTH_STATE_TTL_MINUTES: ${DASHBOARD_SLACK_OAUTH_STATE_TTL_MINUTES:-10}
+      KORTNY_ARTIFACTS_DIR: ${KORTNY_ARTIFACTS_DIR:-/data/artifacts}
+      KORTNY_PREVIEW_SIGNING_SECRET: ${KORTNY_PREVIEW_SIGNING_SECRET:-}
       POSTGRES_URL: postgresql://${POSTGRES_USER:-kortny}:${POSTGRES_PASSWORD:-kortny}@postgres:5432/${POSTGRES_DB:-kortny}
       UV_CACHE_DIR: /tmp/uv-cache
       UV_LINK_MODE: copy
@@ -181,6 +187,7 @@ services:
     volumes:
       - .:/app
       - uv-cache:/tmp/uv-cache
+      - task-artifacts:/data/artifacts
 
   phoenix:
     image: ${PHOENIX_IMAGE:-arizephoenix/phoenix:latest}
@@ -238,6 +245,9 @@ services:
       KORTNY_SANDBOX_RUNNER_URL: ${KORTNY_SANDBOX_RUNNER_URL:-http://sandbox-runner:8090}
       KORTNY_SANDBOX_RUNNER_TIMEOUT_SECONDS: ${KORTNY_SANDBOX_RUNNER_TIMEOUT_SECONDS:-70}
       KORTNY_SANDBOX_DEFAULT_IMAGE: ${KORTNY_SANDBOX_DEFAULT_IMAGE:-ghcr.io/astral-sh/uv:python3.11-bookworm-slim}
+      KORTNY_ARTIFACTS_DIR: ${KORTNY_ARTIFACTS_DIR:-/data/artifacts}
+      KORTNY_PUBLIC_BASE_URL: ${KORTNY_PUBLIC_BASE_URL:-}
+      KORTNY_PREVIEW_SIGNING_SECRET: ${KORTNY_PREVIEW_SIGNING_SECRET:-}
       POSTGRES_URL: postgresql://${POSTGRES_USER:-kortny}:${POSTGRES_PASSWORD:-kortny}@postgres:5432/${POSTGRES_DB:-kortny}
       UV_CACHE_DIR: /tmp/uv-cache
       UV_LINK_MODE: copy
@@ -245,6 +255,7 @@ services:
     volumes:
       - .:/app
       - uv-cache:/tmp/uv-cache
+      - task-artifacts:/data/artifacts
 
   sandbox-docker-proxy:
     image: ${DOCKER_SOCKET_PROXY_IMAGE:-tecnativa/docker-socket-proxy:latest}
@@ -319,6 +330,7 @@ volumes:
   postgres-data:
   phoenix-data:
   uv-cache:
+  task-artifacts:
 
 networks:
   sandbox-control:
