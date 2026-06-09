@@ -756,10 +756,11 @@ def _exec_status(exit_code: int | None) -> str:
 
 
 def _session_create_payload(spec: DockerSessionCreateSpec) -> JsonObject:
-    workspace_mb = max(spec.workspace_mb, 1)
-    workspace_tmpfs = (
-        f"rw,nosuid,nodev,size={workspace_mb * 1024 * 1024},mode=1777"
-    )
+    # The workspace is an anonymous volume, not tmpfs: the Docker archive
+    # API (file read/write/export) cannot see tmpfs mounts, which exist only
+    # in the container's mount namespace. The volume is removed with the
+    # container (DELETE ?v=1). Disk quota is advisory until volume quotas
+    # are supported; memory/CPU/pids limits still apply.
     tmp_tmpfs = "rw,nosuid,nodev,size=268435456,mode=1777"
     memory_bytes = spec.memory_mb * 1024 * 1024
     return {
@@ -774,6 +775,7 @@ def _session_create_payload(spec: DockerSessionCreateSpec) -> JsonObject:
         "WorkingDir": spec.workspace_path,
         "Tty": False,
         "OpenStdin": False,
+        "Volumes": {spec.workspace_path: {}},
         "Labels": {
             "kortny.sandbox": "true",
             "kortny.sandbox.kind": "session",
@@ -796,7 +798,6 @@ def _session_create_payload(spec: DockerSessionCreateSpec) -> JsonObject:
             "ReadonlyRootfs": True,
             "SecurityOpt": ["no-new-privileges"],
             "Tmpfs": {
-                spec.workspace_path: workspace_tmpfs,
                 "/tmp": tmp_tmpfs,
             },
         },

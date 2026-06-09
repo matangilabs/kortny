@@ -119,7 +119,9 @@ def test_session_create_payload_is_hardened() -> None:
     assert host_config["Memory"] == 2048 * 1024 * 1024
     assert host_config["MemorySwap"] == host_config["Memory"]
     assert host_config["PidsLimit"] == 512
-    assert "size=1073741824" in host_config["Tmpfs"]["/workspace"]
+    assert payload["Volumes"] == {"/workspace": {}}
+    assert "/workspace" not in host_config["Tmpfs"]
+    assert "/tmp" in host_config["Tmpfs"]
 
 
 def test_demux_docker_stream_splits_stdout_and_stderr() -> None:
