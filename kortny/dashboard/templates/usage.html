@@ -6,13 +6,22 @@
   <section class="page-heading">
     <div>
       <h1>Usage</h1>
-      <p>Cost and token rollups from recorded LLM calls.</p>
+      <p>
+        {% if dashboard_is_admin %}
+          Workspace cost, token, and task trends from recorded LLM calls.
+        {% else %}
+          Your personal cost, token, and task trends from recorded LLM calls.
+        {% endif %}
+      </p>
     </div>
     <div class="heading-actions">
       <nav class="quick-filter-pills" aria-label="Quick date range">
-        <a class="quick-filter-pill {{ 'active' if usage_toolbar and usage_toolbar.fields and usage_toolbar.fields[0].value == '7' else '' }}" href="?days=7">7d</a>
-        <a class="quick-filter-pill {{ 'active' if usage_toolbar and usage_toolbar.fields and usage_toolbar.fields[0].value == '30' else '' }}" href="?days=30">30d</a>
-        <a class="quick-filter-pill {{ 'active' if usage_toolbar and usage_toolbar.fields and usage_toolbar.fields[0].value == '90' else '' }}" href="?days=90">90d</a>
+        {% set _usage_base = '/usage' if dashboard_is_admin else '/me/usage' %}
+        {% set _days = request.query_params.get('days') %}
+        <a class="quick-filter-pill {{ 'active' if not _days and not from_date and not to_date else '' }}" href="{{ _usage_base }}">All</a>
+        <a class="quick-filter-pill {{ 'active' if _days == '7' else '' }}" href="{{ _usage_base }}?days=7">7d</a>
+        <a class="quick-filter-pill {{ 'active' if _days == '30' else '' }}" href="{{ _usage_base }}?days=30">30d</a>
+        <a class="quick-filter-pill {{ 'active' if _days == '90' else '' }}" href="{{ _usage_base }}?days=90">90d</a>
       </nav>
     </div>
   </section>
@@ -20,75 +29,97 @@
   {% set toolbar = usage_toolbar %}
   {% include "_data_toolbar.html" with context %}
 
-	  <section class="summary-grid usage-summary" aria-label="Usage overview">
-    <div class="card metric-card">
+  <section class="summary-grid usage-summary" aria-label="Usage overview">
+    <div class="card metric-card metric-success">
       <span>Total Cost</span>
       <strong>{{ aggregate.total_cost_usd|money }}</strong>
-    </div>
-    <div class="card metric-card">
-      <span>LLM Calls</span>
-      <strong>{{ aggregate.total_calls|number }}</strong>
+      <small>{{ aggregate.total_calls|number }} LLM calls</small>
     </div>
     <div class="card metric-card">
       <span>Total Tokens</span>
       <strong>{{ (aggregate.total_input_tokens + aggregate.total_output_tokens)|number }}</strong>
+      <small>{{ aggregate.total_input_tokens|number }} in / {{ aggregate.total_output_tokens|number }} out</small>
     </div>
     <div class="card metric-card">
-      <span>Task Failure Rate</span>
+      <span>Tasks</span>
+      <strong>{{ aggregate.total_tasks|number }}</strong>
+      <small>{{ aggregate.failed_tasks|number }} failed</small>
+    </div>
+    <div class="card metric-card {% if aggregate.failed_tasks %}metric-warning{% else %}metric-success{% endif %}">
+      <span>Failure Rate</span>
       <strong>{{ aggregate.task_failure_rate_label }}</strong>
+      <small>of tasks in this window</small>
     </div>
   </section>
 
-  {% set charts = aggregate.charts %}
-  <section class="charts-grid" aria-label="Usage charts">
-    <article class="card chart-card">
-      <header>
-        <h2>Daily Cost</h2>
-        <p>Spend trend by LLM call date.</p>
-      </header>
-      {% set points = charts.daily_cost %}
-      {% set chart_label = "Daily LLM cost chart" %}
-      {% set empty_message = "No cost data in this range." %}
-      {% include "_chart_columns.html" with context %}
-    </article>
+  <!-- Hero: spend trend -->
+  <article class="card usage-chart-card usage-hero-chart">
+    <header>
+      <h2>Daily Cost</h2>
+      <p>Spend trend by LLM call date.</p>
+    </header>
+    <div class="usage-chart-body">
+      <div id="chart-daily-cost" class="usage-chart-canvas"></div>
+    </div>
+  </article>
 
-    <article class="card chart-card">
+  <section class="usage-charts-grid" aria-label="Usage charts">
+    <article class="card usage-chart-card">
       <header>
         <h2>Task Volume</h2>
-        <p>Daily tasks with failure days highlighted.</p>
+        <p>Daily tasks with failures highlighted.</p>
       </header>
-      {% set points = charts.daily_task_volume %}
-      {% set chart_label = "Daily task volume chart" %}
-      {% set empty_message = "No task data in this range." %}
-      {% include "_chart_columns.html" with context %}
+      <div class="usage-chart-body">
+        <div id="chart-task-volume" class="usage-chart-canvas"></div>
+      </div>
     </article>
 
-    <article class="card chart-card">
+    <article class="card usage-chart-card">
       <header>
-        <h2>Model Spend</h2>
-        <p>Top model spend concentration.</p>
+        <h2>Cost by Model</h2>
+        <p>Share of spend across models.</p>
       </header>
-      {% set bars = charts.cost_by_model %}
-      {% set chart_label = "Cost by model chart" %}
-      {% set empty_message = "No model cost data in this range." %}
-      {% include "_chart_bars.html" with context %}
+      <div class="usage-chart-body">
+        <div id="chart-by-model" class="usage-chart-canvas"></div>
+      </div>
     </article>
 
-    <article class="card chart-card">
+    <article class="card usage-chart-card">
       <header>
-        <h2>User Spend</h2>
-        <p>Top user spend concentration.</p>
+        <h2>Cost by Channel</h2>
+        <p>{% if dashboard_is_admin %}Channel-level spend concentration.{% else %}Where your spend happens.{% endif %}</p>
       </header>
-      {% set bars = charts.cost_by_user %}
-      {% set chart_label = "Cost by user chart" %}
-      {% set empty_message = "No user cost data in this range." %}
-      {% include "_chart_bars.html" with context %}
+      <div class="usage-chart-body">
+        <div id="chart-by-channel" class="usage-chart-canvas"></div>
+      </div>
     </article>
+
+    {% if dashboard_is_admin %}
+      <article class="card usage-chart-card">
+        <header>
+          <h2>Cost by User</h2>
+          <p>Top spenders across the workspace.</p>
+        </header>
+        <div class="usage-chart-body">
+          <div id="chart-by-user" class="usage-chart-canvas"></div>
+        </div>
+      </article>
+    {% else %}
+      <article class="card usage-chart-card">
+        <header>
+          <h2>Token Usage</h2>
+          <p>Input vs output tokens over time.</p>
+        </header>
+        <div class="usage-chart-body">
+          <div id="chart-tokens" class="usage-chart-canvas"></div>
+        </div>
+      </article>
+    {% endif %}
   </section>
 
   <section class="memory-toolbar" aria-label="Detailed breakdown header">
     <h2>Detailed Breakdowns</h2>
-    <p>Per-model, per-user, per-channel, and per-day attribution tables.</p>
+    <p>Per-model{% if dashboard_is_admin %}, per-user{% endif %}, per-channel, and per-day attribution tables.</p>
   </section>
 
   <details class="card detail-section" open>
@@ -99,13 +130,15 @@
     </div>
   </details>
 
-  <details class="card detail-section">
-    <summary class="usage-breakdown-summary">Cost by User</summary>
-    <div class="usage-breakdown-body">
-      {% set rows = aggregate.by_user %}
-      {% include "_aggregate_table.html" with context %}
-    </div>
-  </details>
+  {% if dashboard_is_admin %}
+    <details class="card detail-section">
+      <summary class="usage-breakdown-summary">Cost by User</summary>
+      <div class="usage-breakdown-body">
+        {% set rows = aggregate.by_user %}
+        {% include "_aggregate_table.html" with context %}
+      </div>
+    </details>
+  {% endif %}
 
   <details class="card detail-section">
     <summary class="usage-breakdown-summary">Cost by Channel</summary>
@@ -145,4 +178,116 @@
       </table>
     </div>
   </details>
+
+  <script type="application/json" id="usage-data">
+    {
+      "daily": {
+        "labels": [{% for r in aggregate.by_day|reverse %}{{ r.day|string|tojson }}{% if not loop.last %}, {% endif %}{% endfor %}],
+        "cost": [{% for r in aggregate.by_day|reverse %}{{ r.cost_usd|float }}{% if not loop.last %}, {% endif %}{% endfor %}],
+        "inTok": [{% for r in aggregate.by_day|reverse %}{{ r.input_tokens }}{% if not loop.last %}, {% endif %}{% endfor %}],
+        "outTok": [{% for r in aggregate.by_day|reverse %}{{ r.output_tokens }}{% if not loop.last %}, {% endif %}{% endfor %}]
+      },
+      "tasks": {
+        "labels": [{% for r in aggregate.by_task_day|reverse %}{{ r.day|string|tojson }}{% if not loop.last %}, {% endif %}{% endfor %}],
+        "total": [{% for r in aggregate.by_task_day|reverse %}{{ r.task_count }}{% if not loop.last %}, {% endif %}{% endfor %}],
+        "failed": [{% for r in aggregate.by_task_day|reverse %}{{ r.failed_task_count }}{% if not loop.last %}, {% endif %}{% endfor %}]
+      },
+      "byModel": {
+        "labels": [{% for r in aggregate.by_model %}{{ r.display_key|tojson }}{% if not loop.last %}, {% endif %}{% endfor %}],
+        "cost": [{% for r in aggregate.by_model %}{{ r.cost_usd|float }}{% if not loop.last %}, {% endif %}{% endfor %}]
+      },
+      "byChannel": {
+        "labels": [{% for r in aggregate.by_channel %}{{ r.display_key|tojson }}{% if not loop.last %}, {% endif %}{% endfor %}],
+        "cost": [{% for r in aggregate.by_channel %}{{ r.cost_usd|float }}{% if not loop.last %}, {% endif %}{% endfor %}]
+      }{% if dashboard_is_admin %},
+      "byUser": {
+        "labels": [{% for r in aggregate.by_user %}{{ r.display_key|tojson }}{% if not loop.last %}, {% endif %}{% endfor %}],
+        "cost": [{% for r in aggregate.by_user %}{{ r.cost_usd|float }}{% if not loop.last %}, {% endif %}{% endfor %}]
+      }{% endif %}
+    }
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/apexcharts@3.49.1/dist/apexcharts.min.js"></script>
+  <script src="{{ url_for('static', path='/charts.js') }}"></script>
+  <script>
+    (function () {
+      const dataEl = document.getElementById('usage-data');
+      const KC = window.KortnyCharts;
+      if (!dataEl || !KC || typeof ApexCharts === 'undefined') return;
+      let DATA;
+      try { DATA = JSON.parse(dataEl.textContent); } catch (_e) { return; }
+
+      const p = KC.palette();
+      const { money, moneyPrecise, int, shortDate } = KC.fmt;
+      const base = () => KC.baseOptions(p);
+
+      // 1. Daily Cost — area
+      KC.create(document.getElementById('chart-daily-cost'), Object.assign(base(), {
+        chart: Object.assign(base().chart, { type: 'area', height: 300 }),
+        series: [{ name: 'Cost', data: DATA.daily.cost }],
+        colors: [p.accent],
+        stroke: { curve: 'smooth', width: 2.5 },
+        fill: { type: 'gradient', gradient: { shadeIntensity: 1, opacityFrom: 0.35, opacityTo: 0.02, stops: [0, 95] } },
+        xaxis: { categories: DATA.daily.labels.map(shortDate), tickAmount: 8, axisBorder: { color: p.border }, axisTicks: { color: p.border } },
+        yaxis: { labels: { formatter: money } },
+        tooltip: Object.assign(base().tooltip, { y: { formatter: moneyPrecise } }),
+        markers: { size: 0, hover: { size: 5 } },
+      }));
+
+      // 2. Task Volume — grouped column (total + failed)
+      KC.create(document.getElementById('chart-task-volume'), Object.assign(base(), {
+        chart: Object.assign(base().chart, { type: 'bar', height: 280 }),
+        series: [{ name: 'Tasks', data: DATA.tasks.total }, { name: 'Failed', data: DATA.tasks.failed }],
+        colors: [p.accent, p.danger],
+        plotOptions: { bar: { columnWidth: '55%', borderRadius: 3 } },
+        xaxis: { categories: DATA.tasks.labels.map(shortDate), tickAmount: 8, axisBorder: { color: p.border }, axisTicks: { color: p.border } },
+        yaxis: { labels: { formatter: int }, forceNiceScale: true },
+        tooltip: Object.assign(base().tooltip, { y: { formatter: int } }),
+        legend: { position: 'top', horizontalAlign: 'right', labels: { colors: p.muted } },
+      }));
+
+      // Donut builder (cost share) — capped to top slices + "Others"
+      const donut = (elId, labels, values) => {
+        const t = KC.topN(labels, values, 8);
+        return KC.create(document.getElementById(elId), Object.assign(base(), {
+          chart: Object.assign(base().chart, { type: 'donut', height: 280 }),
+          series: t.values,
+          labels: t.labels,
+          colors: KC.categoricalColors(p),
+          stroke: { colors: [p.card], width: 2 },
+          legend: { position: 'bottom', fontSize: '12px', labels: { colors: p.muted }, itemMargin: { horizontal: 6, vertical: 2 } },
+          plotOptions: { pie: { donut: { size: '62%', labels: { show: true, total: { show: true, showAlways: true, label: 'Total', color: p.muted, formatter: (w) => money(w.globals.seriesTotals.reduce((a, b) => a + b, 0)) } } } } },
+          tooltip: Object.assign(base().tooltip, { y: { formatter: moneyPrecise } }),
+        }));
+      };
+      donut('chart-by-model', DATA.byModel.labels, DATA.byModel.cost);
+      donut('chart-by-channel', DATA.byChannel.labels, DATA.byChannel.cost);
+
+      // 3. Cost by User — horizontal bar (admin only), top 12 + Others
+      if (DATA.byUser) {
+        const u = KC.topN(DATA.byUser.labels, DATA.byUser.cost, 12);
+        KC.create(document.getElementById('chart-by-user'), Object.assign(base(), {
+          chart: Object.assign(base().chart, { type: 'bar', height: Math.max(220, u.labels.length * 34 + 40) }),
+          series: [{ name: 'Cost', data: u.values }],
+          colors: [p.accent],
+          plotOptions: { bar: { horizontal: true, borderRadius: 4, barHeight: '62%', distributed: true } },
+          xaxis: { categories: u.labels, labels: { formatter: money }, axisBorder: { color: p.border }, axisTicks: { color: p.border } },
+          tooltip: Object.assign(base().tooltip, { y: { formatter: moneyPrecise } }),
+          legend: { show: false },
+        }));
+      }
+
+      // 4. Token usage — stacked area (member only)
+      KC.create(document.getElementById('chart-tokens'), Object.assign(base(), {
+        chart: Object.assign(base().chart, { type: 'area', height: 280, stacked: true }),
+        series: [{ name: 'Input', data: DATA.daily.inTok }, { name: 'Output', data: DATA.daily.outTok }],
+        colors: [p.accent, '#0e7490'],
+        stroke: { curve: 'smooth', width: 2 },
+        fill: { type: 'gradient', gradient: { opacityFrom: 0.3, opacityTo: 0.03 } },
+        xaxis: { categories: DATA.daily.labels.map(shortDate), tickAmount: 8, axisBorder: { color: p.border }, axisTicks: { color: p.border } },
+        yaxis: { labels: { formatter: int } },
+        tooltip: Object.assign(base().tooltip, { y: { formatter: int } }),
+        legend: { position: 'top', horizontalAlign: 'right', labels: { colors: p.muted } },
+      }));
+    })();
+  </script>
 {% endblock %}

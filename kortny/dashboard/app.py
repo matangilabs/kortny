@@ -456,9 +456,14 @@ def register_routes(app: FastAPI) -> None:
         session: Annotated[Session, Depends(get_session)],
         from_date: Annotated[str | None, Query(alias="from")] = None,
         to_date: Annotated[str | None, Query(alias="to")] = None,
+        days: Annotated[int | None, Query(ge=1, le=366)] = None,
     ) -> Response:
-        start = parse_date_bound(from_date)
-        end = parse_date_bound(to_date, inclusive_end=True)
+        if days is not None:
+            end = datetime.now(UTC)
+            start = end - timedelta(days=days)
+        else:
+            start = parse_date_bound(from_date)
+            end = parse_date_bound(to_date, inclusive_end=True)
         aggregate = get_usage_aggregate(session, start=start, end=end)
         return templates.TemplateResponse(
             request=request,
@@ -2524,11 +2529,16 @@ def register_routes(app: FastAPI) -> None:
         session: Annotated[Session, Depends(get_session)],
         from_date: Annotated[str | None, Query(alias="from")] = None,
         to_date: Annotated[str | None, Query(alias="to")] = None,
+        days: Annotated[int | None, Query(ge=1, le=366)] = None,
     ) -> Response:
         if principal.installation_id is None or principal.slack_user_id is None:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
-        start = parse_date_bound(from_date)
-        end = parse_date_bound(to_date, inclusive_end=True)
+        if days is not None:
+            end = datetime.now(UTC)
+            start = end - timedelta(days=days)
+        else:
+            start = parse_date_bound(from_date)
+            end = parse_date_bound(to_date, inclusive_end=True)
         aggregate = get_usage_aggregate(
             session,
             start=start,

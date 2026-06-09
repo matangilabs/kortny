@@ -8971,3 +8971,45 @@ details[open] > summary::after {
   white-space: nowrap;
 }
 
+
+/* Usage page — ApexCharts cards */
+.usage-hero-chart {
+  margin-bottom: 16px;
+}
+
+.usage-charts-grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-bottom: 24px;
+}
+
+@media (max-width: 900px) {
+  .usage-charts-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.usage-chart-card {
+  min-width: 0;
+}
+
+.usage-chart-body {
+  padding: 10px 8px 6px;
+}
+
+.usage-chart-canvas {
+  min-height: 280px;
+  width: 100%;
+}
+
+/* ApexCharts theme integration tweaks */
+.usage-chart-card .apexcharts-tooltip {
+  border: 1px solid var(--border) !important;
+  box-shadow: 0 6px 16px rgb(0 0 0 / 12%) !important;
+}
+
+.usage-chart-card .apexcharts-legend-text {
+  color: var(--muted-foreground) !important;
+}
+

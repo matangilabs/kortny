@@ -6,7 +6,7 @@
   <section class="page-heading">
     <div>
       <h1>Overview</h1>
-      <p>Operator snapshot for exceptions, health, and cost drivers. Refreshed {{ overview.refreshed_at|datetime }}.</p>
+      <p>Operator snapshot for exceptions, health, and cost drivers. {{ overview.window_label }}, refreshed {{ overview.refreshed_at|datetime }}.</p>
     </div>
     <div class="heading-actions">
       <span class="status-chip badge-{{ overview.system_health.overall_tone }}">{{ overview.system_health.overall_label }}</span>
@@ -27,7 +27,43 @@
     {% endfor %}
   </section>
 
-  <!-- Attention queue full-width — primary operator action surface -->
+  <!-- Trends -->
+  <section class="usage-charts-grid" aria-label="Activity trends">
+    <article class="card usage-chart-card">
+      <header>
+        <h2>Daily Cost</h2>
+        <p>{{ overview.window_label }} spend trend.</p>
+      </header>
+      <div class="usage-chart-body"><div id="ov-daily-cost" class="usage-chart-canvas"></div></div>
+    </article>
+    <article class="card usage-chart-card">
+      <header>
+        <h2>Task Volume</h2>
+        <p>{{ overview.window_label }} task count with failures highlighted.</p>
+      </header>
+      <div class="usage-chart-body"><div id="ov-task-volume" class="usage-chart-canvas"></div></div>
+    </article>
+  </section>
+
+  <!-- Cost drivers -->
+  <section class="usage-charts-grid" aria-label="Top cost drivers">
+    <article class="card usage-chart-card">
+      <header>
+        <h2>Top Models</h2>
+        <p>{{ overview.window_label }} spend by model.</p>
+      </header>
+      <div class="usage-chart-body"><div id="ov-by-model" class="usage-chart-canvas"></div></div>
+    </article>
+    <article class="card usage-chart-card">
+      <header>
+        <h2>Top Users</h2>
+        <p>{{ overview.window_label }} spend by user.</p>
+      </header>
+      <div class="usage-chart-body"><div id="ov-by-user" class="usage-chart-canvas"></div></div>
+    </article>
+  </section>
+
+  <!-- Needs Review — exception queue, after the trend + cost charts -->
   <article class="card attention-card overview-block-gap">
     <header>
       <h2>Needs Review</h2>
@@ -48,120 +84,68 @@
     </div>
   </article>
 
-  <!-- Charts — daily trend and task volume -->
-  <section class="charts-grid overview-charts" aria-label="Recent activity trend">
-    <article class="card chart-card">
+  <!-- Insights -->
+  <section class="insights-grid overview-block-gap" aria-label="System insights">
+    <article class="card insight-card">
       <header>
-        <h2>Daily Cost</h2>
-        <p>{{ overview.window_label }} spend trend.</p>
+        <h2>Agent Skills</h2>
+        <p>Execution routines and invocation counts.</p>
       </header>
-      {% set points = overview.charts.daily_cost %}
-      {% set chart_label = "Overview daily cost chart" %}
-      {% set empty_message = "No cost data in this window." %}
-      {% include "_chart_columns.html" with context %}
-    </article>
-
-    <article class="card chart-card">
-      <header>
-        <h2>Task Volume</h2>
-        <p>{{ overview.window_label }} task count with failures highlighted.</p>
-      </header>
-      {% set points = overview.charts.daily_task_volume %}
-      {% set chart_label = "Overview task volume chart" %}
-      {% set empty_message = "No task data in this window." %}
-      {% include "_chart_columns.html" with context %}
-    </article>
-  </section>
-
-  <!-- Top usage drivers alongside system context -->
-  <section class="overview-main-grid overview-block-gap" aria-label="Overview panels">
-    <article class="card top-card">
-      <header>
-        <h2>Top Usage Drivers</h2>
-        <p>{{ overview.window_label }} by recorded LLM cost.</p>
-      </header>
-      <div class="driver-list">
-        <section>
-          <h3>Models</h3>
-          {% set bars = overview.charts.cost_by_model %}
-          {% set chart_label = "Top model spend chart" %}
-          {% set empty_message = "No model usage in this window." %}
-          {% include "_chart_bars.html" with context %}
-        </section>
-        <section>
-          <h3>Users</h3>
-          {% set bars = overview.charts.cost_by_user %}
-          {% set chart_label = "Top user spend chart" %}
-          {% set empty_message = "No user usage in this window." %}
-          {% include "_chart_bars.html" with context %}
-        </section>
+      <div class="insight-list">
+        {% for skill in overview.skill_usage %}
+          <div class="insight-row">
+            <div class="insight-meta">
+              <strong>{{ skill.name }}</strong>
+              <p class="desc-line">{{ skill.description }}</p>
+            </div>
+            <span class="badge badge-neutral num">{{ skill.invocation_count|number }}</span>
+          </div>
+        {% else %}
+          <p class="empty insight-empty">No procedural skills executed yet.</p>
+        {% endfor %}
       </div>
     </article>
 
-    <!-- Insight panels collapsed into a compact aside -->
-    <div class="overview-insight-stack">
-      <article class="card insight-card skills-card">
-        <header>
-          <h2>Agent Skills</h2>
-          <p>Execution routines and invocation counts.</p>
-        </header>
-        <div class="insight-list">
-          {% for skill in overview.skill_usage %}
-            <div class="insight-row">
-              <div class="insight-meta">
-                <strong>{{ skill.name }}</strong>
-                <p class="desc-line">{{ skill.description }}</p>
-              </div>
-              <span class="badge badge-neutral num">{{ skill.invocation_count|number }}</span>
+    <article class="card insight-card">
+      <header>
+        <h2>Active Memory</h2>
+        <p>Current behavior guidelines from workspace facts.</p>
+      </header>
+      <div class="insight-list">
+        {% for fact_row in overview.active_facts %}
+          <div class="insight-row">
+            <div class="insight-meta">
+              <code class="inline-code">{{ fact_row.fact.key }}</code>
+              <p class="desc-line">{{ fact_row.value_summary }}</p>
             </div>
-          {% else %}
-            <p class="empty insight-empty">No procedural skills executed yet.</p>
-          {% endfor %}
-        </div>
-      </article>
-
-      <article class="card insight-card memory-card-panel">
-        <header>
-          <h2>Active Memory</h2>
-          <p>Current behavior guidelines from workspace facts.</p>
-        </header>
-        <div class="insight-list">
-          {% for fact_row in overview.active_facts %}
-            <div class="insight-row">
-              <div class="insight-meta">
-                <code class="inline-code">{{ fact_row.fact.key }}</code>
-                <p class="desc-line">{{ fact_row.value_summary }}</p>
-              </div>
-              <span class="badge badge-success">{{ fact_row.fact.status }}</span>
-            </div>
-          {% else %}
-            <p class="empty insight-empty">No active behavior policies proposed yet.</p>
-          {% endfor %}
-        </div>
-      </article>
-    </div>
-  </section>
-
-  <!-- Channel Profiles -->
-  <article class="card insight-card profiles-card overview-block-gap">
-    <header>
-      <h2>Channel Profiles</h2>
-      <p>Kortny's observational mappings in channels.</p>
-    </header>
-    <div class="insight-list">
-      {% for cp in overview.channel_profiles %}
-        <div class="insight-row channel-row">
-          <div class="insight-meta">
-            <span class="badge badge-neutral channel-badge">{{ cp.channel.name or cp.channel.slack_id }}</span>
-            <p class="desc-line">{{ cp.summary }}</p>
+            <span class="badge badge-success">{{ fact_row.fact.status }}</span>
           </div>
-          <span class="badge badge-accent num">{{ cp.message_count|number }} msgs</span>
-        </div>
-      {% else %}
-        <p class="empty insight-empty">No active channel profiles compiled yet.</p>
-      {% endfor %}
-    </div>
-  </article>
+        {% else %}
+          <p class="empty insight-empty">No active behavior policies proposed yet.</p>
+        {% endfor %}
+      </div>
+    </article>
+
+    <article class="card insight-card">
+      <header>
+        <h2>Channel Profiles</h2>
+        <p>Kortny's observational mappings in channels.</p>
+      </header>
+      <div class="insight-list">
+        {% for cp in overview.channel_profiles %}
+          <div class="insight-row channel-row">
+            <div class="insight-meta">
+              <span class="badge badge-neutral channel-badge">{{ cp.channel.name or cp.channel.slack_id }}</span>
+              <p class="desc-line">{{ cp.summary }}</p>
+            </div>
+            <span class="badge badge-accent num">{{ cp.message_count|number }} msgs</span>
+          </div>
+        {% else %}
+          <p class="empty insight-empty">No active channel profiles compiled yet.</p>
+        {% endfor %}
+      </div>
+    </article>
+  </section>
 
   <section class="card detail-section">
     <div class="section-header-row">
@@ -171,9 +155,92 @@
       </div>
       <a class="btn-ghost" href="/tasks">View all tasks</a>
     </div>
-      {% set task_items = overview.recent_tasks %}
-      {% set task_empty_message = "No tasks yet." %}
-      {% set tasks_base_path = "/tasks" %}
-      {% include "_task_list.html" with context %}
+    {% set task_items = overview.recent_tasks %}
+    {% set task_empty_message = "No tasks yet." %}
+    {% set tasks_base_path = "/tasks" %}
+    {% include "_task_list.html" with context %}
   </section>
+
+  <script type="application/json" id="overview-data">
+    {
+      "daily": {
+        "labels": [{% for r in overview.by_day|reverse %}{{ r.day|string|tojson }}{% if not loop.last %}, {% endif %}{% endfor %}],
+        "cost": [{% for r in overview.by_day|reverse %}{{ r.cost_usd|float }}{% if not loop.last %}, {% endif %}{% endfor %}]
+      },
+      "tasks": {
+        "labels": [{% for r in overview.by_task_day|reverse %}{{ r.day|string|tojson }}{% if not loop.last %}, {% endif %}{% endfor %}],
+        "total": [{% for r in overview.by_task_day|reverse %}{{ r.task_count }}{% if not loop.last %}, {% endif %}{% endfor %}],
+        "failed": [{% for r in overview.by_task_day|reverse %}{{ r.failed_task_count }}{% if not loop.last %}, {% endif %}{% endfor %}]
+      },
+      "byModel": {
+        "labels": [{% for r in overview.top_models %}{{ r.display_key|tojson }}{% if not loop.last %}, {% endif %}{% endfor %}],
+        "cost": [{% for r in overview.top_models %}{{ r.cost_usd|float }}{% if not loop.last %}, {% endif %}{% endfor %}]
+      },
+      "byUser": {
+        "labels": [{% for r in overview.top_users %}{{ r.display_key|tojson }}{% if not loop.last %}, {% endif %}{% endfor %}],
+        "cost": [{% for r in overview.top_users %}{{ r.cost_usd|float }}{% if not loop.last %}, {% endif %}{% endfor %}]
+      }
+    }
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/apexcharts@3.49.1/dist/apexcharts.min.js"></script>
+  <script src="{{ url_for('static', path='/charts.js') }}"></script>
+  <script>
+    (function () {
+      const dataEl = document.getElementById('overview-data');
+      const KC = window.KortnyCharts;
+      if (!dataEl || !KC || typeof ApexCharts === 'undefined') return;
+      let DATA;
+      try { DATA = JSON.parse(dataEl.textContent); } catch (_e) { return; }
+
+      const p = KC.palette();
+      const { money, moneyPrecise, int, shortDate } = KC.fmt;
+      const base = () => KC.baseOptions(p);
+
+      KC.create(document.getElementById('ov-daily-cost'), Object.assign(base(), {
+        chart: Object.assign(base().chart, { type: 'area', height: 280 }),
+        series: [{ name: 'Cost', data: DATA.daily.cost }],
+        colors: [p.accent],
+        stroke: { curve: 'smooth', width: 2.5 },
+        fill: { type: 'gradient', gradient: { shadeIntensity: 1, opacityFrom: 0.35, opacityTo: 0.02, stops: [0, 95] } },
+        xaxis: { categories: DATA.daily.labels.map(shortDate), tickAmount: 7, axisBorder: { color: p.border }, axisTicks: { color: p.border } },
+        yaxis: { labels: { formatter: money } },
+        tooltip: Object.assign(base().tooltip, { y: { formatter: moneyPrecise } }),
+        markers: { size: 0, hover: { size: 5 } },
+      }));
+
+      KC.create(document.getElementById('ov-task-volume'), Object.assign(base(), {
+        chart: Object.assign(base().chart, { type: 'bar', height: 280 }),
+        series: [{ name: 'Tasks', data: DATA.tasks.total }, { name: 'Failed', data: DATA.tasks.failed }],
+        colors: [p.accent, p.danger],
+        plotOptions: { bar: { columnWidth: '55%', borderRadius: 3 } },
+        xaxis: { categories: DATA.tasks.labels.map(shortDate), tickAmount: 7, axisBorder: { color: p.border }, axisTicks: { color: p.border } },
+        yaxis: { labels: { formatter: int }, forceNiceScale: true },
+        tooltip: Object.assign(base().tooltip, { y: { formatter: int } }),
+        legend: { position: 'top', horizontalAlign: 'right', labels: { colors: p.muted } },
+      }));
+
+      const ovModel = KC.topN(DATA.byModel.labels, DATA.byModel.cost, 8);
+      KC.create(document.getElementById('ov-by-model'), Object.assign(base(), {
+        chart: Object.assign(base().chart, { type: 'donut', height: 280 }),
+        series: ovModel.values,
+        labels: ovModel.labels,
+        colors: KC.categoricalColors(p),
+        stroke: { colors: [p.card], width: 2 },
+        legend: { position: 'bottom', fontSize: '12px', labels: { colors: p.muted }, itemMargin: { horizontal: 6, vertical: 2 } },
+        plotOptions: { pie: { donut: { size: '62%', labels: { show: true, total: { show: true, showAlways: true, label: 'Total', color: p.muted, formatter: (w) => money(w.globals.seriesTotals.reduce((a, b) => a + b, 0)) } } } } },
+        tooltip: Object.assign(base().tooltip, { y: { formatter: moneyPrecise } }),
+      }));
+
+      const ovUser = KC.topN(DATA.byUser.labels, DATA.byUser.cost, 12);
+      KC.create(document.getElementById('ov-by-user'), Object.assign(base(), {
+        chart: Object.assign(base().chart, { type: 'bar', height: Math.max(220, ovUser.labels.length * 34 + 40) }),
+        series: [{ name: 'Cost', data: ovUser.values }],
+        colors: [p.accent],
+        plotOptions: { bar: { horizontal: true, borderRadius: 4, barHeight: '62%', distributed: true } },
+        xaxis: { categories: ovUser.labels, labels: { formatter: money }, axisBorder: { color: p.border }, axisTicks: { color: p.border } },
+        tooltip: Object.assign(base().tooltip, { y: { formatter: moneyPrecise } }),
+        legend: { show: false },
+      }));
+    })();
+  </script>
 {% endblock %}

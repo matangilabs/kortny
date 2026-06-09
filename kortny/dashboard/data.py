@@ -496,6 +496,8 @@ class DashboardOverview:
     active_facts: tuple[MemoryFactRow, ...]
     skill_usage: tuple[OverviewSkillUsageRow, ...]
     channel_profiles: tuple[OverviewChannelProfileRow, ...]
+    by_day: tuple[DailyUsageRow, ...]
+    by_task_day: tuple[DailyTaskRow, ...]
 
 
 @dataclass(frozen=True)
@@ -1686,6 +1688,8 @@ def get_dashboard_overview(
         active_facts=active_facts,
         skill_usage=skill_usage,
         channel_profiles=channel_profiles,
+        by_day=usage.by_day,
+        by_task_day=usage.by_task_day,
     )
 
 
