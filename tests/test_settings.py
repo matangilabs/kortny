@@ -134,7 +134,7 @@ def test_settings_loads_required_environment(monkeypatch: pytest.MonkeyPatch) ->
     assert settings.tool_selector_max_prompt_chars == 12000
     assert settings.tool_result_prompt_max_chars == 8000
     assert settings.observability_enabled is True
-    assert settings.observability_capture_content == "metadata"
+    assert settings.observability_capture_content == "summaries"
     assert settings.otel_service_name == "kortny"
     assert settings.langfuse_enabled is False
 

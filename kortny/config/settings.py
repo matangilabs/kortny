@@ -206,7 +206,7 @@ class Settings(BaseSettings):
         default=True, validation_alias="OBSERVABILITY_ENABLED"
     )
     observability_capture_content: Literal["metadata", "summaries", "full"] = Field(
-        default="metadata", validation_alias="OBSERVABILITY_CAPTURE_CONTENT"
+        default="summaries", validation_alias="OBSERVABILITY_CAPTURE_CONTENT"
     )
     otel_exporter_otlp_endpoint: str | None = Field(
         default=None, validation_alias="OTEL_EXPORTER_OTLP_ENDPOINT"

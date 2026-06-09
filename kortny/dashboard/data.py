@@ -206,6 +206,8 @@ class TimelineEvent:
     badges: tuple[TimelineBadge, ...]
     metrics: tuple[TimelineMetric, ...]
     payload_json: str
+    prompt_json: str | None = None
+    response_json: str | None = None
 
 
 @dataclass(frozen=True)
@@ -6207,7 +6209,21 @@ def _timeline_event(event: TaskEvent) -> TimelineEvent:
         badges=badges,
         metrics=metrics,
         payload_json=json.dumps(payload, indent=2, sort_keys=True, default=str),
+        prompt_json=_captured_content_json(payload.get("request_messages")),
+        response_json=_captured_content_json(payload.get("response")),
     )
+
+
+def _captured_content_json(value: Any) -> str | None:
+    """Pretty-print captured prompt/response content for the timeline.
+
+    Present only when ``OBSERVABILITY_CAPTURE_CONTENT`` is ``summaries``/``full``;
+    ``None`` (the default metadata mode) hides the dedicated UI block.
+    """
+
+    if not value:
+        return None
+    return json.dumps(value, indent=2, sort_keys=True, default=str)
 
 
 def _posted_response_text(events: Sequence[TaskEvent]) -> str | None:

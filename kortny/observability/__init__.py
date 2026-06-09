@@ -8,6 +8,7 @@ from kortny.observability.events import (
 )
 from kortny.observability.tracing import (
     add_span_event,
+    capture_content_mode,
     configure_tracing,
     current_trace_context,
     current_traceparent,
@@ -19,6 +20,7 @@ from kortny.observability.tracing import (
 
 __all__ = [
     "add_span_event",
+    "capture_content_mode",
     "configure_tracing",
     "current_trace_context",
     "current_traceparent",

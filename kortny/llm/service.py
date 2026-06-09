@@ -17,11 +17,17 @@ from kortny.db.models import ModelPricing
 from kortny.llm.routing import ModelRoute, ModelRouteTier
 from kortny.llm.types import ChatMessage, Completion, LLMProvider, TokenUsage
 from kortny.observability import (
+    capture_content_mode,
     log_observation,
     observe_task_event,
     record_span_exception,
     set_span_attributes,
     start_span,
+)
+from kortny.observability.content import (
+    llm_span_attributes,
+    render_chat_messages,
+    render_completion,
 )
 from kortny.tasks import TaskService
 from kortny.tools.types import JsonObject, JsonSchema
@@ -72,6 +78,8 @@ class LLMService:
             response_format=response_format,
         )
         started = time.perf_counter()
+        capture_mode = capture_content_mode()
+        request_messages = render_chat_messages(messages, capture_mode)
         start_fields = self._base_observation_fields(
             messages=messages,
             tools=tools,
@@ -81,11 +89,15 @@ class LLMService:
             prompt_label=prompt_label,
             prompt_version=prompt_version,
         )
+        started_fields = dict(start_fields)
+        if request_messages is not None:
+            started_fields["request_messages"] = request_messages
         with start_span(
             "llm.complete",
             task=self.task_service.get_task(task_id),
             attributes={
                 **start_fields,
+                **llm_span_attributes(request_messages=request_messages),
                 "openinference.span.kind": "LLM",
                 "llm.provider": self.provider_name.value,
                 "llm.model_name": self.provider.model,
@@ -96,7 +108,7 @@ class LLMService:
                 task_id,
                 "llm_call_started",
                 logger=logger,
-                **start_fields,
+                **started_fields,
             )
 
             try:
@@ -129,6 +141,7 @@ class LLMService:
                 cost_usd = calculate_cost_usd(completion.usage, pricing)
 
             latency_ms = _latency_ms(started)
+            response_content = render_completion(completion, capture_mode)
             metadata = {
                 **start_fields,
                 "model": model,
@@ -140,6 +153,8 @@ class LLMService:
                     tool_call.name for tool_call in completion.tool_calls
                 ],
             }
+            if response_content is not None:
+                metadata["response"] = response_content
             self.task_service.record_llm_usage(
                 task_id,
                 provider=self.provider_name,
@@ -184,6 +199,7 @@ class LLMService:
                     "llm.latency_ms": latency_ms,
                     "llm.tool_count": len(tools),
                     "llm.tool_call_count": len(completion.tool_calls),
+                    **llm_span_attributes(response=response_content),
                 }
             )
             log_observation(

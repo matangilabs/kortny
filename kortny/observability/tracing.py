@@ -36,6 +36,7 @@ _DEFAULT_VERSION = "0.1.0"
 _MAX_ATTRIBUTE_CHARS = 2_000
 _CONFIGURED = False
 _TRACING_ENABLED = False
+_CAPTURE_CONTENT = "metadata"
 _TRACER = trace.get_tracer(_TRACER_NAME, _DEFAULT_VERSION)
 
 
@@ -46,11 +47,14 @@ def configure_tracing(settings: Settings) -> None:
     the OpenTelemetry API in its default no-op state.
     """
 
-    global _CONFIGURED, _TRACER, _TRACING_ENABLED
+    global _CONFIGURED, _TRACER, _TRACING_ENABLED, _CAPTURE_CONTENT
     if _CONFIGURED:
         return
 
     _CONFIGURED = True
+    # Capture mode gates prompt/response content for BOTH spans and durable
+    # task_events rows, so set it before the OTEL-disabled early return.
+    _CAPTURE_CONTENT = settings.observability_capture_content
     endpoint = settings.otel_exporter_otlp_endpoint
     if not settings.observability_enabled or endpoint is None:
         _TRACING_ENABLED = False
@@ -103,6 +107,16 @@ def tracing_enabled() -> bool:
     """Return whether this process is exporting traces."""
 
     return _TRACING_ENABLED
+
+
+def capture_content_mode() -> str:
+    """Return the active prompt/response capture mode for this process.
+
+    One of ``"metadata"`` (default), ``"summaries"``, or ``"full"``. Set from
+    ``OBSERVABILITY_CAPTURE_CONTENT`` at process boot via ``configure_tracing``.
+    """
+
+    return _CAPTURE_CONTENT
 
 
 def start_span(

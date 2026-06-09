@@ -42,7 +42,16 @@ from kortny.llm.routing import ModelRoute, ModelRouter, ModelRouteTier
 from kortny.llm.runtime_config import db_provider_name
 from kortny.llm.service import calculate_cost_usd
 from kortny.llm.types import TokenUsage
-from kortny.observability import log_observation
+from kortny.observability import (
+    capture_content_mode,
+    log_observation,
+    set_span_attributes,
+)
+from kortny.observability.content import (
+    captures_content,
+    llm_span_attributes,
+    render_text_messages,
+)
 from kortny.routing import RoutingDecisionTrace
 from kortny.tasks import TaskService
 from kortny.tools import ToolRegistry
@@ -91,6 +100,9 @@ ADK_TOTAL_TOOL_CALLS_KEY = "adk_total_tool_calls"
 ADK_GLOBAL_BUDGET_BLOCKED_KEY = "adk_budget_blocked:planned_workflow"
 ADK_BRANCH_BUDGET_EVENT_PREFIX = "adk_budget_event_recorded:"
 ADK_PLANNED_BUDGET_SUMMARY_KEY = "planned_budget_summary"
+# Transient state key: the captured prompt is stashed by the before-model
+# callback and read back by the after-model callback (which has no request).
+ADK_CAPTURED_REQUEST_KEY = "adk_captured_request_messages"
 ADK_PLANNED_BUDGET_DEFAULT_SUMMARY = "No planned workflow budget caps reached."
 ADK_PHASE_EVENT_PREFIX = "adk_phase_event_recorded:"
 ADK_SINGLE_PERSONA_PROMPT = """User-facing identity rules:
@@ -555,6 +567,7 @@ class AdkAgentRuntime:
             instruction=self._instruction(context_package=context_package),
             description="Routes Slack requests to Kortny specialist agents.",
             tools=[AgentTool(agent=agent) for agent in specialist_agents],
+            before_model_callback=self._capture_adk_model_request,
             after_model_callback=self._record_and_guard_adk_model_response,
             mode="chat",
         )
@@ -874,6 +887,7 @@ class AdkAgentRuntime:
                 _instruction_with_persona(prompt), context
             ),
             description=description,
+            before_model_callback=self._capture_adk_model_request,
             after_model_callback=self._record_and_guard_adk_model_response,
             mode="chat",
         )
@@ -891,6 +905,7 @@ class AdkAgentRuntime:
                 "web/current data, documents, integrations, and multi-step work."
             ),
             tools=self._worker_tools(task=task),
+            before_model_callback=self._capture_adk_model_request,
             after_model_callback=self._record_and_guard_adk_model_response,
             mode="chat",
         )
@@ -1126,6 +1141,29 @@ class AdkAgentRuntime:
             )
         return self._model_config_service
 
+    def _capture_adk_model_request(
+        self,
+        callback_context: CallbackContext,
+        llm_request: Any,
+    ) -> LlmResponse | None:
+        """Stash the prompt so the after-model callback can persist it.
+
+        The ADK ``after_model_callback`` receives only the response, so capture
+        of the request must happen here. No-op unless content capture is on.
+        """
+
+        mode = capture_content_mode()
+        if not captures_content(mode):
+            return None
+        try:
+            messages = render_text_messages(_adk_request_messages(llm_request), mode)
+        except Exception:  # pragma: no cover - capture must never break a call
+            logger.debug("adk request capture failed", exc_info=True)
+            return None
+        if messages is not None:
+            callback_context.state[ADK_CAPTURED_REQUEST_KEY] = messages
+        return None
+
     def _guard_planned_model_request(
         self,
         callback_context: CallbackContext,
@@ -1133,6 +1171,7 @@ class AdkAgentRuntime:
     ) -> LlmResponse | None:
         """Stop planned branch workers before they exceed model-call budgets."""
 
+        self._capture_adk_model_request(callback_context, llm_request)
         del llm_request
         agent_name = callback_context.agent_name
         if agent_name not in ADK_PLANNED_BRANCH_AGENT_NAMES:
@@ -1446,7 +1485,7 @@ class AdkAgentRuntime:
         resolved_model = model_chain.primary if model_chain is not None else None
         model_tier = self._adk_model_tier_for_agent(agent_name)
         route_reason = self._adk_route_reason_for_agent(agent_name)
-        metadata = {
+        metadata: dict[str, Any] = {
             "runtime": "adk",
             "prompt_name": f"kortny.adk.{agent_name}",
             "prompt_source": "adk",
@@ -1486,6 +1525,27 @@ class AdkAgentRuntime:
             if resolved_model
             else None,
         }
+        capture_mode = capture_content_mode()
+        if captures_content(capture_mode):
+            request_messages = callback_context.state.get(ADK_CAPTURED_REQUEST_KEY)
+            response_message: dict[str, Any] | None = None
+            if llm_response.content is not None:
+                rendered = render_text_messages(
+                    [_adk_content_to_message(llm_response.content)],
+                    capture_mode,
+                )
+                response_message = rendered[0] if rendered else None
+            if request_messages:
+                metadata["request_messages"] = request_messages
+            if response_message:
+                metadata["response"] = response_message
+            set_span_attributes(
+                llm_span_attributes(
+                    request_messages=request_messages or None,
+                    response=response_message,
+                )
+            )
+            callback_context.state[ADK_CAPTURED_REQUEST_KEY] = None
         self.task_service.record_llm_usage(
             task_id,
             provider=db_provider_name(
@@ -1914,6 +1974,61 @@ def _event_text(event: Any) -> str:
         if isinstance(text, str) and text:
             texts.append(text)
     return "\n".join(texts)
+
+
+def _adk_content_to_message(content: Any) -> dict[str, Any]:
+    """Flatten a genai ``Content`` into a ``{role, content, tool_calls}`` dict."""
+
+    role = _string_or_none(getattr(content, "role", None)) or "user"
+    texts: list[str] = []
+    tool_calls: list[dict[str, Any]] = []
+    for part in getattr(content, "parts", None) or []:
+        text = getattr(part, "text", None)
+        if text:
+            texts.append(str(text))
+        function_call = getattr(part, "function_call", None) or getattr(
+            part, "functionCall", None
+        )
+        if function_call is not None:
+            try:
+                arguments = dict(getattr(function_call, "args", None) or {})
+            except (TypeError, ValueError):
+                arguments = {}
+            tool_calls.append(
+                {
+                    "name": _string_or_none(getattr(function_call, "name", None)),
+                    "arguments": arguments,
+                }
+            )
+        function_response = getattr(part, "function_response", None) or getattr(
+            part, "functionResponse", None
+        )
+        if function_response is not None:
+            tool_calls.append(
+                {
+                    "name": _string_or_none(getattr(function_response, "name", None)),
+                    "response": getattr(function_response, "response", None),
+                }
+            )
+    message: dict[str, Any] = {"role": role}
+    if texts:
+        message["content"] = "\n".join(texts)
+    if tool_calls:
+        message["tool_calls"] = tool_calls
+    return message
+
+
+def _adk_request_messages(llm_request: Any) -> list[dict[str, Any]]:
+    """Extract prompt messages from an ADK ``LlmRequest``."""
+
+    messages: list[dict[str, Any]] = []
+    config = getattr(llm_request, "config", None)
+    system_instruction = getattr(config, "system_instruction", None)
+    if isinstance(system_instruction, str) and system_instruction.strip():
+        messages.append({"role": "system", "content": system_instruction})
+    for content in getattr(llm_request, "contents", None) or []:
+        messages.append(_adk_content_to_message(content))
+    return messages
 
 
 def _adk_part_tool_call_name(part: genai_types.Part) -> str | None:
