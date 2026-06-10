@@ -28,6 +28,7 @@ from kortny.db.models import (
     TaskEvent,
 )
 from kortny.db.session import make_engine, make_session_factory, normalize_database_url
+from kortny.skills import SkillRegistryService
 from kortny.skills.ingestion import SkillIngestionError, SkillIngestionService
 from kortny.tasks import TaskService
 
@@ -81,12 +82,13 @@ def create_task(
     user_id: str = "U123",
 ) -> Task:
     installation = installation or create_installation(session)
+    thread_ts = f"{uuid.uuid4().int % 10**6}.{uuid.uuid4().int % 10**6}"
     return TaskService(session).create_task(
         installation_id=installation.id,
         slack_event_id=f"Ev{uuid.uuid4().hex}",
         slack_channel_id=channel_id,
-        slack_thread_ts="123.456",
-        slack_message_ts="123.456",
+        slack_thread_ts=thread_ts,
+        slack_message_ts=thread_ts,
         slack_user_id=user_id,
         input="summarize the meeting notes from today",
     )
@@ -355,3 +357,159 @@ class TestSkillIngestion:
 
         with pytest.raises(SkillIngestionError, match="name is required"):
             service.ingest_markdown("just some text", owner_id="W1", **INGEST_KWARGS)
+
+
+class TestCuratedCatalog:
+    def test_ensure_curated_skills_seeds_trusted_system_skills(
+        self, db_session: Session
+    ) -> None:
+        service = SkillRegistryService(db_session)
+
+        service.ensure_curated_skills()
+        service.ensure_curated_skills()  # idempotent
+
+        skills = {
+            skill.slug: skill
+            for skill in db_session.scalars(
+                select(ProceduralSkill).where(ProceduralSkill.owner_type == "system")
+            )
+        }
+        assert {
+            "meeting-notes-summarizer",
+            "competitive-analysis",
+            "weekly-status-report",
+        } <= set(skills)
+        curated = skills["competitive-analysis"]
+        assert curated.trust_level == "trusted"
+        assert curated.provenance == "kortny"
+        versions = list(
+            db_session.scalars(
+                select(ProceduralSkillVersion).where(
+                    ProceduralSkillVersion.skill_id == curated.id
+                )
+            )
+        )
+        assert len(versions) == 1  # idempotent re-seed created no new version
+        reference = db_session.scalar(
+            select(SkillFile).where(SkillFile.skill_version_id == versions[0].id)
+        )
+        assert reference is not None
+        assert reference.path == "references/dimensions.md"
+
+
+class TestSkillEnablement:
+    def test_scope_resolution_workspace_channel_user(self, db_session: Session) -> None:
+        installation = create_installation(db_session)
+        registry = SkillRegistryService(db_session)
+        ws_skill, _ = create_skill(db_session, slug="ws-skill", owner_type="system")
+        ch_skill, _ = create_skill(db_session, slug="ch-skill", owner_type="system")
+        user_skill, _ = create_skill(db_session, slug="user-skill", owner_type="system")
+
+        registry.enable_skill(
+            installation_id=installation.id,
+            skill_id=ws_skill.id,
+            scope_type="workspace",
+            scope_id=None,
+            added_by="dashboard:tester",
+        )
+        registry.enable_skill(
+            installation_id=installation.id,
+            skill_id=ch_skill.id,
+            scope_type="channel",
+            scope_id="C999",
+            added_by="dashboard:tester",
+        )
+        registry.enable_skill(
+            installation_id=installation.id,
+            skill_id=user_skill.id,
+            scope_type="user",
+            scope_id="U999",
+            added_by="dashboard:tester",
+        )
+
+        task_other = create_task(
+            db_session, installation, channel_id="C1", user_id="U1"
+        )
+        assert [s.slug for s in registry.enabled_skills_for_task(task_other)] == [
+            "ws-skill"
+        ]
+
+        task_channel = create_task(
+            db_session, installation, channel_id="C999", user_id="U1"
+        )
+        assert {s.slug for s in registry.enabled_skills_for_task(task_channel)} == {
+            "ws-skill",
+            "ch-skill",
+        }
+
+        task_user = create_task(
+            db_session, installation, channel_id="C1", user_id="U999"
+        )
+        assert {s.slug for s in registry.enabled_skills_for_task(task_user)} == {
+            "ws-skill",
+            "user-skill",
+        }
+
+    def test_disabled_enablement_excluded_and_reenable(
+        self, db_session: Session
+    ) -> None:
+        installation = create_installation(db_session)
+        registry = SkillRegistryService(db_session)
+        skill, _ = create_skill(db_session, slug="toggle-skill", owner_type="system")
+        enablement = registry.enable_skill(
+            installation_id=installation.id,
+            skill_id=skill.id,
+            scope_type="workspace",
+            scope_id=None,
+            added_by="dashboard:tester",
+        )
+        task = create_task(db_session, installation)
+        assert len(registry.enabled_skills_for_task(task)) == 1
+
+        registry.disable_skill(enablement_id=enablement.id, by="dashboard:tester")
+        assert registry.enabled_skills_for_task(task) == []
+
+        again = registry.enable_skill(
+            installation_id=installation.id,
+            skill_id=skill.id,
+            scope_type="workspace",
+            scope_id=None,
+            added_by="dashboard:tester2",
+        )
+        assert again.id == enablement.id
+        assert len(registry.enabled_skills_for_task(task)) == 1
+
+    def test_most_specific_scope_wins_for_attribution(
+        self, db_session: Session
+    ) -> None:
+        installation = create_installation(db_session)
+        registry = SkillRegistryService(db_session)
+        skill, _ = create_skill(db_session, slug="multi-scope", owner_type="system")
+        for scope_type, scope_id in (("workspace", None), ("user", "U999")):
+            registry.enable_skill(
+                installation_id=installation.id,
+                skill_id=skill.id,
+                scope_type=scope_type,
+                scope_id=scope_id,
+                added_by="dashboard:tester",
+            )
+        task = create_task(db_session, installation, user_id="U999")
+
+        enabled = registry.enabled_skills_for_task(task)
+
+        assert len(enabled) == 1
+        assert enabled[0].scope_type == "user"
+
+    def test_invalid_scope_rejected(self, db_session: Session) -> None:
+        installation = create_installation(db_session)
+        registry = SkillRegistryService(db_session)
+        skill, _ = create_skill(db_session, slug="bad-scope", owner_type="system")
+
+        with pytest.raises(ValueError, match="requires a scope_id"):
+            registry.enable_skill(
+                installation_id=installation.id,
+                skill_id=skill.id,
+                scope_type="channel",
+                scope_id=None,
+                added_by="dashboard:tester",
+            )

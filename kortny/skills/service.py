@@ -7,6 +7,7 @@ import json
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
@@ -16,6 +17,8 @@ from kortny.db.models import (
     ProceduralSkill,
     ProceduralSkillInvocation,
     ProceduralSkillVersion,
+    SkillEnablement,
+    SkillFile,
     Task,
     TaskEventType,
 )
@@ -26,6 +29,28 @@ from kortny.tools.types import JsonObject
 SKILL_CATALOG_BUILT_MESSAGE = "procedural_skill_catalog_built"
 SKILL_INVOKED_MESSAGE = "procedural_skill_invoked"
 RESPONSE_HUMANIZER_INVOCATION = "response_humanizer"
+EXECUTION_INVOCATION = "execution"
+
+CURATED_SKILLS_DIR = Path(__file__).parent / "curated"
+SKILL_SCOPE_TYPES = frozenset({"workspace", "channel", "user"})
+_SCOPE_SPECIFICITY = {"workspace": 0, "channel": 1, "user": 2}
+
+
+@dataclass(frozen=True, slots=True)
+class EnabledSkill:
+    """A skill enabled for a task's scope, with its latest active version."""
+
+    skill_id: uuid.UUID
+    version_id: uuid.UUID
+    slug: str
+    name: str
+    version: str
+    description: str
+    trust_level: str
+    scope_type: str
+    scope_id: str | None
+    has_references: bool
+    has_scripts: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +109,142 @@ class SkillRegistryService:
         for definition in BUILTIN_SKILLS:
             self._ensure_builtin_skill(definition)
         self.session.flush()
+
+    def ensure_curated_skills(self) -> None:
+        """Idempotently seed the curated execution-time skill catalog."""
+
+        from kortny.skills.ingestion import SkillIngestionService
+
+        if not CURATED_SKILLS_DIR.is_dir():
+            return
+        ingestion = SkillIngestionService(self.session)
+        for skill_dir in sorted(CURATED_SKILLS_DIR.iterdir()):
+            if not skill_dir.is_dir():
+                continue
+            ingestion.ingest_directory(
+                skill_dir,
+                owner_type="system",
+                owner_id=None,
+                provenance="kortny",
+                trust_level="trusted",
+                created_by="system",
+            )
+        self.session.flush()
+
+    def enable_skill(
+        self,
+        *,
+        installation_id: uuid.UUID,
+        skill_id: uuid.UUID,
+        scope_type: str,
+        scope_id: str | None,
+        added_by: str,
+    ) -> SkillEnablement:
+        """Enable a skill for a scope; re-enables a disabled enablement."""
+
+        _validate_skill_scope(scope_type, scope_id)
+        existing = self.session.scalar(
+            select(SkillEnablement).where(
+                SkillEnablement.installation_id == installation_id,
+                SkillEnablement.skill_id == skill_id,
+                SkillEnablement.scope_type == scope_type,
+                SkillEnablement.scope_id == scope_id
+                if scope_id is not None
+                else SkillEnablement.scope_id.is_(None),
+            )
+        )
+        if existing is not None:
+            existing.status = "enabled"
+            existing.added_by = added_by
+            self.session.flush()
+            return existing
+        enablement = SkillEnablement(
+            installation_id=installation_id,
+            skill_id=skill_id,
+            scope_type=scope_type,
+            scope_id=scope_id,
+            status="enabled",
+            added_by=added_by,
+        )
+        self.session.add(enablement)
+        self.session.flush()
+        return enablement
+
+    def disable_skill(self, *, enablement_id: uuid.UUID, by: str) -> SkillEnablement:
+        """Disable one enablement, keeping the row for audit."""
+
+        enablement = self.session.get(SkillEnablement, enablement_id)
+        if enablement is None:
+            raise ValueError(f"Skill enablement {enablement_id} not found.")
+        enablement.status = "disabled"
+        enablement.added_by = by
+        self.session.flush()
+        return enablement
+
+    def enabled_skills_for_task(self, task: Task) -> list[EnabledSkill]:
+        """Resolve skills enabled for a task's workspace/channel/user scopes.
+
+        One row per skill; when a skill is enabled at several scopes the most
+        specific scope (user > channel > workspace) wins for attribution.
+        """
+
+        scope_filter = SkillEnablement.scope_type == "workspace"
+        if task.slack_channel_id:
+            scope_filter = scope_filter | (
+                (SkillEnablement.scope_type == "channel")
+                & (SkillEnablement.scope_id == task.slack_channel_id)
+            )
+        if task.slack_user_id:
+            scope_filter = scope_filter | (
+                (SkillEnablement.scope_type == "user")
+                & (SkillEnablement.scope_id == task.slack_user_id)
+            )
+        rows = self.session.execute(
+            select(SkillEnablement, ProceduralSkill, ProceduralSkillVersion)
+            .join(ProceduralSkill, ProceduralSkill.id == SkillEnablement.skill_id)
+            .join(
+                ProceduralSkillVersion,
+                ProceduralSkillVersion.skill_id == ProceduralSkill.id,
+            )
+            .where(
+                SkillEnablement.installation_id == task.installation_id,
+                SkillEnablement.status == "enabled",
+                scope_filter,
+                ProceduralSkill.status == "active",
+                ProceduralSkillVersion.status == "active",
+            )
+            .order_by(ProceduralSkill.slug)
+        )
+        by_skill: dict[uuid.UUID, EnabledSkill] = {}
+        for enablement, skill, version in rows:
+            current = by_skill.get(skill.id)
+            if (
+                current is not None
+                and _SCOPE_SPECIFICITY[current.scope_type]
+                >= _SCOPE_SPECIFICITY[enablement.scope_type]
+            ):
+                continue
+            file_kinds = set(
+                self.session.scalars(
+                    select(SkillFile.kind).where(
+                        SkillFile.skill_version_id == version.id
+                    )
+                )
+            )
+            by_skill[skill.id] = EnabledSkill(
+                skill_id=skill.id,
+                version_id=version.id,
+                slug=skill.slug,
+                name=version.name,
+                version=version.version,
+                description=version.description,
+                trust_level=skill.trust_level,
+                scope_type=enablement.scope_type,
+                scope_id=enablement.scope_id,
+                has_references="reference" in file_kinds or "asset" in file_kinds,
+                has_scripts="script" in file_kinds,
+            )
+        return sorted(by_skill.values(), key=lambda item: item.slug)
 
     def select_for_response(
         self,
@@ -359,6 +520,15 @@ def _content_sha256(definition: BuiltInSkillDefinition) -> str:
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
+
+
+def _validate_skill_scope(scope_type: str, scope_id: str | None) -> None:
+    if scope_type not in SKILL_SCOPE_TYPES:
+        raise ValueError(f"Invalid skill scope_type: {scope_type!r}")
+    if scope_type == "workspace" and scope_id is not None:
+        raise ValueError("workspace scope must not carry a scope_id")
+    if scope_type in {"channel", "user"} and not scope_id:
+        raise ValueError(f"{scope_type} scope requires a scope_id")
 
 
 def _string_set(value: object) -> set[str]:
