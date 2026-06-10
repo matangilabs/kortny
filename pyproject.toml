@@ -24,6 +24,7 @@ dependencies = [
     "pydantic-settings>=2.3",
     "pypdf>=5.0",
     "python-dotenv>=1.0",
+    "python-multipart>=0.0.32",
     "reportlab>=4.4",
     "slack-bolt>=1.20",
     "sqlalchemy>=2.0",
