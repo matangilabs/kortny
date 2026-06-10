@@ -95,9 +95,7 @@ def _workbench(
 ) -> tuple[WorkbenchSession, FakeSessionClient]:
     resolved = client or FakeSessionClient()
     return (
-        WorkbenchSession(
-            client=resolved, task=FakeTask(), task_service=sink
-        ),
+        WorkbenchSession(client=resolved, task=FakeTask(), task_service=sink),
         resolved,
     )
 
@@ -124,8 +122,7 @@ def test_sandbox_bash_runs_command_and_reports_output() -> None:
     assert client.execs == [("s-1", "echo hi", "/workspace", 60)]
     assert client.opened == [("task-1", "workbench")]
     assert any(
-        payload.get("message") == "sandbox_session"
-        for _, _, payload in sink.events
+        payload.get("message") == "sandbox_session" for _, _, payload in sink.events
     )
 
 
@@ -143,9 +140,7 @@ def test_sandbox_bash_reuses_session_without_logging_again() -> None:
 
 def test_sandbox_bash_maps_failed_exit_to_recoverable_error() -> None:
     workbench, client = _workbench()
-    client.exec_result = SandboxExecResult(
-        exit_code=2, stderr="boom", timed_out=False
-    )
+    client.exec_result = SandboxExecResult(exit_code=2, stderr="boom", timed_out=False)
     tool = SandboxBashTool(workbench=workbench)
 
     result = tool.invoke({"command": "false"})
@@ -194,9 +189,7 @@ def test_sandbox_read_file_maps_session_error() -> None:
 def test_export_artifact_single_file(tmp_path: Path) -> None:
     workbench, client = _workbench()
     client.archive = _tar_with({"report.csv": b"a,b\n1,2\n"})
-    tool = SandboxExportArtifactTool(
-        workbench=workbench, working_dir=tmp_path
-    )
+    tool = SandboxExportArtifactTool(workbench=workbench, working_dir=tmp_path)
 
     result = tool.invoke({"path": "/workspace/report.csv"})
 

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from sqlalchemy import and_, false, or_
+from sqlalchemy.sql.elements import ColumnElement
 
 SCOPE_WORKSPACE = "workspace"
 SCOPE_CHANNEL = "channel"
@@ -134,7 +136,9 @@ def is_scope_compatible(
     return False
 
 
-def compatible_scope_predicate(model: object, destination: DestinationSurface):
+def compatible_scope_predicate(
+    model: Any, destination: DestinationSurface
+) -> ColumnElement[bool]:
     """Build the SQL predicate matching `is_scope_compatible`.
 
     The model must expose `visibility_scope_type` and `visibility_scope_id`.

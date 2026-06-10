@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
+from typing import Any, cast
 
 from sqlalchemy.orm import Session
 
@@ -93,7 +94,7 @@ def create_provider_for_selection(
 
     return create_litellm_provider(
         settings,
-        **selection.model.litellm_provider_kwargs,
+        **cast(dict[str, Any], selection.model.litellm_provider_kwargs),
     )
 
 

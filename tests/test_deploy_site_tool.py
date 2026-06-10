@@ -3,6 +3,8 @@ import io
 import json
 import tarfile
 import zipfile
+from collections.abc import Callable
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -23,7 +25,7 @@ def _tar_with(entries: dict[str, bytes]) -> bytes:
 
 
 def _tool(
-    handler,
+    handler: Callable[[httpx.Request], httpx.Response],
     *,
     netlify_token: str | None = None,
     vercel_token: str | None = None,
@@ -152,7 +154,7 @@ def test_deploy_vercel_inlines_files_as_base64() -> None:
     assert result.output["url"] == "https://my-dash.vercel.app"
     assert seen["name"] == "my-dash"
     assert seen["target"] == "production"
-    index_entry = seen["files"]["index.html"]
+    index_entry: dict[str, Any] = cast(dict[str, Any], seen["files"])["index.html"]
     assert base64.b64decode(index_entry["data"]) == b"<html></html>"
     assert index_entry["encoding"] == "base64"
 

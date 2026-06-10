@@ -8,7 +8,7 @@ from kortny.routing.tool_scope import (
 )
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class FakeTool:
     name: str
 

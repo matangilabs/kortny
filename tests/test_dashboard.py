@@ -153,8 +153,9 @@ def test_dashboard_login_and_logout_flow(
 
     page_response = test_client.get("/")
     assert page_response.status_code == 200
-    assert "Signed in as" in page_response.text
+    assert 'class="user-pill"' in page_response.text
     assert "admin" in page_response.text
+    assert "Log out" in page_response.text
 
     logout_response = test_client.post("/logout", follow_redirects=False)
     assert logout_response.status_code == 303
@@ -871,8 +872,8 @@ def test_dashboard_admin_model_config_page_shows_provider_state(
     assert "Select a provider..." in response.text
     assert "Other LiteLLM provider" in response.text
     assert "Advanced connection settings" in response.text
-    assert "Routing Workflow" in response.text
-    assert "Connect & Sync Models" in response.text
+    assert "How Routing Works" in response.text
+    assert "Connect &amp; Sync Models" in response.text
     assert "Import Models" not in response.text
     assert "Model Catalog" not in response.text
 
@@ -1031,6 +1032,8 @@ def test_dashboard_admin_can_update_primary_model_tier_and_audit(
     )
     assert audit is not None
     assert audit.action == "update"
+    assert audit.previous_value is not None
+    assert audit.new_value is not None
     assert audit.previous_value["model_identifier"] == "deepseek/deepseek-v4-flash"
     assert audit.new_value["model_identifier"] == "deepseek/deepseek-v4-pro"
 
@@ -1119,6 +1122,7 @@ def test_dashboard_admin_can_create_secret_backed_model_provider(
     )
     assert audit is not None
     assert audit.action == "create"
+    assert audit.new_value is not None
     assert audit.new_value["operation"] == "create_provider"
     assert audit.new_value["imported_count"] == 1
     assert "sk-dashboard-provider-secret" not in str(audit.new_value)
@@ -1308,6 +1312,7 @@ def test_dashboard_admin_imports_full_openrouter_catalog(
     assert model_count == 105
     assert pricing_count == 105
     assert audit is not None
+    assert audit.new_value is not None
     assert audit.new_value["operation"] == "import_models"
     assert audit.new_value["candidate_count"] == 105
 
@@ -1456,13 +1461,14 @@ def test_dashboard_admin_can_inspect_provider_detail_page(
     )
     assert "All Providers" in detail_response.text
     assert "Routed Models" in detail_response.text
-    assert "Search models" not in detail_response.text
+    # Catalog search is now always rendered (client-side filtering)
+    assert "Search models" in detail_response.text
     assert "Needs Attention" in detail_response.text
     assert "Model Catalog" in detail_response.text
     assert "Add Manual Model" in detail_response.text
     assert "DeepSeek Flash" in detail_response.text
     assert "Cheap Fast P1" in detail_response.text
-    assert "$0.100000 in / $0.200000 out" in detail_response.text
+    assert "$0.10 in / $0.20 out" in detail_response.text
     assert "per 1M tokens · USD" in detail_response.text
     assert "128,000 tokens" in detail_response.text
     assert "8,192 tokens" in detail_response.text
@@ -1581,6 +1587,7 @@ def test_dashboard_admin_can_update_missing_provider_model_pricing(
         )
     )
     assert audit is not None
+    assert audit.new_value is not None
     assert audit.new_value["operation"] == "update_missing_pricing"
     assert audit.new_value["pricing_count"] == 1
 
@@ -1668,7 +1675,9 @@ def test_dashboard_provider_detail_lazy_loads_model_catalog_page(
     assert "Paged Model 00" in detail_response.text
     assert "Paged Model 29" not in detail_response.text
     assert "25 shown of 30 models" in detail_response.text
-    assert "Load more models" in detail_response.text
+    # Pagination is infinite-scroll now; the sentinel carries the loader copy
+    assert "data-model-catalog-load-more" in detail_response.text
+    assert "Loading more models" in detail_response.text
     assert next_response.status_code == 200
     next_payload = next_response.json()
     assert next_payload["total_count"] == 30
@@ -1758,6 +1767,7 @@ def test_dashboard_admin_can_assign_fallback_model_tier(
     )
     assert audit is not None
     assert audit.action == "create"
+    assert audit.new_value is not None
     assert audit.new_value["priority"] == 2
 
 
@@ -1820,6 +1830,7 @@ def test_dashboard_admin_can_assign_model_tier_from_provider_catalog(
     )
     assert audit is not None
     assert audit.action == "create"
+    assert audit.new_value is not None
     assert audit.new_value["tier"] == "humanizer"
     assert audit.new_value["model_identifier"] == model.model_identifier
 
@@ -2899,7 +2910,7 @@ def test_dashboard_integrations_page_marks_missing_optional_search(
         "The web_search tool needs BRAVE_SEARCH_API_KEY before it can run."
         in response.text
     )
-    assert "Requires BRAVE_SEARCH_API_KEY." in response.text
+    assert "Add BRAVE_SEARCH_API_KEY to enable web research." in response.text
     assert "Needs setup" in response.text
 
 
@@ -2930,7 +2941,8 @@ def test_dashboard_homepage_renders_operator_overview(
     assert "Overview" in response.text
     assert "Operator snapshot" in response.text
     assert "Needs Review" in response.text
-    assert "Top Usage Drivers" in response.text
+    assert "Top Models" in response.text
+    assert "Top Users" in response.text
     assert "Daily Cost" in response.text
     assert "Task Volume" in response.text
     assert "Recent Work" in response.text
@@ -2941,7 +2953,7 @@ def test_dashboard_homepage_renders_operator_overview(
     assert "Investigate failed overview task" in response.text
     assert f"/tasks/{failed_task.id}" in response.text
     assert 'href="/tasks"' in response.text
-    assert 'class="overview-main-grid"' in response.text
+    assert 'class="usage-charts-grid"' in response.text
 
 
 def test_dashboard_task_list_shows_cost_models_and_turns(
@@ -3232,15 +3244,17 @@ def test_dashboard_usage_renders_visual_analytics(
     assert response.status_code == 200
     assert "Daily Cost" in response.text
     assert "Task Volume" in response.text
-    assert "Model Spend" in response.text
-    assert "User Spend" in response.text
-    assert "Task Failure Rate" in response.text
+    assert "Cost by Model" in response.text
+    assert "Cost by User" in response.text
+    assert "Failure Rate" in response.text
     assert "50.0%" in response.text
     assert "$0.012600" in response.text
     assert "4,500" in response.text
     assert "1 failed" in response.text
-    assert 'class="charts-grid"' in response.text
-    assert "--bar-value:" in response.text
+    assert 'class="usage-charts-grid"' in response.text
+    # Charts are JS-rendered into canvas divs now, not CSS bar partials
+    assert 'id="chart-daily-cost"' in response.text
+    assert "usage-chart-canvas" in response.text
 
 
 def test_dashboard_users_list_shows_rollups_and_detail_links(
@@ -3504,7 +3518,7 @@ def test_dashboard_knowledge_graph_page_shows_entities_relationships_and_evidenc
     assert "Extracted" in response.text
     assert "auto" in response.text
     assert "Channel membership recorded for ops-desk." in response.text
-    assert "Visible to operators, withheld from runtime context" in response.text
+    assert "runtime eligible" in response.text
 
     relationship_response = test_client.get(
         "/knowledge-graph?view=relationships&q=operator-console"
@@ -3615,7 +3629,9 @@ def test_dashboard_witness_page_shows_candidates_and_filters(
 
     assert filtered_response.status_code == 200
     assert "Recurring check: morning project scan" in filtered_response.text
-    assert "Data quality watch: flag unresolved placeholders" not in filtered_response.text
+    assert (
+        "Data quality watch: flag unresolved placeholders" not in filtered_response.text
+    )
 
 
 def test_dashboard_witness_candidate_lifecycle_action_updates_row(
@@ -3820,8 +3836,8 @@ def test_dashboard_knowledge_graph_refresh_queues_channel_assessment_tasks(
     page_response = test_client.get("/knowledge-graph")
 
     assert page_response.status_code == 200
-    assert "Known Channels" in page_response.text
-    assert "Profiled Channels" in page_response.text
+    assert "<span>Channels</span>" in page_response.text
+    assert "profiled" in page_response.text
     assert "Refresh Channel Graph" in page_response.text
 
     response = test_client.post(
@@ -3842,6 +3858,7 @@ def test_dashboard_knowledge_graph_refresh_queues_channel_assessment_tasks(
     assert queued_task.slack_thread_ts == "1779900000.000000"
     assert queued_task.slack_user_id == "dashboard:admin"
     assert queued_task.identity_kind == "synthetic"
+    assert queued_task.identity_key is not None
     assert queued_task.identity_key.startswith(
         "synthetic:dashboard_knowledge_graph_refresh:"
     )
@@ -4582,16 +4599,21 @@ def test_dashboard_playground_routes(
     assert task.identity_kind == "manual"
     assert task.status == TaskStatus.pending
 
-    # 3. GET /playground/{task_id}/stream should return SSE stream
+    # 3. GET /playground/{task_id}/stream should return SSE stream.
+    # The stream only terminates once the task reaches a terminal status —
+    # TestClient.get() reads the full body, so a pending task would poll forever.
+    task.status = TaskStatus.succeeded
+    session.commit()
+
     stream_response = test_client.get(f"/playground/{task_id}/stream")
     assert stream_response.status_code == 200
     assert "text/event-stream" in stream_response.headers["content-type"]
 
-    # Read first chunk
     lines = stream_response.text.split("\n\n")
     assert len(lines) > 0
-    # First line should be connection message
+    # First message should be the connection handshake, last the finish marker
     assert "connected" in lines[0]
+    assert '"finished": true' in stream_response.text
 
 
 def cleanup_database(session: Session) -> None:

@@ -1,7 +1,7 @@
 import json
 import os
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -487,8 +487,7 @@ def test_witness_autopilot_defers_confirmation_or_schedule_actions(
     assert refreshed is not None
     assert refreshed.status == "cooldown"
     assert (
-        refreshed.feedback_json["last_action"]["action_kind"]
-        == "schedule_management"
+        refreshed.feedback_json["last_action"]["action_kind"] == "schedule_management"
     )
     assert refreshed.feedback_json["last_action"]["requires_user_reply"] is True
     assert "read-only analysis" in refreshed.feedback_json["last_action"]["reason"]
@@ -563,8 +562,9 @@ def test_witness_autopilot_respects_private_delivery_setting(
     outcome = run_result.outcomes[0]
     refreshed = db_session.get(WitnessOpportunityCandidate, outcome.candidate_id)
     assert refreshed is not None
-    assert "private Witness delivery is disabled" in (
-        refreshed.feedback_json["last_action"]["reason"]
+    assert (
+        "private Witness delivery is disabled"
+        in (refreshed.feedback_json["last_action"]["reason"])
     )
 
 
@@ -655,7 +655,9 @@ def test_witness_autopilot_defers_inactive_channel_membership(
     outcome = run_result.outcomes[0]
     refreshed = db_session.get(WitnessOpportunityCandidate, outcome.candidate_id)
     assert refreshed is not None
-    assert "active Kortny membership" in refreshed.feedback_json["last_action"]["reason"]
+    assert (
+        "active Kortny membership" in refreshed.feedback_json["last_action"]["reason"]
+    )
 
 
 def test_witness_autopilot_ignores_candidates_from_autopilot_tasks(
@@ -1229,8 +1231,8 @@ class FakeWitnessLLMProvider:
 
     def complete(
         self,
-        messages: tuple[ChatMessage, ...],
-        tools: tuple[JsonSchema, ...] = (),
+        messages: Sequence[ChatMessage],
+        tools: Sequence[JsonSchema] = (),
         *,
         response_format: JsonObject | None = None,
     ) -> Completion:

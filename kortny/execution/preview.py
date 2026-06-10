@@ -101,9 +101,7 @@ def extract_tar_to_dir(
                 continue
             total_bytes += member.size
             if total_bytes > max_bytes:
-                raise UnsafeArchiveError(
-                    f"Archive content exceeds {max_bytes} bytes"
-                )
+                raise UnsafeArchiveError(f"Archive content exceeds {max_bytes} bytes")
             source = tar.extractfile(member)
             if source is None:
                 continue

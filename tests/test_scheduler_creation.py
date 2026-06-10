@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
+from typing import Any, cast
 
+from kortny.db.models import Schedule, Task
 from kortny.llm import ChatMessage, Completion, TokenUsage
 from kortny.scheduler import (
     LLMScheduleParser,
@@ -25,9 +28,9 @@ class FakeScheduleParserLLM:
         self,
         *,
         task_id: uuid.UUID,
-        messages: tuple[ChatMessage, ...],
-        tools: tuple[dict, ...] = (),
-        response_format: dict | None = None,
+        messages: Sequence[ChatMessage],
+        tools: Sequence[dict[str, Any]] = (),
+        response_format: dict[str, Any] | None = None,
         prompt_name: str | None = None,
         prompt_source: str = "code",
     ) -> Completion:
@@ -93,7 +96,9 @@ def test_parse_every_morning_preserves_following_task_words() -> None:
     assert draft.spec_kind == "cron"
     assert draft.cron_expr == "0 9 * * *"
     assert draft.cadence_label == "Every morning"
-    assert draft.task_input == "can you check on PYPL ticker and give me a market summary"
+    assert (
+        draft.task_input == "can you check on PYPL ticker and give me a market summary"
+    )
 
 
 def test_parse_daily_schedule_with_explicit_central_time_humanizes_response() -> None:
@@ -111,14 +116,17 @@ def test_parse_daily_schedule_with_explicit_central_time_humanizes_response() ->
     assert draft.task_input == "send a stock market update."
 
     response = format_schedule_proposal(
-        schedule=None,
+        schedule=cast(Schedule, None),
         draft=draft,
         delivery_surface="dm",
         needs_confirmation=False,
         now=datetime(2026, 6, 4, 19, 29, tzinfo=UTC),
     )
 
-    assert "I'll send a stock market update every morning at 8:00 AM Central time" in response
+    assert (
+        "I'll send a stock market update every morning at 8:00 AM Central time"
+        in response
+    )
     assert "First check is tomorrow at 8:00 AM Central time" in response
     assert "I'll at" not in response
 
@@ -164,7 +172,9 @@ def test_infer_schedule_delivery_from_surface_and_text() -> None:
 def test_schedule_detector_ignores_plain_work_requests() -> None:
     assert looks_like_schedule_request("summarize this channel") is False
     assert looks_like_schedule_request("Every Friday, summarize this channel") is True
-    assert looks_like_schedule_request("Weekdays at 8 AM send me a market update") is True
+    assert (
+        looks_like_schedule_request("Weekdays at 8 AM send me a market update") is True
+    )
 
 
 def test_llm_schedule_parser_accepts_valid_weekday_cron() -> None:
@@ -195,7 +205,7 @@ def test_llm_schedule_parser_accepts_valid_weekday_cron() -> None:
     )
 
     draft = LLMScheduleParser(llm=llm).parse(
-        task=SimpleNamespace(id=uuid.uuid4()),
+        task=cast(Task, SimpleNamespace(id=uuid.uuid4())),
         context=context,
         text="Every weekday at 8 AM central time send me a stock market update",
         now=datetime(2026, 6, 4, 20, 0, tzinfo=UTC),
@@ -240,7 +250,7 @@ def test_llm_schedule_parser_rejects_low_confidence_payload() -> None:
     )
 
     draft = LLMScheduleParser(llm=llm).parse(
-        task=SimpleNamespace(id=uuid.uuid4()),
+        task=cast(Task, SimpleNamespace(id=uuid.uuid4())),
         context=context,
         text="check this sometimes",
         now=datetime(2026, 6, 4, 20, 0, tzinfo=UTC),

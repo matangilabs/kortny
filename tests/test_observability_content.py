@@ -49,8 +49,10 @@ def test_full_mode_captures_raw_content() -> None:
 
 def test_summaries_mode_truncates() -> None:
     long = "y" * (SUMMARY_MAX_CHARS + 500)
-    assert truncate_for_mode(long, "summaries").endswith("…")
-    assert len(truncate_for_mode(long, "summaries")) == SUMMARY_MAX_CHARS
+    truncated = truncate_for_mode(long, "summaries")
+    assert truncated is not None
+    assert truncated.endswith("…")
+    assert len(truncated) == SUMMARY_MAX_CHARS
     # short content is untouched
     assert truncate_for_mode("short", "summaries") == "short"
     rendered = render_completion(_completion(long), "summaries")

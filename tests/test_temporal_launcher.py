@@ -2,6 +2,7 @@ import asyncio
 from types import SimpleNamespace
 from typing import Any, cast
 
+from temporalio.client import Client
 from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 
 from kortny.config import Settings
@@ -38,7 +39,9 @@ def test_start_temporal_task_workflow_uses_stable_id_and_safe_duplicate_policy()
     client = FakeTemporalClient()
 
     launch = asyncio.run(
-        start_temporal_task_workflow(settings=settings, task=task, client=client)
+        start_temporal_task_workflow(
+            settings=settings, task=task, client=cast(Client, client)
+        )
     )
 
     assert launch.workflow_id == f"kortny-task-{task.id}"
@@ -94,14 +97,16 @@ def _task(*, input_text: str) -> Task:
 
 
 def _settings() -> Settings:
-    return Settings(
-        SLACK_BOT_TOKEN="xoxb-test",
-        SLACK_APP_TOKEN="xapp-test",
-        SLACK_SIGNING_SECRET="secret",
-        LLM_PROVIDER="openrouter",
-        LLM_API_KEY="llm-key",
-        LLM_MODEL="openai/gpt-4o",
-        COMPOSIO_API_KEY="composio-key",
-        POSTGRES_URL="postgresql://kortny:kortny@localhost/kortny",
-        KORTNY_WORKFLOW_BACKEND="temporal",
+    return Settings.model_validate(
+        {
+            "SLACK_BOT_TOKEN": "xoxb-test",
+            "SLACK_APP_TOKEN": "xapp-test",
+            "SLACK_SIGNING_SECRET": "secret",
+            "LLM_PROVIDER": "openrouter",
+            "LLM_API_KEY": "llm-key",
+            "LLM_MODEL": "openai/gpt-4o",
+            "COMPOSIO_API_KEY": "composio-key",
+            "POSTGRES_URL": "postgresql://kortny:kortny@localhost/kortny",
+            "KORTNY_WORKFLOW_BACKEND": "temporal",
+        }
     )

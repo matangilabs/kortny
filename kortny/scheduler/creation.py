@@ -540,7 +540,9 @@ def format_schedule_proposal(
 ) -> str:
     """Render a Slack-native schedule response."""
 
-    destination = delivery_label or ("in this DM" if delivery_surface == "dm" else "in this thread")
+    destination = delivery_label or (
+        "in this DM" if delivery_surface == "dm" else "in this thread"
+    )
     first_run = _human_next_run(draft.next_run_at, timezone=draft.timezone, now=now)
     task_summary = _human_task_summary(draft.task_input)
     cadence = draft.cadence_label[:1].lower() + draft.cadence_label[1:]
@@ -672,7 +674,11 @@ def _schedule_time(
         hour += 12
     if meridiem == "am" and hour == 12:
         hour = 0
-    return hour, minute, f"at {_format_time(hour=hour, minute=minute)} {_timezone_label(timezone)}"
+    return (
+        hour,
+        minute,
+        f"at {_format_time(hour=hour, minute=minute)} {_timezone_label(timezone)}",
+    )
 
 
 def _cadence_label(base: str, *, time_label: str | None) -> str:

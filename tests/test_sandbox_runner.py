@@ -1,6 +1,6 @@
 from pathlib import Path
 
-import yaml
+import yaml  # type: ignore[import-untyped]
 from fastapi.testclient import TestClient
 
 from kortny.sandbox_runner import (

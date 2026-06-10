@@ -10,6 +10,7 @@ from decimal import Decimal
 
 from sqlalchemy import Text, and_, cast, exists, func, or_, select
 from sqlalchemy.orm import Session
+from sqlalchemy.sql.elements import ColumnElement
 
 from kortny.db.models import (
     KnowledgeGraphEdge,
@@ -275,7 +276,7 @@ class GraphService:
         """Mark current graph rows stale when their freshness window has elapsed."""
 
         effective_now = now or datetime.now(UTC)
-        entity_predicates = [
+        entity_predicates: list[ColumnElement[bool]] = [
             KnowledgeGraphEntity.is_current.is_(True),
             KnowledgeGraphEntity.expired_at.is_(None),
             KnowledgeGraphEntity.freshness_window_days.is_not(None),
@@ -283,7 +284,7 @@ class GraphService:
                 ("candidate", "active", "confirmed")
             ),
         ]
-        edge_predicates = [
+        edge_predicates: list[ColumnElement[bool]] = [
             KnowledgeGraphEdge.is_current.is_(True),
             KnowledgeGraphEdge.expired_at.is_(None),
             KnowledgeGraphEdge.freshness_window_days.is_not(None),
@@ -746,7 +747,7 @@ class GraphService:
         return result
 
     @staticmethod
-    def _current_entity_predicate():
+    def _current_entity_predicate() -> ColumnElement[bool]:
         return and_(
             KnowledgeGraphEntity.is_current.is_(True),
             KnowledgeGraphEntity.expired_at.is_(None),
@@ -758,7 +759,7 @@ class GraphService:
         )
 
     @staticmethod
-    def _current_edge_predicate():
+    def _current_edge_predicate() -> ColumnElement[bool]:
         return and_(
             KnowledgeGraphEdge.is_current.is_(True),
             KnowledgeGraphEdge.expired_at.is_(None),
@@ -770,7 +771,7 @@ class GraphService:
         )
 
     @staticmethod
-    def _entity_has_evidence_predicate():
+    def _entity_has_evidence_predicate() -> ColumnElement[bool]:
         return exists().where(
             KnowledgeGraphEvidence.target_kind == "entity",
             KnowledgeGraphEvidence.target_id == KnowledgeGraphEntity.id,
@@ -779,7 +780,7 @@ class GraphService:
         )
 
     @staticmethod
-    def _edge_has_evidence_predicate():
+    def _edge_has_evidence_predicate() -> ColumnElement[bool]:
         return exists().where(
             KnowledgeGraphEvidence.target_kind == "edge",
             KnowledgeGraphEvidence.target_id == KnowledgeGraphEdge.id,

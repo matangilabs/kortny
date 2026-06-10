@@ -79,7 +79,8 @@ def test_handoff_keeps_schedule_state_questions_inline() -> None:
 
 
 def _task(input_text: str, *, identity_kind: str | None = None) -> Task:
-    return cast(Any, SimpleNamespace(input=input_text, identity_kind=identity_kind))
+    result: Any = SimpleNamespace(input=input_text, identity_kind=identity_kind)
+    return cast(Task, result)
 
 
 def _settings(**overrides: Any) -> Settings:

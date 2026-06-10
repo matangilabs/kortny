@@ -91,9 +91,9 @@ def test_materializer_turns_due_oneoff_schedule_into_pending_task(
     assert task.available_at == now
     assert task.identity_kind == "scheduled"
     assert task.identity_payload["schedule_id"] == str(schedule.id)
-    assert task.identity_payload["fire_time"] == (
-        now - timedelta(seconds=30)
-    ).isoformat()
+    assert (
+        task.identity_payload["fire_time"] == (now - timedelta(seconds=30)).isoformat()
+    )
     assert task.identity_payload["planned_cost_ceiling_usd"] == "0.2500"
     assert task.identity_payload["delivery_kind"] == "slack_dm"
     assert task.identity_payload["artifact_delivery_policy"] == "message_only"
@@ -115,7 +115,8 @@ def test_materializer_turns_due_oneoff_schedule_into_pending_task(
         select(TaskEvent).where(
             TaskEvent.task_id == task.id,
             TaskEvent.type == TaskEventType.log,
-            TaskEvent.payload["message"].as_string() == "scheduled_task_budget_admitted",
+            TaskEvent.payload["message"].as_string()
+            == "scheduled_task_budget_admitted",
         )
     )
     assert admitted_event is not None
@@ -148,7 +149,9 @@ def test_materializer_pauses_schedule_without_run_budget(
     db_session.refresh(schedule)
     assert schedule.status == "paused"
     assert schedule.metadata_json["last_budget_status"] == "admission_failed"
-    assert db_session.scalar(select(Task).where(Task.identity_kind == "scheduled")) is None
+    assert (
+        db_session.scalar(select(Task).where(Task.identity_kind == "scheduled")) is None
+    )
 
 
 def test_materializer_uses_channel_root_delivery_contract(

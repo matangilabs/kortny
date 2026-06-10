@@ -11,6 +11,7 @@ from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from sqlalchemy.sql.elements import ColumnElement
 
 from kortny.db.models import (
     KnowledgeGraphEdge,
@@ -135,20 +136,19 @@ class KnowledgeGraphExtractionService:
             channel_ids={membership.channel_id for membership in memberships},
             limit=observation_limit,
         )
+        added_by_user_ids: set[str | None] = {
+            user_id
+            for membership in memberships
+            for user_id in (membership.added_by_user_id,)
+            if user_id
+        }
+        observed_user_ids: set[str | None] = {
+            observation.user_id for observation in observations if observation.user_id
+        }
         identity_map = self._identity_map(
             installation_ids={membership.installation_id for membership in memberships}
             | {observation.installation_id for observation in observations},
-            user_ids={
-                user_id
-                for membership in memberships
-                for user_id in (membership.added_by_user_id,)
-                if user_id
-            }
-            | {
-                observation.user_id
-                for observation in observations
-                if observation.user_id
-            },
+            user_ids=added_by_user_ids | observed_user_ids,
         )
 
         channel_entities: dict[tuple[uuid.UUID, str], KnowledgeGraphEntity] = {}
@@ -187,13 +187,13 @@ class KnowledgeGraphExtractionService:
         seen_user_pairs: set[tuple[uuid.UUID, str, str]] = set()
         seen_file_pairs: set[tuple[uuid.UUID, str, str]] = set()
         for observation in observations:
-            membership = membership_by_key.get(
+            obs_membership = membership_by_key.get(
                 (observation.installation_id, observation.channel_id)
             )
-            channel_entity = channel_entities.get(
+            obs_channel_entity = channel_entities.get(
                 (observation.installation_id, observation.channel_id)
             )
-            if membership is None or channel_entity is None:
+            if obs_membership is None or obs_channel_entity is None:
                 continue
 
             if observation.user_id:
@@ -210,7 +210,7 @@ class KnowledgeGraphExtractionService:
                     if not _skip_identity(identity):
                         person_entity, _created = (
                             self._upsert_deterministic_person_entity(
-                                membership=membership,
+                                membership=obs_membership,
                                 user_id=observation.user_id,
                                 identity=identity,
                                 observation=observation,
@@ -220,9 +220,9 @@ class KnowledgeGraphExtractionService:
                         person_count += 1
                         evidence_count += 1
                         self._upsert_deterministic_membership_edge(
-                            membership=membership,
+                            membership=obs_membership,
                             person_entity=person_entity,
-                            channel_entity=channel_entity,
+                            channel_entity=obs_channel_entity,
                             observation=observation,
                         )
                         membership_edge_count += 1
@@ -238,16 +238,16 @@ class KnowledgeGraphExtractionService:
                     seen_file_pairs.add(file_pair)
                     artifact_entity, _created = (
                         self._upsert_deterministic_file_artifact(
-                            membership=membership,
+                            membership=obs_membership,
                             observation=observation,
                         )
                     )
                     artifact_count += 1
                     evidence_count += 1
                     self._upsert_deterministic_file_edge(
-                        membership=membership,
+                        membership=obs_membership,
                         artifact_entity=artifact_entity,
-                        channel_entity=channel_entity,
+                        channel_entity=obs_channel_entity,
                         observation=observation,
                     )
                     artifact_edge_count += 1
@@ -420,7 +420,7 @@ class KnowledgeGraphExtractionService:
     ) -> list[ObservationEvent]:
         if not channel_ids:
             return []
-        predicates = [
+        predicates: list[ColumnElement[bool]] = [
             ObservationEvent.purged_at.is_(None),
             ObservationEvent.channel_id.in_(channel_ids),
         ]

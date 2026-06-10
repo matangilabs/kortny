@@ -160,6 +160,7 @@ from kortny.witness import (
     send_private_suggestion,
     snooze_candidate,
 )
+from kortny.witness.lifecycle import WitnessSlackClient
 
 TEMPLATE_DIR = Path(__file__).parent / "templates"
 STATIC_DIR = Path(__file__).parent / "static"
@@ -530,6 +531,8 @@ def register_routes(app: FastAPI) -> None:
         to_date: Annotated[str | None, Query(alias="to")] = None,
         days: Annotated[int | None, Query(ge=1, le=366)] = None,
     ) -> Response:
+        start: datetime | None
+        end: datetime | None
         if days is not None:
             end = datetime.now(UTC)
             start = end - timedelta(days=days)
@@ -862,7 +865,10 @@ def register_routes(app: FastAPI) -> None:
                     candidate_id,
                     installation_id=installation_id,
                     by_user_id=actor,
-                    client=WebClient(token=runtime_settings.slack_bot_token),
+                    client=cast(
+                        WitnessSlackClient,
+                        WebClient(token=runtime_settings.slack_bot_token),
+                    ),
                 )
                 notice = f"Witness suggestion sent in DM at {delivery.message_ts}."
                 tone = "success"
@@ -3025,6 +3031,8 @@ def register_routes(app: FastAPI) -> None:
     ) -> Response:
         if principal.installation_id is None or principal.slack_user_id is None:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
+        start: datetime | None
+        end: datetime | None
         if days is not None:
             end = datetime.now(UTC)
             start = end - timedelta(days=days)
@@ -4806,7 +4814,9 @@ def _mcp_attempt_discovery(
         tools = discover_server_tools(
             server, encryption_key=encryption_key, timeout_seconds=30
         )
-        count = _upsert(session, server=server, discovered=tools, error=None)
+        count = _upsert(
+            session, server=server, discovered=cast(list[object], tools), error=None
+        )
         return f"Discovered {count} tool{'s' if count != 1 else ''}."
     except Exception as exc:
         error_str = f"{type(exc).__name__}: {exc}"

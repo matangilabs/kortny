@@ -1,6 +1,6 @@
 import os
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +11,7 @@ from sqlalchemy import Engine, delete, select
 from sqlalchemy.orm import Session
 
 from kortny.composio import (
+    ComposioClient,
     ComposioConnectionResolver,
     ComposioTool,
     ComposioToolExecution,
@@ -1221,22 +1222,21 @@ def test_worker_registry_exposes_integration_inventory_for_capability_lookup(
     assert user_summary["preferred_opening"] == (
         "Here are the things I can help with right now:"
     )
-    assert {
-        group["label"] for group in user_summary["capability_groups"]
-    } >= {
+    assert {group["label"] for group in user_summary["capability_groups"]} >= {
         "Research and current info",
         "Slack context",
         "Slack actions",
         "Scheduled work",
         "Workspace knowledge",
-        "Sandboxed code checks",
+        "Sandboxed coding workbench",
     }
     assert "Runtime" not in {
         group["label"] for group in user_summary["capability_groups"]
     }
-    assert {
-        (app["app"], app["scope"]) for app in user_summary["connected_apps"]
-    } == {("Firecrawl", "personal"), ("Notion", "workspace")}
+    assert {(app["app"], app["scope"]) for app in user_summary["connected_apps"]} == {
+        ("Firecrawl", "personal"),
+        ("Notion", "workspace"),
+    }
     native_tools = result.output["native_tools"]
     assert {tool["name"] for tool in native_tools} >= {
         "web_search",
@@ -1272,7 +1272,9 @@ def test_worker_registry_exposes_integration_inventory_for_capability_lookup(
         for connection in result.output["connected_integrations"]
     } == {"firecrawl", "notion"}
     alias_result = registry.invoke("list_integrations", {})
-    assert alias_result.output["native_tool_count"] == result.output["native_tool_count"]
+    assert (
+        alias_result.output["native_tool_count"] == result.output["native_tool_count"]
+    )
     assert any(
         event.payload.get("message") == "external_tool_selection_skipped"
         and event.payload.get("reason") == "intent_no_external_tools"
@@ -1334,7 +1336,7 @@ def test_worker_registry_omits_code_exec_when_sandbox_runner_is_unconfigured(
 
     assert "code_exec" not in registry.names()
     assert "code_exec" not in {tool["name"] for tool in native_tools}
-    assert "Sandboxed code checks" not in {
+    assert "Sandboxed coding workbench" not in {
         group["label"]
         for group in result.output["user_facing_summary"]["capability_groups"]
     }
@@ -1492,12 +1494,13 @@ def build_settings(
     return Settings(**kwargs)
 
 
-class FakeComposioClient:
+class FakeComposioClient(ComposioClient):
     def __init__(
         self,
         *,
         tools_by_toolkit: dict[str, tuple[ComposioTool, ...]] | None = None,
     ) -> None:
+        super().__init__(api_key="fake")
         self.calls: list[dict[str, Any]] = []
         self.list_tool_calls: list[dict[str, Any]] = []
         self.tools_by_toolkit = tools_by_toolkit or {"firecrawl": firecrawl_tools()}
@@ -1667,8 +1670,8 @@ class FailingToolSelector:
         *,
         task_id: uuid.UUID,
         task_input: str,
-        native_cards: tuple[ToolCard, ...],
-        external_cards: tuple[ToolCard, ...],
+        native_cards: Sequence[ToolCard],
+        external_cards: Sequence[ToolCard],
     ) -> ToolSelectionResult:
         del task_id, task_input, native_cards, external_cards
         raise ValueError("invalid selector payload")
@@ -1677,15 +1680,15 @@ class FailingToolSelector:
 class StaticToolSelector:
     def __init__(self, result: ToolSelectionResult) -> None:
         self.result = result
-        self.calls: list[dict[str, object]] = []
+        self.calls: list[dict[str, Any]] = []
 
     def select(
         self,
         *,
         task_id: uuid.UUID,
         task_input: str,
-        native_cards: tuple[ToolCard, ...],
-        external_cards: tuple[ToolCard, ...],
+        native_cards: Sequence[ToolCard],
+        external_cards: Sequence[ToolCard],
     ) -> ToolSelectionResult:
         self.calls.append(
             {

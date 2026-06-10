@@ -223,7 +223,9 @@ class RuntimeGraphReinforcementService:
 def _task_events(session: Session, task: Task) -> tuple[TaskEvent, ...]:
     return tuple(
         session.scalars(
-            select(TaskEvent).where(TaskEvent.task_id == task.id).order_by(TaskEvent.seq)
+            select(TaskEvent)
+            .where(TaskEvent.task_id == task.id)
+            .order_by(TaskEvent.seq)
         )
     )
 
@@ -304,7 +306,9 @@ def _runtime_evidence(
         source_task_id=task.id,
         source_task_event_id=message_event.id,
         source_slack_channel_id=task.slack_channel_id,
-        source_slack_message_ts=_string_or_none(message_event.payload.get("message_ts")),
+        source_slack_message_ts=_string_or_none(
+            message_event.payload.get("message_ts")
+        ),
         raw_snippet=_evidence_snippet(task, message_event, graph_events),
         confidence_score=Decimal("0.650"),
         confidence_reason=(

@@ -81,9 +81,7 @@ class SemanticRouteDecision:
             "selected_backend": selected_backend,
             "planned_classifier_route": planned_classifier_route,
             "planned_candidate": planned_candidate,
-            "runtime_disagreement": (
-                self.runtime_class.value != handoff_runtime_class
-            ),
+            "runtime_disagreement": (self.runtime_class.value != handoff_runtime_class),
             "execution_path_disagreement": (
                 self.execution_path.value != handoff_execution_path
             ),
@@ -202,7 +200,9 @@ def parse_semantic_route_decision(content: str | None) -> SemanticRouteDecision:
     try:
         payload = json.loads(_extract_json_object(content))
     except json.JSONDecodeError as exc:
-        raise SemanticRouterParseError("Semantic router returned invalid JSON.") from exc
+        raise SemanticRouterParseError(
+            "Semantic router returned invalid JSON."
+        ) from exc
     if not isinstance(payload, dict):
         raise SemanticRouterParseError("Semantic router JSON must be an object.")
 

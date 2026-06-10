@@ -19,6 +19,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import cast
 
 from slack_sdk import WebClient
 from sqlalchemy import and_, desc, func, select
@@ -230,17 +231,21 @@ class WitnessRunner:
                         llm_provider=self.llm_provider,
                         provider_name=self.provider_name,
                         actor_id=f"witness_runner:{self.runner_id}",
-                    ).run_once(
+                    )
+                    .run_once(
                         installation_id=installation_id,
                         now=run_at,
                         limit=autopilot_limit,
                         min_confidence=autopilot_min_confidence,
-                    ).outcomes
+                    )
+                    .outcomes
                     if should_run_autopilot
                     else ()
                 )
             status = (
-                "processed" if projections or deliveries or autopilot_outcomes else "idle"
+                "processed"
+                if projections or deliveries or autopilot_outcomes
+                else "idle"
             )
             return WitnessRunResult(
                 runner_id=self.runner_id,
@@ -501,26 +506,25 @@ class WitnessRunner:
         ]
         if installation_id is not None:
             filters.append(ObserveChannelProfile.installation_id == installation_id)
-        return tuple(
-            self.session.execute(
-                select(ObserveChannelProfile, SlackChannelMembership)
-                .join(
-                    SlackChannelMembership,
-                    and_(
-                        SlackChannelMembership.installation_id
-                        == ObserveChannelProfile.installation_id,
-                        SlackChannelMembership.channel_id
-                        == ObserveChannelProfile.channel_id,
-                    ),
-                )
-                .where(*filters)
-                .order_by(
-                    desc(ObserveChannelProfile.last_profiled_at),
-                    desc(ObserveChannelProfile.updated_at),
-                )
-                .limit(limit)
-            ).all()
-        )
+        rows = self.session.execute(
+            select(ObserveChannelProfile, SlackChannelMembership)
+            .join(
+                SlackChannelMembership,
+                and_(
+                    SlackChannelMembership.installation_id
+                    == ObserveChannelProfile.installation_id,
+                    SlackChannelMembership.channel_id
+                    == ObserveChannelProfile.channel_id,
+                ),
+            )
+            .where(*filters)
+            .order_by(
+                desc(ObserveChannelProfile.last_profiled_at),
+                desc(ObserveChannelProfile.updated_at),
+            )
+            .limit(limit)
+        ).all()
+        return tuple((profile, membership) for profile, membership in rows)
 
     def _eligible_dm_candidates(
         self,
@@ -668,10 +672,11 @@ class WitnessWorker:
 
     def run_once(self, *, now: datetime | None = None) -> WitnessRunResult:
         with self.session_factory.begin() as session:
-            slack_client = (
+            slack_client = cast(
+                WitnessSlackClient | None,
                 WebClient(token=self._settings.slack_bot_token)
                 if self.deliver_private
-                else None
+                else None,
             )
             result = WitnessRunner(
                 session,

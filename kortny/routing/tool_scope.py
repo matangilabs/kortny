@@ -92,7 +92,9 @@ class NativeToolScopePolicy:
             )
 
         suppressed = set(suppressed_names)
-        selected_tools = tuple(tool for tool in original_tools if tool.name not in suppressed)
+        selected_tools = tuple(
+            tool for tool in original_tools if tool.name not in suppressed
+        )
         selected_names = tuple(tool.name for tool in selected_tools)
         return NativeToolScopeDecision(
             selected_tools=selected_tools,

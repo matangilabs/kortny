@@ -67,7 +67,9 @@ SECTION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ),
     (
         "commitment",
-        re.compile(r"\b(next actions?|follow[- ]?ups?|todos?|workflows?|cadence)\b", re.I),
+        re.compile(
+            r"\b(next actions?|follow[- ]?ups?|todos?|workflows?|cadence)\b", re.I
+        ),
     ),
 )
 KIND_SPECS = {
@@ -517,7 +519,9 @@ class TaskSummaryGraphExtractionService:
 def _task_events(session: Session, task: Task) -> tuple[TaskEvent, ...]:
     return tuple(
         session.scalars(
-            select(TaskEvent).where(TaskEvent.task_id == task.id).order_by(TaskEvent.seq)
+            select(TaskEvent)
+            .where(TaskEvent.task_id == task.id)
+            .order_by(TaskEvent.seq)
         )
     )
 
@@ -637,11 +641,19 @@ def _candidate_kind(line: str, *, current_section: str | None) -> str | None:
     lowered = line.lower()
     if current_section is not None and _looks_substantive(line):
         return current_section
-    if re.search(r"\b(decided|decision|recommend|recommended|default|agreed|accepted|use)\b", lowered):
+    if re.search(
+        r"\b(decided|decision|recommend|recommended|default|agreed|accepted|use)\b",
+        lowered,
+    ):
         return "decision"
-    if re.search(r"\b(unresolved|open question|open item|needs owner|follow up|blocked|unknown|gap)\b", lowered):
+    if re.search(
+        r"\b(unresolved|open question|open item|needs owner|follow up|blocked|unknown|gap)\b",
+        lowered,
+    ):
         return "open_question"
-    if re.search(r"\b(workflow|cadence|schedule|recurring|next action|todo)\b", lowered):
+    if re.search(
+        r"\b(workflow|cadence|schedule|recurring|next action|todo)\b", lowered
+    ):
         return "commitment"
     return None
 
@@ -685,9 +697,10 @@ def _review_decision(candidate: _Candidate) -> _ReviewDecision:
             NEEDS_REVIEW_STATUS,
             "sensitive_or_high_impact_language",
         )
-    if candidate.kind in {"open_question", "commitment"} and PERSON_RESPONSIBILITY_RE.search(
-        candidate.label
-    ):
+    if candidate.kind in {
+        "open_question",
+        "commitment",
+    } and PERSON_RESPONSIBILITY_RE.search(candidate.label):
         return _ReviewDecision(
             "candidate",
             NEEDS_REVIEW_STATUS,
@@ -708,7 +721,9 @@ def _candidate_evidence(
         source_task_id=task.id,
         source_task_event_id=message_event.id,
         source_slack_channel_id=task.slack_channel_id,
-        source_slack_message_ts=_string_or_none(message_event.payload.get("message_ts")),
+        source_slack_message_ts=_string_or_none(
+            message_event.payload.get("message_ts")
+        ),
         raw_snippet=_shorten(
             f"Task request: {task.input}. Extracted graph item: {candidate.source_text}",
             MAX_EVIDENCE_SNIPPET_CHARS,
@@ -789,7 +804,9 @@ def _reinforce_entity(
     entity.last_reinforced_at = now
     entity.reinforcement_count = (entity.reinforcement_count or 0) + 1
     entity.updated_at = now
-    if _task_evidence_exists(session, task=task, target_kind="entity", target_id=entity.id):
+    if _task_evidence_exists(
+        session, task=task, target_kind="entity", target_id=entity.id
+    ):
         return 0
     graph.add_evidence(
         installation_id=task.installation_id,

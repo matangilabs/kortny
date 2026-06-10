@@ -84,9 +84,7 @@ def test_session_exec_unknown_session_is_404() -> None:
     client, _ = _client()
 
     with client:
-        response = client.post(
-            "/sessions/missing/exec", json={"command": "echo hi"}
-        )
+        response = client.post("/sessions/missing/exec", json={"command": "echo hi"})
 
     assert response.status_code == 404
 

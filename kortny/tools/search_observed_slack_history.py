@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 from sqlalchemy import and_, desc, or_, select
 from sqlalchemy.orm import Session
+from sqlalchemy.sql.elements import ColumnElement
 
 from kortny.db.models import ObservationEvent, SlackChannelMembership, Task
 from kortny.tools.types import JsonObject, JsonSchema, ToolResult
@@ -261,7 +262,7 @@ class SearchObservedSlackHistoryTool:
         )
 
 
-def _search_condition(query: str) -> object:
+def _search_condition(query: str) -> ColumnElement[bool]:
     tokens = _query_tokens(query)
     if not tokens:
         tokens = (query,)

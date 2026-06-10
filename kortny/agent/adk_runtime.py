@@ -6,13 +6,13 @@ import asyncio
 import logging
 import re
 import uuid
-from collections.abc import Callable, MutableMapping
+from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import ROUND_HALF_UP, Decimal
 from functools import lru_cache
 from typing import Any, SupportsInt, cast
 
-from google.adk.agents import Agent, ParallelAgent, SequentialAgent
+from google.adk.agents import Agent, BaseAgent, ParallelAgent, SequentialAgent
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.models.lite_llm import LiteLlm
 from google.adk.models.llm_response import LlmResponse
@@ -745,7 +745,7 @@ class AdkAgentRuntime:
                 ParallelAgent(
                     name="planned_parallel_fanout",
                     description="Runs independent planned workflow branches concurrently.",
-                    sub_agents=workers,
+                    sub_agents=cast(list[BaseAgent], workers),
                 ),
                 merger,
             ],
@@ -1082,7 +1082,7 @@ class AdkAgentRuntime:
     ) -> LiteLlm:
         resolved = self._resolved_adk_model(task=task, tier=tier)
         if resolved is not None and model is None:
-            return LiteLlm(**resolved.adk_litellm_kwargs)
+            return LiteLlm(**cast(dict[str, Any], resolved.adk_litellm_kwargs))
         return adk_litellm_model(
             self.settings,
             model=self._env_model_for_request(tier=tier, model=model),
@@ -2221,7 +2221,7 @@ def _planned_budget_event_scope(budget_type: str, agent_name: str) -> str:
 
 
 def _append_planned_budget_note(
-    state: MutableMapping[str, Any],
+    state: Any,
     *,
     agent_name: str,
     budget_type: str,

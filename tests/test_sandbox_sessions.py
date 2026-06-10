@@ -125,10 +125,7 @@ def test_session_create_payload_is_hardened() -> None:
 
 
 def test_demux_docker_stream_splits_stdout_and_stderr() -> None:
-    raw = (
-        b"\x01\x00\x00\x00\x00\x00\x00\x05hello"
-        b"\x02\x00\x00\x00\x00\x00\x00\x04oops"
-    )
+    raw = b"\x01\x00\x00\x00\x00\x00\x00\x05hello\x02\x00\x00\x00\x00\x00\x00\x04oops"
 
     stdout, stderr = _demux_docker_stream(raw)
 
@@ -210,9 +207,7 @@ def test_exec_wraps_command_with_timeout_and_caps_it() -> None:
 
 
 def test_exec_rejects_unknown_session() -> None:
-    manager = SessionManager(
-        docker_client=FakeDockerSessionClient(), config=_config()
-    )
+    manager = SessionManager(docker_client=FakeDockerSessionClient(), config=_config())
 
     with pytest.raises(SessionNotFoundError):
         manager.exec("missing", "echo hi")

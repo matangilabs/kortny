@@ -13,6 +13,7 @@ from kortny.approvals import (
     approval_prompt_text,
 )
 from kortny.db.models import TaskEventType
+from kortny.execution import SandboxResult, SandboxSpec
 from kortny.tools import ToolRegistry
 from kortny.tools.code_exec import CodeExecTool
 from kortny.tools.types import JsonObject, ToolResult
@@ -306,7 +307,7 @@ class _TimeoutTool:
 
 
 class _FailingSandboxRunner:
-    def run(self, spec: object) -> object:
+    def run(self, spec: SandboxSpec) -> SandboxResult:
         del spec
         raise AssertionError("code_exec should pause for approval before running")
 
@@ -316,9 +317,9 @@ class _SuccessfulSandboxRunner:
         self.stdout = stdout
         self.spec: Any | None = None
 
-    def run(self, spec: object) -> SimpleNamespace:
+    def run(self, spec: SandboxSpec) -> SandboxResult:
         self.spec = spec
-        return SimpleNamespace(
+        return SimpleNamespace(  # type: ignore[return-value]
             exit_code=0,
             stdout=self.stdout,
             stderr="",

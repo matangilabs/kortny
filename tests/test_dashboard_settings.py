@@ -13,7 +13,7 @@ def test_dashboard_settings_defaults_to_bootstrap_login(
         "DASHBOARD_SLACK_REDIRECT_URI",
     ):
         monkeypatch.delenv(name, raising=False)
-    settings = DashboardSettings(
+    settings = DashboardSettings(  # type: ignore[call-arg]
         _env_file=None,
         postgres_url="postgresql://kortny:kortny@localhost/kortny",
         session_secret="test-dashboard-session-secret",
@@ -26,7 +26,7 @@ def test_dashboard_settings_defaults_to_bootstrap_login(
 
 
 def test_dashboard_settings_enables_slack_login_when_configured() -> None:
-    settings = DashboardSettings(
+    settings = DashboardSettings(  # type: ignore[call-arg]
         _env_file=None,
         postgres_url="postgresql://kortny:kortny@localhost/kortny",
         session_secret="test-dashboard-session-secret",
@@ -51,7 +51,7 @@ def test_dashboard_settings_requires_slack_config_for_hybrid_mode(
     ):
         monkeypatch.delenv(name, raising=False)
     with pytest.raises(ValueError, match="DASHBOARD_SLACK_CLIENT_ID"):
-        DashboardSettings(
+        DashboardSettings(  # type: ignore[call-arg]
             _env_file=None,
             postgres_url="postgresql://kortny:kortny@localhost/kortny",
             session_secret="test-dashboard-session-secret",
@@ -61,7 +61,7 @@ def test_dashboard_settings_requires_slack_config_for_hybrid_mode(
 
 def test_dashboard_settings_rejects_invalid_state_ttl() -> None:
     with pytest.raises(ValueError):
-        DashboardSettings(
+        DashboardSettings(  # type: ignore[call-arg]
             _env_file=None,
             postgres_url="postgresql://kortny:kortny@localhost/kortny",
             session_secret="test-dashboard-session-secret",

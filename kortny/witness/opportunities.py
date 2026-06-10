@@ -108,7 +108,9 @@ class WitnessOpportunityService:
         now = datetime.now(UTC)
         scope_type, scope_id = _scope_for_membership(membership)
         channel_label = (
-            f"#{membership.channel_name}" if membership.channel_name else membership.channel_id
+            f"#{membership.channel_name}"
+            if membership.channel_name
+            else membership.channel_id
         )
 
         created_count = 0

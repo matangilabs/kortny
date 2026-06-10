@@ -123,8 +123,7 @@ class ToolApprovalPolicy:
                     scope=ApprovalScope.user,
                     risk="external_deployment",
                     reason=(
-                        f"{tool.name} publishes files to an external hosting "
-                        "provider."
+                        f"{tool.name} publishes files to an external hosting provider."
                     ),
                 )
             if tool_name in SANDBOXED_CODE_NATIVE_TOOLS:
@@ -247,10 +246,7 @@ def approval_prompt_text(request: ToolApprovalRequest) -> str:
             f"*Inputs:* {args}\n\n"
             f"{TOOL_APPROVAL_REACTION_INSTRUCTION}"
         )
-    if (
-        request.tool_name == "code_exec"
-        and request.risk == "sandboxed_code_execution"
-    ):
+    if request.tool_name == "code_exec" and request.risk == "sandboxed_code_execution":
         return (
             "I can check this in a locked-down Python sandbox. Please approve "
             "before I run it.\n"

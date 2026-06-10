@@ -1,11 +1,16 @@
 from types import SimpleNamespace
+from typing import Any
+
+import pytest
 
 from kortny.llm.litellm_provider import LiteLLMProvider
 from kortny.llm.types import ChatMessage, TokenUsage, ToolCall
 
 
-def test_litellm_provider_calls_completion_and_parses_response(monkeypatch) -> None:
-    captured: dict[str, object] = {}
+def test_litellm_provider_calls_completion_and_parses_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
 
     response = SimpleNamespace(
         id="chatcmpl-123",
@@ -29,7 +34,7 @@ def test_litellm_provider_calls_completion_and_parses_response(monkeypatch) -> N
         usage=SimpleNamespace(prompt_tokens=12, completion_tokens=4),
     )
 
-    def fake_completion(**kwargs):
+    def fake_completion(**kwargs: Any) -> object:
         captured.update(kwargs)
         return response
 

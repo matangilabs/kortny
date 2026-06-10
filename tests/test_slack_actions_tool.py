@@ -499,8 +499,7 @@ def test_slack_create_channel_canvas_records_side_effect_and_event(
         select(TaskEvent).where(
             TaskEvent.task_id == task.id,
             TaskEvent.type == TaskEventType.log,
-            TaskEvent.payload["message"].as_string()
-            == "slack_channel_canvas_created",
+            TaskEvent.payload["message"].as_string() == "slack_channel_canvas_created",
         )
     )
     side_effect = db_session.scalar(

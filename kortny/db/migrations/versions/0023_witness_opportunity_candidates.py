@@ -29,8 +29,7 @@ SOURCE_TYPES = (
     "'scheduled_witness', 'manual'"
 )
 STATUSES = (
-    "'candidate', 'sent', 'accepted', 'dismissed', 'cooldown', "
-    "'superseded', 'archived'"
+    "'candidate', 'sent', 'accepted', 'dismissed', 'cooldown', 'superseded', 'archived'"
 )
 
 

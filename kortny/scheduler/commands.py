@@ -129,7 +129,9 @@ class ScheduleCommandService:
             return None
 
         if command.action == "activate":
-            return self._activate(task=task, schedule=schedule, context=context, now=now)
+            return self._activate(
+                task=task, schedule=schedule, context=context, now=now
+            )
         if command.action == "cancel":
             return self._cancel(task=task, schedule=schedule, context=context, now=now)
         if command.action == "pause":
@@ -504,7 +506,9 @@ def _schedule_id_from_text(text: str) -> uuid.UUID | None:
 
 
 def _schedule_task_input(schedule: Schedule) -> str:
-    template = schedule.task_template if isinstance(schedule.task_template, dict) else {}
+    template = (
+        schedule.task_template if isinstance(schedule.task_template, dict) else {}
+    )
     value = template.get("input")
     if isinstance(value, str) and value.strip():
         return value.strip()
@@ -522,7 +526,9 @@ def _schedule_timezone(schedule: Schedule) -> str:
 
 
 def _cadence_label(schedule: Schedule) -> str:
-    metadata = schedule.metadata_json if isinstance(schedule.metadata_json, dict) else {}
+    metadata = (
+        schedule.metadata_json if isinstance(schedule.metadata_json, dict) else {}
+    )
     cadence = metadata.get("cadence_label")
     if isinstance(cadence, str) and cadence.strip():
         return cadence.strip()
@@ -542,7 +548,9 @@ def _next_run_label(schedule: Schedule) -> str:
 
 
 def _delivery_label(schedule: Schedule) -> str:
-    template = schedule.task_template if isinstance(schedule.task_template, dict) else {}
+    template = (
+        schedule.task_template if isinstance(schedule.task_template, dict) else {}
+    )
     delivery_kind = getattr(schedule, "delivery_kind", None)
     if delivery_kind == "slack_dm":
         return "this DM"

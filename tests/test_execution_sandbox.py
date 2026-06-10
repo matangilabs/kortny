@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -107,7 +108,7 @@ def test_sandbox_result_payload_preserves_artifact_and_lifecycle_summary() -> No
 
     assert payload["exit_code"] == 0
     assert payload["artifact_count"] == 1
-    assert payload["artifacts"][0]["filename"] == "report.pdf"
+    assert cast(list[Any], payload["artifacts"])[0]["filename"] == "report.pdf"
     assert payload["usage"] == {"wall_ms": 123}
     assert payload["events"] == [
         {
@@ -144,7 +145,7 @@ def test_lifecycle_event_payload_includes_redacted_spec_and_tool_context() -> No
     assert payload["phase"] == "created"
     assert payload["tool"] == "code_exec"
     assert payload["tool_call_id"] == "call-123"
-    assert payload["spec"]["env_keys"] == ["SECRET_TOKEN"]
+    assert cast(dict[str, Any], payload["spec"])["env_keys"] == ["SECRET_TOKEN"]
     assert "do-not-log" not in str(payload)
 
 

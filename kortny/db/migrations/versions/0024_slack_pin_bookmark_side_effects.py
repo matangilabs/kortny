@@ -20,8 +20,7 @@ UPGRADE_OPERATIONS = (
     "'reactions_remove', 'pins_add', 'bookmarks_add'"
 )
 DOWNGRADE_OPERATIONS = (
-    "'chat_postMessage', 'files_upload_v2', 'reactions_add', "
-    "'reactions_remove'"
+    "'chat_postMessage', 'files_upload_v2', 'reactions_add', 'reactions_remove'"
 )
 
 

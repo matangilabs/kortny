@@ -29,6 +29,7 @@ from kortny.knowledge_graph import (
     VisibilityScope,
     is_scope_compatible,
 )
+from kortny.knowledge_graph.service import GraphContextPack
 from kortny.tools import QueryWorkspaceGraphTool
 
 TEST_POSTGRES_URL = os.environ.get("KORTNY_TEST_POSTGRES_URL")
@@ -701,5 +702,5 @@ def evidence(snippet: str) -> EvidenceInput:
     )
 
 
-def entity_keys(pack) -> set[str]:
+def entity_keys(pack: GraphContextPack) -> set[str]:
     return {entity.canonical_key for entity in pack.entities}

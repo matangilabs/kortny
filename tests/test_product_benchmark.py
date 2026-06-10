@@ -124,8 +124,7 @@ def test_product_benchmark_records_current_handoff_baseline() -> None:
         )
 
         assert (
-            decision.runtime_class.value
-            == expected["current_runtime_class_baseline"]
+            decision.runtime_class.value == expected["current_runtime_class_baseline"]
         ), (
             f"{scenario['id']} handoff runtime changed from benchmark baseline. "
             "If this is an intended routing improvement, update the benchmark "
@@ -200,14 +199,16 @@ def _task(input_text: str) -> Task:
 
 
 def _settings() -> Settings:
-    return Settings(
-        SLACK_BOT_TOKEN="xoxb-test",
-        SLACK_APP_TOKEN="xapp-test",
-        SLACK_SIGNING_SECRET="secret",
-        LLM_PROVIDER="openrouter",
-        LLM_API_KEY="llm-key",
-        LLM_MODEL="openai/gpt-4o",
-        COMPOSIO_API_KEY="composio-key",
-        POSTGRES_URL="postgresql://kortny:kortny@localhost/kortny",
-        KORTNY_WORKFLOW_BACKEND="inline",
+    return Settings.model_validate(
+        {
+            "SLACK_BOT_TOKEN": "xoxb-test",
+            "SLACK_APP_TOKEN": "xapp-test",
+            "SLACK_SIGNING_SECRET": "secret",
+            "LLM_PROVIDER": "openrouter",
+            "LLM_API_KEY": "llm-key",
+            "LLM_MODEL": "openai/gpt-4o",
+            "COMPOSIO_API_KEY": "composio-key",
+            "POSTGRES_URL": "postgresql://kortny:kortny@localhost/kortny",
+            "KORTNY_WORKFLOW_BACKEND": "inline",
+        }
     )

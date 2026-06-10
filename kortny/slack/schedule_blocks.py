@@ -26,6 +26,7 @@ SCHEDULE_ACTION_IDS = frozenset(
 def schedule_action_blocks(schedule: Schedule) -> list[dict]:
     """Return compact schedule management buttons for a Slack confirmation."""
 
+    primary_action: tuple[str, str, str | None]
     if schedule.status == "proposed":
         primary_action = ("Activate", SCHEDULE_ACTION_ACTIVATE, "primary")
     elif schedule.status == "paused":

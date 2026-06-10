@@ -115,9 +115,7 @@ def test_client_error_maps_to_session_error() -> None:
         return httpx.Response(422, json={"detail": "bad path"})
 
     with pytest.raises(SandboxSessionError, match="bad path") as exc_info:
-        _client(httpx.MockTransport(handler)).write_file(
-            "s-1", "/etc/passwd", b"x"
-        )
+        _client(httpx.MockTransport(handler)).write_file("s-1", "/etc/passwd", b"x")
 
     assert exc_info.value.status_code == 422
 

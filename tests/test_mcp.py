@@ -13,6 +13,7 @@ import sys
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
+from typing import cast
 
 import pytest
 from alembic import command
@@ -169,7 +170,7 @@ class TestMcpExecuteTool:
             enabled=True,
         )
         return McpExecuteTool(
-            session=object(),
+            session=cast(Session, object()),
             task=None,
             server=server,
             tool=server_tool,

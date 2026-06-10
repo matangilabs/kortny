@@ -1293,7 +1293,7 @@ class AgentTaskExecutor:
         if self.web_search_tool is not None:
             return self.web_search_tool
         try:
-            return WebSearchTool.from_settings(settings)
+            return cast(Tool, WebSearchTool.from_settings(settings))
         except ValueError as exc:
             if "BRAVE_SEARCH_API_KEY" not in str(exc):
                 raise
@@ -1719,7 +1719,7 @@ class AgentTaskExecutor:
                 "suppressing final message for background assessment task_id=%s",
                 task.id,
             )
-            return
+            return None
         client = self.slack_client
         if client is None:
             client = cast(
@@ -1749,7 +1749,7 @@ class AgentTaskExecutor:
                     "suppressing final message after memory confirmation prompt task_id=%s",
                     task.id,
                 )
-                return
+                return None
             logger.info("posting final message task_id=%s", task.id)
             response_source = strip_internal_response_preamble(result_summary)
             if response_source != result_summary.strip():

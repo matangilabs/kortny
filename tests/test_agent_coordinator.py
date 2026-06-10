@@ -1,7 +1,7 @@
 import json
 import os
 import uuid
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -162,13 +162,13 @@ class FakeContextEngine:
         self.after_turn_calls.append((task.id, outcome))
 
 
-class NoopExecutionPlanner:
+class NoopExecutionPlanner(ExecutionPlanner):
     def should_plan(
         self,
         *,
         task: Task,
         tool_schemas: Sequence[JsonSchema],
-        intent_decision: dict[str, object] | None,
+        intent_decision: Mapping[str, object] | None,
     ) -> PlannerGateDecision:
         del task, tool_schemas, intent_decision
         return PlannerGateDecision(False, "test_no_plan")
@@ -717,7 +717,8 @@ def test_coordinator_retries_empty_response_after_tool_result(
     assert result.result_summary == "I found the memory topic."
     assert len(llm.calls) == 3
     assert any(
-        message.role == "system" and "previous response was empty" in message.content
+        message.role == "system"
+        and "previous response was empty" in (message.content or "")
         for message in llm.calls[2][1]
     )
     assert any(

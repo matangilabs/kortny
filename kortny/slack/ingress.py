@@ -211,10 +211,14 @@ class SlackIngress:
 
         action_id = action.get("action_id")
         if not isinstance(action_id, str):
-            return ScheduleActionResult(handled=False, action="unknown", reason="missing_action_id")
+            return ScheduleActionResult(
+                handled=False, action="unknown", reason="missing_action_id"
+            )
         schedule_id = parse_schedule_action_value(action.get("value"))
         if schedule_id is None:
-            return ScheduleActionResult(handled=False, action=action_id, reason="invalid_schedule_id")
+            return ScheduleActionResult(
+                handled=False, action=action_id, reason="invalid_schedule_id"
+            )
 
         user_id = _action_user_id(body)
         channel_id = _action_channel_id(body)

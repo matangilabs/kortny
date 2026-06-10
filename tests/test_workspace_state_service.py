@@ -77,12 +77,14 @@ class FakeSlackClient:
         channel: str,
         text: str,
         thread_ts: str | None = None,
+        blocks: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         self.messages.append(
             {
                 "channel": channel,
                 "text": text,
                 "thread_ts": thread_ts,
+                "blocks": blocks,
             }
         )
         return {"ok": True, "channel": channel, "ts": "1716600100.000001"}
@@ -192,6 +194,7 @@ def test_propose_confirm_round_trip_materializes_active_fact(
             "channel": "C123",
             "text": "Saved. I'll use this going forward: Concise PDF reports",
             "thread_ts": "1716500000.000001",
+            "blocks": None,
         }
     ]
 
@@ -274,6 +277,7 @@ def test_propose_reject_does_not_write_workspace_state(db_session: Session) -> N
             "channel": "C123",
             "text": "No problem, I won't save that.",
             "thread_ts": "1716500000.000001",
+            "blocks": None,
         }
     ]
 

@@ -5,11 +5,12 @@ from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from alembic import command
 from alembic.config import Config
+from google.adk.agents.callback_context import CallbackContext
 from google.adk.models.llm_response import LlmResponse
 from google.genai import types as genai_types
 from sqlalchemy import Engine, delete, func, select
@@ -612,7 +613,9 @@ def test_worker_synthesizes_approval_prompt_with_cheap_fast_model(
     assert "no network or host filesystem access" in posted_text
     assert "React with :white_check_mark:" in posted_text
     assert "code_exec" not in posted_text
-    assert "print((128.4 - 91.7)" not in provider.calls[0][0][1].content
+    msg_content = provider.calls[0][0][1].content
+    assert msg_content is not None
+    assert "print((128.4 - 91.7)" not in msg_content
     assert provider.calls[0][2] == {"type": "json_object"}
     events = task_events(db_session, task)
     assert any(
@@ -726,7 +729,9 @@ def test_agent_executor_builds_routed_llm_from_task_input(
 
     events = task_events(db_session, task)
 
-    assert llm.provider.model == "anthropic/document-model"
+    # LiteLLM runtime identifiers carry the openrouter/ prefix (see
+    # litellm_catalog model identifier normalization).
+    assert llm.provider.model == "openrouter/anthropic/document-model"
     assert llm.model_tier == "document"
     assert any(
         event.payload.get("message") == "model_route_selected"
@@ -951,7 +956,7 @@ def test_agent_executor_records_planned_workflow_classifier_event_for_complex_ta
         and event.payload.get("behavior") == "observe_only"
         and event.payload.get("route") == "planned_candidate"
         and event.payload.get("planned_candidate") is True
-        and event.payload.get("estimated_subtask_count") >= 3
+        and (event.payload.get("estimated_subtask_count") or 0) >= 3
         for event in events
     )
     assert any(
@@ -1221,9 +1226,7 @@ def test_agent_executor_posts_planned_workflow_progress_update(
         and event.payload.get("model_tier") == "cheap_fast"
         for event in events
     )
-    usage = db_session.scalar(
-        select(LLMUsage).where(LLMUsage.task_id == task.id)
-    )
+    usage = db_session.scalar(select(LLMUsage).where(LLMUsage.task_id == task.id))
     assert usage is not None
     assert usage.model_tier == "cheap_fast"
     assert usage.model == "deepseek/deepseek-v4-flash-20260423"
@@ -1471,7 +1474,9 @@ def test_adk_model_callback_records_llm_usage(
         ),
     )
 
-    runtime._record_adk_model_usage(callback_context=context, llm_response=response)
+    runtime._record_adk_model_usage(
+        callback_context=cast(CallbackContext, context), llm_response=response
+    )
     usage = db_session.scalar(select(LLMUsage).where(LLMUsage.task_id == task.id))
 
     assert usage is not None
@@ -1557,7 +1562,9 @@ def test_adk_model_callback_records_planned_workflow_cost_ceiling_event(
         ),
     )
 
-    runtime._record_adk_model_usage(callback_context=context, llm_response=response)
+    runtime._record_adk_model_usage(
+        callback_context=cast(CallbackContext, context), llm_response=response
+    )
     events = task_events(db_session, task)
 
     assert any(
@@ -1624,7 +1631,9 @@ def test_adk_model_callback_uses_openrouter_catalog_pricing_when_litellm_misses(
         ),
     )
 
-    runtime._record_adk_model_usage(callback_context=context, llm_response=response)
+    runtime._record_adk_model_usage(
+        callback_context=cast(CallbackContext, context), llm_response=response
+    )
     usage = db_session.scalar(select(LLMUsage).where(LLMUsage.task_id == task.id))
 
     assert usage is not None
@@ -3175,7 +3184,40 @@ def test_worker_runs_dashboard_graph_refresh_without_agent_runtime(
                 usage=TokenUsage(input_tokens=240, output_tokens=90),
                 cost_usd=Decimal("0.000100"),
                 model="openai/gpt-4o-mini",
-            )
+            ),
+            # Second call: witness channel-profile opportunity extraction that
+            # runs after the assessment completes.
+            Completion(
+                content=json.dumps(
+                    {
+                        "candidates": [
+                            {
+                                "candidate_type": "recurring_check",
+                                "title": "Summarize daily blotter changes",
+                                "summary": (
+                                    "The channel reviews a daily trade blotter "
+                                    "before the PM meeting."
+                                ),
+                                "suggested_action": (
+                                    "Offer a recurring blotter summary."
+                                ),
+                                "suggested_message": (
+                                    "Want me to summarize blotter changes each morning?"
+                                ),
+                                "evidence": ["Daily trade blotter posted"],
+                                "confidence_score": 0.7,
+                                "confidence_reason": (
+                                    "Recurring daily workflow in evidence."
+                                ),
+                            }
+                        ]
+                    }
+                ),
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=80, output_tokens=20),
+                cost_usd=Decimal("0.000020"),
+                model="openai/gpt-4o-mini",
+            ),
         ]
     )
     slack_client = FakeSlackClient()
@@ -3249,7 +3291,8 @@ def test_worker_runs_dashboard_graph_refresh_without_agent_runtime(
 
     assert result.status == TaskStatus.succeeded.value, task.error
     assert task.status is TaskStatus.succeeded
-    assert len(provider.calls) == 1
+    # Call 1: semantic profile extraction; call 2: witness opportunity pass
+    assert len(provider.calls) == 2
     assert provider.calls[0][2] == {"type": "json_object"}
     assert slack_client.messages == []
     assert "agent_runtime_selected" in event_messages
@@ -3274,6 +3317,7 @@ def test_worker_runs_dashboard_graph_refresh_without_agent_runtime(
         "Review daily blotter files before PM meeting",
         "Check scale-down and liquidation notes",
     ]
+    assert profile.summary is not None
     assert "investment operations" in profile.summary.lower()
     assert "blotter" in profile.summary.lower()
     assert (
@@ -3512,7 +3556,18 @@ def test_worker_dashboard_graph_refresh_falls_back_on_bad_semantic_output(
                 usage=TokenUsage(input_tokens=120, output_tokens=45),
                 cost_usd=Decimal("0.000050"),
                 model="openai/gpt-4o-mini",
-            )
+            ),
+            # Second call: witness channel-profile opportunity extraction that
+            # runs after the assessment completes.
+            Completion(
+                content=json.dumps(
+                    {"candidates": [], "skipped_reason": "no actionable items"}
+                ),
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=80, output_tokens=20),
+                cost_usd=Decimal("0.000020"),
+                model="openai/gpt-4o-mini",
+            ),
         ]
     )
     result = TaskWorker(
@@ -3538,7 +3593,8 @@ def test_worker_dashboard_graph_refresh_falls_back_on_bad_semantic_output(
     )
 
     assert result.status == TaskStatus.succeeded.value, task.error
-    assert len(provider.calls) == 1
+    # Call 1: semantic profile extraction; call 2: witness opportunity pass
+    assert len(provider.calls) == 2
     assert KG_CHANNEL_REFRESH_SEMANTIC_FALLBACK_MESSAGE in event_messages
     assert KG_CHANNEL_REFRESH_SEMANTIC_EXTRACTED_MESSAGE not in event_messages
     assert (
@@ -3552,11 +3608,13 @@ def test_worker_dashboard_graph_refresh_falls_back_on_bad_semantic_output(
     )
     assert profile is not None
     assert profile.metadata_json["synthesis"] == "deterministic"
+    assert profile.summary is not None
     assert "product" in profile.summary.lower()
     assert "launch" in profile.summary.lower()
     assert "adk" not in profile.summary.lower()
-    assert task.total_input_tokens == 120
-    assert task.total_output_tokens == 45
+    # Semantic extraction (120/45) + witness opportunity pass (80/20)
+    assert task.total_input_tokens == 200
+    assert task.total_output_tokens == 65
 
 
 def test_agent_executor_records_missing_brave_key_and_continues_without_web_search(
@@ -3986,8 +4044,7 @@ def test_agent_executor_projects_witness_candidates_from_posted_watch_answer(
         "unresolved_decision",
     }
     assert all(
-        candidate.visibility_scope_type == "private_channel"
-        for candidate in candidates
+        candidate.visibility_scope_type == "private_channel" for candidate in candidates
     )
     assert all(candidate.source_type == "task_summary" for candidate in candidates)
     assert all(candidate.source_task_id == task.id for candidate in candidates)
@@ -4051,8 +4108,7 @@ def test_agent_executor_skips_witness_extractor_for_adk_quick_response(
         == 0
     )
     assert not any(
-        event.payload.get("message")
-        == WITNESS_OPPORTUNITY_CANDIDATES_PROJECTED_MESSAGE
+        event.payload.get("message") == WITNESS_OPPORTUNITY_CANDIDATES_PROJECTED_MESSAGE
         for event in task_events(db_session, task)
     )
 
@@ -4100,8 +4156,7 @@ def test_agent_executor_skips_witness_extractor_for_witness_autopilot_task(
         == 0
     )
     assert not any(
-        event.payload.get("message")
-        == WITNESS_OPPORTUNITY_CANDIDATES_PROJECTED_MESSAGE
+        event.payload.get("message") == WITNESS_OPPORTUNITY_CANDIDATES_PROJECTED_MESSAGE
         for event in task_events(db_session, task)
     )
 

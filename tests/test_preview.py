@@ -38,9 +38,7 @@ def test_preview_url_embeds_token_and_paths() -> None:
     url = preview_url("https://kortny.example.com/", "secret", "task-1", "dash")
 
     token = preview_token("secret", "task-1", "dash")
-    assert url == (
-        f"https://kortny.example.com/preview/{token}/task-1/dash/index.html"
-    )
+    assert url == (f"https://kortny.example.com/preview/{token}/task-1/dash/index.html")
 
 
 def test_safe_slug_normalizes_input() -> None:
@@ -50,9 +48,7 @@ def test_safe_slug_normalizes_input() -> None:
 
 
 def test_extract_strips_common_root_directory(tmp_path: Path) -> None:
-    tar_bytes = _tar_with(
-        {"dist/index.html": b"<html></html>", "dist/js/app.js": b"x"}
-    )
+    tar_bytes = _tar_with({"dist/index.html": b"<html></html>", "dist/js/app.js": b"x"})
 
     extracted = extract_tar_to_dir(tar_bytes, tmp_path)
 

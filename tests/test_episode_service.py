@@ -175,6 +175,7 @@ def test_episode_service_records_failed_task_and_retrieves_by_scope(
         input_text="did this fail before?",
         event_id="EvEpisodeFollowup",
         thread_ts="1716500000.000001",
+        message_ts="1716500000.000002",
     )
 
     relevant = EpisodeService(db_session).relevant_for_task(follow_up)
@@ -218,13 +219,16 @@ def create_task(
     input_text: str,
     event_id: str,
     thread_ts: str = "1716400000.000001",
+    message_ts: str | None = None,
 ) -> Task:
+    # message_ts must be unique per task: TaskService dedups on the
+    # slack-message identity key (channel:thread_ts:message_ts).
     task = TaskService(session).create_task(
         installation_id=installation.id,
         slack_event_id=event_id,
         slack_channel_id="C123",
         slack_thread_ts=thread_ts,
-        slack_message_ts=thread_ts,
+        slack_message_ts=message_ts or thread_ts,
         slack_user_id="U123",
         input=input_text,
     )

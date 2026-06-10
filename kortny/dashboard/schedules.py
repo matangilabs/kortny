@@ -157,7 +157,9 @@ def get_schedule_dashboard(
     )
     identities = _owner_identity_map(session, schedules)
     page_model = SchedulePage(
-        rows=tuple(_schedule_row(schedule, identities=identities) for schedule in schedules),
+        rows=tuple(
+            _schedule_row(schedule, identities=identities) for schedule in schedules
+        ),
         metrics=_schedule_metrics(
             session,
             installation_id=installation_id,
@@ -239,7 +241,9 @@ def apply_schedule_action(
         notice = "Scheduled task resumed."
     else:
         if schedule.status not in {"proposed", "active", "paused"}:
-            raise ValueError("Only proposed, active, or paused schedules can be cancelled.")
+            raise ValueError(
+                "Only proposed, active, or paused schedules can be cancelled."
+            )
         schedule.status = "cancelled"
         schedule.next_run_at = None
         notice = "Scheduled task cancelled."
@@ -342,7 +346,9 @@ def update_schedule_from_dashboard(
 
     cost_ceiling = _parse_budget(planned_cost_ceiling_usd)
     normalized_delivery_kind = delivery_kind.strip()
-    if normalized_delivery_kind not in {key for key, _label in SCHEDULE_DELIVERY_OPTIONS}:
+    if normalized_delivery_kind not in {
+        key for key, _label in SCHEDULE_DELIVERY_OPTIONS
+    }:
         raise ValueError("Delivery must be DM, thread, channel, or dashboard.")
     normalized_artifact_policy = artifact_delivery_policy.strip() or "message_only"
     if normalized_artifact_policy not in {
@@ -350,7 +356,9 @@ def update_schedule_from_dashboard(
     }:
         raise ValueError("Artifact policy is not supported.")
 
-    target_user_id = delivery_slack_user_id.strip() or schedule.owner_slack_user_id or ""
+    target_user_id = (
+        delivery_slack_user_id.strip() or schedule.owner_slack_user_id or ""
+    )
     target_channel_id = delivery_slack_channel_id.strip()
     target_thread_ts = delivery_slack_thread_ts.strip() or None
     if not target_channel_id:
@@ -454,9 +462,15 @@ def _schedule_metrics(
         )
 
     return (
-        ScheduleMetric("Active", f"{count('active'):,}", "Running on schedule", "success"),
-        ScheduleMetric("Paused", f"{count('paused'):,}", "Waiting to resume", "warning"),
-        ScheduleMetric("Proposed", f"{count('proposed'):,}", "Drafts not yet active", "neutral"),
+        ScheduleMetric(
+            "Active", f"{count('active'):,}", "Running on schedule", "success"
+        ),
+        ScheduleMetric(
+            "Paused", f"{count('paused'):,}", "Waiting to resume", "warning"
+        ),
+        ScheduleMetric(
+            "Proposed", f"{count('proposed'):,}", "Drafts not yet active", "neutral"
+        ),
         ScheduleMetric("Total", f"{count():,}", "All visible schedules", "neutral"),
     )
 
@@ -542,7 +556,9 @@ def _task_identity_map(
 ) -> dict[tuple[str, uuid.UUID, str], str]:
     pairs: set[tuple[str, uuid.UUID, str]] = set()
     for task in tasks:
-        payload = task.identity_payload if isinstance(task.identity_payload, dict) else {}
+        payload = (
+            task.identity_payload if isinstance(task.identity_payload, dict) else {}
+        )
         user_id = payload.get("delivery_slack_user_id") or task.slack_user_id
         channel_id = payload.get("delivery_slack_channel_id") or task.slack_channel_id
         if isinstance(user_id, str) and user_id:
@@ -563,7 +579,11 @@ def _task_identity_map(
         )
     )
     return {
-        (identity.kind, identity.installation_id, identity.slack_id): identity.display_name
+        (
+            identity.kind,
+            identity.installation_id,
+            identity.slack_id,
+        ): identity.display_name
         for identity in identities
         if (identity.kind, identity.installation_id, identity.slack_id) in pairs
     }
@@ -606,15 +626,15 @@ def _task_delivery_label(
 ) -> str:
     payload = task.identity_payload if isinstance(task.identity_payload, dict) else {}
     delivery_kind = payload.get("delivery_kind")
-    user_id = _optional_string(payload.get("delivery_slack_user_id")) or task.slack_user_id
+    user_id = (
+        _optional_string(payload.get("delivery_slack_user_id")) or task.slack_user_id
+    )
     channel_id = (
         _optional_string(payload.get("delivery_slack_channel_id"))
         or task.slack_channel_id
     )
     user_label = (
-        identities.get(("user", task.installation_id, user_id))
-        if user_id
-        else None
+        identities.get(("user", task.installation_id, user_id)) if user_id else None
     ) or user_id
     channel_label = (
         identities.get(("channel", task.installation_id, channel_id))
@@ -634,7 +654,9 @@ def _task_delivery_label(
 
 
 def _schedule_health_notice(schedule: Schedule) -> str | None:
-    metadata = schedule.metadata_json if isinstance(schedule.metadata_json, dict) else {}
+    metadata = (
+        schedule.metadata_json if isinstance(schedule.metadata_json, dict) else {}
+    )
     scheduler_error = _optional_string(metadata.get("last_scheduler_error"))
     budget_status = _optional_string(metadata.get("last_budget_status"))
     if scheduler_error == "missing_planned_cost_ceiling":
@@ -669,7 +691,9 @@ def _can_access_schedule(
         return False
     if is_admin:
         return True
-    return schedule.owner_type == "user" and schedule.owner_slack_user_id == slack_user_id
+    return (
+        schedule.owner_type == "user" and schedule.owner_slack_user_id == slack_user_id
+    )
 
 
 def _get_accessible_schedule(
@@ -700,7 +724,9 @@ def _normalize_view(*, view: str, is_admin: bool) -> str:
 
 
 def _cadence_label(schedule: Schedule) -> str:
-    metadata = schedule.metadata_json if isinstance(schedule.metadata_json, dict) else {}
+    metadata = (
+        schedule.metadata_json if isinstance(schedule.metadata_json, dict) else {}
+    )
     label = metadata.get("cadence_label")
     if isinstance(label, str) and label.strip():
         return label
@@ -764,7 +790,9 @@ def _delivery_label(schedule: Schedule) -> str:
         return _delivery_with_artifact_policy("Thread", schedule)
     if delivery_kind == "dashboard_only":
         return _delivery_with_artifact_policy("Dashboard", schedule)
-    template = schedule.task_template if isinstance(schedule.task_template, dict) else {}
+    template = (
+        schedule.task_template if isinstance(schedule.task_template, dict) else {}
+    )
     surface = template.get("delivery_surface")
     if surface == "dm":
         return _delivery_with_artifact_policy("DM", schedule)
@@ -777,7 +805,9 @@ def _delivery_label(schedule: Schedule) -> str:
 
 
 def _delivery_with_artifact_policy(label: str, schedule: Schedule) -> str:
-    template = schedule.task_template if isinstance(schedule.task_template, dict) else {}
+    template = (
+        schedule.task_template if isinstance(schedule.task_template, dict) else {}
+    )
     policy = (
         getattr(schedule, "artifact_delivery_policy", None)
         or template.get("artifact_delivery_policy")
@@ -791,7 +821,9 @@ def _delivery_with_artifact_policy(label: str, schedule: Schedule) -> str:
 
 
 def _schedule_task_input(schedule: Schedule) -> str:
-    template = schedule.task_template if isinstance(schedule.task_template, dict) else {}
+    template = (
+        schedule.task_template if isinstance(schedule.task_template, dict) else {}
+    )
     value = template.get("input")
     if isinstance(value, str) and value.strip():
         return value.strip()
@@ -855,9 +887,7 @@ def _schedule_snapshot(schedule: Schedule) -> dict[str, Any]:
         "delivery_slack_channel_id": schedule.delivery_slack_channel_id,
         "delivery_slack_thread_ts": schedule.delivery_slack_thread_ts,
         "artifact_delivery_policy": schedule.artifact_delivery_policy,
-        "planned_cost_ceiling_usd": _decimal_string(
-            schedule.planned_cost_ceiling_usd
-        ),
+        "planned_cost_ceiling_usd": _decimal_string(schedule.planned_cost_ceiling_usd),
     }
 
 

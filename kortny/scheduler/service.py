@@ -12,7 +12,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import func, select
@@ -106,7 +106,9 @@ class ScheduleMaterializer:
             if use_advisory_lock:
                 self._release_advisory_lock()
 
-    def _claim_due_schedules(self, *, now: datetime, limit: int) -> tuple[Schedule, ...]:
+    def _claim_due_schedules(
+        self, *, now: datetime, limit: int
+    ) -> tuple[Schedule, ...]:
         return tuple(
             self.session.scalars(
                 select(Schedule)
@@ -212,8 +214,8 @@ class ScheduleMaterializer:
         )
         task = self.tasks.create_task(
             installation_id=schedule.installation_id,
-            slack_channel_id=delivery["slack_channel_id"],
-            slack_user_id=delivery["slack_user_id"],
+            slack_channel_id=cast(str, delivery["slack_channel_id"]),
+            slack_user_id=cast(str, delivery["slack_user_id"]),
             input=input_text,
             slack_thread_ts=delivery["slack_thread_ts"],
             slack_message_ts=_optional_template_string(template, "slack_message_ts"),
@@ -228,9 +230,7 @@ class ScheduleMaterializer:
             {
                 "message": SCHEDULED_TASK_BUDGET_ADMITTED_MESSAGE,
                 "schedule_id": str(schedule.id),
-                "cost_ceiling_usd": _decimal_string(
-                    schedule.planned_cost_ceiling_usd
-                ),
+                "cost_ceiling_usd": _decimal_string(schedule.planned_cost_ceiling_usd),
                 "behavior": "admit_with_per_run_ceiling",
             },
         )
@@ -345,7 +345,9 @@ class ScheduleMaterializer:
 
     def _try_advisory_lock(self) -> bool:
         return bool(
-            self.session.scalar(select(func.pg_try_advisory_lock(self.advisory_lock_key)))
+            self.session.scalar(
+                select(func.pg_try_advisory_lock(self.advisory_lock_key))
+            )
         )
 
     def _release_advisory_lock(self) -> None:
@@ -657,7 +659,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         else settings.scheduler_materialize_limit,
         advisory_lock_key=settings.scheduler_advisory_lock_key,
     )
-    logger.info("scheduler started scheduler_id=%s once=%s", worker.scheduler_id, args.once)
+    logger.info(
+        "scheduler started scheduler_id=%s once=%s", worker.scheduler_id, args.once
+    )
     if args.once:
         result = worker.run_once()
         print(

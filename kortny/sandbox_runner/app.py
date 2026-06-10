@@ -424,9 +424,7 @@ def create_app(
         return {"ok": True, "service": SERVICE_NAME, **info.to_payload()}
 
     @app.post("/sessions/{session_id}/exec")
-    def session_exec(
-        session_id: str, request: SessionExecRequest
-    ) -> dict[str, object]:
+    def session_exec(session_id: str, request: SessionExecRequest) -> dict[str, object]:
         manager = _require_session_manager()
         try:
             result = manager.exec(
@@ -511,9 +509,7 @@ def create_app(
     return app
 
 
-def _session_reaper_loop(
-    manager: SessionManager, stop_event: threading.Event
-) -> None:
+def _session_reaper_loop(manager: SessionManager, stop_event: threading.Event) -> None:
     while not stop_event.wait(SESSION_REAPER_INTERVAL_SECONDS):
         try:
             manager.reap()

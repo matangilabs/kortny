@@ -10,8 +10,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
-from typing import Any
-from typing import cast as type_cast
+from typing import Any, Protocol
 from urllib.parse import urlencode, urlsplit, urlunsplit
 
 from sqlalchemy import Select, Text, case, cast, exists, func, or_, select
@@ -4511,7 +4510,7 @@ def _normalize_kg_sort(view: str, sort: str | None) -> str:
 
 
 def _kg_installation_filter(
-    model: object,
+    model: type[Any],
     installation_id: uuid.UUID | None,
 ) -> list[ColumnElement[bool]]:
     if installation_id is None:
@@ -4519,12 +4518,12 @@ def _kg_installation_filter(
     return [model.installation_id == installation_id]
 
 
-def _kg_current_filters(model: object) -> list[ColumnElement[bool]]:
+def _kg_current_filters(model: type[Any]) -> list[ColumnElement[bool]]:
     return [model.is_current.is_(True), model.expired_at.is_(None)]
 
 
 def _kg_has_evidence_predicate(
-    model: object,
+    model: type[Any],
     target_kind: str,
 ) -> ColumnElement[bool]:
     return exists().where(
@@ -4580,9 +4579,9 @@ def _kg_entity_rows(
     identities = _identity_map_from_keys(
         session,
         tuple(
-            _kg_scope_identity_key(entity)
+            key
             for entity in entities
-            if _kg_scope_identity_key(entity) is not None
+            if (key := _kg_scope_identity_key(entity)) is not None
         ),
     )
     rows = tuple(
@@ -5011,8 +5010,8 @@ def _kg_entity_filters(
 
 def _kg_edge_filters(
     *,
-    source: KnowledgeGraphEntity,
-    target: KnowledgeGraphEntity,
+    source: type[KnowledgeGraphEntity],
+    target: type[KnowledgeGraphEntity],
     query: str,
     scope_filter: str,
     state_filter: str,
@@ -5027,22 +5026,26 @@ def _kg_edge_filters(
         filters.append(KnowledgeGraphEdge.relationship_type == kind_filter)
     if query:
         pattern = f"%{query}%"
+        # source and target are aliased ORM classes; attribute access returns column
+        # descriptors at runtime even though mypy sees the field types.
+        src: Any = source
+        tgt: Any = target
         filters.append(
             or_(
                 KnowledgeGraphEdge.relationship_type.ilike(pattern),
                 KnowledgeGraphEdge.source_type.ilike(pattern),
                 KnowledgeGraphEdge.visibility_scope_id.ilike(pattern),
                 cast(KnowledgeGraphEdge.attrs_json, Text).ilike(pattern),
-                source.canonical_key.ilike(pattern),
-                source.display_name.ilike(pattern),
-                target.canonical_key.ilike(pattern),
-                target.display_name.ilike(pattern),
+                src.canonical_key.ilike(pattern),
+                src.display_name.ilike(pattern),
+                tgt.canonical_key.ilike(pattern),
+                tgt.display_name.ilike(pattern),
             )
         )
     return filters
 
 
-def _kg_state_filters(model: object, state_filter: str) -> list[ColumnElement[bool]]:
+def _kg_state_filters(model: type[Any], state_filter: str) -> list[ColumnElement[bool]]:
     if state_filter == "all":
         return []
     if state_filter == "current":
@@ -5050,7 +5053,7 @@ def _kg_state_filters(model: object, state_filter: str) -> list[ColumnElement[bo
     return [model.lifecycle_state == state_filter]
 
 
-def _kg_entity_order(sort: str):
+def _kg_entity_order(sort: str) -> tuple[Any, ...]:
     if sort == "created_desc":
         return (KnowledgeGraphEntity.created_at.desc(), KnowledgeGraphEntity.id.desc())
     if sort == "confidence_desc":
@@ -5064,7 +5067,7 @@ def _kg_entity_order(sort: str):
     return (KnowledgeGraphEntity.updated_at.desc(), KnowledgeGraphEntity.id.desc())
 
 
-def _kg_edge_order(sort: str):
+def _kg_edge_order(sort: str) -> tuple[Any, ...]:
     if sort == "created_desc":
         return (KnowledgeGraphEdge.created_at.desc(), KnowledgeGraphEdge.id.desc())
     if sort == "confidence_desc":
@@ -5172,7 +5175,13 @@ def _kg_entities_by_id(
     }
 
 
-def _kg_scope_identity_key(model: object) -> IdentityKey | None:
+class _HasScopeFields(Protocol):
+    installation_id: uuid.UUID
+    visibility_scope_type: str
+    visibility_scope_id: str | None
+
+
+def _kg_scope_identity_key(model: _HasScopeFields) -> IdentityKey | None:
     scope_type = model.visibility_scope_type
     scope_id = model.visibility_scope_id
     if not scope_id:
@@ -7091,7 +7100,7 @@ def _single_installation_id(session: Session) -> uuid.UUID | None:
         )
     )
     if len(installation_ids) == 1:
-        return type_cast(uuid.UUID, installation_ids[0])
+        return installation_ids[0]
     return None
 
 
@@ -7315,7 +7324,7 @@ def _model_capability_labels(model: LLMModelCatalog) -> tuple[str, ...]:
     return unique[:5] if unique else ("Metadata pending",)
 
 
-def _model_metadata_value(model: LLMModelCatalog, key: str) -> object | None:
+def _model_metadata_value(model: LLMModelCatalog, key: str) -> Any:
     capabilities = _mapping(model.capabilities_json)
     metadata = _mapping(model.metadata_json)
     litellm_metadata = _mapping(metadata.get("litellm_metadata"))

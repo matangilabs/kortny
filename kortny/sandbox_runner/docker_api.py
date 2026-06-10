@@ -401,7 +401,6 @@ class DockerApiClient:
             )
             cleanup_error = cleanup_error or remove_error
 
-
     def create_session_container(
         self, spec: DockerSessionCreateSpec
     ) -> DockerSessionCreateResult:
@@ -913,8 +912,9 @@ def _remove_container(*, base_url: str, container_id: str | None) -> str | None:
 
 
 def _docker_error_text(*, response: httpx.Response, payload: object | None) -> str:
-    if isinstance(payload, dict) and isinstance(payload.get("message"), str):
-        return payload["message"][:500]
+    message = payload.get("message") if isinstance(payload, dict) else None
+    if isinstance(message, str):
+        return message[:500]
     return response.text[:500]
 
 

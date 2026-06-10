@@ -106,23 +106,19 @@ def test_classifier_keeps_schedule_state_questions_inline() -> None:
 
 
 def _task(input_text: str) -> Task:
-    return cast(
-        Any,
-        SimpleNamespace(
-            input=input_text,
-            identity_kind=None,
-        ),
+    result: Any = SimpleNamespace(
+        input=input_text,
+        identity_kind=None,
     )
+    return cast(Task, result)
 
 
 def _intent_event(decision: dict[str, Any]) -> TaskEvent:
-    return cast(
-        Any,
-        SimpleNamespace(
-            seq=1,
-            payload={
-                "message": INTENT_CLASSIFIED_MESSAGE,
-                "decision": decision,
-            },
-        ),
+    result: Any = SimpleNamespace(
+        seq=1,
+        payload={
+            "message": INTENT_CLASSIFIED_MESSAGE,
+            "decision": decision,
+        },
     )
+    return cast(TaskEvent, result)

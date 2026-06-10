@@ -656,7 +656,9 @@ class TaskRepository:
     def _record_scheduled_task_cost_ceiling_if_exceeded(self, task: Task) -> None:
         if task.identity_kind != "scheduled":
             return
-        payload = task.identity_payload if isinstance(task.identity_payload, dict) else {}
+        payload = (
+            task.identity_payload if isinstance(task.identity_payload, dict) else {}
+        )
         ceiling = _optional_decimal(payload.get("planned_cost_ceiling_usd"))
         if ceiling is None or ceiling <= 0:
             return

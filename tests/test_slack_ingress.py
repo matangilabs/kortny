@@ -78,7 +78,7 @@ class FakeSlackClient:
         thread_ts: str | None = None,
         blocks: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        call = {
+        call: dict[str, Any] = {
             "channel": channel,
             "text": text,
             "thread_ts": thread_ts,
