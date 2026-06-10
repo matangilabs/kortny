@@ -369,8 +369,10 @@ class AdkAgentRuntime:
         approval_policy: ToolApprovalPolicy | None = None,
         model_config_service: ModelConfigService | None = None,
         tool_result_prompt_max_chars: int = 8000,
+        response_depth: str | None = None,
     ) -> None:
         self.settings = settings
+        self.response_depth = response_depth
         self.session = session
         self.task_service = task_service
         self.registry = registry
@@ -524,6 +526,67 @@ class AdkAgentRuntime:
             parts=[genai_types.Part.from_text(text=task.input)],
         )
 
+        final_text, event_count, final_author, authors = await self._drive_runner(
+            runner,
+            task=task,
+            user_id=user_id,
+            session_id=session_id,
+            message=message,
+            start_event_count=0,
+        )
+
+        if not final_text.strip():
+            # Providers occasionally return an empty completion (observed
+            # live: gemini flash via openrouter with output_tokens=0). One
+            # bounded retry before failing the task.
+            self.task_service.append_event(
+                task,
+                TaskEventType.log,
+                {
+                    "message": "adk_empty_final_response_retry",
+                    "runtime": "adk",
+                    "event_count": event_count,
+                },
+            )
+            (
+                retry_text,
+                retry_events,
+                retry_author,
+                retry_authors,
+            ) = await self._drive_runner(
+                runner,
+                task=task,
+                user_id=user_id,
+                session_id=session_id,
+                message=message,
+                start_event_count=event_count,
+            )
+            event_count += retry_events
+            for author in retry_authors:
+                if author not in authors:
+                    authors.append(author)
+            if retry_text.strip():
+                final_text = retry_text
+                final_author = retry_author
+
+        if not final_text.strip():
+            raise AgentLoopError(
+                f"ADK runtime returned no final text for task {task.id}"
+            )
+        return final_text.strip(), event_count, final_author, authors
+
+    async def _drive_runner(
+        self,
+        runner: Any,
+        *,
+        task: Task,
+        user_id: str,
+        session_id: str,
+        message: genai_types.Content,
+        start_event_count: int,
+    ) -> tuple[str, int, str | None, list[str]]:
+        """Run one ADK turn and collect the final response text."""
+
         final_text = ""
         final_author: str | None = None
         event_count = 0
@@ -538,16 +601,13 @@ class AdkAgentRuntime:
             author = _string_or_none(getattr(event, "author", None))
             if author is not None and author not in authors:
                 authors.append(author)
-            self._record_adk_event(task, event=event, event_count=event_count)
+            self._record_adk_event(
+                task, event=event, event_count=start_event_count + event_count
+            )
             if event.is_final_response():
                 final_author = author
                 final_text = _event_text(event)
-
-        if not final_text.strip():
-            raise AgentLoopError(
-                f"ADK runtime returned no final text for task {task.id}"
-            )
-        return final_text.strip(), event_count, final_author, authors
+        return final_text, event_count, final_author, authors
 
     def _build_agent(
         self,
@@ -1003,53 +1063,78 @@ class AdkAgentRuntime:
             )
         return []
 
+    def _resolved_response_depth(self, task: Task | None) -> str | None:
+        """Return the unified router depth driving ADK mode selection (HIG-218).
+
+        Prefers the explicit depth handed in by the executor, then the persisted
+        ``unified_depth_decision`` event. ``None`` means no depth signal.
+        """
+
+        if self.response_depth is not None:
+            return self.response_depth
+        if task is None:
+            return None
+        payload = self._latest_log_payload(
+            task=task,
+            message="unified_depth_decision",
+        )
+        if payload is None:
+            return None
+        value = payload.get("response_depth")
+        return value if isinstance(value, str) and value else None
+
     def _should_use_planned_workflow(
         self,
         *,
         task: Task | None,
         planned_workflow_payload: dict[str, Any] | None,
     ) -> bool:
+        del planned_workflow_payload
         if task is None:
             return False
         if not self.settings.planned_workflows_enabled:
             return False
         if self.registry_factory is None and self.registry is None:
             return False
-        if planned_workflow_payload is None:
-            return False
-        return planned_workflow_payload.get("planned_candidate") is True
+        return self._resolved_response_depth(task) == "deep_workflow"
 
     def _should_use_direct_quick_response(self, *, task: Task | None) -> bool:
         if task is None:
             return False
         if not _is_direct_quick_response_input(task.input):
             return False
-        handoff_payload = self._latest_log_payload(
-            task=task,
-            message="runtime_handoff_evaluated",
-        )
-        if handoff_payload is None:
-            return False
-        if handoff_payload.get("runtime_class") != "quick_response":
-            return False
-        if handoff_payload.get("selected_backend") != "inline":
-            return False
-        planned_payload = self._latest_log_payload(
-            task=task,
-            message="planned_workflow_classified",
-        )
-        reason_codes = planned_payload.get("reason_codes") if planned_payload else ()
-        if not isinstance(reason_codes, (list, tuple, set)):
-            return False
-        return "quick_conversation" in {
-            str(reason) for reason in reason_codes if isinstance(reason, str)
-        }
+        return self._resolved_response_depth(task) == "quick_response"
 
     def _planned_workflow_payload(self, task: Task) -> dict[str, Any] | None:
-        return self._latest_log_payload(
+        """Return a planned-workflow-shaped view of the unified depth decision.
+
+        Under the unified router (HIG-218) there is no separate planned-workflow
+        classifier event. We derive the legacy shape (``planned_candidate``,
+        ``route``, ``reason``) from the ``unified_depth_decision`` event so the
+        existing ADK planned-workflow machinery and cost-ceiling guards keep
+        working off a single decision.
+        """
+
+        payload = self._latest_log_payload(
             task=task,
-            message="planned_workflow_classified",
+            message="unified_depth_decision",
         )
+        if payload is None:
+            return None
+        response_depth = payload.get("response_depth")
+        if not isinstance(response_depth, str) or not response_depth:
+            return None
+        planned_candidate = response_depth == "deep_workflow"
+        return {
+            "response_depth": response_depth,
+            "time_sensitivity": payload.get("time_sensitivity"),
+            "toolkit_affinity": payload.get("toolkit_affinity", []),
+            "depth_source": payload.get("depth_source"),
+            "planned_candidate": planned_candidate,
+            "route": ("planned_candidate" if planned_candidate else "inline"),
+            "reason": f"unified_router_depth_{response_depth}",
+            "reason_codes": [],
+        }
 
     def _latest_log_payload(
         self,

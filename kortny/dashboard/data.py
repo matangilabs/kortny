@@ -6273,7 +6273,7 @@ def _planned_workflow_trace(
             present = True
         if message == "adk_planned_workflow_selected":
             selected_payload = payload
-        if message == "planned_workflow_classified":
+        if message == "unified_depth_decision":
             classifier_payload = payload
         if message in PLANNED_TRACE_MESSAGES and event.seq in timeline_by_seq:
             phase_events.append(timeline_by_seq[event.seq])
@@ -6532,7 +6532,7 @@ def _is_planned_trace_payload(
     payload: dict[str, Any], event_type: TaskEventType
 ) -> bool:
     message = _payload_string(payload, "message")
-    if message in PLANNED_TRACE_MESSAGES or message == "planned_workflow_classified":
+    if message in PLANNED_TRACE_MESSAGES or message == "unified_depth_decision":
         return True
     if _payload_string(payload, "adk_agent_name") in PLANNED_AGENT_NAMES:
         return True

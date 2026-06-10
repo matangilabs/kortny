@@ -273,14 +273,15 @@ def test_adk_runtime_short_availability_check_uses_direct_quick_agent(
                         "selected_backend": "inline",
                     },
                     {
-                        "message": "planned_workflow_classified",
-                        "reason_codes": ["quick_conversation"],
+                        "message": "unified_depth_decision",
+                        "response_depth": "quick_response",
                     },
                 ]
             ),
         ),
         task_service=cast(Any, task_service),
         registry_factory=registry_factory,
+        response_depth="quick_response",
     )
 
     agent = runtime._build_agent(task=task)
@@ -351,14 +352,15 @@ def test_adk_runtime_uses_model_config_service_for_task_bound_model(
                         "selected_backend": "inline",
                     },
                     {
-                        "message": "planned_workflow_classified",
-                        "reason_codes": ["quick_conversation"],
+                        "message": "unified_depth_decision",
+                        "response_depth": "quick_response",
                     },
                 ]
             ),
         ),
         task_service=cast(Any, task_service),
         model_config_service=cast(Any, model_config_service),
+        response_depth="quick_response",
     )
 
     agent = runtime._build_agent(task=task)
@@ -817,6 +819,7 @@ def test_adk_runtime_builds_planned_parallel_pipeline_for_planned_candidate(
         task_service=cast(Any, task_service),
         registry=ToolRegistry([_EchoTool()]),
         model="anthropic/sonnet-routed",
+        response_depth="deep_workflow",
     )
 
     agent = runtime._build_agent(
@@ -878,6 +881,7 @@ def test_adk_runtime_respects_planned_workflow_disable_flag(
         session=cast(Any, None),
         task_service=cast(Any, _FakeTaskService()),
         registry=ToolRegistry([_EchoTool()]),
+        response_depth="deep_workflow",
     )
 
     agent = runtime._build_agent(

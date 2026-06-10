@@ -456,8 +456,8 @@
       "prompt": "forget my PDF branding preference",
       "primary_guardrail": "slack_response_quality",
       "desired_runtime_route": "inline",
-      "baseline_classifier_route": "planned_candidate",
-      "known_gap": "Current planned-workflow classifier can treat forget-memory requests as planned due keyword noise from 'PDF'.",
+      "baseline_classifier_route": "inline",
+      "known_gap": "Resolved by the unified router (HIG-218): the deterministic depth override no longer over-routes forget-memory requests to a deep workflow on keyword noise from 'PDF'.",
       "routing_expectation": {
         "expected_runtime_class": "inline_tool_task",
         "expected_intent": "memory.forget",

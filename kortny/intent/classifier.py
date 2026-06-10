@@ -9,6 +9,7 @@ from typing import Protocol
 
 from pydantic import ValidationError
 
+from kortny.intent.depth_overrides import apply_depth_overrides
 from kortny.intent.models import (
     IntentClassification,
     IntentDecision,
@@ -111,7 +112,8 @@ class LLMIntentClassifier:
             )
         decision = parse_intent_decision(completion.content)
         decision = _with_deterministic_overrides(request, decision)
-        return _with_mixed_follow_up_memory_override(request, decision)
+        decision = _with_mixed_follow_up_memory_override(request, decision)
+        return apply_depth_overrides(request, decision)
 
 
 def parse_intent_decision(content: str | None) -> IntentDecision:

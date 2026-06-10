@@ -570,6 +570,78 @@ def test_execution_planner_skips_single_hop_read_integration(
     assert gate.reason == "single_hop_read_tool"
 
 
+_DEPTH_SCHEMAS: tuple[JsonSchema, ...] = (
+    {
+        "name": "composio_firecrawl_search",
+        "description": "Search the web.",
+        "parameters": {"type": "object"},
+    },
+)
+
+
+def test_execution_planner_plans_for_deep_workflow_depth(
+    db_session: Session,
+) -> None:
+    task = create_task(db_session, input_text="research and write a brief")
+    gate = ExecutionPlanner().should_plan(
+        task=task,
+        tool_schemas=_DEPTH_SCHEMAS,
+        intent_decision={
+            "likely_tools": ["composio_firecrawl_search"],
+            "model_tier": "standard",
+            "response_depth": "deep_workflow",
+        },
+    )
+
+    assert gate.should_plan is True
+    assert gate.reason == "unified_depth_deep_workflow"
+
+
+def test_execution_planner_skips_planning_for_standard_and_quick_depth(
+    db_session: Session,
+) -> None:
+    task = create_task(db_session, input_text="look up the AAPL price")
+    for depth in ("standard_tool_task", "quick_response"):
+        gate = ExecutionPlanner().should_plan(
+            task=task,
+            tool_schemas=_DEPTH_SCHEMAS,
+            intent_decision={
+                "likely_tools": ["composio_firecrawl_search"],
+                "model_tier": "standard",
+                "response_depth": depth,
+            },
+        )
+        assert gate.should_plan is False
+        assert gate.reason == f"unified_depth_{depth}"
+
+
+def test_execution_planner_falls_back_to_legacy_without_intent(
+    db_session: Session,
+) -> None:
+    task = create_task(db_session, input_text="how is the team doing today")
+    gate = ExecutionPlanner().should_plan(
+        task=task,
+        tool_schemas=_DEPTH_SCHEMAS,
+        intent_decision=None,
+    )
+
+    # Legacy heuristic path: no intent signal and no toolkit name match.
+    assert gate.should_plan is False
+    assert gate.reason == "no_intent_signal"
+
+
+def test_guardrail_limits_for_depth_scales_quick_response() -> None:
+    quick = ExecutionGuardrailLimits.for_depth("quick_response")
+    assert quick.max_turns == 2
+    assert quick.max_tool_calls == 3
+
+    standard = ExecutionGuardrailLimits.for_depth("standard_tool_task")
+    deep = ExecutionGuardrailLimits.for_depth("deep_workflow")
+    default = ExecutionGuardrailLimits()
+    assert standard == default
+    assert deep == default
+
+
 def test_coordinator_gates_sensitive_tool_before_invocation(
     db_session: Session,
 ) -> None:

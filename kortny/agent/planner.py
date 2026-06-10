@@ -176,10 +176,42 @@ class ExecutionPlanner:
         tool_schemas: Sequence[JsonSchema],
         intent_decision: Mapping[str, object] | None,
     ) -> PlannerGateDecision:
-        """Return whether this task deserves an LLM-authored plan."""
+        """Return whether this task deserves an LLM-authored plan.
+
+        The unified router (HIG-218) owns depth: when the ingress intent decision
+        carries a ``response_depth``, that decision drives planning. Tasks with
+        no intent decision (synthetic, scheduled, manual — they never pass
+        ingress) fall back to the legacy heuristics below.
+        """
 
         if not tool_schemas:
             return PlannerGateDecision(False, "no_tools_available")
+
+        if intent_decision is None:
+            return self._legacy_should_plan(task=task, tool_schemas=tool_schemas)
+
+        response_depth = _optional_str(intent_decision.get("response_depth"))
+        if response_depth == "deep_workflow":
+            return PlannerGateDecision(True, "unified_depth_deep_workflow")
+        if response_depth in {"quick_response", "standard_tool_task"}:
+            return PlannerGateDecision(False, f"unified_depth_{response_depth}")
+
+        # No depth signal on the decision (legacy persisted payload): fall back
+        # to the battle-tested heuristics so behavior is unchanged.
+        return self._legacy_should_plan(
+            task=task,
+            tool_schemas=tool_schemas,
+            intent_decision=intent_decision,
+        )
+
+    def _legacy_should_plan(
+        self,
+        *,
+        task: Task,
+        tool_schemas: Sequence[JsonSchema],
+        intent_decision: Mapping[str, object] | None = None,
+    ) -> PlannerGateDecision:
+        """Legacy rule-based planning gate for tasks without a depth signal."""
 
         if intent_decision is None:
             if _external_toolkit_name_mentioned(task.input, tool_schemas):
@@ -640,6 +672,12 @@ def _schema_names(tool_schemas: Sequence[JsonSchema]) -> tuple[str, ...]:
         for schema in tool_schemas
         if isinstance((name := schema.get("name")), str) and name
     )
+
+
+def _optional_str(value: object) -> str | None:
+    if isinstance(value, str) and value:
+        return value
+    return None
 
 
 def _string_list(value: object) -> list[str]:

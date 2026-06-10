@@ -71,6 +71,7 @@ class ToolSelector(Protocol):
         external_cards: Sequence[ToolCard],
         intent_classification: str | None = None,
         likely_tools: Sequence[str] = (),
+        toolkit_affinity: Sequence[str] = (),
     ) -> ToolSelectionResult:
         """Return selected external tools and native suppressions."""
 
@@ -98,6 +99,7 @@ class LLMToolSelector:
         external_cards: Sequence[ToolCard],
         intent_classification: str | None = None,
         likely_tools: Sequence[str] = (),
+        toolkit_affinity: Sequence[str] = (),
     ) -> ToolSelectionResult:
         if not external_cards:
             return ToolSelectionResult(route_reason="no_external_candidates")
@@ -109,6 +111,7 @@ class LLMToolSelector:
             max_prompt_chars=self.max_prompt_chars,
             intent_classification=intent_classification,
             likely_tools=list(likely_tools),
+            toolkit_affinity=list(toolkit_affinity),
         )
         completion = self.llm.complete(
             task_id=task_id,
@@ -162,8 +165,10 @@ class HeuristicToolSelector:
         external_cards: Sequence[ToolCard],
         intent_classification: str | None = None,
         likely_tools: Sequence[str] = (),
+        toolkit_affinity: Sequence[str] = (),
     ) -> ToolSelectionResult:
         del task_id, native_cards, intent_classification, likely_tools
+        del toolkit_affinity
         if not external_cards:
             return ToolSelectionResult(route_reason="no_external_candidates")
 
@@ -308,6 +313,7 @@ def _fit_selector_payload(
     max_prompt_chars: int,
     intent_classification: str | None = None,
     likely_tools: list[str] | None = None,
+    toolkit_affinity: list[str] | None = None,
 ) -> tuple[JsonObject, _SelectorPromptBudget]:
     candidates = list(external_cards)
     description_chars = DEFAULT_PROMPT_DESCRIPTION_CHARS
@@ -319,6 +325,7 @@ def _fit_selector_payload(
         max_description_chars=description_chars,
         intent_classification=intent_classification,
         likely_tools=likely_tools,
+        toolkit_affinity=toolkit_affinity,
     )
     prompt_chars = _selector_prompt_chars(payload)
     while prompt_chars > max_prompt_chars:
@@ -344,6 +351,7 @@ def _fit_selector_payload(
             max_description_chars=description_chars,
             intent_classification=intent_classification,
             likely_tools=likely_tools,
+            toolkit_affinity=toolkit_affinity,
         )
         prompt_chars = _selector_prompt_chars(payload)
 
@@ -370,6 +378,7 @@ def _selector_payload(
     max_description_chars: int,
     intent_classification: str | None = None,
     likely_tools: list[str] | None = None,
+    toolkit_affinity: list[str] | None = None,
 ) -> JsonObject:
     payload: JsonObject = {
         "task_input": task_input,
@@ -393,6 +402,8 @@ def _selector_payload(
         intent["classification"] = intent_classification
     if likely_tools:
         intent["likely_tools"] = likely_tools
+    if toolkit_affinity:
+        intent["toolkit_affinity"] = toolkit_affinity
     if intent:
         payload["intent"] = intent
     return payload

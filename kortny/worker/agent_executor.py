@@ -15,6 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from kortny.agent.coordinator import DEFAULT_SYSTEM_PROMPT, AgentRunResult
+from kortny.agent.execution import ExecutionGuardrailLimits
 from kortny.agent.runtime import CustomAgentRuntime
 from kortny.agent.thread_context import ThreadTranscriptProvider
 from kortny.approvals import (
@@ -131,7 +132,6 @@ from kortny.witness import (
     WitnessTaskResponseExtractor,
 )
 from kortny.workflow.handoff import evaluate_runtime_handoff
-from kortny.workflow.planning_classifier import classify_planned_workflow
 
 GENERIC_FAILURE_TEXT = (
     "Something went wrong while I was working on this. Please try again soon."
@@ -163,11 +163,46 @@ ADK_QUICK_FINAL_AUTHORS = frozenset(
 logger = logging.getLogger(__name__)
 
 
+UNIFIED_DEPTH_DECISION_MESSAGE = "unified_depth_decision"
+
+
 @dataclass(frozen=True, slots=True)
 class TaskExecutionResult:
     """Result returned by a worker task executor."""
 
     result_summary: str
+
+
+@dataclass(frozen=True, slots=True)
+class UnifiedDepthDecision:
+    """Unified router depth decision derived from the ingress intent (HIG-218).
+
+    Tasks that never pass ingress (synthetic/scheduled/manual) default to
+    ``standard_tool_task`` with ``depth_source="default"`` so legacy behavior is
+    unchanged.
+    """
+
+    response_depth: str
+    time_sensitivity: str
+    toolkit_affinity: tuple[str, ...]
+    depth_source: str
+
+    @property
+    def is_quick(self) -> bool:
+        return self.response_depth == "quick_response"
+
+    @property
+    def is_deep(self) -> bool:
+        return self.response_depth == "deep_workflow"
+
+    def to_payload(self) -> JsonObject:
+        return {
+            "message": UNIFIED_DEPTH_DECISION_MESSAGE,
+            "response_depth": self.response_depth,
+            "time_sensitivity": self.time_sensitivity,
+            "toolkit_affinity": list(self.toolkit_affinity),
+            "depth_source": self.depth_source,
+        }
 
 
 class TaskExecutor(Protocol):
@@ -706,60 +741,21 @@ class AgentTaskExecutor:
         task_service: TaskService,
         working_dir: Path,
     ) -> AgentRunResult:
-        planned_workflow_candidate = False
-        planned_workflow_payload: JsonObject | None = None
-        try:
-            planned_workflow = classify_planned_workflow(
-                task=task,
-                events=_task_events(session, task),
-            )
-            planned_workflow_candidate = planned_workflow.planned_candidate
-            planned_workflow_payload = planned_workflow.to_payload()
-            task_service.append_event(
-                task,
-                TaskEventType.log,
-                planned_workflow_payload,
-            )
-            log_observation(
-                logger,
-                "planned_workflow_classified",
-                task=task,
-                classifier="rules_plus_intent_metadata",
-                classifier_version="hig_179_slice_0",
-                behavior="observe_only",
-                route=planned_workflow.route.value,
-                planned_candidate=planned_workflow.planned_candidate,
-                confidence=planned_workflow.confidence,
-                estimated_subtask_count=planned_workflow.estimated_subtask_count,
-                reason_codes=list(planned_workflow.reason_codes),
-                detected_integrations=list(planned_workflow.detected_integrations),
-                likely_tools=list(planned_workflow.likely_tools),
-                needs_context=list(planned_workflow.needs_context),
-            )
-        except Exception as exc:
-            task_service.append_event(
-                task,
-                TaskEventType.error,
-                {
-                    "message": "planned_workflow_classifier_failed",
-                    "classifier": "rules_plus_intent_metadata",
-                    "classifier_version": "hig_179_slice_0",
-                    "behavior": "observe_only",
-                    "fallback_policy": "inline_on_low_confidence_or_classifier_failure",
-                    "error_type": type(exc).__name__,
-                    "error": str(exc),
-                },
-            )
-            log_observation(
-                logger,
-                "planned_workflow_classifier_failed",
-                task=task,
-                classifier="rules_plus_intent_metadata",
-                classifier_version="hig_179_slice_0",
-                behavior="observe_only",
-                error_type=type(exc).__name__,
-                error_summary=str(exc)[:500],
-            )
+        depth = _resolve_unified_depth(session, task)
+        task_service.append_event(task, TaskEventType.log, depth.to_payload())
+        log_observation(
+            logger,
+            UNIFIED_DEPTH_DECISION_MESSAGE,
+            task=task,
+            response_depth=depth.response_depth,
+            time_sensitivity=depth.time_sensitivity,
+            depth_source=depth.depth_source,
+            toolkit_affinity=list(depth.toolkit_affinity),
+        )
+        # Deep workflows are the durable/planned candidates under the unified
+        # router; quick/standard stay on the inline path.
+        planned_workflow_candidate = depth.is_deep
+        planned_workflow_payload = depth.to_payload()
         handoff = evaluate_runtime_handoff(settings=settings, task=task)
         task_service.append_event(task, TaskEventType.log, handoff.to_payload())
         log_observation(
@@ -809,6 +805,10 @@ class AgentTaskExecutor:
                 shadow_confidence=_routing_confidence_from_planned_payload(
                     planned_workflow_payload
                 ),
+                response_depth=depth.response_depth,
+                time_sensitivity=depth.time_sensitivity,
+                toolkit_affinity=depth.toolkit_affinity,
+                depth_source=depth.depth_source,
                 metadata={
                     "recommended_backend": handoff.recommended_backend,
                     "configured_backend": handoff.configured_backend,
@@ -861,6 +861,10 @@ class AgentTaskExecutor:
                 shadow_confidence=_routing_confidence_from_planned_payload(
                     planned_workflow_payload
                 ),
+                response_depth=depth.response_depth,
+                time_sensitivity=depth.time_sensitivity,
+                toolkit_affinity=depth.toolkit_affinity,
+                depth_source=depth.depth_source,
             ).to_payload(),
         )
         if settings.agent_runtime == "adk":
@@ -944,6 +948,7 @@ class AgentTaskExecutor:
                     settings
                 ),
                 tool_result_prompt_max_chars=settings.tool_result_prompt_max_chars,
+                response_depth=depth.response_depth,
             ).run(task)
 
         llm = self._build_llm(
@@ -972,6 +977,7 @@ class AgentTaskExecutor:
             system_prompt=self.system_prompt,
             tool_result_prompt_max_chars=settings.tool_result_prompt_max_chars,
             thread_transcript_provider=self._build_thread_transcript_provider(settings),
+            guardrail_limits=ExecutionGuardrailLimits.for_depth(depth.response_depth),
         ).run(task)
 
     def _record_semantic_router_shadow(
@@ -989,15 +995,16 @@ class AgentTaskExecutor:
 
         handoff = evaluate_runtime_handoff(settings=settings, task=task)
         events = _task_events(session, task)
-        planned_workflow_payload = _latest_payload_event(
+        depth_payload = _latest_payload_event(
             events,
-            message="planned_workflow_classified",
+            message=UNIFIED_DEPTH_DECISION_MESSAGE,
         )
-        planned_candidate = None
-        if planned_workflow_payload is not None:
-            raw_planned_candidate = planned_workflow_payload.get("planned_candidate")
-            if isinstance(raw_planned_candidate, bool):
-                planned_candidate = raw_planned_candidate
+        unified_depth = (
+            _payload_str(depth_payload, "response_depth")
+            if depth_payload is not None
+            else None
+        )
+        planned_candidate = unified_depth == "deep_workflow"
 
         model_route = ModelRouter(settings).route_for_tier(
             ModelRouteTier.cheap_fast,
@@ -1057,14 +1064,21 @@ class AgentTaskExecutor:
             handoff_runtime_class=handoff.runtime_class.value,
             handoff_recommended_backend=handoff.recommended_backend,
             selected_backend=handoff.selected_backend,
-            planned_classifier_route=_routing_payload_str(
-                planned_workflow_payload,
-                "route",
-            ),
-            planned_candidate=planned_candidate,
+            planned_classifier_route=(
+                "planned_candidate" if planned_candidate else "inline"
+            )
+            if unified_depth is not None
+            else None,
+            planned_candidate=planned_candidate if unified_depth is not None else None,
         )
         promotion = SemanticRouterPromotionGate().evaluate(decision)
         metadata["promotion_gate"] = promotion.to_payload()
+        if unified_depth is not None:
+            metadata["unified_response_depth"] = unified_depth
+            metadata["shadow_depth_agreement"] = _shadow_depth_agreement(
+                shadow_runtime_class=decision.runtime_class.value,
+                unified_depth=unified_depth,
+            )
         task_service.append_event(
             task,
             TaskEventType.log,
@@ -1416,6 +1430,7 @@ class AgentTaskExecutor:
         effective_decision = effective_intent_decision(raw_intent)
         selector_intent_classification: str | None = None
         selector_likely_tools: list[str] = []
+        selector_toolkit_affinity: list[str] = []
         if effective_decision is not None:
             raw_cls = effective_decision.get("classification")
             if isinstance(raw_cls, str) and raw_cls:
@@ -1424,6 +1439,11 @@ class AgentTaskExecutor:
             if isinstance(raw_lt, list):
                 selector_likely_tools = [
                     item for item in raw_lt if isinstance(item, str) and item
+                ]
+            raw_affinity = effective_decision.get("toolkit_affinity")
+            if isinstance(raw_affinity, list | tuple):
+                selector_toolkit_affinity = [
+                    item for item in raw_affinity if isinstance(item, str) and item
                 ]
         tool_selection_task_input = _tool_selection_task_input(
             session=session,
@@ -1438,6 +1458,7 @@ class AgentTaskExecutor:
                 external_cards=selector_cards,
                 intent_classification=selector_intent_classification,
                 likely_tools=selector_likely_tools,
+                toolkit_affinity=selector_toolkit_affinity,
             )
         except Exception as exc:
             logger.exception("tool selector failed task_id=%s", task.id)
@@ -1458,6 +1479,7 @@ class AgentTaskExecutor:
                 external_cards=selector_cards,
                 intent_classification=selector_intent_classification,
                 likely_tools=selector_likely_tools,
+                toolkit_affinity=selector_toolkit_affinity,
             )
         selection = _expand_related_tool_selection(
             task_input=task.input,
@@ -1473,6 +1495,7 @@ class AgentTaskExecutor:
             selector_candidate_count=len(selector_cards),
             intent_classification=selector_intent_classification,
             intent_likely_tools=selector_likely_tools,
+            intent_toolkit_affinity=selector_toolkit_affinity,
         )
         selected_external_names = set(selection.selected_names)
         suppressed_native_names = set(selection.suppressed_native_tools)
@@ -1525,6 +1548,7 @@ class AgentTaskExecutor:
         selector_candidate_count: int,
         intent_classification: str | None = None,
         intent_likely_tools: list[str] | None = None,
+        intent_toolkit_affinity: list[str] | None = None,
     ) -> None:
         payload: JsonObject = {
             "message": "tool_selection_completed",
@@ -1578,6 +1602,11 @@ class AgentTaskExecutor:
             **(
                 {"intent_likely_tools": intent_likely_tools}
                 if intent_likely_tools
+                else {}
+            ),
+            **(
+                {"intent_toolkit_affinity": intent_toolkit_affinity}
+                if intent_toolkit_affinity
                 else {}
             ),
         }
@@ -2948,6 +2977,27 @@ def _routing_intent_from_handoff(
     return "task.general"
 
 
+def _shadow_depth_agreement(
+    *,
+    shadow_runtime_class: str,
+    unified_depth: str,
+) -> bool:
+    """Map the shadow semantic runtime_class to the unified depth (HIG-218).
+
+    quick_response <-> quick_response;
+    inline_tool_task <-> standard_tool_task;
+    durable/scheduled_workflow_task <-> deep_workflow.
+    """
+
+    mapping = {
+        "quick_response": "quick_response",
+        "inline_tool_task": "standard_tool_task",
+        "durable_workflow_task": "deep_workflow",
+        "scheduled_workflow_task": "deep_workflow",
+    }
+    return mapping.get(shadow_runtime_class) == unified_depth
+
+
 def _routing_payload_str(
     payload: Mapping[str, Any] | None,
     key: str,
@@ -3052,6 +3102,41 @@ def _external_tool_skip_reason(
         }
 
     return None
+
+
+def _resolve_unified_depth(
+    session: Session,
+    task: Task,
+) -> UnifiedDepthDecision:
+    """Resolve the unified router depth for a task (HIG-218).
+
+    Reads the execution-driving (effective) intent decision. Tasks with no
+    intent decision default to ``standard_tool_task`` / ``default``.
+    """
+
+    decision = effective_intent_decision(_latest_intent_decision(session, task))
+    if decision is None:
+        return UnifiedDepthDecision(
+            response_depth="standard_tool_task",
+            time_sensitivity="interactive",
+            toolkit_affinity=(),
+            depth_source="default",
+        )
+    response_depth = _payload_str(decision, "response_depth") or "standard_tool_task"
+    time_sensitivity = _payload_str(decision, "time_sensitivity") or "interactive"
+    depth_source = _payload_str(decision, "depth_source") or "default"
+    raw_affinity = decision.get("toolkit_affinity")
+    toolkit_affinity: tuple[str, ...] = ()
+    if isinstance(raw_affinity, list | tuple):
+        toolkit_affinity = tuple(
+            item for item in raw_affinity if isinstance(item, str) and item
+        )
+    return UnifiedDepthDecision(
+        response_depth=response_depth,
+        time_sensitivity=time_sensitivity,
+        toolkit_affinity=toolkit_affinity,
+        depth_source=depth_source,
+    )
 
 
 def _latest_intent_decision(session: Session, task: Task) -> dict[str, Any] | None:

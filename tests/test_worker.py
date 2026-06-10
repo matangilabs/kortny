@@ -896,15 +896,31 @@ def test_agent_executor_memoizes_adk_registry_factory_per_execution(
     assert captured["tool_names"] == ["web_search"]
 
 
-def test_agent_executor_records_planned_workflow_classifier_event_for_complex_task(
+def test_agent_executor_records_unified_depth_decision_for_deep_workflow(
     db_session: Session,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    task = create_task(db_session, event_id="EvPlannedWorkflowClassified")
+    task = create_task(db_session, event_id="EvUnifiedDepthDeep")
     task.input = "Research best AI agents for trading and summarize the options."
     db_session.commit()
     task_service = TaskService(db_session)
+    task_service.append_event(
+        task,
+        TaskEventType.log,
+        {
+            "message": "intent_classification_completed",
+            "decision": {
+                "classification": "task_request",
+                "likely_tools": ["web_search"],
+                "model_tier": "standard",
+                "response_depth": "deep_workflow",
+                "time_sensitivity": "interactive",
+                "toolkit_affinity": [],
+                "depth_source": "deterministic_override",
+            },
+        },
+    )
     settings = Settings.model_validate(
         {
             "SLACK_BOT_TOKEN": "xoxb-test",
@@ -952,11 +968,9 @@ def test_agent_executor_records_planned_workflow_classifier_event_for_complex_ta
         result.result_summary == "Complex task still executed by the current runtime."
     )
     assert any(
-        event.payload.get("message") == "planned_workflow_classified"
-        and event.payload.get("behavior") == "observe_only"
-        and event.payload.get("route") == "planned_candidate"
-        and event.payload.get("planned_candidate") is True
-        and (event.payload.get("estimated_subtask_count") or 0) >= 3
+        event.payload.get("message") == "unified_depth_decision"
+        and event.payload.get("response_depth") == "deep_workflow"
+        and event.payload.get("depth_source") == "deterministic_override"
         for event in events
     )
     assert any(
@@ -971,8 +985,7 @@ def test_agent_executor_records_planned_workflow_classifier_event_for_complex_ta
     ]
     assert any(
         payload.get("stage") == "worker_runtime_handoff"
-        and payload.get("runtime_class") == "inline_tool_task"
-        and payload.get("shadow_route") == "planned_candidate"
+        and payload.get("response_depth") == "deep_workflow"
         and payload.get("shadow_planned_candidate") is True
         for payload in route_events
     )
@@ -1095,7 +1108,7 @@ def test_agent_executor_answers_schedule_state_question_with_fast_path(
     assert "response_humanizer_started" in event_messages
     assert "response_humanizer_completed" in event_messages
     assert "response_humanizer_skipped" not in event_messages
-    assert "planned_workflow_classified" not in event_messages
+    assert "unified_depth_decision" not in event_messages
     assert "runtime_handoff_evaluated" not in event_messages
     assert "adk_runtime_started" not in event_messages
     assert "witness_opportunity_candidates_projected" not in event_messages
@@ -1127,6 +1140,7 @@ def test_agent_executor_posts_planned_workflow_progress_update(
     task.input = "Research best AI agents for trading and summarize the options."
     db_session.commit()
     task_service = TaskService(db_session)
+    _seed_deep_workflow_intent(task_service, task)
     settings = Settings.model_validate(
         {
             "SLACK_BOT_TOKEN": "xoxb-test",
@@ -1185,9 +1199,14 @@ def test_agent_executor_posts_planned_workflow_progress_update(
     assert len(slack_client.messages) == 1
     assert slack_client.messages[0]["channel"] == "C123"
     assert slack_client.messages[0]["thread_ts"] == "EvPlannedWorkflowProgress"
-    # Progress text must be one of the deterministic templates
+    # Progress text must be one of the deterministic templates (normalized at
+    # the posting boundary, e.g. em dash -> hyphen).
+    from kortny.slack.formatting import normalize_user_facing_text
+
     posted_text = slack_client.messages[0]["text"]
-    assert posted_text in _PLANNED_PROGRESS_TEMPLATES
+    assert posted_text in {
+        normalize_user_facing_text(template) for template in _PLANNED_PROGRESS_TEMPLATES
+    }
     assert "workstreams" not in posted_text.casefold()
     # No LLM calls for progress text — provider should be empty
     assert provider.calls == []
@@ -1230,10 +1249,17 @@ def test_agent_executor_planned_progress_template_is_deterministic(
     task = create_task(db_session, event_id="EvProgressDeterminism")
     task.input = "Research best AI agents for trading and summarize the options."
     db_session.commit()
+    _seed_deep_workflow_intent(TaskService(db_session), task)
 
-    # Compute expected template the same way the implementation does
+    # Compute expected template the same way the implementation does. The
+    # posting boundary normalizes user-facing text (e.g. em dash -> hyphen), so
+    # compare against the normalized template, not the raw constant.
+    from kortny.slack.formatting import normalize_user_facing_text
+
     expected_index = int(task.id.hex[:8], 16) % len(_PLANNED_PROGRESS_TEMPLATES)
-    expected_text = _PLANNED_PROGRESS_TEMPLATES[expected_index]
+    expected_text = normalize_user_facing_text(
+        _PLANNED_PROGRESS_TEMPLATES[expected_index]
+    )
 
     settings = Settings.model_validate(
         {
@@ -1283,6 +1309,106 @@ def test_agent_executor_planned_progress_template_is_deterministic(
     assert slack_client.messages[0]["text"] == expected_text
 
 
+def _seed_intent_with_depth(
+    task_service: TaskService,
+    task: Task,
+    *,
+    response_depth: str,
+    depth_source: str = "deterministic_override",
+) -> None:
+    task_service.append_event(
+        task,
+        TaskEventType.log,
+        {
+            "message": "intent_classification_completed",
+            "decision": {
+                "classification": "task_request",
+                "likely_tools": [],
+                "model_tier": "standard",
+                "response_depth": response_depth,
+                "time_sensitivity": "interactive",
+                "toolkit_affinity": [],
+                "depth_source": depth_source,
+            },
+        },
+    )
+
+
+def test_agent_executor_quick_response_skips_planner_and_progress(
+    db_session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = create_task(db_session, event_id="EvQuickDepth")
+    task.input = "thanks, that's helpful!"
+    db_session.commit()
+    task_service = TaskService(db_session)
+    _seed_intent_with_depth(task_service, task, response_depth="quick_response")
+    settings = Settings.model_validate(
+        {
+            "SLACK_BOT_TOKEN": "xoxb-test",
+            "SLACK_APP_TOKEN": "xapp-test",
+            "SLACK_SIGNING_SECRET": "signing-secret",
+            "LLM_PROVIDER": SettingsLLMProvider.openrouter,
+            "LLM_API_KEY": "openrouter-key",
+            "LLM_MODEL": "anthropic/sonnet-default",
+            "POSTGRES_URL": "postgresql://kortny:kortny@localhost/kortny",
+            "AGENT_RUNTIME": "custom",
+            "KORTNY_PLANNED_WORKFLOW_PROGRESS_UPDATES_ENABLED": True,
+        }
+    )
+    captured: dict[str, Any] = {}
+
+    from kortny.agent.execution import ExecutionGuardrailLimits
+
+    class FakeCustomRuntime:
+        def __init__(self, **kwargs: Any) -> None:
+            captured["guardrail_limits"] = kwargs.get("guardrail_limits")
+
+        def run(self, task_arg: Task) -> AgentRunResult:
+            return AgentRunResult(
+                task_id=task_arg.id,
+                result_summary="You're welcome!",
+                turns=1,
+                artifact_count=0,
+            )
+
+    monkeypatch.setattr(
+        "kortny.worker.agent_executor.CustomAgentRuntime",
+        FakeCustomRuntime,
+    )
+
+    AgentTaskExecutor(
+        settings=settings,
+        llm_provider=FakeAgentProvider([]),
+        provider_name="openrouter",
+        slack_client=FakeSlackClient(),
+    )._run_agent_runtime(
+        settings=settings,
+        session=db_session,
+        task=task,
+        task_service=task_service,
+        working_dir=tmp_path,
+    )
+
+    events = task_events(db_session, task)
+    event_messages = [event.payload.get("message") for event in events]
+
+    assert any(
+        event.payload.get("message") == "unified_depth_decision"
+        and event.payload.get("response_depth") == "quick_response"
+        for event in events
+    )
+    # Quick responses never post the planned progress template.
+    assert "planned_task_started" not in event_messages
+    assert "planned_task_progress_posted" not in event_messages
+    # Quick responses get the reduced guardrail budget.
+    limits = captured["guardrail_limits"]
+    assert limits == ExecutionGuardrailLimits.for_depth("quick_response")
+    assert limits.max_turns == 2
+    assert limits.max_tool_calls == 3
+
+
 def test_agent_executor_shadow_starts_temporal_for_planned_candidate(
     db_session: Session,
     tmp_path: Path,
@@ -1292,6 +1418,7 @@ def test_agent_executor_shadow_starts_temporal_for_planned_candidate(
     task.input = "Research best AI agents for trading and summarize the options."
     db_session.commit()
     task_service = TaskService(db_session)
+    _seed_deep_workflow_intent(task_service, task)
     settings = Settings.model_validate(
         {
             "SLACK_BOT_TOKEN": "xoxb-test",
@@ -1360,8 +1487,8 @@ def test_agent_executor_shadow_starts_temporal_for_planned_candidate(
     )
     assert launch_calls == [str(task.id)]
     assert any(
-        event.payload.get("message") == "planned_workflow_classified"
-        and event.payload.get("planned_candidate") is True
+        event.payload.get("message") == "unified_depth_decision"
+        and event.payload.get("response_depth") == "deep_workflow"
         for event in events
     )
     assert any(
@@ -1560,10 +1687,11 @@ def test_adk_model_callback_records_planned_workflow_cost_ceiling_event(
         task,
         TaskEventType.log,
         {
-            "message": "planned_workflow_classified",
-            "route": "planned_candidate",
-            "planned_candidate": True,
-            "confidence": 0.9,
+            "message": "unified_depth_decision",
+            "response_depth": "deep_workflow",
+            "time_sensitivity": "interactive",
+            "toolkit_affinity": [],
+            "depth_source": "deterministic_override",
         },
     )
     db_session.add(
@@ -3355,7 +3483,7 @@ def test_worker_runs_dashboard_graph_refresh_without_agent_runtime(
     assert WITNESS_OPPORTUNITY_CANDIDATES_PROJECTED_MESSAGE in event_messages
     assert "tool_selection_completed" not in event_messages
     assert "adk_runtime_started" not in event_messages
-    assert "planned_workflow_classified" not in event_messages
+    assert "unified_depth_decision" not in event_messages
     assert len(tool_results) == 1
     assert tool_results[0].payload["output"]["context_source"] == "observation_cache"
     assert tool_results[0].payload["output"]["message_count"] == 3
@@ -4426,6 +4554,27 @@ def task_events(session: Session, task: Task) -> list[TaskEvent]:
             .where(TaskEvent.task_id == task.id)
             .order_by(TaskEvent.seq)
         )
+    )
+
+
+def _seed_deep_workflow_intent(task_service: TaskService, task: Task) -> None:
+    """Seed an ingress intent decision that forces the unified deep-workflow path."""
+
+    task_service.append_event(
+        task,
+        TaskEventType.log,
+        {
+            "message": "intent_classification_completed",
+            "decision": {
+                "classification": "task_request",
+                "likely_tools": ["web_search"],
+                "model_tier": "standard",
+                "response_depth": "deep_workflow",
+                "time_sensitivity": "interactive",
+                "toolkit_affinity": [],
+                "depth_source": "deterministic_override",
+            },
+        },
     )
 
 

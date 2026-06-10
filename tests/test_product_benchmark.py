@@ -5,8 +5,8 @@ from typing import Any, cast
 
 from kortny.config import Settings
 from kortny.db.models import Task
+from kortny.intent.depth_overrides import classify_depth_override
 from kortny.workflow.handoff import evaluate_runtime_handoff
-from kortny.workflow.planning_classifier import classify_planned_workflow
 
 BENCHMARK_PATH = Path("tests/fixtures/kortny_product_benchmark.json")
 
@@ -95,16 +95,25 @@ def test_product_benchmark_fixture_is_well_formed() -> None:
             assert all(isinstance(check, str) and check.strip() for check in checks)
 
 
-def test_product_benchmark_records_current_planned_classifier_baseline() -> None:
+def test_product_benchmark_records_current_depth_override_baseline() -> None:
     benchmark = _load_benchmark()
 
     for scenario in benchmark["scenarios"]:
-        decision = classify_planned_workflow(task=_task(scenario["prompt"]))
+        override = classify_depth_override(text=scenario["prompt"])
+        # Map the unified-router deterministic depth override onto the legacy
+        # planned/inline route taxonomy used by the benchmark fixture: only
+        # deep_workflow overrides are planned candidates; everything else (no
+        # forced depth, quick, standard) is inline.
+        route = (
+            "planned_candidate"
+            if override is not None and override.depth == "deep_workflow"
+            else "inline"
+        )
 
-        assert decision.route.value == scenario["baseline_classifier_route"], (
-            f"{scenario['id']} classifier route changed from benchmark baseline. "
-            "If this is an intended product improvement, update the benchmark "
-            "baseline and known_gap note."
+        assert route == scenario["baseline_classifier_route"], (
+            f"{scenario['id']} depth-override route changed from benchmark "
+            "baseline. If this is an intended product improvement, update the "
+            "benchmark baseline and known_gap note."
         )
 
 
@@ -148,7 +157,6 @@ def test_product_benchmark_tracks_known_route_gaps() -> None:
         "linear_project_tasks",
         "james_bond_ranked_research",
         "website_cpt_audit",
-        "memory_forget_no_match",
     }
     for scenario in benchmark["scenarios"]:
         if scenario["id"] in known_gap_ids:

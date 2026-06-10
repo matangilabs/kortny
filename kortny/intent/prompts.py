@@ -16,6 +16,9 @@ Return exactly one JSON object matching this schema:
   "likely_tools": string[],
   "model_tier": "cheap" | "standard" | "strong",
   "reason": string,
+  "response_depth": "quick_response" | "standard_tool_task" | "deep_workflow",
+  "time_sensitivity": "interactive" | "relaxed",
+  "toolkit_affinity": string[],
   "primary_intent": {
     "type": "task_request" | "follow_up" | "memory_candidate" | "clarification" | "cancel_or_retry" | "third_person_reference" | "ambient_observation" | "ignore",
     "objective": string,
@@ -56,6 +59,17 @@ Multi-intent guidance:
 - For messages like "yeah lets do that" plus "remember this in the future", classify the top-level and primary_intent as follow_up, and include a secondary memory_candidate intent.
 - Do not let a memory instruction hide a concrete task request or follow-up.
 - If there is only one intent, primary_intent may be null and secondary_intents should be empty.
+
+Response depth (response_depth) — how much execution machinery the request deserves:
+- quick_response: greetings, thanks, acknowledgements, capability questions ("what can you do", "what tools do you have"), simple factual replies answerable with no tools or one cheap lookup, and schedule-state questions ("what's scheduled", "do I have anything running"). Examples: "thanks!", "what can you do?", "are you up?".
+- standard_tool_task: needs one to a few tool calls against a single integration, or bounded research with a clear answer. Examples: "look up the latest price of AAPL", "find the Linear issue about onboarding", "summarize this thread".
+- deep_workflow: multi-source research, document or artifact production, multiple integrations, write or destructive operations, monitoring or long-running work, or explicit "thorough/comprehensive/full report" asks. Examples: "research the competitive landscape and write a brief", "audit our docs site and post a report", "create a Linear issue and email the team".
+
+Time sensitivity (time_sensitivity):
+- interactive: the user is waiting now and wants a prompt reply. This is the default for direct questions and requests. Examples: "what's the status?", "pull the latest numbers".
+- relaxed: the user signals it can wait, framed as background, scheduled, digest, or "whenever you get a chance" work. Examples: "whenever you get a chance, summarize last week", "add this to tomorrow's digest", "no rush, but research X".
+
+Toolkit affinity (toolkit_affinity): lowercase names of integrations, MCP servers, or toolkits the user named or strongly implied, as a deduplicated array. Use the integration name, not the verb. Examples: "create a Linear issue" => ["linear"]; "check GitHub PRs and post to Slack" => ["github", "slack"]; "what's the weather" => [].
 
 Important memory-control distinction:
 - "forget/remove/delete/clear my memory/preference/fact/rule" is a task_request with likely_tools ["inspect_memory", "forget_fact"], not cancel_or_retry.

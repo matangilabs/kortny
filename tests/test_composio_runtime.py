@@ -1674,9 +1674,10 @@ class FailingToolSelector:
         external_cards: Sequence[ToolCard],
         intent_classification: str | None = None,
         likely_tools: Sequence[str] = (),
+        toolkit_affinity: Sequence[str] = (),
     ) -> ToolSelectionResult:
         del task_id, task_input, native_cards, external_cards
-        del intent_classification, likely_tools
+        del intent_classification, likely_tools, toolkit_affinity
         raise ValueError("invalid selector payload")
 
 
@@ -1694,6 +1695,7 @@ class StaticToolSelector:
         external_cards: Sequence[ToolCard],
         intent_classification: str | None = None,
         likely_tools: Sequence[str] = (),
+        toolkit_affinity: Sequence[str] = (),
     ) -> ToolSelectionResult:
         self.calls.append(
             {
@@ -1703,6 +1705,7 @@ class StaticToolSelector:
                 "external_cards": external_cards,
                 "intent_classification": intent_classification,
                 "likely_tools": list(likely_tools),
+                "toolkit_affinity": list(toolkit_affinity),
             }
         )
         return self.result

@@ -37,7 +37,6 @@ from kortny.tools.native_runtime import (
 )
 from kortny.tools.types import JsonObject, JsonSchema
 from kortny.worker.agent_executor import NATIVE_SLACK_CONTEXT_HINTS
-from kortny.workflow.planning_classifier import _TOOL_TO_INTEGRATION
 
 
 class CostingTool:
@@ -140,7 +139,6 @@ def test_native_tool_surfaces_are_derived_from_metadata() -> None:
         }
     )
     assert native_tool_names_by_approval("admin_approval") == frozenset()
-    assert integration_map == _TOOL_TO_INTEGRATION
     assert native_slack_context_hint_names() == NATIVE_SLACK_CONTEXT_HINTS
 
 

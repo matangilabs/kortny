@@ -50,6 +50,19 @@ class ExecutionGuardrailLimits:
     max_same_tool_call: int = 2
     max_same_recoverable_error: int = 2
 
+    @classmethod
+    def for_depth(cls, depth: str) -> ExecutionGuardrailLimits:
+        """Return depth-scaled limits for the unified router (HIG-218).
+
+        ``quick_response`` gets a tight budget; ``standard_tool_task`` and
+        ``deep_workflow`` use the current defaults (planned budgets already
+        exist for the deep/planned path). Full adaptive scaling is HIG-220.
+        """
+
+        if depth == "quick_response":
+            return cls(max_turns=2, max_tool_calls=3)
+        return cls()
+
     def __post_init__(self) -> None:
         if self.max_turns < 1:
             raise ValueError("max_turns must be at least 1")

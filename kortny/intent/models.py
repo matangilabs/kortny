@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+ResponseDepth = Literal["quick_response", "standard_tool_task", "deep_workflow"]
+TimeSensitivity = Literal["interactive", "relaxed"]
+DepthSource = Literal["llm", "deterministic_override", "default"]
 
 
 class IntentSurface(StrEnum):
@@ -101,8 +106,30 @@ class IntentDecision(BaseModel):
     likely_tools: list[str] = Field(default_factory=list)
     model_tier: ModelTier
     reason: str = Field(min_length=1, max_length=500)
+    response_depth: ResponseDepth = "standard_tool_task"
+    time_sensitivity: TimeSensitivity = "interactive"
+    toolkit_affinity: tuple[str, ...] = ()
+    depth_source: DepthSource = "default"
     primary_intent: IntentFragment | None = None
     secondary_intents: list[IntentFragment] = Field(default_factory=list)
+
+    @field_validator("toolkit_affinity", mode="before")
+    @classmethod
+    def normalize_toolkit_affinity(cls, value: object) -> tuple[str, ...]:
+        if value is None:
+            return ()
+        if isinstance(value, str | bytes):
+            return ()
+        if not isinstance(value, list | tuple):
+            return ()
+        cleaned: list[str] = []
+        for item in value:
+            if not isinstance(item, str):
+                continue
+            normalized = " ".join(item.split()).strip()
+            if normalized and normalized not in cleaned:
+                cleaned.append(normalized)
+        return tuple(cleaned)
 
     def routing_classification(self) -> IntentClassification:
         """Return the intent classification that should drive execution."""

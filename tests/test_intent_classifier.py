@@ -246,6 +246,69 @@ def test_parse_intent_decision_accepts_explicit_decomposition() -> None:
     assert decision.secondary_intents[0].likely_tools == ["remember_fact"]
 
 
+def test_parse_intent_decision_reads_unified_router_fields() -> None:
+    decision = parse_intent_decision(
+        """
+        {
+          "addressed_to_kortny": true,
+          "classification": "task_request",
+          "confidence": 0.9,
+          "should_create_task": true,
+          "should_ack_with_reaction": true,
+          "suggested_reaction": "eyes",
+          "needs_channel_context": false,
+          "needs_thread_context": false,
+          "needs_file_context": false,
+          "likely_tools": ["composio_linear_execute"],
+          "model_tier": "standard",
+          "reason": "Create a Linear issue and email the team.",
+          "response_depth": "deep_workflow",
+          "time_sensitivity": "relaxed",
+          "toolkit_affinity": ["linear", "email"]
+        }
+        """
+    )
+
+    assert decision.response_depth == "deep_workflow"
+    assert decision.time_sensitivity == "relaxed"
+    assert decision.toolkit_affinity == ("linear", "email")
+    assert decision.depth_source == "default"
+
+
+def test_parse_intent_decision_defaults_unified_fields_for_legacy_payload() -> None:
+    decision = parse_intent_decision(
+        """
+        {
+          "addressed_to_kortny": true,
+          "classification": "task_request",
+          "confidence": 0.8,
+          "should_create_task": true,
+          "should_ack_with_reaction": false,
+          "suggested_reaction": null,
+          "needs_channel_context": false,
+          "needs_thread_context": false,
+          "needs_file_context": false,
+          "likely_tools": [],
+          "model_tier": "standard",
+          "reason": "Legacy payload without depth fields."
+        }
+        """
+    )
+
+    assert decision.response_depth == "standard_tool_task"
+    assert decision.time_sensitivity == "interactive"
+    assert decision.toolkit_affinity == ()
+    assert decision.depth_source == "default"
+
+
+def test_intent_prompt_schema_lists_unified_router_keys() -> None:
+    from kortny.intent.prompts import INTENT_CLASSIFIER_SYSTEM_PROMPT
+
+    assert '"response_depth"' in INTENT_CLASSIFIER_SYSTEM_PROMPT
+    assert '"time_sensitivity"' in INTENT_CLASSIFIER_SYSTEM_PROMPT
+    assert '"toolkit_affinity"' in INTENT_CLASSIFIER_SYSTEM_PROMPT
+
+
 def test_parse_intent_decision_rejects_invalid_content() -> None:
     with pytest.raises(IntentClassificationError):
         parse_intent_decision("not json")

@@ -36,6 +36,11 @@ class RoutingDecisionTrace:
     shadow_route: str | None = None
     shadow_planned_candidate: bool | None = None
     shadow_confidence: float | None = None
+    response_depth: str | None = None
+    time_sensitivity: str | None = None
+    toolkit_affinity: tuple[str, ...] = ()
+    depth_source: str | None = None
+    shadow_depth_agreement: bool | None = None
     metadata: JsonObject | None = None
 
     def to_payload(self) -> JsonObject:
@@ -77,6 +82,12 @@ class RoutingDecisionTrace:
             self.shadow_planned_candidate,
         )
         _set_if_present(payload, "shadow_confidence", self.shadow_confidence)
+        _set_if_present(payload, "response_depth", self.response_depth)
+        _set_if_present(payload, "time_sensitivity", self.time_sensitivity)
+        if self.toolkit_affinity:
+            payload["toolkit_affinity"] = list(self.toolkit_affinity)
+        _set_if_present(payload, "depth_source", self.depth_source)
+        _set_if_present(payload, "shadow_depth_agreement", self.shadow_depth_agreement)
         if self.metadata:
             payload["metadata"] = self.metadata
         return payload
