@@ -1,122 +1,120 @@
-# Kortny
+<p align="center">
+  <img src="./kortny/dashboard/static/assets/kortny_icon.png" width="110" alt="Kortny logo" />
+</p>
 
-> For teams who live in Slack.
+<h1 align="center">Kortny</h1>
 
-Kortny is a self-hosted AI coworker that executes real tasks,
-remembers how your team works, and gets better the longer it's
-there. Not a bot that answers questions — a coworker that takes
-work off your plate.
+<h3 align="center">The self-hosted AI coworker that lives in your Slack.</h3>
 
----
+<p align="center">
+  Mention it in a thread; it plans, runs real tasks against your tools,
+  builds and executes code in a sandbox, remembers how your team works,
+  and shows you every step and every cent — all on infrastructure you control.
+</p>
 
-## The Problem
+<p align="center">
+  <a href="./LICENSE"><img src="https://img.shields.io/github/license/boffti/kortny?style=for-the-badge&color=blue" alt="License"></a>
+  <a href="https://github.com/boffti/kortny/stargazers"><img src="https://img.shields.io/github/stars/boffti/kortny?style=for-the-badge&color=ffcb47" alt="GitHub stars"></a>
+  <a href="https://github.com/boffti/kortny/commits/main"><img src="https://img.shields.io/github/commit-activity/m/boffti/kortny?style=for-the-badge" alt="Commit activity"></a>
+  <a href="./CONTRIBUTING.md"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen?style=for-the-badge" alt="PRs welcome"></a>
+</p>
 
-Most hosted AI tools are black boxes: opaque pricing, data you
-don't control, and no real visibility into what happened. Generic
-Slack bots answer questions but don't *do* the work. And nothing
-self-hosted combines durable task execution, workspace memory, and
-cross-tool orchestration in one package you actually own and run.
+<p align="center">
+  <a href="#-quickstart">Quickstart</a> ·
+  <a href="#-what-can-it-do">Features</a> ·
+  <a href="#-security-model">Security</a> ·
+  <a href="#-architecture">Architecture</a> ·
+  <a href="#-contributing">Contributing</a>
+</p>
 
----
-
-## What Makes Kortny Different
-
-- **It finishes what it starts** — every request runs as a tracked
-  task with a full log of every step, tool call, and decision. No
-  black box, no guessing what happened.
-- **No surprise bills** — every task shows the model used, tokens
-  consumed, and exact cost. You always know what you're spending
-  and why.
-- **Reads the room** — formal in #finance, casual in #general,
-  silent unless mentioned in #announcements. Each channel gets the
-  version of Kortny that fits.
-- **Gets better the longer it's there** — remembers past work,
-  learns your preferences, and stops asking questions it already
-  knows the answers to.
-- **Your bot, your identity** — create your own Slack app with your
-  own name and avatar. Kortny runs the brain, you own the face.
-- **Runs on your infrastructure** — Docker Compose, no cloud control
-  plane. Your Slack data, task history, memory, and cost logs live
-  in your Postgres, and you choose the LLM provider your prompts
-  go to.
-- **100+ integrations** — Gmail, HubSpot, GitHub, Google Drive,
-  Calendar, and more via Composio OAuth. (Composio is a third-party
-  broker — see [Where your data lives](#where-your-data-lives). A
-  Composio-free, bring-your-own-MCP path is on the roadmap for V1.1.)
-- **BYO LLM** — OpenAI, Anthropic, or OpenRouter.
+<!-- HERO ASSET: replace with a dark/light <picture> screenshot or 20s GIF of a
+     Slack thread — user @mentions Kortny, it builds a dashboard, posts a
+     preview link back to the thread. Demo workspace only, no real data. -->
 
 ---
 
-## Where your data lives
+> [!IMPORTANT]
+> Kortny is early and moving fast. **Star the repo** to follow releases — it
+> genuinely helps the project get found.
 
-Kortny is self-hosted, and we want to be precise about what that
-means rather than waving the word around.
+## 🤔 Why Kortny
 
-**Stays in your stack:** the Slack app runs under your bot token,
-and every task, step log, memory record, and cost entry is stored
-in your own Postgres. Nothing about your workspace's activity is
-sent to us — there is no "us" in the data path. You pick the LLM
-provider, so you decide where your prompts and your team's content
-are processed.
+Hosted AI coworkers are black boxes: your Slack history and files flow into
+someone else's cloud, pricing is opaque, and you can't see what the agent
+actually did. Generic Slack bots answer questions but don't *do* the work.
 
-**The deliberate exception — external integrations:** connecting a
-tool like Gmail or HubSpot routes through **Composio**, a
-third-party OAuth and tool-execution broker. We made this trade-off
-on purpose: per-tool OAuth setup is the single biggest onboarding
-wall for self-hosters, and Composio removes it. The cost is that
-integration traffic passes through Composio rather than staying
-entirely local.
+Kortny is the alternative you run yourself:
 
-If you need a fully self-contained integration plane with zero
-third-party dependency, the **bring-your-own-MCP path (V1.1)** is
-built for exactly that.
+- **It finishes what it starts** — every request becomes a tracked task with a
+  full log of every step, tool call, approval, and decision.
+- **It computes instead of guessing** — asked for a dashboard, a report, or an
+  analysis, Kortny writes and executes real code in an isolated sandbox,
+  verifies the output, and delivers a file or a live preview link.
+- **No surprise bills** — per-task model, token, and cost accounting in the
+  built-in dashboard. BYO LLM keys (OpenAI, Anthropic, OpenRouter).
+- **It gets better the longer it's there** — workspace memory, episodic
+  recall, and a knowledge graph built from how your team actually works.
+- **Your bot, your identity** — ship it under your own Slack app name and
+  avatar. Kortny runs the brain; you own the face.
+- **Apache-2.0, Docker Compose, your Postgres** — no cloud control plane, no
+  vendor in your data path.
 
----
+## 🚀 Quickstart
 
-## Quickstart
+> [!NOTE]
+> Prerequisites: Docker + Docker Compose, a Slack workspace you can install
+> apps into, and one LLM API key (OpenAI, Anthropic, or OpenRouter). A
+> [Composio](https://composio.dev) key enables the 100+ integration catalog.
 
-### Prerequisites
-- Docker and Docker Compose
-- An LLM provider key (OpenAI, Anthropic, or OpenRouter)
-- A Composio API key for the integration catalog and connected-account tooling
-
-### 1. Create your Slack app
-
-1. Go to https://api.slack.com/apps → Create New App → From Manifest
-2. Paste the contents of `manifest.json` from this repo
-3. Name your bot whatever you want — this is your bot, your brand
-4. Upload a custom avatar if you'd like. This repo includes the Kortny icon at
-   `kortny/dashboard/static/assets/kortny_icon.png`; when the dashboard is
-   running, it is served at `/static/assets/kortny_icon.png`.
-5. Install the app to your workspace
-6. Copy your **Bot Token** (`xoxb-...`), **App-Level Token**
-   (`xapp-...` with `connections:write` for Socket Mode), and
-   **Signing Secret**
-7. Copy the app's **Client ID** and **Client Secret** for dashboard
-   Sign in with Slack
-8. Add `http://localhost:8080/auth/slack/callback` as an OAuth redirect URL
-
-If you update an existing Slack app from this repo's manifest, apply the
-manifest changes in Slack and reinstall the app to the workspace so new event
-subscriptions and scopes take effect.
-
-### 2. Clone and configure
-
-```
+```sh
 git clone https://github.com/boffti/kortny
 cd kortny
-cp .env.example .env
+cp .env.example .env   # fill in Slack + LLM keys (see below)
+docker compose up -d --force-recreate
 ```
 
-Edit `.env`:
+Then invite your bot and put it to work:
 
-```x
+```
+/invite @your-bot-name
+@your-bot-name summarize the last 7 days of this channel
+@your-bot-name build me a dashboard from the CSV I just uploaded
+```
+
+The operator dashboard is at `http://localhost:8080` — tasks, traces, costs,
+memory, schedules, and sandbox runs.
+
+<details>
+<summary><b>Step 1 — Create your Slack app (~5 minutes)</b></summary>
+
+1. Go to https://api.slack.com/apps → **Create New App** → **From Manifest**
+2. Paste the contents of `manifest.json` from this repo
+3. Name the bot whatever you want — this is your bot, your brand
+4. Optional: upload an avatar. The Kortny icon ships at
+   `kortny/dashboard/static/assets/kortny_icon.png`
+5. Install the app to your workspace
+6. Copy the **Bot Token** (`xoxb-...`), **App-Level Token** (`xapp-...` with
+   `connections:write` for Socket Mode), and **Signing Secret**
+7. Copy the app's **Client ID** and **Client Secret** for dashboard Sign in
+   with Slack, and add `http://localhost:8080/auth/slack/callback` as an OAuth
+   redirect URL
+
+If you update an existing Slack app from this repo's manifest, re-apply the
+manifest in Slack and reinstall the app so new scopes and event subscriptions
+take effect.
+
+</details>
+
+<details>
+<summary><b>Step 2 — Configure <code>.env</code></b></summary>
+
+```sh
 SLACK_BOT_TOKEN=xoxb-...
 SLACK_APP_TOKEN=xapp-...
 SLACK_SIGNING_SECRET=...
 LLM_PROVIDER=openai          # openai | anthropic | openrouter
 LLM_API_KEY=sk-...
-LLM_MODEL=gpt-4o             # or claude-3-5-sonnet, etc.
+LLM_MODEL=gpt-4o
 COMPOSIO_API_KEY=...
 DASHBOARD_AUTH_MODE=hybrid
 DASHBOARD_SLACK_CLIENT_ID=...
@@ -124,273 +122,262 @@ DASHBOARD_SLACK_CLIENT_SECRET=...
 DASHBOARD_SLACK_REDIRECT_URI=http://localhost:8080/auth/slack/callback
 ```
 
-That is enough for the default Docker Compose stack. Everything else in
-`.env.example` is optional and has a local-development default: bootstrap
-dashboard fallback credentials, Postgres credentials, Temporal, scheduler,
-Witness, and observability.
+That's enough for the default stack. Everything else in `.env.example` is
+optional with sane local defaults: Postgres credentials, scheduler, Witness,
+sandbox tuning, observability, Temporal.
 
-Set `BRAVE_SEARCH_API_KEY` only if you want the built-in Brave-backed web
-search tool; search can also be provided by a connected Composio integration.
-Set `ENCRYPTION_KEY` before saving dashboard-managed provider or integration
-secrets.
+Worth knowing:
 
-### 3. Start Kortny
+- `BRAVE_SEARCH_API_KEY` enables the built-in web search tool.
+- `ENCRYPTION_KEY` is required before saving dashboard-managed secrets.
+- `KORTNY_PUBLIC_BASE_URL` + `KORTNY_PREVIEW_SIGNING_SECRET` enable shareable
+  preview links for sandbox-built dashboards and sites.
+- `NETLIFY_AUTH_TOKEN` / `VERCEL_TOKEN` enable one-approval site deploys.
+- Change `DASHBOARD_PASSWORD` and `DASHBOARD_SESSION_SECRET` before exposing
+  the dashboard beyond localhost (it binds to `127.0.0.1` by default).
 
-```
-docker compose up -d --force-recreate
-```
+</details>
 
-This starts Postgres on `localhost:5432`, runs the Alembic migration, starts
-the Slack Socket Mode ingress service, starts the task worker, starts the
-Postgres-native schedule materializer, starts the Witness proactive runner, and
-serves the operator dashboard at `http://localhost:8080`. It also starts the
-sandbox runner used for isolated code execution.
+<details>
+<summary><b>What <code>docker compose up</code> starts</b></summary>
 
-This does not start optional services such as Phoenix or the Temporal
-experiment profile.
+| Service | What it does |
+|---|---|
+| `postgres` | All state: tasks, events, memory, costs |
+| `migrate` | Runs Alembic migrations before anything boots |
+| `app` | Slack Socket Mode ingress (Bolt) |
+| `worker` | Task executor — the LLM + tool loop |
+| `scheduler` | Materializes scheduled tasks |
+| `witness` | Proactive opportunity scanner (bounded autopilot) |
+| `dashboard` | Operator UI at `localhost:8080` |
+| `sandbox-runner` + `sandbox-docker-proxy` | Isolated code execution |
 
-Witness is on by default: it creates proactive opportunity candidates, reviews
-due candidates, and can start low-risk read-only proactive tasks through the
-normal Kortny worker path. Autopilot is intentionally bounded: it only executes
-non-interruptive read-only analysis/status checks, skips schedule-management or
-confirmation-seeking follow-ups, ignores candidates produced by scheduled task
-runs, and requires active channel membership before posting. The default
-autopilot limit is one proactive task per tick so old candidate backlog does not
-flood a workspace. It still will not send proactive DMs unless you set
+Optional profiles: `--profile observability` (Phoenix trace UI at
+`localhost:6006`), `--profile temporal` (experimental durable workflow
+backend, UI at `localhost:8233`).
+
+Witness is on by default and intentionally bounded: it only auto-starts
+non-interruptive, read-only proactive tasks (one per tick), requires channel
+membership before posting, and never DMs unless
 `KORTNY_WITNESS_DELIVER_PRIVATE=true`.
 
-The dashboard uses Sign in with Slack for per-user identity. In the default
-`hybrid` mode, a local bootstrap login remains available for development and
-recovery. Use `DASHBOARD_USERNAME` and `DASHBOARD_PASSWORD` for that fallback,
-and change `DASHBOARD_SESSION_SECRET` before exposing the dashboard beyond
-local development. It is bound to `127.0.0.1` by default; change
-`DASHBOARD_HOST_PORT` only if you need a different local port.
+</details>
 
-If you explicitly need local-only dashboard auth, set
-`DASHBOARD_AUTH_MODE=bootstrap`. Slack login stores a local dashboard user for
-future personal dashboards and user-scoped integrations.
+## ✨ What can it do
 
-### 4. Develop against the local database
+| Capability | Status |
+|---|---|
+| Slack mention → durable tracked task with full audit log | ✅ Shipped |
+| **Sandboxed coding workbench** — writes & executes code for dashboards, reports, analysis; verifies by running it | ✅ Shipped |
+| Shareable preview links for sandbox-built dashboards/sites | ✅ Shipped |
+| One-approval deploys to Netlify / Vercel (tokens never enter the sandbox) | ✅ Shipped |
+| Per-task cost, token, and model accounting | ✅ Shipped |
+| Workspace memory + episodic recall + knowledge graph | ✅ Shipped |
+| Scheduled tasks from natural language ("every Monday at 9...") | ✅ Shipped |
+| Proactive suggestions from observed activity (Witness) | ✅ Shipped |
+| Approval gates — reaction-based confirmation for risky actions | ✅ Shipped |
+| 100+ integrations via Composio OAuth (Gmail, GitHub, HubSpot, ...) | ✅ Shipped |
+| PDF / document generation | ✅ Shipped |
+| Per-channel personality profiles (tone, verbosity, proactivity) | ✅ Shipped |
+| OTEL tracing (Phoenix local / Langfuse Cloud) | ✅ Shipped |
+| Google ADK agent runtime (`AGENT_RUNTIME=adk`) | 🟡 Beta |
+| Temporal durable workflow backend | 🟡 Experimental |
+| Bring-your-own MCP servers (Composio-free integration plane) | ⬜ Planned |
+| Network-enabled sandbox profile (pip/npm via egress allowlist) | ⬜ Planned |
 
-Host-side commands need a local `POSTGRES_URL`; the Compose containers receive
-their internal `POSTGRES_URL` automatically:
+## 🛡 Security model
 
+Kortny executes model-written code and acts on your tools, so the guardrails
+are harness-owned, not model-owned. Full details in [SECURITY.md](./SECURITY.md).
+
+- **Sandboxed execution.** Untrusted code never runs in the worker. It runs in
+  dedicated Docker containers: all capabilities dropped, read-only root
+  filesystem, **no network**, CPU/memory/PID caps, per-task workspaces removed
+  after use. Workers reach Docker only through a restricted socket proxy.
+- **Human approval.** Sandbox sessions, external writes, and deploys require
+  explicit requester approval in Slack (react ✅) before execution.
+- **Secrets stay out of reach.** Integration and deploy tokens live on the
+  trusted worker. Sandboxed code — and the model — never see them.
+- **Execution guardrails.** Max turns, tool-call budgets, and a circuit
+  breaker for repeated failures, enforced by the harness.
+- **Everything is auditable.** Every tool call, sandbox command, approval, and
+  output preview lands in the task timeline, inspectable in the dashboard.
+
+### What stays local, what leaves
+
+| Stays on your server | Leaves your server (you choose to whom) |
+|---|---|
+| Slack event handling (your bot token) | **LLM inference** → your provider (OpenAI / Anthropic / OpenRouter), your keys |
+| All tasks, step logs, approvals, audit trail (Postgres) | **External tool actions** → Composio (OAuth broker; credentials are brokered, the model never sees raw tokens) |
+| Memory, episodes, knowledge graph | **Web search** → Brave (only if you enable it) |
+| Cost & usage accounting | **Deploys** → Netlify/Vercel (only on explicit approved request) |
+| Sandbox execution & artifacts | |
+| Dashboard & traces | |
+
+There is no Kortny cloud in the data path — no telemetry, no phone-home. If
+you need a fully self-contained integration plane, the bring-your-own-MCP path
+is on the roadmap.
+
+## 🏗 Architecture
+
+```mermaid
+flowchart LR
+    subgraph YOUR["Your server — docker compose"]
+        APP["Slack ingress<br/>(Bolt, Socket Mode)"]
+        PG[("Postgres<br/>tasks · memory · costs")]
+        WORKER["Worker<br/>LLM + tool loop"]
+        SCHED["Scheduler"]
+        WITNESS["Witness<br/>proactive scanner"]
+        DASH["Dashboard :8080<br/>tasks · traces · costs · previews"]
+        RUNNER["Sandbox runner"]
+        SBX["Hardened sandbox containers<br/>no network · caps dropped"]
+    end
+    SLACK(("Slack")) <--> APP
+    APP --> PG
+    WORKER --> PG
+    SCHED --> PG
+    WITNESS --> PG
+    DASH --> PG
+    WORKER --> RUNNER --> SBX
+    WORKER -.->|"inference (your keys)"| LLM(("LLM provider"))
+    WORKER -.->|"tool actions"| COMPOSIO(("Composio"))
+    WORKER -.->|"approved deploys"| HOSTS(("Netlify / Vercel"))
 ```
+
+How a task flows: a Slack mention (or schedule, or Witness suggestion) becomes
+a `Task` row → the worker leases it from the Postgres queue → the agent loop
+plans, calls tools, pauses for approvals, executes code in the sandbox when
+the work demands computation → the result posts back to the originating
+thread, and every step is queryable in the dashboard.
+
+<details>
+<summary><b>Local development</b></summary>
+
+Kortny uses [`uv`](https://github.com/astral-sh/uv) for dependency management.
+
+```sh
+uv sync
+make check         # ruff lint + format-check, mypy, pytest
+make lint          # ruff check
+make typecheck     # mypy
+make test          # pytest (unit)
+make playground    # adk web .
+```
+
+Host-side commands need a local `POSTGRES_URL`:
+
+```sh
 export POSTGRES_URL=postgresql://kortny:kortny@localhost:5432/kortny
 make migrate
+uv run python -m kortny.worker --once     # process one pending task
+uv run python -m kortny.witness --once    # one Witness scan/autopilot tick
+```
+
+DB-backed integration tests require a **dedicated** test database (the
+harness refuses to run against the dev DB):
+
+```sh
 docker compose exec postgres createdb -U kortny kortny_test
-KORTNY_TEST_POSTGRES_URL=postgresql://kortny:kortny@localhost:5432/kortny_test uv run pytest tests/test_task_service.py tests/test_queue.py
+KORTNY_TEST_POSTGRES_URL=postgresql://kortny:kortny@localhost:5432/kortny_test uv run pytest
 ```
 
-Use a dedicated test database for integration tests. DB-backed tests perform
-destructive cleanup and the test harness refuses to run when
-`KORTNY_TEST_POSTGRES_URL` points at the default `localhost:5432/kortny`
-development database. Use a database name that starts with `test_` or ends with
-`_test`, such as `kortny_test`. The harness also refuses to run if
-`KORTNY_TEST_POSTGRES_URL` points at the same database target as `POSTGRES_URL`,
-or if `KORTNY_ENV`, `APP_ENV`, or `ENVIRONMENT` is set to `prod`/`production`.
+Optional pre-commit hooks: `uv run pre-commit install`.
 
-To process at most one pending task from your host shell:
+</details>
 
-```
-uv run python -m kortny.worker --once
-```
+<details>
+<summary><b>Observability (Phoenix / Langfuse)</b></summary>
 
-To run one Witness scan/autopilot tick from your host shell:
+Local trace UI with one extra container:
 
-```
-uv run python -m kortny.witness --once
+```sh
+make compose-up-observability   # Phoenix at http://localhost:6006
 ```
 
-To inspect task costs and LLM usage, open:
+For Langfuse Cloud (or a separate Langfuse instance), set:
 
-```
-http://localhost:8080
-```
-
-### Optional: run local observability
-
-Kortny can run with a lightweight local Phoenix trace UI:
-
-```
-make compose-up-observability
-```
-
-Open Phoenix at `http://localhost:6006`. Phoenix runs as one optional container
-behind the `observability` Compose profile, and persists traces to the
-`phoenix-data` Docker volume with SQLite by default. Set
-`PHOENIX_SQL_DATABASE_URL` to use a separate Postgres database for Phoenix.
-
-Kortny does not bundle a self-hosted Langfuse stack because that requires a
-larger observability deployment: Langfuse web/worker, Postgres, ClickHouse,
-Redis, and blob storage. To use Langfuse Cloud or a separate Langfuse instance,
-set:
-
-```
+```sh
 OTEL_EXPORTER_OTLP_ENDPOINT=https://cloud.langfuse.com/api/public/otel/v1/traces
-OTEL_EXPORTER_OTLP_HEADERS=Authorization=Basic <base64-public-secret>,x-langfuse-ingestion-version=4
+OTEL_EXPORTER_OTLP_HEADERS=Authorization=Basic <base64 pk:sk>,x-langfuse-ingestion-version=4
 LANGFUSE_ENABLED=true
 LANGFUSE_HOST=https://cloud.langfuse.com
 LANGFUSE_PUBLIC_KEY=pk-lf-...
 LANGFUSE_SECRET_KEY=sk-lf-...
 ```
 
-Generate the Basic Auth value with:
+</details>
 
-```
-printf 'pk-lf-...:sk-lf-...' | base64
-```
+<details>
+<summary><b>Sandboxed code execution — policy details</b></summary>
 
-### Temporal workflow backend
+The worker never mounts the Docker socket. It calls the internal
+`sandbox-runner` service over the Compose network, which reaches the Docker
+API through `sandbox-docker-proxy` (BUILD/VOLUMES/SYSTEM/SECRETS endpoints
+disabled).
 
-Kortny's default execution layer is the Postgres-backed task queue plus the
-`worker` service. Temporal is not part of the normal self-host/dev path because
-the current Temporal workflow is still a shadow/skeleton backend, not primary
-task execution.
+Two execution modes, both behind requester approval in Slack:
 
-Normal local startup:
+- **`code_exec`** — one-shot Python snippets for calculations and checks.
+- **Workbench sessions** — a persistent hardened container per task that the
+  agent drives with `sandbox_bash` and file tools to build apps, run
+  analysis, and produce artifacts. One approval covers the whole session.
 
-```
-docker compose up -d --force-recreate
-```
+Container policy: `ghcr.io/astral-sh/uv:python3.11-bookworm-slim`,
+`NetworkMode=none`, all capabilities dropped, `no-new-privileges`, read-only
+root filesystem, CPU/memory/PID limits, per-task workspace volumes removed
+with the container, idle/TTL reaping, lifecycle + bounded output previews
+written to the task timeline.
 
-To inspect the Temporal experiment explicitly:
+Kill switch: `KORTNY_SANDBOX_EXECUTION_ENABLED=false`.
 
-```
-docker compose --profile temporal up -d --force-recreate
-```
+</details>
 
-Temporal's local UI is then available at `http://localhost:8233`.
+## 🗺 Roadmap
 
-`KORTNY_WORKFLOW_BACKEND` defaults to `inline`. HIG-97 records durable-candidate
-handoff events for future work, but real Slack execution remains owned by the
-main worker until we deliberately migrate the execution layer.
+Planned, not yet shipped — sequenced toward a stable V1.1:
 
-Scheduled work is still owned by Kortny/Postgres in this local stack. The
-`scheduler` service materializes due `schedules` rows into normal `tasks` rows;
-Temporal Schedules are deferred until Temporal runs with production persistence.
+- **Bring-your-own MCP servers** — fully self-contained integration plane,
+  zero third-party broker.
+- **Network-enabled sandbox profile** — `pip`/`npm` installs through an
+  egress proxy with a registry allowlist, unlocking full app scaffolding.
+- **Production deployment hardening** — published Docker image, hardened
+  compose variant, CI.
+- **Richer document generation** — polished multi-page PDFs and decks.
 
-### Sandboxed code execution
+Follow the [issues](https://github.com/boffti/kortny/issues) for the live
+backlog.
 
-Kortny starts an internal `sandbox-runner` service by default. The worker never
-mounts the Docker socket directly; it calls the runner over the Compose network,
-and the runner talks to Docker through `sandbox-docker-proxy`.
+## 🤝 Contributing
 
-The first sandboxed tool is `code_exec`, a short Python execution tool for
-calculations and tiny script checks. It is available to regular employees when
-the runner is healthy, but every run requires requester approval in Slack before
-execution.
+Contributions are welcome — native tools, docs, bug reports, integrations.
+Start with [CONTRIBUTING.md](./CONTRIBUTING.md). New tools implement one
+small `Tool` interface plus a catalog metadata entry; the
+[tool authoring guide](./CLAUDE.md#tool-authoring) walks through it.
 
-Default sandbox policy:
+Found a security issue? Please use
+[private vulnerability reporting](./SECURITY.md) — not a public issue.
 
-- Runtime: hardened Docker container launched by `sandbox-runner`.
-- Image: `ghcr.io/astral-sh/uv:python3.11-bookworm-slim`.
-- Network: disabled with `NetworkMode=none`.
-- Filesystem: no host bind mount for user code; the container gets tmpfs
-  workspace paths.
-- Privileges: no privileged mode, `no-new-privileges`, all capabilities dropped,
-  readonly root filesystem.
-- Limits: 1 CPU, 512 MB memory, 128 PID cap, 60 second runner default timeout.
-- Audit: sandbox lifecycle and bounded stdout/stderr result previews are written
-  to the task timeline.
+## ⭐ Star History
 
-This replaces the earlier "temp dir plus process" direction for untrusted code.
-There was no previous production `code_exec` subprocess baseline in Kortny:
-fixed tools like PDF generation used trusted in-process library calls. The
-current benchmark baseline is therefore operational, not feature parity against
-an old code tool: the normal Compose path starts the runner, the worker-to-runner
-HTTP bridge executes a small Python smoke check in a sibling sandbox container,
-and the runner cleans up containers after execution.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=boffti%2Fkortny&theme=dark&type=Date">
+  <img width="100%" src="https://api.star-history.com/svg?repos=boffti%2Fkortny&type=Date" alt="Star History Chart">
+</picture>
 
-To disable sandbox execution while leaving the service visible for health
-checks:
+## 👥 Contributors
 
-```
-KORTNY_SANDBOX_EXECUTION_ENABLED=false
-```
+<a href="https://github.com/boffti/kortny/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=boffti/kortny" alt="Contributors" />
+</a>
 
-### 5. Invite your bot to a channel
+## ❓ Why "Kortny"?
 
-Once the Slack ingress service is running:
+Every team has that coworker who quietly keeps everything running — files the
+report, remembers the decision from three months ago, ships the dashboard
+nobody else had time for. Kortny is that coworker, except it never sleeps and
+it runs on your hardware.
 
-```
-/invite @your-bot-name
-```
+## 📄 License
 
-Say hello:
-
-```
-@your-bot-name summarize the last 7 days of this channel
-```
-
-Your AI coworker is live.
-
----
-
-## Features
-
-- **Durable task execution** — every Slack request becomes a tracked
-  task with steps, tool calls, and a full audit log.
-- **Parallel task processing** — multiple team members can use Kortny
-  at once; each task runs independently.
-- **File editing and generation** — read, edit, and post files back
-  in-thread without leaving Slack.
-- **Sandboxed code execution** — employees can ask Kortny to run small
-  Python snippets in an isolated no-network container with resource limits;
-  requester approval is required before execution.
-- **Workspace memory** — structured state and episodic recall across
-  conversations and tasks.
-- **Per-channel and per-user profiles** — tone, verbosity, approval
-  behavior, and proactivity per context.
-- **Cost dashboard** — per-task token usage and cost tracking in the
-  management UI.
-- **100+ integrations** — via Composio OAuth, no manual per-tool
-  token setup.
-- **Composio-free path** — bring your own MCP servers for a fully
-  self-contained integration plane *(V1.1)*.
-- **Ambient workspace intelligence** — notices recurring patterns and
-  suggests automations unprompted *(V1.1)*.
-- **Scheduled tasks** — natural-language scheduling *(V1.1)*.
-- **Approval gates** — reaction-based confirmations for sensitive
-  actions *(V1.1)*.
-
----
-
-## Development
-
-Kortny uses `uv` for Python dependency management and local tooling.
-
-```sh
-uv sync
-```
-
-Common commands:
-
-```sh
-make lint          # ruff check
-make format        # ruff format
-make typecheck     # mypy
-make test          # pytest
-make check         # lint, format-check, typecheck, and test
-make playground    # adk web .
-```
-
-Optional local hooks:
-
-```sh
-uv run pre-commit install
-```
-
----
-
-## Contributing
-
-Kortny is early and contributions are welcome. Read
-[CONTRIBUTING.md](./CONTRIBUTING.md) to get started — whether that's
-adding a native tool, improving docs, or reporting a bug.
-
----
-
-## License
-
-[Apache-2.0](./LICENSE)
+[Apache-2.0](./LICENSE) — permissive, with an explicit patent grant. Build
+whatever you want with it.
