@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
+import time
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
@@ -32,6 +34,7 @@ from kortny.mcp.client import (
     discover_server_tools,
 )
 from kortny.mcp.provider import McpExternalToolProvider
+from kortny.mcp.sessions import McpSessionManager
 from kortny.secrets import encrypt_secret_value
 from kortny.tasks import TaskService
 from kortny.tools.mcp_execute import McpExecuteTool, mcp_runtime_tool_name
@@ -76,7 +79,7 @@ class TestMcpClient:
         tools = discover_server_tools(_stdio_server(), encryption_key=ENCRYPTION_KEY)
         by_name = {tool.name: tool for tool in tools}
 
-        assert set(by_name) == {"echo", "write_note"}
+        assert set(by_name) == {"echo", "write_note", "server_pid", "big_echo"}
         assert by_name["echo"].read_only_hint is True
         assert by_name["echo"].input_schema.get("type") == "object"
         assert "text" in by_name["echo"].input_schema.get("properties", {})
@@ -119,13 +122,139 @@ class TestMcpClient:
         tools = discover_server_tools(
             _stdio_server(secret_env=secret), encryption_key=ENCRYPTION_KEY
         )
-        assert {tool.name for tool in tools} == {"echo", "write_note"}
+        assert {tool.name for tool in tools} == {
+            "echo",
+            "write_note",
+            "server_pid",
+            "big_echo",
+        }
 
     def test_unsupported_transport_raises(self) -> None:
         server = _stdio_server()
         server.transport = "carrier-pigeon"
         with pytest.raises(McpClientError):
             check_server(server, encryption_key=ENCRYPTION_KEY)
+
+
+# ---------------------------------------------------------------------------
+# Session manager: per-task session reuse (HIG-214) — no DB
+# ---------------------------------------------------------------------------
+
+
+def _pid_from_result(text: str) -> int:
+    match = re.search(r"pid:\s*(\d+)", text)
+    assert match is not None, f"no pid in result text: {text!r}"
+    return int(match.group(1))
+
+
+def _process_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+class TestMcpSessionManager:
+    def test_two_calls_reuse_one_session_and_subprocess(self) -> None:
+        manager = McpSessionManager()
+        server = _stdio_server()
+        try:
+            first = manager.call_tool(
+                server,
+                "server_pid",
+                {},
+                encryption_key=ENCRYPTION_KEY,
+                timeout_seconds=30,
+            )
+            pid_one = _pid_from_result(first.text)
+
+            started = time.perf_counter()
+            second = manager.call_tool(
+                server,
+                "server_pid",
+                {},
+                encryption_key=ENCRYPTION_KEY,
+                timeout_seconds=30,
+            )
+            second_latency = time.perf_counter() - started
+            pid_two = _pid_from_result(second.text)
+
+            # Same subprocess across calls -> one spawn, session reused.
+            assert pid_one == pid_two
+            # Reused session means no ~1s subprocess spawn on the 2nd call.
+            assert second_latency < 0.5, f"second call too slow: {second_latency:.3f}s"
+        finally:
+            manager.close()
+
+    def test_reconnect_after_session_invalidated(self) -> None:
+        manager = McpSessionManager()
+        server = _stdio_server()
+        try:
+            first = manager.call_tool(
+                server,
+                "server_pid",
+                {},
+                encryption_key=ENCRYPTION_KEY,
+                timeout_seconds=30,
+            )
+            pid_one = _pid_from_result(first.text)
+
+            # Invalidate the cached session out from under the manager, as a
+            # transport failure would. The next call must reconnect once.
+            key = str(server.id)
+            assert key in manager._owners
+            manager._drop_session(key)
+            assert key not in manager._owners
+
+            second = manager.call_tool(
+                server,
+                "server_pid",
+                {},
+                encryption_key=ENCRYPTION_KEY,
+                timeout_seconds=30,
+            )
+            pid_two = _pid_from_result(second.text)
+            # A fresh subprocess (new PID) proves a clean reconnect.
+            assert pid_one != pid_two
+            assert _process_alive(pid_two)
+        finally:
+            manager.close()
+
+    def test_close_leaves_no_orphaned_subprocess(self) -> None:
+        manager = McpSessionManager()
+        result = manager.call_tool(
+            _stdio_server(),
+            "server_pid",
+            {},
+            encryption_key=ENCRYPTION_KEY,
+            timeout_seconds=30,
+        )
+        pid = _pid_from_result(result.text)
+        assert _process_alive(pid)
+
+        manager.close()
+
+        # Allow the OS a brief moment to reap the terminated child.
+        deadline = time.perf_counter() + 5.0
+        while _process_alive(pid) and time.perf_counter() < deadline:
+            time.sleep(0.05)
+        assert not _process_alive(pid), f"orphaned MCP subprocess pid={pid}"
+
+    def test_close_is_idempotent(self) -> None:
+        manager = McpSessionManager()
+        manager.call_tool(
+            _stdio_server(),
+            "server_pid",
+            {},
+            encryption_key=ENCRYPTION_KEY,
+            timeout_seconds=30,
+        )
+        manager.close()
+        # A second close must not raise.
+        manager.close()
 
 
 # ---------------------------------------------------------------------------
@@ -219,6 +348,37 @@ class TestMcpExecuteTool:
         requirement = policy.requirement_for(write_tool, {})
         assert requirement.required is True
         assert requirement.scope is ApprovalScope.user
+
+    def test_big_payload_is_bounded(self) -> None:
+        server = _stdio_server()
+        server_tool = McpServerTool(
+            id=uuid.uuid4(),
+            server_id=server.id,
+            name="big_echo",
+            description="Return a big payload.",
+            input_schema={
+                "type": "object",
+                "properties": {"size": {"type": "integer"}},
+                "required": ["size"],
+            },
+            read_only_hint=True,
+            destructive_hint=None,
+            enabled=True,
+        )
+        tool = McpExecuteTool(
+            session=cast(Session, object()),
+            task=None,
+            server=server,
+            tool=server_tool,
+            encryption_key=ENCRYPTION_KEY,
+            timeout_seconds=30,
+            result_max_chars=2000,
+        )
+        result = tool.invoke({"size": 50000})
+        assert result.output["truncated"] is True
+        assert result.output["original_chars"] > 2000
+        assert "truncation_hint" in result.output
+        assert len(json.dumps(result.output, default=str)) <= 2000
 
 
 # ---------------------------------------------------------------------------

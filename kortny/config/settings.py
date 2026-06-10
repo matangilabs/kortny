@@ -207,6 +207,9 @@ class Settings(BaseSettings):
     tool_result_prompt_max_chars: int = Field(
         default=8000, validation_alias="TOOL_RESULT_PROMPT_MAX_CHARS"
     )
+    tool_result_max_chars: int = Field(
+        default=16000, validation_alias="KORTNY_TOOL_RESULT_MAX_CHARS"
+    )
 
     composio_api_key: str = Field(validation_alias="COMPOSIO_API_KEY", min_length=1)
     composio_catalog_enabled: bool = Field(
@@ -496,6 +499,13 @@ class Settings(BaseSettings):
     def _valid_tool_result_prompt_max_chars(cls, value: int) -> int:
         if value < 1000:
             raise ValueError("TOOL_RESULT_PROMPT_MAX_CHARS must be at least 1000")
+        return value
+
+    @field_validator("tool_result_max_chars")
+    @classmethod
+    def _valid_tool_result_max_chars(cls, value: int) -> int:
+        if value < 1000:
+            raise ValueError("KORTNY_TOOL_RESULT_MAX_CHARS must be at least 1000")
         return value
 
     @field_validator("otel_trace_sampling_ratio")

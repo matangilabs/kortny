@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from datetime import UTC, datetime
 
@@ -10,7 +11,15 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from kortny.db.models import McpServer, McpServerTool
+from kortny.mcp.description_quality import (
+    DescriptionEnricherLLMClient,
+    enrich_tool_description,
+    score_tool_description,
+    sha256_of_description,
+)
 from kortny.secrets import SecretEncryptionError, encrypt_secret_value
+
+logger = logging.getLogger(__name__)
 
 VALID_TRANSPORTS = ("stdio", "streamable_http", "sse")
 
@@ -141,8 +150,22 @@ def upsert_discovered_tools(
     server: McpServer,
     discovered: list[object],
     error: str | None,
+    llm: DescriptionEnricherLLMClient | None = None,
 ) -> int:
-    """Persist tool discovery results; return number of tools upserted."""
+    """Persist tool discovery results; return number of tools upserted.
+
+    After upserting each tool's core fields, runs the description quality
+    pipeline when an LLM client is supplied:
+
+    - Computes the SHA-256 of the raw description.
+    - If the SHA changed (or the score has never been computed), scores the
+      description using the deterministic rubric.
+    - If the score is below the 0.5 threshold and the LLM is available,
+      attempts one cheap-tier enrichment call and stores the result.
+
+    Scoring/enrichment failures are logged and silently skipped so they never
+    fail discovery.
+    """
     now = datetime.now(UTC)
     server.last_discovery_at = now
     server.last_discovery_error = error
@@ -170,27 +193,85 @@ def upsert_discovered_tools(
         read_only_hint = getattr(tool, "read_only_hint", None)
         destructive_hint = getattr(tool, "destructive_hint", None)
         if existing is None:
-            session.add(
-                McpServerTool(
-                    server_id=server.id,
-                    name=tool_name,
-                    description=description,
-                    input_schema=input_schema,
-                    read_only_hint=read_only_hint,
-                    destructive_hint=destructive_hint,
-                    enabled=True,
-                )
+            row = McpServerTool(
+                server_id=server.id,
+                name=tool_name,
+                description=description,
+                input_schema=input_schema,
+                read_only_hint=read_only_hint,
+                destructive_hint=destructive_hint,
+                enabled=True,
             )
+            session.add(row)
+            session.flush()  # populate row.id before quality pass
         else:
-            existing.description = description
-            existing.input_schema = input_schema
-            existing.read_only_hint = read_only_hint
-            existing.destructive_hint = destructive_hint
-            existing.updated_at = now
+            row = existing
+            row.description = description
+            row.input_schema = input_schema
+            row.read_only_hint = read_only_hint
+            row.destructive_hint = destructive_hint
+            row.updated_at = now
         upserted += 1
+
+        # Quality scoring + optional enrichment
+        _apply_description_quality(row, description, input_schema, llm=llm)
 
     session.flush()
     return upserted
+
+
+# ---------------------------------------------------------------------------
+# Description quality helpers
+# ---------------------------------------------------------------------------
+
+_QUALITY_THRESHOLD = 0.5
+
+
+def _apply_description_quality(
+    row: McpServerTool,
+    description: str,
+    input_schema: dict,
+    *,
+    llm: DescriptionEnricherLLMClient | None,
+) -> None:
+    """Score and optionally enrich one tool's description.  Never raises."""
+    try:
+        new_sha = sha256_of_description(description)
+        sha_changed = row.description_sha256 != new_sha
+        needs_score = sha_changed or row.description_quality_score is None
+
+        if not needs_score:
+            return
+
+        # Always re-score when sha changed or score is missing
+        score = score_tool_description(row.name, description, input_schema)
+        row.description_quality_score = score  # type: ignore[assignment]
+        row.description_sha256 = new_sha
+
+        # Clear stale enriched description when the raw description changed
+        if sha_changed:
+            row.enriched_description = None
+
+        # Enrich if below threshold and LLM is available
+        if (
+            score < _QUALITY_THRESHOLD
+            and llm is not None
+            and row.enriched_description is None
+        ):
+            enriched = enrich_tool_description(
+                llm,
+                name=row.name,
+                description=description,
+                input_schema=input_schema,
+            )
+            if enriched:
+                row.enriched_description = enriched
+
+    except Exception:
+        logger.exception(
+            "mcp_description_quality_failed",
+            extra={"tool_name": row.name},
+        )
 
 
 def toggle_mcp_tool(

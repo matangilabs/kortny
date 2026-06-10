@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import re
 from dataclasses import dataclass
@@ -11,11 +12,14 @@ from sqlalchemy.orm import Session
 
 from kortny.db.models import McpServer, McpServerTool, Task
 from kortny.mcp.client import McpClientError, McpToolCallResult, call_server_tool
+from kortny.mcp.sessions import McpSessionManager
 from kortny.observability.events import log_observation
+from kortny.tools.result_budget import bound_tool_result
 from kortny.tools.types import JsonObject, JsonSchema, RecoverableToolError, ToolResult
 
 logger = logging.getLogger(__name__)
 MAX_TOOL_NAME_LENGTH = 64
+DEFAULT_RESULT_MAX_CHARS = 16000
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +48,8 @@ class McpExecuteTool:
         encryption_key: str,
         timeout_seconds: int,
         name: str | None = None,
+        session_manager: McpSessionManager | None = None,
+        result_max_chars: int = DEFAULT_RESULT_MAX_CHARS,
     ) -> None:
         self.session = session
         self.task = task
@@ -51,6 +57,8 @@ class McpExecuteTool:
         self.server_tool = tool
         self.encryption_key = encryption_key
         self.timeout_seconds = timeout_seconds
+        self.session_manager = session_manager
+        self.result_max_chars = result_max_chars
         self.name = name or mcp_runtime_tool_name(server.name, tool.name)
         self.description = _description(server, tool)
         self.parameters = _parameters(tool)
@@ -83,13 +91,23 @@ class McpExecuteTool:
             argument_keys=sorted(arguments),
         )
         try:
-            result: McpToolCallResult = call_server_tool(
-                self.server,
-                self.server_tool.name,
-                arguments,
-                encryption_key=self.encryption_key,
-                timeout_seconds=int(self.timeout_seconds),
-            )
+            result: McpToolCallResult
+            if self.session_manager is not None:
+                result = self.session_manager.call_tool(
+                    self.server,
+                    self.server_tool.name,
+                    arguments,
+                    encryption_key=self.encryption_key,
+                    timeout_seconds=float(self.timeout_seconds),
+                )
+            else:
+                result = call_server_tool(
+                    self.server,
+                    self.server_tool.name,
+                    arguments,
+                    encryption_key=self.encryption_key,
+                    timeout_seconds=int(self.timeout_seconds),
+                )
         except McpClientError as exc:
             log_observation(
                 logger,
@@ -163,7 +181,28 @@ class McpExecuteTool:
         }
         if result.structured is not None:
             output["structured"] = result.structured
+        output = self._bound_output(output)
         return ToolResult(output=output)
+
+    def _bound_output(self, output: JsonObject) -> JsonObject:
+        bounded = bound_tool_result(
+            output,
+            max_chars=self.result_max_chars,
+            hint=(
+                f"MCP tool {self.server_tool.name} on server {self.server.name} "
+                "returned a large payload; result truncated."
+            ),
+        )
+        if bounded is not output:
+            logger.info(
+                "mcp tool result truncated runtime_tool=%s original_chars=%s "
+                "final_chars=%s max_chars=%s",
+                self.name,
+                bounded.get("original_chars"),
+                len(json.dumps(bounded, default=str)),
+                self.result_max_chars,
+            )
+        return bounded
 
 
 def mcp_runtime_tool_name(server_name: str, tool_name: str) -> str:

@@ -9,9 +9,14 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from kortny.db.models import McpServer, McpServerTool, Task
+from kortny.mcp.sessions import McpSessionManager
 from kortny.observability.events import log_observation
 from kortny.tool_selection.models import ToolCard
-from kortny.tools.mcp_execute import McpExecuteTool, mcp_runtime_tool_name
+from kortny.tools.mcp_execute import (
+    DEFAULT_RESULT_MAX_CHARS,
+    McpExecuteTool,
+    mcp_runtime_tool_name,
+)
 from kortny.tools.types import Tool
 
 logger = logging.getLogger(__name__)
@@ -35,12 +40,15 @@ class McpExternalToolProvider:
         task: Task,
         encryption_key: str | None,
         tool_timeout_seconds: float,
+        result_max_chars: int = DEFAULT_RESULT_MAX_CHARS,
     ) -> None:
         self.session = session
         self.task = task
         self.encryption_key = encryption_key
         self.tool_timeout_seconds = tool_timeout_seconds
+        self.result_max_chars = result_max_chars
         self._catalog: tuple[_ServerCatalog, ...] | None = None
+        self._session_manager = McpSessionManager()
 
     def tool_cards(self) -> tuple[ToolCard, ...]:
         cards: list[ToolCard] = []
@@ -62,9 +70,16 @@ class McpExternalToolProvider:
                         encryption_key=self.encryption_key or "",
                         timeout_seconds=int(self.tool_timeout_seconds),
                         name=mcp_runtime_tool_name(entry.server.name, tool.name),
+                        session_manager=self._session_manager,
+                        result_max_chars=self.result_max_chars,
                     )
                 )
         return tuple(tools)
+
+    def close(self) -> None:
+        """Close the per-task MCP session manager. Idempotent, never raises."""
+
+        self._session_manager.close()
 
     def _load_catalog(self) -> tuple[_ServerCatalog, ...]:
         if self._catalog is not None:
@@ -127,7 +142,9 @@ def _tool_card(server: McpServer, tool: McpServerTool) -> ToolCard:
 def _card_description(server: McpServer, tool: McpServerTool) -> str:
     required = ", ".join(_required_fields(tool.input_schema)) or "none"
     access = "read-only" if tool.read_only_hint else "write-capable"
-    body = tool.description.strip() or tool.name
+    # Prefer the LLM-enriched description when available (HIG-215).
+    raw_body = tool.enriched_description or tool.description or tool.name
+    body = raw_body.strip() or tool.name
     return (
         f"{access.capitalize()} MCP tool {tool.name} from server '{server.name}': "
         f"{body} Required fields: {required}."

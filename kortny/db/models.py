@@ -2169,6 +2169,12 @@ class McpServerTool(Base):
     enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("true")
     )
+    # Description quality columns (migration 0028 / HIG-215)
+    description_quality_score: Mapped[Decimal | None] = mapped_column(
+        Numeric(precision=4, scale=3), nullable=True
+    )
+    enriched_description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    description_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         TZ, nullable=False, server_default=func.now()
     )

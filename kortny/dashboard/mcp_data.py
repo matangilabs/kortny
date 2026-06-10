@@ -5,11 +5,14 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from kortny.db.models import McpServer, McpServerTool
+
+_QUALITY_THRESHOLD = 0.5
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,6 +23,34 @@ class McpToolRow:
     read_only_hint: bool | None
     destructive_hint: bool | None
     enabled: bool
+    # Description quality fields (HIG-215)
+    description_quality_score: Decimal | None
+    enriched_description: str | None
+
+    @property
+    def quality_badge(self) -> str:
+        """CSS badge variant for the description quality indicator.
+
+        Returns one of: "success" (ok, score >= 0.5, no enrichment),
+        "accent" (enriched_description present),
+        "warning" (score < 0.5 and no enrichment).
+        """
+        if self.enriched_description:
+            return "accent"
+        score = self.description_quality_score
+        if score is None or float(score) < _QUALITY_THRESHOLD:
+            return "warning"
+        return "success"
+
+    @property
+    def quality_label(self) -> str:
+        """Short human-readable label for the quality badge."""
+        if self.enriched_description:
+            return "enriched"
+        score = self.description_quality_score
+        if score is None or float(score) < _QUALITY_THRESHOLD:
+            return "poor"
+        return "ok"
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +104,8 @@ def get_mcp_dashboard(
                 read_only_hint=t.read_only_hint,
                 destructive_hint=t.destructive_hint,
                 enabled=t.enabled,
+                description_quality_score=t.description_quality_score,
+                enriched_description=t.enriched_description,
             )
             for t in session.scalars(
                 select(McpServerTool)
@@ -121,6 +154,8 @@ def get_mcp_server_row(
             read_only_hint=t.read_only_hint,
             destructive_hint=t.destructive_hint,
             enabled=t.enabled,
+            description_quality_score=t.description_quality_score,
+            enriched_description=t.enriched_description,
         )
         for t in session.scalars(
             select(McpServerTool)

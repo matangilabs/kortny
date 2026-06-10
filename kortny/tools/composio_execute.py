@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import re
 
@@ -11,10 +12,12 @@ from sqlalchemy.orm import Session
 from kortny.composio import ComposioClient, ComposioConnectionResolver, ComposioTool
 from kortny.db.models import Task
 from kortny.observability.events import log_observation
+from kortny.tools.result_budget import bound_tool_result
 from kortny.tools.types import JsonObject, JsonSchema, RecoverableToolError, ToolResult
 
 logger = logging.getLogger(__name__)
 MAX_TOOL_NAME_LENGTH = 64
+DEFAULT_RESULT_MAX_CHARS = 16000
 
 
 class ComposioExecuteTool:
@@ -28,12 +31,14 @@ class ComposioExecuteTool:
         client: ComposioClient,
         tool: ComposioTool,
         name: str | None = None,
+        result_max_chars: int = DEFAULT_RESULT_MAX_CHARS,
     ) -> None:
         self.session = session
         self.task = task
         self.client = client
         self.resolver = ComposioConnectionResolver(session, task)
         self.tool = tool
+        self.result_max_chars = result_max_chars
         self.name = name or composio_runtime_tool_name(tool.toolkit_slug, tool.slug)
         self.description = _description(tool)
         self.parameters = _parameters(tool)
@@ -107,25 +112,45 @@ class ComposioExecuteTool:
             successful=execution.successful,
             log_id=execution.log_id,
         )
-        return ToolResult(
-            output={
-                "provider": "composio",
-                "toolkit_slug": self.tool.toolkit_slug,
-                "tool_slug": self.tool.slug,
-                "successful": execution.successful,
-                "data": execution.data,
-                "error": execution.error,
-                "log_id": execution.log_id,
-                "scope": {
-                    "type": connection.visibility_scope_type,
-                    "id": connection.visibility_scope_id,
-                },
-                "connection": {
-                    "display_name": connection.display_name,
-                    "connected_account_id": connection.connected_account_id,
-                },
-            }
+        output: JsonObject = {
+            "provider": "composio",
+            "toolkit_slug": self.tool.toolkit_slug,
+            "tool_slug": self.tool.slug,
+            "successful": execution.successful,
+            "data": execution.data,
+            "error": execution.error,
+            "log_id": execution.log_id,
+            "scope": {
+                "type": connection.visibility_scope_type,
+                "id": connection.visibility_scope_id,
+            },
+            "connection": {
+                "display_name": connection.display_name,
+                "connected_account_id": connection.connected_account_id,
+            },
+        }
+        output = self._bound_output(output)
+        return ToolResult(output=output)
+
+    def _bound_output(self, output: JsonObject) -> JsonObject:
+        bounded = bound_tool_result(
+            output,
+            max_chars=self.result_max_chars,
+            hint=(
+                f"Composio tool {self.tool.slug} ({self.tool.toolkit_slug}) "
+                "returned a large payload; result truncated."
+            ),
         )
+        if bounded is not output:
+            logger.info(
+                "composio tool result truncated runtime_tool=%s original_chars=%s "
+                "final_chars=%s max_chars=%s",
+                self.name,
+                bounded.get("original_chars"),
+                len(json.dumps(bounded, default=str)),
+                self.result_max_chars,
+            )
+        return bounded
 
 
 def composio_runtime_tool_name(toolkit_slug: str, tool_slug: str | None = None) -> str:

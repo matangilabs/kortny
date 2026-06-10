@@ -122,6 +122,7 @@
                     <tr>
                       <th>Tool</th>
                       <th>Description</th>
+                      <th>Quality</th>
                       <th>Side-effect</th>
                       <th>Runtime name</th>
                       <th>Enabled</th>
@@ -131,7 +132,10 @@
                     {% for tool in server.tools %}
                       <tr class="{{ '' if tool.enabled else 'mcp-tool-disabled' }}">
                         <td><code>{{ tool.name }}</code></td>
-                        <td class="mcp-tool-description">{{ tool.description or '—' }}</td>
+                        <td class="mcp-tool-description">{{ tool.enriched_description or tool.description or '—' }}</td>
+                        <td>
+                          <span class="badge badge-{{ tool.quality_badge }}" title="Description quality score: {{ '%.2f'|format(tool.description_quality_score|float) if tool.description_quality_score is not none else 'unscored' }}">{{ tool.quality_label }}</span>
+                        </td>
                         <td>{{ hint_chip(tool.read_only_hint, tool.destructive_hint) }}</td>
                         <td><code class="mcp-runtime-name">mcp__{{ server.name }}__{{ tool.name }}</code></td>
                         <td>

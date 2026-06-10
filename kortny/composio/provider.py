@@ -16,6 +16,7 @@ from kortny.db.models import Task
 from kortny.observability.events import log_observation
 from kortny.tool_selection.models import ToolCard
 from kortny.tools.composio_execute import (
+    DEFAULT_RESULT_MAX_CHARS,
     ComposioExecuteTool,
     composio_runtime_tool_name,
 )
@@ -42,11 +43,13 @@ class ComposioExternalToolProvider:
         task: Task,
         client: ComposioClient,
         per_toolkit_limit: int = 8,
+        result_max_chars: int = DEFAULT_RESULT_MAX_CHARS,
     ) -> None:
         self.session = session
         self.task = task
         self.client = client
         self.per_toolkit_limit = per_toolkit_limit
+        self.result_max_chars = result_max_chars
         self.resolver = ComposioConnectionResolver(session, task)
         self._catalog: tuple[_ToolkitCatalog, ...] | None = None
 
@@ -70,6 +73,7 @@ class ComposioExternalToolProvider:
                             entry.connection.toolkit_slug,
                             tool.slug,
                         ),
+                        result_max_chars=self.result_max_chars,
                     )
                 )
         return tuple(tools)
