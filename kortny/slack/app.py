@@ -9,13 +9,26 @@ from typing import Any, TypeVar
 
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
+from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from kortny.config import Settings, load_settings
+from kortny.db.models import Installation
 from kortny.db.models import LLMProvider as DbLLMProvider
 from kortny.db.session import session_scope
 from kortny.intent import LLMIntentClassifier, should_classify_channel_message
-from kortny.llm import LLMService, ModelRouter, ModelRouteTier, create_litellm_provider
+from kortny.llm import (
+    LLMProvider,
+    LLMService,
+    ModelRoute,
+    ModelRouter,
+    ModelRouteTier,
+    create_litellm_provider,
+)
+from kortny.llm.runtime_config import (
+    create_provider_for_selection,
+    select_runtime_model,
+)
 from kortny.logging_config import configure_logging
 from kortny.observability import configure_tracing, record_span_exception, start_span
 from kortny.scheduler import LLMScheduleParser
@@ -72,10 +85,12 @@ def create_bolt_app(
                             intent_classifier=_intent_classifier(
                                 resolved_settings,
                                 session,
+                                slack_team_id=body.get("team_id"),
                             ),
                             schedule_fallback_parser=_schedule_fallback_parser(
                                 resolved_settings,
                                 session,
+                                slack_team_id=body.get("team_id"),
                             ),
                         )
                         onboarding_result = (
@@ -131,10 +146,12 @@ def create_bolt_app(
                                 intent_classifier=_intent_classifier(
                                     resolved_settings,
                                     session,
+                                    slack_team_id=body.get("team_id"),
                                 ),
                                 schedule_fallback_parser=_schedule_fallback_parser(
                                     resolved_settings,
                                     session,
+                                    slack_team_id=body.get("team_id"),
                                 ),
                             )
                             ingress.handle_dm(
@@ -147,13 +164,16 @@ def create_bolt_app(
                                 client=client,
                                 acknowledgement_generator=acknowledgement_generator,
                                 intent_classifier=_pre_task_intent_classifier(
-                                    resolved_settings
+                                    resolved_settings,
+                                    session,
+                                    slack_team_id=body.get("team_id"),
                                 )
                                 if is_soft_mention_candidate
                                 else None,
                                 schedule_fallback_parser=_schedule_fallback_parser(
                                     resolved_settings,
                                     session,
+                                    slack_team_id=body.get("team_id"),
                                 )
                                 if is_soft_mention_candidate
                                 else None,
@@ -271,43 +291,109 @@ def create_bolt_app(
     return app
 
 
-def _intent_classifier(settings: Settings, session: Session) -> LLMIntentClassifier:
+def _cheap_tier_llm(
+    settings: Settings,
+    session: Session,
+    *,
+    slack_team_id: str | None,
+    reason: str,
+) -> tuple[LLMProvider, ModelRoute, DbLLMProvider | str]:
+    """Resolve the cheap tier through dashboard model config, env as fallback.
+
+    The worker resolves every call through ``select_runtime_model`` so the
+    dashboard tier assignments apply; ingress must do the same or operators
+    end up with two different models serving the cheap tier.
+    """
+
     model_route = ModelRouter(settings).route_for_tier(
         ModelRouteTier.cheap_fast,
+        reason=reason,
+    )
+    if slack_team_id:
+        installation = session.scalar(
+            select(Installation).where(Installation.slack_team_id == slack_team_id)
+        )
+        if installation is not None:
+            try:
+                selection = select_runtime_model(
+                    session=session,
+                    settings=settings,
+                    installation_id=installation.id,
+                    model_route=model_route,
+                )
+            except Exception:
+                logger.exception(
+                    "runtime model selection failed at ingress; using env fallback"
+                )
+            else:
+                return (
+                    create_provider_for_selection(
+                        settings=settings, selection=selection
+                    ),
+                    selection.model_route,
+                    selection.provider_name,
+                )
+    return (
+        create_litellm_provider(settings, model=model_route.model),
+        model_route,
+        DbLLMProvider(settings.llm_provider),
+    )
+
+
+def _intent_classifier(
+    settings: Settings,
+    session: Session,
+    *,
+    slack_team_id: str | None,
+) -> LLMIntentClassifier:
+    provider, model_route, provider_name = _cheap_tier_llm(
+        settings,
+        session,
+        slack_team_id=slack_team_id,
         reason="intent_classification",
     )
     return LLMIntentClassifier(
         llm=LLMService(
             session=session,
-            provider=create_litellm_provider(settings, model=model_route.model),
-            provider_name=DbLLMProvider(settings.llm_provider),
+            provider=provider,
+            provider_name=provider_name,
             model_route=model_route,
         )
     )
 
 
-def _pre_task_intent_classifier(settings: Settings) -> LLMIntentClassifier:
-    model_route = ModelRouter(settings).route_for_tier(
-        ModelRouteTier.cheap_fast,
+def _pre_task_intent_classifier(
+    settings: Settings,
+    session: Session,
+    *,
+    slack_team_id: str | None,
+) -> LLMIntentClassifier:
+    provider, _model_route, _provider_name = _cheap_tier_llm(
+        settings,
+        session,
+        slack_team_id=slack_team_id,
         reason="intent_classification",
     )
-    return LLMIntentClassifier(
-        provider=create_litellm_provider(settings, model=model_route.model)
-    )
+    return LLMIntentClassifier(provider=provider)
 
 
 def _schedule_fallback_parser(
-    settings: Settings, session: Session
+    settings: Settings,
+    session: Session,
+    *,
+    slack_team_id: str | None,
 ) -> LLMScheduleParser:
-    model_route = ModelRouter(settings).route_for_tier(
-        ModelRouteTier.cheap_fast,
+    provider, model_route, provider_name = _cheap_tier_llm(
+        settings,
+        session,
+        slack_team_id=slack_team_id,
         reason="schedule_parsing",
     )
     return LLMScheduleParser(
         llm=LLMService(
             session=session,
-            provider=create_litellm_provider(settings, model=model_route.model),
-            provider_name=DbLLMProvider(settings.llm_provider),
+            provider=provider,
+            provider_name=provider_name,
             model_route=model_route,
         )
     )
