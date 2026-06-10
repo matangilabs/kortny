@@ -1,4 +1,4 @@
-.PHONY: install lock lint lint-fix format format-check typecheck test check migrate downgrade compose-up compose-up-observability compose-up-workflow compose-down compose-down-observability compose-down-workflow compose-down-observability-volumes compose-logs compose-logs-observability compose-logs-workflow playground clean
+.PHONY: install lock lint lint-fix format format-check typecheck test test-serial check migrate downgrade compose-up compose-up-observability compose-up-workflow compose-down compose-down-observability compose-down-workflow compose-down-observability-volumes compose-logs compose-logs-observability compose-logs-workflow playground clean
 
 install:
 	uv sync
@@ -22,6 +22,9 @@ typecheck:
 	uv run mypy .
 
 test:
+	uv run pytest -n auto --dist loadfile
+
+test-serial:
 	uv run pytest
 
 check: lint format-check typecheck test

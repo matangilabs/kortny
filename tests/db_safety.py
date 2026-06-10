@@ -60,7 +60,12 @@ def assert_safe_test_database(
 
 
 def _is_test_database_name(database_name: str) -> bool:
-    return database_name.startswith("test_") or database_name.endswith("_test")
+    # "_test_" covers per-xdist-worker clones such as "kortny_test_gw0".
+    return (
+        database_name.startswith("test_")
+        or database_name.endswith("_test")
+        or "_test_" in database_name
+    )
 
 
 def _database_target(parsed: SplitResult) -> DatabaseTarget:
