@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Self-hosted AI coworker for teams who live in Slack."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = { text = "Apache-2.0" }
 authors = [{ name = "Kortny Contributors" }]
 dependencies = [
     "alembic>=1.13",

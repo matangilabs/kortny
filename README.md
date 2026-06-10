@@ -393,4 +393,4 @@ adding a native tool, improving docs, or reporting a bug.
 
 ## License
 
-MIT
+[Apache-2.0](./LICENSE)
