@@ -1,0 +1,132 @@
+{% extends "base.html" %}
+
+{% block title %}{{ detail.entry.name }} - Skills - Kortny Dashboard{% endblock %}
+
+{% block content %}
+  <section class="page-heading">
+    <div>
+      <h1>{{ detail.entry.name }}</h1>
+      <p><code>{{ detail.entry.slug }}</code> · v{{ detail.entry.version }} · {{ detail.entry.provenance }}</p>
+    </div>
+    <a class="btn-ghost" href="/skills">Back to Skills</a>
+  </section>
+
+  {% if notice %}
+    <div class="notice notice-{{ notice_tone }}" role="status">{{ notice }}</div>
+  {% endif %}
+
+  <div class="skill-detail-grid">
+    <article class="card skill-detail-main">
+      <div class="skill-detail-badges">
+        <span class="badge badge-{{ 'success' if detail.entry.trust_level == 'trusted' else 'warning' if detail.entry.trust_level == 'community' else 'danger' if detail.entry.trust_level == 'quarantined' else 'neutral' }}">{{ detail.entry.trust_level }}</span>
+        <span class="badge badge-neutral">{{ 'curated' if detail.entry.owner_type == 'system' else 'custom' }}</span>
+        {% if detail.entry.invocations_30d %}
+          <span class="badge badge-accent">{{ detail.entry.invocations_30d }} uses / 30d</span>
+        {% endif %}
+        {% if detail.allowed_tools %}
+          <span class="badge badge-neutral">tools: {{ detail.allowed_tools | join(', ') }}</span>
+        {% endif %}
+      </div>
+      <p class="skill-detail-description">{{ detail.entry.description }}</p>
+      <h3>Instructions</h3>
+      <pre class="skill-instructions">{{ detail.instructions_md }}</pre>
+      {% if detail.files %}
+        <h3>Bundled files</h3>
+        <table class="skill-file-table">
+          <thead><tr><th>Path</th><th>Kind</th><th>Size</th></tr></thead>
+          <tbody>
+            {% for file in detail.files %}
+              <tr>
+                <td><code>{{ file.path }}</code></td>
+                <td>{{ file.kind }}{% if file.is_binary %} <span class="badge badge-neutral">binary</span>{% endif %}</td>
+                <td>{{ file.size_bytes | number }}&nbsp;B</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% endif %}
+    </article>
+
+    <div class="skill-detail-side">
+      <article class="card">
+        <h3>Where it's enabled</h3>
+        {% if detail.entry.enabled_scopes %}
+          <ul class="skill-scope-list">
+            {% for chip in detail.entry.enabled_scopes %}
+              <li>
+                <span class="skill-scope-chip">
+                  {{ chip.scope_type }}{% if chip.scope_id %} · {{ chip.scope_id }}{% endif %}
+                  <form method="post" action="/skills/enablements/{{ chip.enablement_id }}/disable" onsubmit="return confirm('Disable this skill for the {{ chip.scope_type }} scope?');">
+                    <input type="hidden" name="next" value="{{ skills_return_path }}" />
+                    <button type="submit" title="Disable for this scope" aria-label="Disable for this scope">&times;</button>
+                  </form>
+                </span>
+              </li>
+            {% endfor %}
+          </ul>
+        {% else %}
+          <p class="skill-side-note">Not enabled anywhere yet.</p>
+        {% endif %}
+        <form class="skill-enable-form" method="post" action="/skills/{{ detail.entry.skill_id }}/enable">
+          <input type="hidden" name="next" value="{{ skills_return_path }}" />
+          <select class="input" name="scope_type" aria-label="Scope" onchange="this.closest('form').querySelector('.skill-scope-id').style.display = this.value === 'workspace' ? 'none' : '';">
+            <option value="workspace">Workspace</option>
+            <option value="channel">Channel</option>
+            <option value="user">User</option>
+          </select>
+          <input class="input skill-scope-id" type="text" name="scope_id" placeholder="C… / U… ID" aria-label="Channel or user ID" style="display:none" />
+          <button class="btn" type="submit">Enable</button>
+        </form>
+      </article>
+
+      {% if detail.entry.owner_type != 'system' %}
+        <article class="card">
+          <h3>Trust level</h3>
+          <p class="skill-side-note">Untrusted skills are instruction-only: bundled scripts never execute until promoted.</p>
+          <form class="skill-enable-form" method="post" action="/skills/{{ detail.entry.skill_id }}/trust">
+            <input type="hidden" name="next" value="{{ skills_return_path }}" />
+            <select class="input" name="trust_level" aria-label="Trust level">
+              {% for level in ['trusted', 'community', 'untrusted', 'quarantined'] %}
+                <option value="{{ level }}" {{ 'selected' if detail.entry.trust_level == level else '' }}>{{ level }}</option>
+              {% endfor %}
+            </select>
+            <button class="btn" type="submit">Set</button>
+          </form>
+        </article>
+      {% endif %}
+
+      <article class="card">
+        <h3>Versions</h3>
+        <ul class="skill-version-list">
+          {% for version in detail.versions %}
+            <li>
+              <code>{{ version.version }}</code>
+              <span class="badge badge-{{ 'success' if version.status == 'active' else 'neutral' }}">{{ version.status }}</span>
+              <span>{{ version.created_by }}</span>
+            </li>
+          {% endfor %}
+        </ul>
+      </article>
+
+      <article class="card">
+        <h3>Recent invocations</h3>
+        {% if detail.invocations %}
+          <table class="skill-file-table">
+            <thead><tr><th>Task</th><th>Kind</th><th>When</th></tr></thead>
+            <tbody>
+              {% for invocation in detail.invocations %}
+                <tr>
+                  <td><a href="/tasks/{{ invocation.task_id }}"><code>{{ (invocation.task_id | string)[:8] }}</code></a></td>
+                  <td>{{ invocation.invocation_kind }}</td>
+                  <td>{{ invocation.created_at.strftime('%b %d, %H:%M') }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        {% else %}
+          <p class="skill-side-note">Not used in a task yet.</p>
+        {% endif %}
+      </article>
+    </div>
+  </div>
+{% endblock %}

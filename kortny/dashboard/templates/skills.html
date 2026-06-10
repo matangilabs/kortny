@@ -1,0 +1,287 @@
+{% extends "base.html" %}
+
+{% block title %}Skills - Kortny Dashboard{% endblock %}
+
+{% macro trust_badge(level) %}
+  <span class="badge badge-{{ 'success' if level == 'trusted' else 'warning' if level == 'community' else 'danger' if level == 'quarantined' else 'neutral' }}">{{ level }}</span>
+{% endmacro %}
+
+{% macro scope_picker() %}
+  <select class="input" name="scope_type" aria-label="Scope" onchange="this.closest('form').querySelector('.skill-scope-id').style.display = this.value === 'workspace' ? 'none' : '';">
+    <option value="workspace">Workspace</option>
+    <option value="channel">Channel</option>
+    <option value="user">User</option>
+  </select>
+  <input class="input skill-scope-id" type="text" name="scope_id" placeholder="C… / U… ID" aria-label="Channel or user ID" style="display:none" />
+{% endmacro %}
+
+{% macro skill_card(entry) %}
+  <article class="skill-card" role="listitem" data-skill-text="{{ (entry.name ~ ' ' ~ entry.slug ~ ' ' ~ entry.description) | lower }}">
+    <div class="skill-card-top">
+      <div class="skill-card-heading">
+        <a class="skill-card-title" href="/skills/{{ entry.skill_id }}">{{ entry.name }}</a>
+        <div class="skill-card-pills">
+          <span class="badge badge-neutral">{{ 'curated' if entry.owner_type == 'system' else 'custom' }}</span>
+          {{ trust_badge(entry.trust_level) }}
+        </div>
+      </div>
+      <div class="skill-card-action">
+        {% if entry.is_enabled %}
+          <span class="badge badge-success">Installed</span>
+        {% else %}
+          <form method="post" action="/skills/{{ entry.skill_id }}/enable">
+            <input type="hidden" name="next" value="{{ skills_return_path }}" />
+            <input type="hidden" name="scope_type" value="workspace" />
+            <button class="btn" type="submit">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+              Install
+            </button>
+          </form>
+        {% endif %}
+      </div>
+    </div>
+    <p class="skill-card-description">{{ entry.description }}</p>
+    <div class="skill-card-meta">
+      <span class="skill-meta-chip" title="Version">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
+        v{{ entry.version }}
+      </span>
+      {% if entry.has_references %}
+        <span class="skill-meta-chip" title="Bundles reference files">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20"/></svg>
+          references
+        </span>
+      {% endif %}
+      {% if entry.has_scripts %}
+        <span class="skill-meta-chip" title="Bundles scripts (not executed until trusted)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+          scripts
+        </span>
+      {% endif %}
+      {% if entry.invocations_30d %}
+        <span class="skill-meta-chip" title="Times used in the last 30 days">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+          {{ entry.invocations_30d }} uses
+        </span>
+      {% endif %}
+    </div>
+    {% if entry.enabled_scopes %}
+      <div class="skill-scope-chips" aria-label="Enabled scopes">
+        {% for chip in entry.enabled_scopes %}
+          <span class="skill-scope-chip">
+            {{ chip.scope_type }}{% if chip.scope_id %} · {{ chip.scope_id }}{% endif %}
+            <form method="post" action="/skills/enablements/{{ chip.enablement_id }}/disable" onsubmit="return confirm('Disable this skill for the {{ chip.scope_type }} scope?');">
+              <input type="hidden" name="next" value="{{ skills_return_path }}" />
+              <button type="submit" title="Disable for this scope" aria-label="Disable for this scope">&times;</button>
+            </form>
+          </span>
+        {% endfor %}
+      </div>
+    {% endif %}
+    <div class="skill-card-foot">
+      <span class="skill-card-byline" title="Source">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+        By {{ 'Kortny' if entry.provenance == 'kortny' else entry.provenance | replace('user:', '') }}
+      </span>
+      {% if entry.is_enabled %}
+        <form class="skill-enable-form" method="post" action="/skills/{{ entry.skill_id }}/enable">
+          <input type="hidden" name="next" value="{{ skills_return_path }}" />
+          {{ scope_picker() }}
+          <button class="btn-ghost" type="submit">Add scope</button>
+        </form>
+      {% else %}
+        <a class="btn-ghost" href="/skills/{{ entry.skill_id }}">Details</a>
+      {% endif %}
+    </div>
+  </article>
+{% endmacro %}
+
+{% block content %}
+  <section class="page-heading">
+    <div>
+      <div class="skills-heading-tabs">
+        <h1>Skills</h1>
+        <nav class="segmented-nav" aria-label="Skills view">
+          <a class="segmented-item {{ 'active' if skills_view == 'library' else '' }}" href="/skills" {% if skills_view == 'library' %}aria-current="page"{% endif %}>Library</a>
+          <a class="segmented-item {{ 'active' if skills_view == 'installed' else '' }}" href="/skills?view=installed" {% if skills_view == 'installed' %}aria-current="page"{% endif %}>Installed</a>
+        </nav>
+      </div>
+      <p>Skills are reusable playbooks that extend what Kortny can do. Install them to give the agent specialized knowledge and workflows.</p>
+    </div>
+  </section>
+
+  {% if notice %}
+    <div class="notice notice-{{ notice_tone }}" role="status">{{ notice }}</div>
+  {% endif %}
+
+  <div class="skills-toolbar">
+    <div class="skills-search">
+      <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <input class="skills-search-input" type="search" id="skills-search" placeholder="Search skills by name or description…" aria-label="Search skills" />
+    </div>
+  </div>
+
+  {% if skills_view == 'installed' %}
+    {% set installed = (skills.curated + skills.custom) | selectattr('is_enabled') | list %}
+    <section class="skill-section" aria-label="Installed skills">
+      <div class="section-header-row">
+        <div>
+          <h2>Installed skills</h2>
+          <p>Skills currently available to the agent, with the scopes they're enabled for.</p>
+        </div>
+        <span class="skill-section-count">{{ installed | length }} skill{{ '' if installed | length == 1 else 's' }}</span>
+      </div>
+      {% if installed %}
+        <div class="skill-grid" role="list">
+          {% for entry in installed %}
+            {{ skill_card(entry) }}
+          {% endfor %}
+        </div>
+      {% else %}
+        <p class="skill-empty">Nothing installed yet — browse the <a href="/skills">library</a> to add skills.</p>
+      {% endif %}
+    </section>
+  {% else %}
+    <section class="skill-section" aria-label="Curated skills">
+      <div class="section-header-row">
+        <div>
+          <h2>Curated skills</h2>
+          <p>Maintained with Kortny and trusted by default.</p>
+        </div>
+        <span class="skill-section-count">{{ skills.curated | length }} skill{{ '' if skills.curated | length == 1 else 's' }}</span>
+      </div>
+      {% if skills.curated %}
+        <div class="skill-grid" role="list">
+          {% for entry in skills.curated %}
+            {{ skill_card(entry) }}
+          {% endfor %}
+        </div>
+      {% else %}
+        <p class="skill-empty">No curated skills available yet.</p>
+      {% endif %}
+    </section>
+
+    <section class="skill-section" aria-label="Your skills">
+      <div class="section-header-row">
+        <div>
+          <h2>Your skills</h2>
+          <p>Custom skills start <strong>untrusted</strong>: instructions and references are used, bundled scripts never run until promoted.</p>
+        </div>
+        <span class="skill-section-count">{{ skills.custom | length }} skill{{ '' if skills.custom | length == 1 else 's' }}</span>
+      </div>
+      {% if skills.custom %}
+        <div class="skill-grid" role="list">
+          {% for entry in skills.custom %}
+            {{ skill_card(entry) }}
+          {% endfor %}
+        </div>
+      {% else %}
+        <p class="skill-empty">No custom skills yet — add one below.</p>
+      {% endif %}
+    </section>
+
+    <section class="skill-section" aria-label="Add your own skill">
+      <div class="section-header-row">
+        <div>
+          <h2>Add your own</h2>
+          <p>Bring a skill folder as a .zip (SKILL.md plus optional references/, assets/, scripts/), a single SKILL.md, or paste markdown.</p>
+        </div>
+      </div>
+      <div class="skill-add-grid">
+        <article class="card skill-add-card">
+          <h3>Upload a skill</h3>
+          <p>Compatible with Claude, Codex, and ADK skill folders — frontmatter <code>name</code> and <code>description</code> required.</p>
+          <form class="skill-add-form" method="post" action="/skills/upload" enctype="multipart/form-data">
+            <input type="hidden" name="next" value="{{ skills_return_path }}" />
+            <label class="skill-dropzone" id="skill-dropzone">
+              <input type="file" name="skill_file" accept=".zip,.md" required />
+              <span class="skill-dropzone-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+              </span>
+              <span class="skill-dropzone-title">Drop a skill here or <em>browse</em></span>
+              <span class="skill-dropzone-hint">.zip or SKILL.md, up to 16&nbsp;MB</span>
+              <span class="skill-dropzone-file" id="skill-dropzone-file"></span>
+            </label>
+            <div class="skill-add-foot">
+              <label class="form-field">Enable for
+                {{ scope_picker() }}
+              </label>
+              <button class="btn" type="submit">Upload &amp; enable</button>
+            </div>
+          </form>
+        </article>
+        <article class="card skill-add-card">
+          <h3>Paste a skill</h3>
+          <p>Paste a full SKILL.md with frontmatter, or plain markdown plus a name and description.</p>
+          <form class="skill-add-form" method="post" action="/skills/paste">
+            <input type="hidden" name="next" value="{{ skills_return_path }}" />
+            <label class="form-field">Name
+              <input class="input" type="text" name="name" placeholder="e.g. Bug Triage" />
+            </label>
+            <label class="form-field">When should Kortny use it?
+              <input class="input" type="text" name="description" placeholder="Use when triaging incoming bug reports…" />
+            </label>
+            <label class="form-field">Instructions
+              <textarea class="input" name="content" rows="6" placeholder="## Steps&#10;1. Reproduce the issue first…" required></textarea>
+            </label>
+            <div class="skill-add-foot">
+              <label class="form-field">Enable for
+                {{ scope_picker() }}
+              </label>
+              <button class="btn" type="submit">Add &amp; enable</button>
+            </div>
+          </form>
+        </article>
+      </div>
+    </section>
+  {% endif %}
+
+  <script>
+    (function () {
+      var search = document.getElementById('skills-search');
+      if (search) {
+        search.addEventListener('input', function () {
+          var query = search.value.trim().toLowerCase();
+          document.querySelectorAll('[data-skill-text]').forEach(function (card) {
+            card.style.display =
+              !query || card.dataset.skillText.indexOf(query) !== -1 ? '' : 'none';
+          });
+        });
+      }
+
+      var dropzone = document.getElementById('skill-dropzone');
+      if (dropzone) {
+        var input = dropzone.querySelector('input[type="file"]');
+        var fileLabel = document.getElementById('skill-dropzone-file');
+        var showFile = function () {
+          if (input.files && input.files.length) {
+            fileLabel.textContent = input.files[0].name;
+            dropzone.classList.add('has-file');
+          } else {
+            fileLabel.textContent = '';
+            dropzone.classList.remove('has-file');
+          }
+        };
+        input.addEventListener('change', showFile);
+        ['dragenter', 'dragover'].forEach(function (eventName) {
+          dropzone.addEventListener(eventName, function (event) {
+            event.preventDefault();
+            dropzone.classList.add('dragover');
+          });
+        });
+        ['dragleave', 'drop'].forEach(function (eventName) {
+          dropzone.addEventListener(eventName, function (event) {
+            event.preventDefault();
+            dropzone.classList.remove('dragover');
+          });
+        });
+        dropzone.addEventListener('drop', function (event) {
+          if (event.dataTransfer && event.dataTransfer.files.length) {
+            input.files = event.dataTransfer.files;
+            showFile();
+          }
+        });
+      }
+    })();
+  </script>
+{% endblock %}

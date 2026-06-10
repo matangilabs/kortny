@@ -13,7 +13,17 @@ from typing import Annotated, Any, cast
 from urllib.parse import parse_qs, parse_qsl, quote, urlencode, urlsplit, urlunsplit
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
+from fastapi import (
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+    status,
+)
 from fastapi.responses import (
     FileResponse,
     HTMLResponse,
@@ -82,6 +92,14 @@ from kortny.dashboard.schedules import (
     update_schedule_from_dashboard,
 )
 from kortny.dashboard.settings import DashboardSettings, load_dashboard_settings
+from kortny.dashboard.skills_actions import (
+    disable_skill_enablement,
+    enable_skill_for_scope,
+    paste_skill_markdown,
+    set_skill_trust,
+    upload_skill,
+)
+from kortny.dashboard.skills_data import get_skill_detail, get_skills_dashboard
 from kortny.db.models import (
     ComposioConnection,
     DashboardOAuthState,
@@ -117,6 +135,8 @@ from kortny.llm.provider_config import (
     secret_resolver_from_settings,
 )
 from kortny.secrets import SecretEncryptionError, encrypt_secret_value
+from kortny.skills import SkillRegistryService
+from kortny.skills.ingestion import SkillIngestionError
 from kortny.witness import (
     DEFAULT_WITNESS_AUTOPILOT_MIN_CONFIDENCE,
     DEFAULT_WITNESS_SNOOZE,
@@ -847,6 +867,224 @@ def register_routes(app: FastAPI) -> None:
             session.rollback()
             return _redirect_with_notice(next_path, str(exc), tone="danger")
         return _redirect_with_notice(next_path, notice, tone=tone)
+
+    @app.get("/skills", response_class=HTMLResponse)
+    def skills(
+        request: Request,
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        session: Annotated[Session, Depends(get_session)],
+        view: Annotated[str, Query()] = "library",
+        notice: Annotated[str | None, Query()] = None,
+        notice_tone: Annotated[str, Query()] = "success",
+    ) -> Response:
+        SkillRegistryService(session).ensure_curated_skills()
+        session.commit()
+        installation_id = _dashboard_installation_id(session, principal)
+        skills_dashboard = get_skills_dashboard(session, installation_id)
+        return templates.TemplateResponse(
+            request=request,
+            name="skills.html",
+            context={
+                **_dashboard_context(principal, active_page="skills"),
+                "skills": skills_dashboard,
+                "skills_view": "installed" if view == "installed" else "library",
+                "skills_return_path": _request_path(request),
+                "notice": notice,
+                "notice_tone": _notice_tone(notice_tone),
+            },
+        )
+
+    @app.get("/skills/{skill_id}", response_class=HTMLResponse)
+    def skill_detail(
+        request: Request,
+        skill_id: UUID,
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        session: Annotated[Session, Depends(get_session)],
+        notice: Annotated[str | None, Query()] = None,
+        notice_tone: Annotated[str, Query()] = "success",
+    ) -> Response:
+        installation_id = _dashboard_installation_id(session, principal)
+        detail = get_skill_detail(session, installation_id, skill_id)
+        if detail is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+        return templates.TemplateResponse(
+            request=request,
+            name="skill_detail.html",
+            context={
+                **_dashboard_context(principal, active_page="skills"),
+                "detail": detail,
+                "skills_return_path": _request_path(request),
+                "notice": notice,
+                "notice_tone": _notice_tone(notice_tone),
+            },
+        )
+
+    @app.post("/skills/{skill_id}/enable")
+    async def skill_enable(
+        request: Request,
+        skill_id: UUID,
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> RedirectResponse:
+        form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+        next_path = _safe_next_path(form.get("next", ["/skills"])[0])
+        installation_id = _dashboard_installation_id(session, principal)
+        if installation_id is None:
+            return _redirect_with_notice(
+                next_path,
+                "Enabling a skill requires a selected workspace.",
+                tone="danger",
+            )
+        actor = principal.slack_user_id or dashboard_actor(principal.display_name)
+        try:
+            enablement = enable_skill_for_scope(
+                session,
+                installation_id=installation_id,
+                skill_id=skill_id,
+                scope_type=_form_value(form, "scope_type") or "workspace",
+                scope_id=_form_value(form, "scope_id"),
+                by_user=actor,
+            )
+            session.commit()
+        except ValueError as exc:
+            session.rollback()
+            return _redirect_with_notice(next_path, str(exc), tone="danger")
+        return _redirect_with_notice(
+            next_path,
+            f"Skill enabled for {enablement.scope_type} scope.",
+        )
+
+    @app.post("/skills/enablements/{enablement_id}/disable")
+    async def skill_disable(
+        request: Request,
+        enablement_id: UUID,
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> RedirectResponse:
+        form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+        next_path = _safe_next_path(form.get("next", ["/skills"])[0])
+        actor = principal.slack_user_id or dashboard_actor(principal.display_name)
+        try:
+            disable_skill_enablement(
+                session, enablement_id=enablement_id, by_user=actor
+            )
+            session.commit()
+        except ValueError as exc:
+            session.rollback()
+            return _redirect_with_notice(next_path, str(exc), tone="danger")
+        return _redirect_with_notice(next_path, "Skill disabled.", tone="warning")
+
+    @app.post("/skills/upload")
+    async def skill_upload(
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        session: Annotated[Session, Depends(get_session)],
+        skill_file: Annotated[UploadFile, File(alias="skill_file")],
+        scope_type: Annotated[str, Form()] = "workspace",
+        scope_id: Annotated[str, Form()] = "",
+        next_path: Annotated[str, Form(alias="next")] = "/skills",
+    ) -> RedirectResponse:
+        next_path = _safe_next_path(next_path)
+        installation_id = _dashboard_installation_id(session, principal)
+        if installation_id is None:
+            return _redirect_with_notice(
+                next_path,
+                "Uploading a skill requires a selected workspace.",
+                tone="danger",
+            )
+        actor = principal.slack_user_id or dashboard_actor(principal.display_name)
+        data = await skill_file.read()
+        try:
+            result = upload_skill(
+                session,
+                installation_id=installation_id,
+                data=data,
+                filename=skill_file.filename or "skill.zip",
+                by_user=actor,
+            )
+            enable_skill_for_scope(
+                session,
+                installation_id=installation_id,
+                skill_id=result.skill.id,
+                scope_type=scope_type or "workspace",
+                scope_id=scope_id or None,
+                by_user=actor,
+            )
+            session.commit()
+        except (SkillIngestionError, ValueError) as exc:
+            session.rollback()
+            return _redirect_with_notice(next_path, str(exc), tone="danger")
+        return _redirect_with_notice(
+            next_path,
+            f"Skill '{result.skill.slug}' uploaded and enabled.",
+        )
+
+    @app.post("/skills/paste")
+    async def skill_paste(
+        request: Request,
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> RedirectResponse:
+        form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+        next_path = _safe_next_path(form.get("next", ["/skills"])[0])
+        installation_id = _dashboard_installation_id(session, principal)
+        if installation_id is None:
+            return _redirect_with_notice(
+                next_path,
+                "Adding a skill requires a selected workspace.",
+                tone="danger",
+            )
+        actor = principal.slack_user_id or dashboard_actor(principal.display_name)
+        try:
+            result = paste_skill_markdown(
+                session,
+                installation_id=installation_id,
+                content=_form_value(form, "content") or "",
+                name=_form_value(form, "name"),
+                description=_form_value(form, "description"),
+                by_user=actor,
+            )
+            enable_skill_for_scope(
+                session,
+                installation_id=installation_id,
+                skill_id=result.skill.id,
+                scope_type=_form_value(form, "scope_type") or "workspace",
+                scope_id=_form_value(form, "scope_id"),
+                by_user=actor,
+            )
+            session.commit()
+        except (SkillIngestionError, ValueError) as exc:
+            session.rollback()
+            return _redirect_with_notice(next_path, str(exc), tone="danger")
+        return _redirect_with_notice(
+            next_path,
+            f"Skill '{result.skill.slug}' added and enabled.",
+        )
+
+    @app.post("/skills/{skill_id}/trust")
+    async def skill_trust(
+        request: Request,
+        skill_id: UUID,
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> RedirectResponse:
+        form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+        next_path = _safe_next_path(form.get("next", [f"/skills/{skill_id}"])[0])
+        actor = principal.slack_user_id or dashboard_actor(principal.display_name)
+        try:
+            skill = set_skill_trust(
+                session,
+                skill_id=skill_id,
+                trust_level=_form_value(form, "trust_level") or "",
+                by_user=actor,
+            )
+            session.commit()
+        except ValueError as exc:
+            session.rollback()
+            return _redirect_with_notice(next_path, str(exc), tone="danger")
+        return _redirect_with_notice(
+            next_path,
+            f"Trust level set to {skill.trust_level}.",
+        )
 
     @app.post("/knowledge-graph/refresh")
     async def knowledge_graph_refresh(
