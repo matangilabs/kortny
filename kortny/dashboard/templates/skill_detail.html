@@ -44,6 +44,13 @@
             {% endfor %}
           </tbody>
         </table>
+        {% if detail.entry.has_scripts %}
+          {% if detail.entry.trust_level == 'trusted' %}
+            <p class="skill-script-note skill-script-note-enabled">Scripts run inside the task sandbox via <code>run_skill_script</code>.</p>
+          {% else %}
+            <p class="skill-script-note skill-script-note-blocked">Scripts are stored but blocked until this skill is promoted to trusted. Use the Trust level control to promote.</p>
+          {% endif %}
+        {% endif %}
       {% endif %}
     </article>
 

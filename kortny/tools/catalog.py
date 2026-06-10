@@ -588,6 +588,22 @@ NATIVE_TOOL_METADATA: dict[str, ToolMetadata] = {
             "skill. Scripts are viewable, never executed.",
         ),
     ),
+    "run_skill_script": ToolMetadata(
+        name="run_skill_script",
+        namespace="native.skills",
+        category="Skills",
+        display_name="Run skill script",
+        capabilities=("procedural_skills", "skill_script_execution"),
+        side_effect="write",
+        approval="none",
+        required_env_vars=("POSTGRES_URL", "KORTNY_SANDBOX_RUNNER_URL"),
+        notes=(
+            "Runs a bundled script from a trusted skill inside the task's "
+            "sandbox; only skills at trust level 'trusted' are runnable. "
+            "Trust tier is the gate and the sandbox bounds blast radius, so no "
+            "per-call approval is required. Never executes on the worker host.",
+        ),
+    ),
     "query_workspace_graph": ToolMetadata(
         name="query_workspace_graph",
         namespace="native.context",

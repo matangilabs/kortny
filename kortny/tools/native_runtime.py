@@ -41,7 +41,11 @@ from kortny.tools.schedules import (
     UpdateScheduleTool,
 )
 from kortny.tools.search_observed_slack_history import SearchObservedSlackHistoryTool
-from kortny.tools.skills import LoadSkillResourceTool, LoadSkillTool
+from kortny.tools.skills import (
+    LoadSkillResourceTool,
+    LoadSkillTool,
+    RunSkillScriptTool,
+)
 from kortny.tools.slack_actions import (
     SlackAddBookmarkTool,
     SlackAddReactionTool,
@@ -364,6 +368,32 @@ def _build_load_skill_resource_tool(context: NativeToolBuildContext) -> Tool | N
     )
 
 
+def _has_enabled_skill_scripts(context: NativeToolBuildContext) -> bool:
+    from kortny.skills import SkillRegistryService
+
+    enabled = SkillRegistryService(
+        context.session, task_service=context.task_service
+    ).enabled_skills_for_task(context.task)
+    return any(skill.has_scripts for skill in enabled)
+
+
+def _build_run_skill_script_tool(context: NativeToolBuildContext) -> Tool | None:
+    if not _has_enabled_skill_scripts(context):
+        return None
+    workbench = _workbench_session(context)
+    if workbench is None:
+        _log_workbench_unavailable(
+            context, "run_skill_script", "missing_sandbox_runner_url"
+        )
+        return None
+    return RunSkillScriptTool(
+        session=context.session,
+        task=context.task,
+        task_service=context.task_service,
+        workbench=workbench,
+    )
+
+
 NATIVE_TOOL_REGISTRATIONS: tuple[NativeToolRegistration, ...] = (
     NativeToolRegistration("web_search", WebSearchTool, _build_web_search_tool),
     NativeToolRegistration(
@@ -542,6 +572,11 @@ NATIVE_TOOL_REGISTRATIONS: tuple[NativeToolRegistration, ...] = (
         "load_skill_resource",
         LoadSkillResourceTool,
         _build_load_skill_resource_tool,
+    ),
+    NativeToolRegistration(
+        "run_skill_script",
+        RunSkillScriptTool,
+        _build_run_skill_script_tool,
     ),
     NativeToolRegistration(
         "list_schedules",

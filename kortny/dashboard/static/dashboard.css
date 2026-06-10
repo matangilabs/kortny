@@ -9568,6 +9568,26 @@ details[open] > summary::after {
   margin: 0;
 }
 
+.skill-script-note {
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+  margin: 0;
+  padding: 7px 10px;
+}
+
+.skill-script-note-enabled {
+  background: var(--success-bg);
+  border: 1px solid color-mix(in srgb, var(--success) 28%, transparent);
+  color: var(--success);
+}
+
+.skill-script-note-blocked {
+  background: var(--warning-bg);
+  border: 1px solid color-mix(in srgb, var(--warning) 28%, transparent);
+  color: var(--warning);
+}
+
 .skill-scope-list {
   display: grid;
   gap: 6px;

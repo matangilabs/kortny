@@ -296,3 +296,47 @@ def test_invalid_upload_surfaces_error_notice(
 
     assert response.status_code == 303
     assert "notice_tone=danger" in response.headers["location"]
+
+
+def test_script_execution_capability_note(
+    client: tuple[TestClient, Session],
+) -> None:
+    """Detail page shows blocked note for untrusted skill with scripts, enabled note after promotion."""
+    test_client, session = client
+    create_installation(session)
+
+    # Upload demo-skill which bundles scripts/hello.py; custom uploads default to untrusted.
+    test_client.post(
+        "/skills/upload",
+        data={"scope_type": "workspace", "scope_id": "", "next": "/skills"},
+        files={"skill_file": ("demo-skill.zip", fixture_zip(), "application/zip")},
+        follow_redirects=False,
+    )
+    skill = session.scalar(
+        select(ProceduralSkill).where(ProceduralSkill.slug == "demo-skill")
+    )
+    assert skill is not None
+    assert skill.trust_level == "untrusted"
+
+    # Untrusted: blocked note should appear.
+    detail = test_client.get(f"/skills/{skill.id}")
+    assert detail.status_code == 200
+    assert "skill-script-note-blocked" in detail.text
+    assert "blocked until this skill is promoted to trusted" in detail.text
+    assert "skill-script-note-enabled" not in detail.text
+
+    # Promote to trusted.
+    promote = test_client.post(
+        f"/skills/{skill.id}/trust",
+        data={"trust_level": "trusted", "next": f"/skills/{skill.id}"},
+        follow_redirects=False,
+    )
+    assert promote.status_code == 303
+    session.expire_all()
+
+    # Trusted: sandbox-enabled note should appear.
+    detail_trusted = test_client.get(f"/skills/{skill.id}")
+    assert detail_trusted.status_code == 200
+    assert "skill-script-note-enabled" in detail_trusted.text
+    assert "Scripts run inside the task sandbox" in detail_trusted.text
+    assert "skill-script-note-blocked" not in detail_trusted.text

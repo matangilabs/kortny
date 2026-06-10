@@ -30,6 +30,7 @@ SKILL_CATALOG_BUILT_MESSAGE = "procedural_skill_catalog_built"
 SKILL_INVOKED_MESSAGE = "procedural_skill_invoked"
 RESPONSE_HUMANIZER_INVOCATION = "response_humanizer"
 EXECUTION_INVOCATION = "execution"
+SCRIPT_EXECUTION_INVOCATION = "script_execution"
 
 CURATED_SKILLS_DIR = Path(__file__).parent / "curated"
 SKILL_SCOPE_TYPES = frozenset({"workspace", "channel", "user"})

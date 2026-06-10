@@ -3,6 +3,7 @@
 from kortny.skills.service import (
     EXECUTION_INVOCATION,
     RESPONSE_HUMANIZER_INVOCATION,
+    SCRIPT_EXECUTION_INVOCATION,
     SKILL_CATALOG_BUILT_MESSAGE,
     SKILL_INVOKED_MESSAGE,
     EnabledSkill,
@@ -13,6 +14,7 @@ from kortny.skills.service import (
 __all__ = [
     "EXECUTION_INVOCATION",
     "RESPONSE_HUMANIZER_INVOCATION",
+    "SCRIPT_EXECUTION_INVOCATION",
     "SKILL_CATALOG_BUILT_MESSAGE",
     "SKILL_INVOKED_MESSAGE",
     "EnabledSkill",

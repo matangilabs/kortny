@@ -28,6 +28,7 @@ from kortny.db.models import (
     TaskEvent,
 )
 from kortny.db.session import make_engine, make_session_factory, normalize_database_url
+from kortny.execution.sandbox_sessions import SandboxExecResult, SandboxSessionInfo
 from kortny.skills import SkillRegistryService
 from kortny.skills.ingestion import SkillIngestionError, SkillIngestionService
 from kortny.tasks import TaskService
@@ -731,3 +732,258 @@ class TestSkillTools:
         assert _build_load_skill_resource_tool(make_context(task_with)) is not None
         assert _build_load_skill_tool(make_context(task_without)) is None
         assert _build_load_skill_resource_tool(make_context(task_without)) is None
+
+
+class FakeScriptSessionClient:
+    """Records write_file/exec calls for run_skill_script tests."""
+
+    def __init__(self) -> None:
+        self.writes: list[tuple[str, bytes]] = []
+        self.execs: list[tuple[str, str, int]] = []
+        self.exec_result = SandboxExecResult(
+            exit_code=0, stdout="hello from demo skill\n", stderr=""
+        )
+
+    def open_session(
+        self, task_id: str, profile: str = "workbench"
+    ) -> SandboxSessionInfo:
+        return SandboxSessionInfo(
+            session_id="s-1",
+            task_id=task_id,
+            container_id="c-1",
+            profile=profile,
+            reused=False,
+        )
+
+    def exec(
+        self,
+        session_id: str,
+        command: str,
+        *,
+        workdir: str = "/workspace",
+        timeout_seconds: int = 120,
+    ) -> SandboxExecResult:
+        self.execs.append((command, workdir, timeout_seconds))
+        return self.exec_result
+
+    def write_file(self, session_id: str, path: str, content: bytes) -> int:
+        self.writes.append((path, content))
+        return len(content)
+
+    def read_file(self, session_id: str, path: str) -> bytes:  # pragma: no cover
+        raise NotImplementedError
+
+    def export_archive(self, session_id: str, path: str) -> bytes:  # pragma: no cover
+        raise NotImplementedError
+
+    def close_session(self, session_id: str) -> None:  # pragma: no cover
+        return None
+
+
+class TestRunSkillScript:
+    def _setup(
+        self, db_session: Session, *, trust_level: str
+    ) -> tuple[Task, ProceduralSkill]:
+        installation = create_installation(db_session)
+        ingestion = SkillIngestionService(db_session)
+        result = ingestion.ingest_directory(
+            FIXTURE_SKILL_DIR,
+            owner_type="system",
+            owner_id=None,
+            provenance="kortny",
+            trust_level=trust_level,
+            created_by="system",
+        )
+        SkillRegistryService(db_session).enable_skill(
+            installation_id=installation.id,
+            skill_id=result.skill.id,
+            scope_type="workspace",
+            scope_id=None,
+            added_by="dashboard:tester",
+        )
+        task = create_task(db_session, installation)
+        return task, result.skill
+
+    def _tool(self, db_session: Session, task: Task, client: object):  # type: ignore[no-untyped-def]
+        from kortny.tools.sandbox_workbench import WorkbenchSession
+        from kortny.tools.skills import RunSkillScriptTool
+
+        task_service = TaskService(db_session)
+        workbench = WorkbenchSession(
+            client=client,  # type: ignore[arg-type]
+            task=task,
+            task_service=task_service,
+        )
+        return RunSkillScriptTool(
+            session=db_session,
+            task=task,
+            task_service=task_service,
+            workbench=workbench,
+        )
+
+    def test_untrusted_skill_is_blocked_by_trust_gate(
+        self, db_session: Session
+    ) -> None:
+        from kortny.tools.types import RecoverableToolError
+
+        task, _ = self._setup(db_session, trust_level="untrusted")
+        client = FakeScriptSessionClient()
+        tool = self._tool(db_session, task, client)
+
+        with pytest.raises(RecoverableToolError) as exc_info:
+            tool.invoke({"slug": "demo-skill", "path": "scripts/hello.py"})
+
+        assert exc_info.value.code == "skill_scripts_blocked_by_trust"
+        assert "trusted" in (exc_info.value.hint or "")
+        assert client.execs == []
+        assert client.writes == []
+        blocked = [
+            event
+            for event in db_session.scalars(
+                select(TaskEvent).where(TaskEvent.task_id == task.id)
+            )
+            if event.payload.get("message") == "skill_script_blocked"
+        ]
+        assert len(blocked) == 1
+        assert blocked[0].payload["trust_level"] == "untrusted"
+        assert blocked[0].payload["path"] == "scripts/hello.py"
+
+    def test_trusted_skill_materializes_and_executes(self, db_session: Session) -> None:
+        task, skill = self._setup(db_session, trust_level="trusted")
+        client = FakeScriptSessionClient()
+        tool = self._tool(db_session, task, client)
+
+        result = tool.invoke(
+            {"slug": "demo-skill", "path": "scripts/hello.py", "args": ["--verbose"]}
+        )
+
+        assert result.output["successful"] is True
+        assert result.output["exit_code"] == 0
+        assert result.output["slug"] == "demo-skill"
+        assert result.output["path"] == "scripts/hello.py"
+
+        written_paths = {path for path, _ in client.writes}
+        assert "/workspace/skills/demo-skill/scripts/hello.py" in written_paths
+        assert "/workspace/skills/demo-skill/references/notes.md" in written_paths
+        assert "/workspace/skills/demo-skill/references/diagram.png" in written_paths
+        assert "/workspace/skills/demo-skill/SKILL.md" in written_paths
+        diagram = next(
+            content for path, content in client.writes if path.endswith("diagram.png")
+        )
+        assert isinstance(diagram, bytes)
+
+        assert len(client.execs) == 1
+        command, workdir, timeout = client.execs[0]
+        assert command == "python scripts/hello.py --verbose"
+        assert workdir == "/workspace/skills/demo-skill"
+        assert timeout == 300
+
+        invocation = db_session.scalar(
+            select(ProceduralSkillInvocation).where(
+                ProceduralSkillInvocation.task_id == task.id,
+                ProceduralSkillInvocation.invocation_kind == "script_execution",
+            )
+        )
+        assert invocation is not None
+        assert invocation.skill_id == skill.id
+
+    def test_bare_script_name_is_normalized(self, db_session: Session) -> None:
+        task, _ = self._setup(db_session, trust_level="trusted")
+        client = FakeScriptSessionClient()
+        tool = self._tool(db_session, task, client)
+
+        result = tool.invoke({"slug": "demo-skill", "path": "hello.py"})
+
+        assert result.output["path"] == "scripts/hello.py"
+        assert client.execs[0][0] == "python scripts/hello.py"
+
+    def test_unknown_script_errors_with_available_scripts(
+        self, db_session: Session
+    ) -> None:
+        from kortny.tools.types import RecoverableToolError
+
+        task, _ = self._setup(db_session, trust_level="trusted")
+        client = FakeScriptSessionClient()
+        tool = self._tool(db_session, task, client)
+
+        with pytest.raises(RecoverableToolError) as exc_info:
+            tool.invoke({"slug": "demo-skill", "path": "scripts/missing.py"})
+
+        assert exc_info.value.code == "skill_script_not_found"
+        assert "scripts/hello.py" in (exc_info.value.hint or "")
+        assert client.execs == []
+
+    def test_unsupported_extension_errors(self, db_session: Session) -> None:
+        from kortny.tools.types import RecoverableToolError
+
+        task, _ = self._setup(db_session, trust_level="trusted")
+        client = FakeScriptSessionClient()
+        tool = self._tool(db_session, task, client)
+
+        with pytest.raises(RecoverableToolError) as exc_info:
+            tool.invoke({"slug": "demo-skill", "path": "references/notes.md"})
+
+        assert exc_info.value.code == "skill_script_unsupported"
+        assert client.execs == []
+
+    def test_factory_gates_on_scripts_and_workbench(self, db_session: Session) -> None:
+        from unittest.mock import MagicMock
+
+        from kortny.tools.native_runtime import (
+            NativeToolBuildContext,
+            _build_run_skill_script_tool,
+        )
+
+        task_with_scripts, _ = self._setup(db_session, trust_level="trusted")
+
+        no_scripts_installation = create_installation(db_session)
+        no_scripts_skill, _ = create_skill(
+            db_session, slug="no-scripts", owner_type="system"
+        )
+        SkillRegistryService(db_session).enable_skill(
+            installation_id=no_scripts_installation.id,
+            skill_id=no_scripts_skill.id,
+            scope_type="workspace",
+            scope_id=None,
+            added_by="dashboard:tester",
+        )
+        task_no_scripts = create_task(db_session, no_scripts_installation)
+
+        def make_context(
+            task: Task, *, runner_url: str | None
+        ) -> NativeToolBuildContext:
+            settings = MagicMock()
+            settings.sandbox_runner_url = runner_url
+            settings.sandbox_runner_timeout_seconds = 70.0
+            return NativeToolBuildContext(
+                settings=settings,
+                session=db_session,
+                task=task,
+                task_service=TaskService(db_session),
+                working_dir=Path("/tmp"),
+                web_search_tool=None,
+                slack_history_client=None,
+                slack_file_client=None,
+                slack_identity_client=None,
+                slack_action_client=None,
+                memory_service=MagicMock(),
+            )
+
+        assert (
+            _build_run_skill_script_tool(
+                make_context(task_with_scripts, runner_url="http://runner")
+            )
+            is not None
+        )
+        assert (
+            _build_run_skill_script_tool(
+                make_context(task_no_scripts, runner_url="http://runner")
+            )
+            is None
+        )
+        assert (
+            _build_run_skill_script_tool(
+                make_context(task_with_scripts, runner_url=None)
+            )
+            is None
+        )
