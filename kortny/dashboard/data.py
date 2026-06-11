@@ -2378,13 +2378,16 @@ def get_witness_candidates_dashboard(
     )
 
 
-_WITNESS_DELIVERED_DECISIONS = ("notify", "question", "draft")
+_WITNESS_DELIVERED_DECISIONS = ("notify", "question", "draft", "channel_sent")
 _WITNESS_DECISION_LABELS = {
     "notify": "Notify (digest)",
     "question": "Question (cadence ask)",
     "draft": "Draft (say go)",
     "silent": "Silent (below threshold)",
     "digest": "Digest DMs sent",
+    "channel_sent": "Channel post sent",
+    "channel_deferred": "Channel deferred (policy/quiet/budget)",
+    "draft_executed": "Draft executed (autopilot)",
 }
 
 
@@ -2521,7 +2524,16 @@ def get_witness_kpis(
             label=_WITNESS_DECISION_LABELS[decision],
             count=decision_totals.get(decision, 0),
         )
-        for decision in ("notify", "question", "draft", "silent", "digest")
+        for decision in (
+            "notify",
+            "question",
+            "draft",
+            "silent",
+            "digest",
+            "channel_sent",
+            "channel_deferred",
+            "draft_executed",
+        )
     )
     return WitnessKpis(
         window_days=window_days,

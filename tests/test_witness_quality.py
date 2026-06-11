@@ -905,12 +905,17 @@ def test_witness_kpis_from_fixture_rows(db_session: Session) -> None:
     # 1 accepted, 0 automated.
     assert kpis.conversion_to_automation == pytest.approx(0.0)
     counts = {row.decision: row.count for row in kpis.decision_counts}
+    # HIG-198/HIG-230 added channel_sent / channel_deferred / draft_executed
+    # to the decision breakdown; none occur in this fixture.
     assert counts == {
         "notify": 1,
         "question": 0,
         "draft": 0,
         "silent": 1,
         "digest": 1,
+        "channel_sent": 0,
+        "channel_deferred": 0,
+        "draft_executed": 0,
     }
     assert kpis.silent_rate_label == "50.0%"
     assert kpis.time_to_action_label == "2.0h"

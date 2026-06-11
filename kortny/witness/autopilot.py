@@ -10,15 +10,17 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from kortny.config import Settings, load_settings
 from kortny.db.models import LLMProvider as DbLLMProvider
 from kortny.db.models import (
+    ObservePolicy,
     SlackChannelMembership,
     Task,
     TaskEventType,
+    WitnessDeliveryLog,
     WitnessOpportunityCandidate,
 )
 from kortny.llm import (
@@ -37,6 +39,10 @@ from kortny.observability import start_span
 from kortny.tasks import TaskService
 from kortny.tasks.identity import TaskIdentity
 from kortny.tools.types import JsonObject
+from kortny.witness.opportunities import (
+    candidate_delivery_decision,
+    candidate_thread_ts,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,11 +51,19 @@ WITNESS_AUTOPILOT_REVIEW_RESPONSE_FORMAT: JsonObject = {"type": "json_object"}
 WITNESS_AUTOPILOT_TASK_CREATED_MESSAGE = "witness_autopilot_task_created"
 WITNESS_AUTOPILOT_CANDIDATE_DEFERRED_MESSAGE = "witness_autopilot_candidate_deferred"
 WITNESS_AUTOPILOT_CANDIDATE_DISMISSED_MESSAGE = "witness_autopilot_candidate_dismissed"
+WITNESS_AUTOPILOT_DRAFT_POSTED_MESSAGE = "witness_autopilot_draft_posted"
+WITNESS_DRAFT_TASK_SOURCE = "witness_draft"
 
 DEFAULT_WITNESS_AUTOPILOT_LIMIT = 1
 DEFAULT_WITNESS_AUTOPILOT_MIN_CONFIDENCE = Decimal("0.600")
 DEFAULT_WITNESS_AUTOPILOT_COOLDOWN = timedelta(hours=24)
 MAX_AUTOPILOT_TASK_INPUT_CHARS = 1800
+
+# Draft tier (HIG-230): sliding 24h budget per channel; drafts count against
+# witness_delivery_log via decision='draft_executed'.
+DEFAULT_WITNESS_DRAFTS_PER_CHANNEL_PER_DAY = 1
+WITNESS_DRAFT_WINDOW = timedelta(days=1)
+WITNESS_DRAFT_LOG_USER_PREFIX = "channel:"
 
 _VALID_DECISIONS = frozenset(
     ("execute_task", "defer", "dismiss", "monitor_only", "ask_user")
@@ -65,6 +79,7 @@ _VALID_ACTION_KINDS = frozenset(
         "approval_request",
         "reminder",
         "monitoring_setup",
+        "draft_artifact",
         "other",
     )
 )
@@ -135,6 +150,10 @@ class WitnessAutopilotRunResult:
     def dismissed_count(self) -> int:
         return sum(1 for outcome in self.outcomes if outcome.status == "dismissed")
 
+    @property
+    def drafted_count(self) -> int:
+        return sum(1 for outcome in self.outcomes if outcome.status == "draft_executed")
+
 
 class WitnessAutopilot:
     """Review due Witness candidates and turn useful ones into normal tasks."""
@@ -148,6 +167,7 @@ class WitnessAutopilot:
         provider_name: DbLLMProvider | str | None = None,
         actor_id: str = "witness_autopilot",
         cooldown: timedelta = DEFAULT_WITNESS_AUTOPILOT_COOLDOWN,
+        drafts_per_channel_per_day: int | None = None,
     ) -> None:
         self.session = session
         self.settings = settings
@@ -155,6 +175,7 @@ class WitnessAutopilot:
         self.provider_name = provider_name
         self.actor_id = actor_id
         self.cooldown = cooldown
+        self.drafts_per_channel_per_day = drafts_per_channel_per_day
 
     def run_once(
         self,
@@ -230,7 +251,10 @@ class WitnessAutopilot:
                 WitnessOpportunityCandidate.source_task_id.is_(None),
                 WitnessOpportunityCandidate.source_task_id.not_in(
                     select(Task.id).where(
-                        Task.identity_key.like("synthetic:witness_autopilot:%")
+                        or_(
+                            Task.identity_key.like("synthetic:witness_autopilot:%"),
+                            Task.identity_key.like("synthetic:witness_draft:%"),
+                        )
                     )
                 ),
             ),
@@ -289,6 +313,18 @@ class WitnessAutopilot:
             )
 
         decision = self._review_with_llm(candidate, source_task=source_task)
+        if (
+            decision.decision == "execute_task"
+            and decision.action_kind == "draft_artifact"
+        ):
+            # HIG-230 draft tier: drafts are visibly drafts, never sent or
+            # published anywhere external, and count against draft budgets.
+            return self._review_draft_candidate(
+                candidate,
+                decision=decision,
+                source_task=source_task,
+                now=now,
+            )
         decision_safety_reason = _decision_safety_defer_reason(decision)
         if decision_safety_reason is not None:
             return self._defer_reviewed_decision(
@@ -476,6 +512,244 @@ class WitnessAutopilot:
             decision=decision.decision,
             risk=decision.risk,
             reason=reason,
+        )
+
+    def _review_draft_candidate(
+        self,
+        candidate: WitnessOpportunityCandidate,
+        *,
+        decision: WitnessAutopilotDecision,
+        source_task: Task,
+        now: datetime,
+    ) -> WitnessAutopilotOutcome:
+        """Auto-execute a draft_artifact candidate when every gate passes."""
+
+        channel_id = _candidate_channel_id(candidate, source_task=source_task)
+        defer_reason = self._draft_defer_reason(
+            candidate,
+            decision=decision,
+            channel_id=channel_id,
+            now=now,
+        )
+        if defer_reason is not None:
+            return self._defer_reviewed_decision(
+                candidate,
+                decision=decision,
+                now=now,
+                reason=defer_reason,
+            )
+        assert channel_id is not None  # _draft_defer_reason checked it
+
+        task = self._create_draft_task(
+            candidate,
+            decision=decision,
+            source_task=source_task,
+            channel_id=channel_id,
+            now=now,
+        )
+        # A draft does not consume the candidate: it stays accept-able and
+        # acceptance later still flows through materialize_acceptance. The
+        # cooldown only stops the autopilot re-reviewing it every tick.
+        candidate.cooldown_until = now + self.cooldown
+        candidate.last_decision = "draft"
+        candidate.last_suggested_at = now
+        candidate.updated_at = now
+        _record_feedback(
+            candidate,
+            action="draft_posted",
+            by_user_id=self.actor_id,
+            now=now,
+            details={
+                "decision": decision.decision,
+                "risk": decision.risk,
+                "action_kind": decision.action_kind,
+                "delivery_target": decision.delivery_target,
+                "reason": decision.reason,
+                "generated_task_id": str(task.id),
+                "channel_id": channel_id,
+                "execution_policy": "draft_tier",
+            },
+        )
+        self.session.add(
+            WitnessDeliveryLog(
+                installation_id=candidate.installation_id,
+                slack_user_id=f"{WITNESS_DRAFT_LOG_USER_PREFIX}{channel_id}",
+                candidate_id=candidate.id,
+                decision="draft_executed",
+                reason="sent",
+                created_at=now,
+            )
+        )
+        TaskService(self.session).append_event(
+            task,
+            TaskEventType.log,
+            {
+                "message": WITNESS_AUTOPILOT_DRAFT_POSTED_MESSAGE,
+                "candidate_id": str(candidate.id),
+                "source_task_id": str(source_task.id),
+                "decision": decision.decision,
+                "risk": decision.risk,
+                "action_kind": decision.action_kind,
+                "delivery_target": decision.delivery_target,
+                "reason": decision.reason,
+            },
+        )
+        self.session.flush()
+        return WitnessAutopilotOutcome(
+            candidate_id=candidate.id,
+            status="draft_executed",
+            decision=decision.decision,
+            risk=decision.risk,
+            reason=decision.reason,
+            task_id=task.id,
+        )
+
+    def _draft_defer_reason(
+        self,
+        candidate: WitnessOpportunityCandidate,
+        *,
+        decision: WitnessAutopilotDecision,
+        channel_id: str | None,
+        now: datetime,
+    ) -> str | None:
+        if channel_id is None:
+            return "Draft tier needs a concrete Slack channel or DM target."
+        if decision.risk != "low":
+            return "Draft tier only executes low-risk candidates."
+        if candidate_delivery_decision(candidate) != "draft":
+            return (
+                "Draft tier only runs when the delivery scorer decision is "
+                "draft (one-shot candidates)."
+            )
+        if not decision.allowed_without_confirmation:
+            return "Autopilot reviewer did not mark this safe without confirmation."
+        if decision.confidence_score < DEFAULT_WITNESS_AUTOPILOT_MIN_CONFIDENCE:
+            return "Autopilot reviewer confidence was below the execution threshold."
+        if not decision.task_input:
+            return "Autopilot reviewer did not provide a draft task to execute."
+        if _candidate_has_posted_draft(candidate):
+            return "Candidate already has a posted draft awaiting feedback."
+        is_dm = channel_id.startswith("D") or candidate.visibility_scope_type == "dm"
+        if not is_dm and not self._channel_policy_is_full(
+            installation_id=candidate.installation_id,
+            channel_id=channel_id,
+        ):
+            return (
+                "Draft tier needs the channel policy at proactivity_status="
+                "'full' (or DM scope)."
+            )
+        limit = self._draft_budget_limit()
+        if limit < 1:
+            return "Draft tier is disabled (draft budget is zero)."
+        if (
+            self._drafts_in_window(
+                installation_id=candidate.installation_id,
+                channel_id=channel_id,
+                now=now,
+            )
+            >= limit
+        ):
+            return "Draft budget for this channel is used up for today."
+        return None
+
+    def _draft_budget_limit(self) -> int:
+        if self.drafts_per_channel_per_day is not None:
+            return self.drafts_per_channel_per_day
+        if self.settings is not None:
+            return self.settings.witness_drafts_per_channel_per_day
+        return DEFAULT_WITNESS_DRAFTS_PER_CHANNEL_PER_DAY
+
+    def _drafts_in_window(
+        self,
+        *,
+        installation_id: uuid.UUID,
+        channel_id: str,
+        now: datetime,
+    ) -> int:
+        cutoff = now - WITNESS_DRAFT_WINDOW
+        return int(
+            self.session.scalar(
+                select(func.count())
+                .select_from(WitnessDeliveryLog)
+                .where(
+                    WitnessDeliveryLog.installation_id == installation_id,
+                    WitnessDeliveryLog.slack_user_id
+                    == f"{WITNESS_DRAFT_LOG_USER_PREFIX}{channel_id}",
+                    WitnessDeliveryLog.decision == "draft_executed",
+                    WitnessDeliveryLog.created_at > cutoff,
+                )
+            )
+            or 0
+        )
+
+    def _channel_policy_is_full(
+        self,
+        *,
+        installation_id: uuid.UUID,
+        channel_id: str,
+    ) -> bool:
+        policy = self.session.scalar(
+            select(ObservePolicy).where(
+                ObservePolicy.installation_id == installation_id,
+                ObservePolicy.scope_type == "channel",
+                ObservePolicy.scope_id == channel_id,
+            )
+        )
+        return (
+            policy is not None
+            and policy.proactivity_status == "full"
+            and policy.paused_at is None
+        )
+
+    def _create_draft_task(
+        self,
+        candidate: WitnessOpportunityCandidate,
+        *,
+        decision: WitnessAutopilotDecision,
+        source_task: Task,
+        channel_id: str,
+        now: datetime,
+    ) -> Task:
+        task_input = _draft_task_input(candidate, decision=decision)
+        thread_ts = candidate_thread_ts(candidate, source_task=source_task)
+        user_id = (
+            candidate.target_slack_user_id
+            or source_task.slack_user_id
+            or _membership_added_by(self.session, candidate)
+            or self.actor_id
+        )
+        identity = TaskIdentity.synthetic(
+            source=WITNESS_DRAFT_TASK_SOURCE,
+            source_id=str(candidate.id),
+            input_text=task_input,
+            payload={
+                "candidate_id": str(candidate.id),
+                "candidate_type": candidate.candidate_type,
+                "visibility_scope_type": candidate.visibility_scope_type,
+                "visibility_scope_id": candidate.visibility_scope_id,
+                "source_task_id": str(source_task.id),
+                "autopilot_decision": decision.decision,
+                "autopilot_risk": decision.risk,
+                "autopilot_action_kind": decision.action_kind,
+                "autopilot_delivery_target": decision.delivery_target,
+                "response_contract": (
+                    "Produce a visible draft only. Never send, publish, or "
+                    "execute anything external. The reply must read as a "
+                    "draft offered for feedback."
+                ),
+                "created_at": now.isoformat(),
+            },
+        )
+        return TaskService(self.session).create_task(
+            installation_id=candidate.installation_id,
+            slack_event_id=None,
+            slack_channel_id=channel_id,
+            slack_thread_ts=thread_ts,
+            slack_message_ts=None,
+            slack_user_id=user_id,
+            input=task_input,
+            identity=identity,
+            source_surface=WITNESS_DRAFT_TASK_SOURCE,
         )
 
     def _review_with_llm(
@@ -683,18 +957,24 @@ def _review_messages(
                 "users opt out. Use semantic judgment. Decide whether Kortny "
                 "should act now on this opportunity candidate. Prefer "
                 "execute_task only for low-risk, non-interruptive read-only "
-                "analysis or status checks with clear evidence. Do not execute "
+                "analysis or status checks with clear evidence. One exception: "
+                "when the most useful next step is preparing a concrete "
+                "deliverable text (a summary, checklist, doc outline, or "
+                "message body) that will only be shown as a visible draft and "
+                "never sent or published, classify it as action_kind "
+                "draft_artifact with decision execute_task. Do not execute "
                 "anything that asks the user to confirm, approve, review, or "
                 "reply; creates, edits, cancels, or audits a schedule; writes "
                 "memory or policy; posts a reminder; retries an external tool "
-                "that needs approval; performs external writes; exposes private "
-                "data; or is stale/speculative. For those, return defer, "
+                "that needs approval; performs external writes (including "
+                "anything email-like); exposes private data; or is "
+                "stale/speculative. For those, return defer, "
                 "monitor_only, ask_user, or dismiss. Return JSON only with schema: "
                 '{"decision":"execute_task|defer|dismiss|monitor_only|ask_user",'
                 '"risk":"low|medium|high",'
                 '"action_kind":"read_only_analysis|status_check|'
                 "schedule_management|memory_write|external_write|approval_request|"
-                'reminder|monitoring_setup|other",'
+                'reminder|monitoring_setup|draft_artifact|other",'
                 '"delivery_target":"channel|dm|none|unknown",'
                 '"requires_user_reply":false,'
                 '"allowed_without_confirmation":true,'
@@ -883,6 +1163,40 @@ def _membership_added_by(
         .limit(1)
     )
     return membership.added_by_user_id if membership is not None else None
+
+
+def _candidate_has_posted_draft(candidate: WitnessOpportunityCandidate) -> bool:
+    feedback = candidate.feedback_json or {}
+    history = feedback.get("history")
+    if not isinstance(history, list):
+        return False
+    return any(
+        isinstance(entry, dict) and entry.get("action") == "draft_posted"
+        for entry in history
+    )
+
+
+def _draft_task_input(
+    candidate: WitnessOpportunityCandidate,
+    *,
+    decision: WitnessAutopilotDecision,
+) -> str:
+    """Task input that produces a visibly-draft deliverable (HIG-230)."""
+
+    base = decision.task_input or (
+        candidate.deliverable or candidate.suggested_action or candidate.summary
+    )
+    return _bounded(
+        (
+            f"{base}\n\n"
+            "Produce the deliverable as a draft only. Do not send, publish, "
+            "or execute anything external. Start your reply with "
+            '"Draft (not sent) - " plus one line on what this is and why, '
+            "then the draft itself, and end with: Tell me changes or say "
+            "'go' to finalize."
+        ),
+        MAX_AUTOPILOT_TASK_INPUT_CHARS,
+    )
 
 
 def _task_input(

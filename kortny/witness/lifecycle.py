@@ -16,6 +16,10 @@ from kortny.slack.formatting import normalize_user_facing_text
 from kortny.slack.outbox import SlackSideEffectOutbox
 
 WITNESS_SUGGESTION_PURPOSE = "witness_suggestion"
+# HIG-198: proactive suggestion posted into a channel (policy-gated). The
+# outbox idempotency key is "{purpose}:{candidate_id}" — the reaction-routing
+# lookup in kortny/slack/ingress.py depends on that shape.
+WITNESS_CHANNEL_SUGGESTION_PURPOSE = "witness_channel_suggestion"
 DEFAULT_WITNESS_SNOOZE = timedelta(days=7)
 MAX_WITNESS_AUDIT_HISTORY = 25
 

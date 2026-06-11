@@ -38,6 +38,7 @@ from kortny.db.models import (
 )
 from kortny.db.models import (
     ObserveChannelProfile,
+    ObservePolicy,
     SlackChannelMembership,
     Task,
     TaskEventType,
@@ -63,14 +64,21 @@ from kortny.witness.autopilot import (
     WitnessAutopilotOutcome,
 )
 from kortny.witness.extractor import WitnessChannelProfileExtractor
-from kortny.witness.lifecycle import WitnessSlackClient, _record_feedback
+from kortny.witness.lifecycle import (
+    WITNESS_CHANNEL_SUGGESTION_PURPOSE,
+    WitnessSlackClient,
+    _record_feedback,
+)
 from kortny.witness.opportunities import (
     WITNESS_OPPORTUNITY_CANDIDATES_PROJECTED_MESSAGE,
     WitnessOpportunityService,
+    candidate_delivery_decision,
+    candidate_thread_ts,
     recurrence_evidence_line,
     recurrence_is_proven,
 )
 from kortny.witness.receptivity import (
+    collect_channel_feedback_events,
     collect_user_feedback_events,
     effective_confidence,
     receptivity,
@@ -94,12 +102,25 @@ WITNESS_DIGEST_CANDIDATE_SCAN_LIMIT = 50
 WITNESS_DIGEST_PURPOSE = "witness_digest"
 WITNESS_DIGEST_MAX_CHARS = 3500
 
+# Channel delivery (HIG-198). Channel posting is the most abusable surface in
+# the product: every channel delivery passes per-channel policy opt-in
+# (ObservePolicy proactivity_status == "full") AND the receptivity threshold
+# AND the channel budget AND quiet hours. Failed gates defer, never drop.
+DEFAULT_WITNESS_CHANNEL_POSTS_PER_WEEK = 1
+WITNESS_CHANNEL_POST_WINDOW = timedelta(days=7)
+WITNESS_CHANNEL_CANDIDATE_SCAN_LIMIT = 50
+WITNESS_CHANNEL_SUGGESTION_MAX_CHARS = 1800
+# Per-channel rows in witness_delivery_log key slack_user_id as
+# "channel:{channel_id}" so sliding budget windows stay queryable.
+WITNESS_CHANNEL_LOG_USER_PREFIX = "channel:"
+
 WITNESS_RUNNER_PROFILE_SCAN_STARTED_MESSAGE = "witness_runner_profile_scan_started"
 WITNESS_RUNNER_PROFILE_SCAN_COMPLETED_MESSAGE = "witness_runner_profile_scan_completed"
 WITNESS_RUNNER_PROFILE_SCAN_FAILED_MESSAGE = "witness_runner_profile_scan_failed"
 WITNESS_RUNNER_DELIVERY_SKIPPED_MESSAGE = "witness_runner_delivery_skipped"
 WITNESS_RUNNER_DELIVERY_SENT_MESSAGE = "witness_runner_delivery_sent"
 WITNESS_RUNNER_DIGEST_SENT_MESSAGE = "witness_runner_digest_sent"
+WITNESS_RUNNER_CHANNEL_POST_SENT_MESSAGE = "witness_runner_channel_post_sent"
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,7 +147,7 @@ class WitnessDeliveryOutcome:
     """Delivery decision result for one candidate.
 
     ``status`` is one of: sent, silent, budget_deferred, interval_deferred,
-    quiet_hours_deferred, window_deduped, skipped.
+    quiet_hours_deferred, policy_deferred, window_deduped, skipped.
     """
 
     candidate_id: uuid.UUID
@@ -208,13 +229,20 @@ class WitnessRunner:
         digest_max_items: int = DEFAULT_WITNESS_DIGEST_MAX_ITEMS,
         quiet_hours_start: int | None = None,
         quiet_hours_end: int | None = None,
+        channel_posts_per_week: int = DEFAULT_WITNESS_CHANNEL_POSTS_PER_WEEK,
+        drafts_per_channel_per_day: int | None = None,
     ) -> WitnessRunResult:
         """Run one Witness tick.
 
-        Channel delivery is intentionally not supported here. Private delivery
-        only attempts candidates that already have DM scope, batched into one
-        digest DM per user per digest window. ``delivery_limit`` is deprecated:
-        the digest budget (``digest_max_items``) is the volume control now.
+        Private delivery only attempts candidates that already have DM scope,
+        batched into one digest DM per user per digest window.
+        ``delivery_limit`` is deprecated: the digest budget
+        (``digest_max_items``) is the volume control now.
+
+        Channel delivery (HIG-198) attempts channel-scoped candidates whenever
+        a Slack client is configured; each channel must opt in via its
+        ObservePolicy (``proactivity_status == "full"``) and respects the
+        weekly per-channel budget, the decision gate, and quiet hours.
         """
 
         if profile_limit < 0:
@@ -223,6 +251,8 @@ class WitnessRunner:
             raise ValueError("delivery_limit must be non-negative")
         if digest_max_items < 1:
             raise ValueError("digest_max_items must be positive")
+        if channel_posts_per_week < 0:
+            raise ValueError("channel_posts_per_week must be non-negative")
         run_at = _coerce_utc(now)
 
         lock_acquired = True
@@ -263,6 +293,14 @@ class WitnessRunner:
                     if deliver_private
                     else ()
                 )
+                deliveries = deliveries + self._deliver_channel_suggestions(
+                    installation_id=installation_id,
+                    now=run_at,
+                    delivery_threshold=delivery_threshold,
+                    channel_posts_per_week=channel_posts_per_week,
+                    quiet_hours_start=quiet_hours_start,
+                    quiet_hours_end=quiet_hours_end,
+                )
                 should_run_autopilot = (
                     autopilot_enabled
                     if autopilot_enabled is not None
@@ -278,6 +316,7 @@ class WitnessRunner:
                         llm_provider=self.llm_provider,
                         provider_name=self.provider_name,
                         actor_id=f"witness_runner:{self.runner_id}",
+                        drafts_per_channel_per_day=drafts_per_channel_per_day,
                     )
                     .run_once(
                         installation_id=installation_id,
@@ -753,6 +792,464 @@ class WitnessRunner:
         )
         return tuple(outcomes)
 
+    def _deliver_channel_suggestions(
+        self,
+        *,
+        installation_id: uuid.UUID | None,
+        now: datetime,
+        delivery_threshold: Decimal,
+        channel_posts_per_week: int,
+        quiet_hours_start: int | None,
+        quiet_hours_end: int | None,
+    ) -> tuple[WitnessDeliveryOutcome, ...]:
+        """Deliver channel-scoped suggestions through every HIG-198 gate."""
+
+        if self.slack_client is None or channel_posts_per_week < 1:
+            return ()
+        candidates = self._eligible_channel_candidates(
+            installation_id=installation_id,
+            now=now,
+            limit=WITNESS_CHANNEL_CANDIDATE_SCAN_LIMIT,
+        )
+        if not candidates:
+            return ()
+
+        grouped: dict[tuple[uuid.UUID, str], list[WitnessOpportunityCandidate]] = {}
+        for candidate in candidates:
+            channel_id = candidate.channel_id
+            if channel_id is None:
+                continue
+            grouped.setdefault((candidate.installation_id, channel_id), []).append(
+                candidate
+            )
+
+        outcomes: list[WitnessDeliveryOutcome] = []
+        for (group_installation_id, channel_id), group in grouped.items():
+            outcomes.extend(
+                self._deliver_channel_group(
+                    installation_id=group_installation_id,
+                    channel_id=channel_id,
+                    candidates=group,
+                    now=now,
+                    delivery_threshold=delivery_threshold,
+                    channel_posts_per_week=channel_posts_per_week,
+                    quiet_hours_start=quiet_hours_start,
+                    quiet_hours_end=quiet_hours_end,
+                )
+            )
+        self.session.flush()
+        return tuple(outcomes)
+
+    def _deliver_channel_group(
+        self,
+        *,
+        installation_id: uuid.UUID,
+        channel_id: str,
+        candidates: list[WitnessOpportunityCandidate],
+        now: datetime,
+        delivery_threshold: Decimal,
+        channel_posts_per_week: int,
+        quiet_hours_start: int | None,
+        quiet_hours_end: int | None,
+    ) -> tuple[WitnessDeliveryOutcome, ...]:
+        log_user = f"{WITNESS_CHANNEL_LOG_USER_PREFIX}{channel_id}"
+
+        # Gate 1: per-channel policy opt-in. "full" finally means something;
+        # digest_only keeps today's DM-digest-only behavior.
+        if not self._channel_policy_allows_posting(
+            installation_id=installation_id,
+            channel_id=channel_id,
+        ):
+            return self._defer_channel_candidates(
+                candidates,
+                installation_id=installation_id,
+                log_user=log_user,
+                reason="policy",
+                now=now,
+            )
+
+        # Gate 2: quiet hours — deferred, never dropped.
+        if _in_quiet_hours(now, quiet_hours_start, quiet_hours_end):
+            return self._defer_channel_candidates(
+                candidates,
+                installation_id=installation_id,
+                log_user=log_user,
+                reason="quiet_hours",
+                now=now,
+                status="quiet_hours_deferred",
+            )
+
+        # Gate 3: the HIG-227 decision gate, scored on channel-level
+        # receptivity (everyone's reactions to suggestions in this channel).
+        events = collect_channel_feedback_events(
+            self.session,
+            installation_id=installation_id,
+            channel_id=channel_id,
+            now=now,
+        )
+        outcomes: list[WitnessDeliveryOutcome] = []
+        deliverable: list[tuple[float, str, WitnessOpportunityCandidate]] = []
+        for candidate in candidates:
+            evidence_count = len(candidate.evidence_json or [])
+            confidence = effective_confidence(
+                candidate.confidence_score or Decimal("0.500"),
+                reinforcement_count=candidate.reinforcement_count or 1,
+                evidence_count=evidence_count,
+            )
+            receptivity_value = receptivity(events, candidate.candidate_type, now)
+            if candidate.automation_kind == "recurring" and not recurrence_is_proven(
+                candidate, now=now
+            ):
+                receptivity_value *= UNPROVEN_RECURRENCE_RECEPTIVITY_FACTOR
+            score = float(confidence) * receptivity_value
+            candidate.receptivity_score = _quantized_score(receptivity_value)
+            if Decimal(str(score)) < delivery_threshold:
+                candidate.last_decision = "silent"
+                candidate.updated_at = now
+                self._log_delivery_decision(
+                    installation_id=installation_id,
+                    user_id=log_user,
+                    candidate_id=candidate.id,
+                    decision="silent",
+                    reason=(
+                        f"score={score:.3f} below threshold={delivery_threshold} "
+                        f"(confidence={confidence} receptivity="
+                        f"{receptivity_value:.3f})"
+                    ),
+                    now=now,
+                )
+                outcomes.append(
+                    WitnessDeliveryOutcome(
+                        candidate_id=candidate.id,
+                        status="silent",
+                        reason="below_threshold",
+                        channel_id=channel_id,
+                        decision="silent",
+                        score=score,
+                    )
+                )
+                continue
+            decision = candidate_delivery_decision(candidate)
+            candidate.last_decision = decision
+            candidate.updated_at = now
+            deliverable.append((score, decision, candidate))
+
+        if not deliverable:
+            return tuple(outcomes)
+
+        # Gate 4: sliding weekly budget per channel over witness_delivery_log.
+        deliverable.sort(key=lambda item: item[0], reverse=True)
+        budget_left = channel_posts_per_week - self._channel_posts_in_window(
+            installation_id=installation_id,
+            log_user=log_user,
+            now=now,
+        )
+        included = deliverable[: max(budget_left, 0)]
+        overflow = deliverable[max(budget_left, 0) :]
+        for score, decision, candidate in overflow:
+            # Budget stop: stays pending, delivers next window.
+            self._log_channel_deferral(
+                installation_id=installation_id,
+                log_user=log_user,
+                candidate_id=candidate.id,
+                reason="budget",
+                now=now,
+            )
+            outcomes.append(
+                WitnessDeliveryOutcome(
+                    candidate_id=candidate.id,
+                    status="budget_deferred",
+                    reason="budget",
+                    channel_id=channel_id,
+                    decision=decision,
+                    score=score,
+                )
+            )
+
+        for score, decision, candidate in included:
+            outcomes.append(
+                self._post_channel_suggestion(
+                    installation_id=installation_id,
+                    channel_id=channel_id,
+                    log_user=log_user,
+                    candidate=candidate,
+                    decision=decision,
+                    score=score,
+                    now=now,
+                )
+            )
+        return tuple(outcomes)
+
+    def _post_channel_suggestion(
+        self,
+        *,
+        installation_id: uuid.UUID,
+        channel_id: str,
+        log_user: str,
+        candidate: WitnessOpportunityCandidate,
+        decision: str,
+        score: float,
+        now: datetime,
+    ) -> WitnessDeliveryOutcome:
+        client = self.slack_client
+        assert client is not None  # checked by caller
+        source_task = (
+            self.session.get(Task, candidate.source_task_id)
+            if candidate.source_task_id is not None
+            else None
+        )
+        thread_ts = candidate_thread_ts(candidate, source_task=source_task)
+        text = _channel_suggestion_text(candidate, decision=decision, now=now)
+        request: dict[str, object] = {
+            "channel": channel_id,
+            "text": text,
+            "thread_ts": thread_ts,
+        }
+
+        def _post(
+            client: WitnessSlackClient = client,
+            channel_id: str = channel_id,
+            text: str = text,
+            thread_ts: str | None = thread_ts,
+        ) -> Mapping[str, Any]:
+            return client.chat_postMessage(
+                channel=channel_id,
+                text=text,
+                thread_ts=thread_ts,
+            )
+
+        side_effect = SlackSideEffectOutbox(self.session).deliver(
+            installation_id=installation_id,
+            task_id=candidate.source_task_id,
+            idempotency_key=f"{WITNESS_CHANNEL_SUGGESTION_PURPOSE}:{candidate.id}",
+            operation="chat_postMessage",
+            purpose=WITNESS_CHANNEL_SUGGESTION_PURPOSE,
+            target_channel_id=channel_id,
+            target_thread_ts=thread_ts,
+            request=request,
+            call=_post,
+        )
+        if side_effect.deduped:
+            # This candidate already has a visible suggestion post; keep it
+            # pending without double-posting.
+            return WitnessDeliveryOutcome(
+                candidate_id=candidate.id,
+                status="window_deduped",
+                reason="channel_suggestion_deduped",
+                channel_id=channel_id,
+                decision=decision,
+                score=score,
+            )
+
+        message_ts = _response_ts(side_effect.response)
+        candidate.status = "sent"
+        candidate.cooldown_until = None
+        candidate.last_suggested_at = now
+        candidate.updated_at = now
+        _record_feedback(
+            candidate,
+            action="sent",
+            by_user_id="witness_runner",
+            now=now,
+            details={
+                "channel_id": channel_id,
+                "message_ts": message_ts,
+                "thread_ts": thread_ts,
+                "side_effect_id": str(side_effect.side_effect.id),
+                "deduped": side_effect.deduped,
+                "delivery_policy": "channel_post",
+                "decision": decision,
+            },
+        )
+        self._log_delivery_decision(
+            installation_id=installation_id,
+            user_id=log_user,
+            candidate_id=candidate.id,
+            decision="channel_sent",
+            reason="sent",
+            now=now,
+        )
+        _append_candidate_event(
+            self.session,
+            candidate,
+            message=WITNESS_RUNNER_CHANNEL_POST_SENT_MESSAGE,
+            payload={
+                "runner_id": self.runner_id,
+                "channel_id": channel_id,
+                "message_ts": message_ts,
+                "thread_ts": thread_ts,
+                "decision": decision,
+                "delivery_policy": "channel_post",
+            },
+        )
+        logger.info(
+            "%s runner_id=%s channel_id=%s candidate_id=%s decision=%s",
+            WITNESS_RUNNER_CHANNEL_POST_SENT_MESSAGE,
+            self.runner_id,
+            channel_id,
+            candidate.id,
+            decision,
+        )
+        return WitnessDeliveryOutcome(
+            candidate_id=candidate.id,
+            status="sent",
+            channel_id=channel_id,
+            message_ts=message_ts,
+            decision=decision,
+            score=score,
+        )
+
+    def _defer_channel_candidates(
+        self,
+        candidates: list[WitnessOpportunityCandidate],
+        *,
+        installation_id: uuid.UUID,
+        log_user: str,
+        reason: str,
+        now: datetime,
+        status: str = "policy_deferred",
+    ) -> tuple[WitnessDeliveryOutcome, ...]:
+        outcomes: list[WitnessDeliveryOutcome] = []
+        for candidate in candidates:
+            self._log_channel_deferral(
+                installation_id=installation_id,
+                log_user=log_user,
+                candidate_id=candidate.id,
+                reason=reason,
+                now=now,
+            )
+            outcomes.append(
+                WitnessDeliveryOutcome(
+                    candidate_id=candidate.id,
+                    status=status,
+                    reason=reason,
+                    channel_id=candidate.channel_id,
+                )
+            )
+        return tuple(outcomes)
+
+    def _log_channel_deferral(
+        self,
+        *,
+        installation_id: uuid.UUID,
+        log_user: str,
+        candidate_id: uuid.UUID,
+        reason: str,
+        now: datetime,
+    ) -> None:
+        """Log a channel deferral, deduped per (candidate, reason) per day.
+
+        The runner ticks every few minutes; without dedupe a channel that
+        never opted in would emit a deferral row per candidate per tick.
+        Deferred is still never dropped — the candidate stays pending.
+        """
+
+        cutoff = now - timedelta(hours=24)
+        already_logged = (
+            self.session.scalar(
+                select(func.count())
+                .select_from(WitnessDeliveryLog)
+                .where(
+                    WitnessDeliveryLog.installation_id == installation_id,
+                    WitnessDeliveryLog.candidate_id == candidate_id,
+                    WitnessDeliveryLog.decision == "channel_deferred",
+                    WitnessDeliveryLog.reason == reason,
+                    WitnessDeliveryLog.created_at > cutoff,
+                )
+            )
+            or 0
+        ) > 0
+        if already_logged:
+            return
+        self._log_delivery_decision(
+            installation_id=installation_id,
+            user_id=log_user,
+            candidate_id=candidate_id,
+            decision="channel_deferred",
+            reason=reason,
+            now=now,
+        )
+
+    def _channel_policy_allows_posting(
+        self,
+        *,
+        installation_id: uuid.UUID,
+        channel_id: str,
+    ) -> bool:
+        policy = self.session.scalar(
+            select(ObservePolicy).where(
+                ObservePolicy.installation_id == installation_id,
+                ObservePolicy.scope_type == "channel",
+                ObservePolicy.scope_id == channel_id,
+            )
+        )
+        return (
+            policy is not None
+            and policy.proactivity_status == "full"
+            and policy.paused_at is None
+        )
+
+    def _channel_posts_in_window(
+        self,
+        *,
+        installation_id: uuid.UUID,
+        log_user: str,
+        now: datetime,
+    ) -> int:
+        # HIG-231 ambient file briefs share this weekly per-channel window:
+        # both account through rows keyed 'channel:{channel_id}', so a brief
+        # consumes a channel post slot and vice versa (bidirectional budget).
+        cutoff = now - WITNESS_CHANNEL_POST_WINDOW
+        return int(
+            self.session.scalar(
+                select(func.count())
+                .select_from(WitnessDeliveryLog)
+                .where(
+                    WitnessDeliveryLog.installation_id == installation_id,
+                    WitnessDeliveryLog.slack_user_id == log_user,
+                    WitnessDeliveryLog.decision.in_(
+                        ("channel_sent", "ambient_file_brief")
+                    ),
+                    WitnessDeliveryLog.created_at > cutoff,
+                )
+            )
+            or 0
+        )
+
+    def _eligible_channel_candidates(
+        self,
+        *,
+        installation_id: uuid.UUID | None,
+        now: datetime,
+        limit: int,
+    ) -> tuple[WitnessOpportunityCandidate, ...]:
+        filters = [
+            WitnessOpportunityCandidate.status == "candidate",
+            WitnessOpportunityCandidate.visibility_scope_type == "channel",
+            WitnessOpportunityCandidate.channel_id.is_not(None),
+            WitnessOpportunityCandidate.channel_id.not_like("D%"),
+            (
+                (WitnessOpportunityCandidate.cooldown_until.is_(None))
+                | (WitnessOpportunityCandidate.cooldown_until <= now)
+            ),
+        ]
+        if installation_id is not None:
+            filters.append(
+                WitnessOpportunityCandidate.installation_id == installation_id
+            )
+        return tuple(
+            self.session.scalars(
+                select(WitnessOpportunityCandidate)
+                .where(*filters)
+                .order_by(
+                    WitnessOpportunityCandidate.confidence_score.desc(),
+                    WitnessOpportunityCandidate.created_at.asc(),
+                )
+                .with_for_update(skip_locked=True)
+                .limit(limit)
+            )
+        )
+
     def _digest_sent_in_window(
         self,
         *,
@@ -976,11 +1473,12 @@ class WitnessWorker:
 
     def run_once(self, *, now: datetime | None = None) -> WitnessRunResult:
         with self.session_factory.begin() as session:
+            # The client is always available: channel delivery (HIG-198) is
+            # gated per channel by ObservePolicy proactivity_status == "full",
+            # while deliver_private still gates the DM digest path.
             slack_client = cast(
-                WitnessSlackClient | None,
-                WebClient(token=self._settings.slack_bot_token)
-                if self.deliver_private
-                else None,
+                WitnessSlackClient,
+                WebClient(token=self._settings.slack_bot_token),
             )
             result = WitnessRunner(
                 session,
@@ -1006,6 +1504,10 @@ class WitnessWorker:
                 digest_max_items=self._settings.witness_digest_max_items,
                 quiet_hours_start=self._settings.witness_quiet_hours_start,
                 quiet_hours_end=self._settings.witness_quiet_hours_end,
+                channel_posts_per_week=(self._settings.witness_channel_posts_per_week),
+                drafts_per_channel_per_day=(
+                    self._settings.witness_drafts_per_channel_per_day
+                ),
             )
             logger.info(
                 "witness runner tick runner_id=%s status=%s projected=%s delivered=%s autopilot_reviewed=%s autopilot_executed=%s",
@@ -1112,23 +1614,9 @@ def _in_quiet_hours(
 
 
 def _candidate_decision(candidate: WitnessOpportunityCandidate) -> str:
-    """Assign the above-threshold action: notify / question / draft.
+    """Assign the above-threshold action — see candidate_delivery_decision."""
 
-    - ``question``: recurring automation with no cadence — the digest line
-      asks the user for one instead of guessing.
-    - ``draft``: one-shot with an above-threshold score — the digest offers
-      "say go and I'll do it".
-    - ``notify`` otherwise.
-    """
-
-    if (
-        candidate.automation_kind == "recurring"
-        and not (candidate.cadence_suggestion or "").strip()
-    ):
-        return "question"
-    if candidate.automation_kind == "one_shot":
-        return "draft"
-    return "notify"
+    return candidate_delivery_decision(candidate)
 
 
 def _digest_text(
@@ -1148,6 +1636,35 @@ def _digest_text(
         lines.append(f"   {_digest_action_line(decision, candidate)}")
     text = "\n".join(lines)
     return normalize_user_facing_text(text[:WITNESS_DIGEST_MAX_CHARS])
+
+
+def _channel_suggestion_text(
+    candidate: WitnessOpportunityCandidate,
+    *,
+    decision: str,
+    now: datetime,
+) -> str:
+    """Threaded, low-key, evidence-first channel suggestion copy (HIG-198)."""
+
+    noticed = (
+        candidate.suggested_message
+        or f"I noticed something that might be worth a look: {candidate.summary}"
+    )
+    lines = [noticed]
+    evidence = _digest_evidence_line(candidate, now=now)
+    if evidence:
+        lines.append(f"Evidence: {evidence}")
+    proposed = candidate.deliverable or candidate.suggested_action
+    if proposed:
+        lines.append(f"Proposed: {proposed}")
+    if decision == "question":
+        lines.append(
+            "What cadence should I use? Reply with one (like 'every weekday "
+            "5pm') and I'll set it up."
+        )
+    lines.append("React :white_check_mark: to set it up or :no_entry_sign: to drop it.")
+    text = "\n".join(lines)
+    return normalize_user_facing_text(text[:WITNESS_CHANNEL_SUGGESTION_MAX_CHARS])
 
 
 def _digest_evidence_line(

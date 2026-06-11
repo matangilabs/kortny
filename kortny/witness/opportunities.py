@@ -42,6 +42,9 @@ ALLOWED_CANDIDATE_TYPES = frozenset(
 )
 ALLOWED_AUTOMATION_KINDS = frozenset(("recurring", "one_shot", "watch"))
 
+# Slack message timestamps look like "1780300000.000001".
+SLACK_TS_RE = re.compile(r"^\d+\.\d+$")
+
 # Recurring framing gate (HIG-227 / HIG-197 Phase 1): only claim recurrence in
 # user-facing copy once the pattern is proven by repeated observation.
 RECURRENCE_MIN_REINFORCEMENT = 3
@@ -506,6 +509,53 @@ def recurrence_evidence_line(
         f"I've seen this {candidate.reinforcement_count} times since "
         f"{first_observed.date().isoformat()}"
     )
+
+
+def candidate_delivery_decision(candidate: WitnessOpportunityCandidate) -> str:
+    """Assign the above-threshold action: notify / question / draft (HIG-227).
+
+    - ``question``: recurring automation with no cadence — the copy asks the
+      user for one instead of guessing.
+    - ``draft``: one-shot with an above-threshold score — the copy offers
+      "say go and I'll do it".
+    - ``notify`` otherwise.
+    """
+
+    if (
+        candidate.automation_kind == "recurring"
+        and not (candidate.cadence_suggestion or "").strip()
+    ):
+        return "question"
+    if candidate.automation_kind == "one_shot":
+        return "draft"
+    return "notify"
+
+
+def candidate_thread_ts(
+    candidate: WitnessOpportunityCandidate,
+    *,
+    source_task: Task | None,
+) -> str | None:
+    """Best-effort source thread for a threaded channel reply (HIG-198).
+
+    Prefers the source task's thread/message ts, then any Slack-shaped ts in
+    the candidate's evidence. Witness scan tasks store the channel id in
+    ``slack_thread_ts``, so only values matching the Slack ts shape count.
+    Returns None when no source thread exists — the post goes top-level.
+    """
+
+    if source_task is not None:
+        for value in (source_task.slack_thread_ts, source_task.slack_message_ts):
+            if isinstance(value, str) and SLACK_TS_RE.match(value):
+                return value
+    for item in candidate.evidence_json or []:
+        if not isinstance(item, dict):
+            continue
+        for key in ("thread_ts", "message_ts", "ts"):
+            value = item.get(key)
+            if isinstance(value, str) and SLACK_TS_RE.match(value):
+                return value
+    return None
 
 
 def _refresh_automation_fields(

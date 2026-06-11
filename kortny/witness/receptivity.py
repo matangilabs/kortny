@@ -176,6 +176,56 @@ def collect_user_feedback_events(
     return tuple(events)
 
 
+def collect_channel_feedback_events(
+    session: Session,
+    *,
+    installation_id: uuid.UUID,
+    channel_id: str,
+    now: datetime | None = None,
+    window_days: int = DISMISSAL_WINDOW_DAYS,
+) -> tuple[UserFeedbackEvent, ...]:
+    """Read a channel's accept/dismiss history out of candidate feedback_json.
+
+    HIG-198 channel delivery has no single target user, so receptivity is
+    learned from everyone's reactions to suggestions in that channel. Scoring
+    semantics are unchanged — this only changes which histories feed
+    :func:`receptivity`.
+    """
+
+    observed_now = now or datetime.now(UTC)
+    cutoff = observed_now - timedelta(days=window_days)
+    candidates = session.scalars(
+        select(WitnessOpportunityCandidate).where(
+            WitnessOpportunityCandidate.installation_id == installation_id,
+            WitnessOpportunityCandidate.channel_id == channel_id,
+        )
+    )
+    events: list[UserFeedbackEvent] = []
+    for candidate in candidates:
+        feedback = candidate.feedback_json or {}
+        history = feedback.get("history")
+        if not isinstance(history, list):
+            continue
+        for entry in history:
+            if not isinstance(entry, dict):
+                continue
+            action = entry.get("action")
+            if action not in ("accepted", "dismissed"):
+                continue
+            at = _parse_datetime(entry.get("at"))
+            if at is None or at < cutoff or at > observed_now:
+                continue
+            events.append(
+                UserFeedbackEvent(
+                    action=action,
+                    category=candidate.candidate_type,
+                    at=at,
+                )
+            )
+    events.sort(key=lambda event: event.at)
+    return tuple(events)
+
+
 def _parse_datetime(value: object) -> datetime | None:
     if not isinstance(value, str) or not value:
         return None

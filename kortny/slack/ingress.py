@@ -17,13 +17,16 @@ from kortny.approvals import (
     TOOL_APPROVAL_PROMPT_PURPOSE,
     TOOL_APPROVAL_REJECTED_PURPOSE,
 )
+from kortny.config import Settings, SettingsError, load_settings
 from kortny.db.models import (
     Installation,
     Schedule,
     SlackInboundEvent,
+    SlackSideEffect,
     Task,
     TaskEvent,
     TaskEventType,
+    WitnessOpportunityCandidate,
 )
 from kortny.db.models import TaskStatus as DbTaskStatus
 from kortny.intent import (
@@ -48,6 +51,7 @@ from kortny.observe import (
     ObservationResult,
     ObserveService,
 )
+from kortny.observe.ambient_files import maybe_create_ambient_file_brief
 from kortny.observe.assessment import (
     CHANNEL_ASSESSMENT_REQUESTED_MESSAGE,
     assessment_event_id_for_membership,
@@ -96,6 +100,12 @@ from kortny.slack.schedule_blocks import (
     schedule_action_blocks,
 )
 from kortny.tasks import TaskIdentity, TaskService
+from kortny.witness.automation import AutomationOutcome, materialize_acceptance
+from kortny.witness.lifecycle import (
+    WITNESS_CHANNEL_SUGGESTION_PURPOSE,
+    accept_candidate,
+    dismiss_candidate,
+)
 
 LEADING_MENTION_RE = re.compile(r"^\s*<@[^>]+>\s*")
 WHITESPACE_RE = re.compile(r"\s+")
@@ -189,6 +199,7 @@ class SlackIngress:
         reaction_provider: ReactionProvider | None = None,
         intent_classifier: IntentClassifier | None = None,
         schedule_fallback_parser: ScheduleFallbackParser | None = None,
+        settings: Settings | None = None,
     ) -> None:
         self.session = session
         self.client = client
@@ -199,6 +210,7 @@ class SlackIngress:
         self.reaction_provider = reaction_provider or LibraryReactionProvider()
         self.intent_classifier = intent_classifier
         self.schedule_fallback_parser = schedule_fallback_parser
+        self.settings = settings
         self.inbound_events = SlackInboundEventService(session)
 
     def handle_schedule_action(
@@ -534,6 +546,16 @@ class SlackIngress:
                 event.get("channel"),
                 result.event.id if result.event is not None else None,
             )
+            if result.event is not None and result.policy is not None:
+                # HIG-231: cheap DB-read gate only — no LLM at ingress.
+                maybe_create_ambient_file_brief(
+                    session=self.session,
+                    installation=installation,
+                    policy=result.policy,
+                    observation=result.event,
+                    event=event,
+                    task_service=self.task_service,
+                )
         else:
             if result.event is not None:
                 self.inbound_events.mark_observed(
@@ -1060,6 +1082,14 @@ class SlackIngress:
             )
             if result.handled:
                 return result
+            witness_result = self._handle_witness_suggestion_reaction(
+                reaction=reaction,
+                channel_id=channel_id,
+                message_ts=message_ts,
+                user_id=user_id,
+            )
+            if witness_result.handled:
+                return witness_result
             approval_result = self._handle_tool_approval_reaction(
                 reaction=reaction,
                 channel_id=channel_id,
@@ -2188,6 +2218,129 @@ class SlackIngress:
                 reason="no_pending_memory_proposal",
             )
 
+    def _handle_witness_suggestion_reaction(
+        self,
+        *,
+        reaction: str,
+        channel_id: str,
+        message_ts: str,
+        user_id: str,
+    ) -> ReactionResult:
+        """Route accept/dismiss reactions on Witness channel suggestion posts.
+
+        HIG-198: the suggestion post is an outbox row whose idempotency key is
+        ``witness_channel_suggestion:{candidate_id}``. Accept reuses the
+        existing lifecycle (accept_candidate -> materialize_acceptance, same
+        as the dashboard); dismiss feeds HIG-227 receptivity learning.
+        """
+
+        side_effect = self.session.scalar(
+            select(SlackSideEffect)
+            .where(
+                SlackSideEffect.purpose == WITNESS_CHANNEL_SUGGESTION_PURPOSE,
+                SlackSideEffect.target_channel_id == channel_id,
+                SlackSideEffect.status == "succeeded",
+                SlackSideEffect.response_json["ts"].as_string() == message_ts,
+            )
+            .order_by(SlackSideEffect.created_at.desc())
+            .limit(1)
+        )
+        if side_effect is None:
+            return ReactionResult(
+                handled=False,
+                action="witness_suggestion",
+                reason="no_witness_suggestion",
+            )
+        candidate_id = _witness_suggestion_candidate_id(side_effect.idempotency_key)
+        if candidate_id is None:
+            return ReactionResult(
+                handled=False,
+                action="witness_suggestion",
+                reason="invalid_witness_suggestion_key",
+            )
+
+        try:
+            if reaction == REACTION_CONFIRM:
+                candidate = accept_candidate(
+                    self.session,
+                    candidate_id,
+                    installation_id=side_effect.installation_id,
+                    by_user_id=user_id,
+                )
+                outcome = self._materialize_witness_acceptance(
+                    candidate,
+                    accepted_by=user_id,
+                )
+                logger.info(
+                    "slack witness suggestion accepted candidate_id=%s user=%s "
+                    "automation_kind=%s schedule_id=%s task_id=%s",
+                    candidate_id,
+                    user_id,
+                    outcome.kind,
+                    outcome.schedule_id,
+                    outcome.task_id,
+                )
+                return ReactionResult(
+                    handled=True,
+                    action="accept_witness_suggestion",
+                )
+            dismiss_candidate(
+                self.session,
+                candidate_id,
+                installation_id=side_effect.installation_id,
+                by_user_id=user_id,
+                reason="slack_reaction",
+            )
+            logger.info(
+                "slack witness suggestion dismissed candidate_id=%s user=%s",
+                candidate_id,
+                user_id,
+            )
+            return ReactionResult(
+                handled=True,
+                action="dismiss_witness_suggestion",
+            )
+        except (LookupError, ValueError) as exc:
+            logger.info(
+                "slack witness suggestion reaction ignored candidate_id=%s "
+                "user=%s reason=%s",
+                candidate_id,
+                user_id,
+                exc,
+            )
+            return ReactionResult(
+                handled=False,
+                action="witness_suggestion",
+                reason="witness_candidate_not_actionable",
+            )
+
+    def _materialize_witness_acceptance(
+        self,
+        candidate: WitnessOpportunityCandidate,
+        *,
+        accepted_by: str,
+    ) -> AutomationOutcome:
+        """Run HIG-224 materialization after a reaction accept.
+
+        Mirrors the dashboard accept path: never undoes the acceptance —
+        configuration problems degrade to a status-only accept.
+        """
+
+        settings = self.settings
+        if settings is None:
+            try:
+                settings = load_settings()
+            except SettingsError:
+                return AutomationOutcome(kind="disabled")
+        return materialize_acceptance(
+            self.session,
+            settings,
+            candidate,
+            accepted_by=accepted_by,
+            slack_client=self.client,
+            schedule_parser=self.schedule_fallback_parser,
+        )
+
     def _post_memory_reaction_result(
         self,
         *,
@@ -2259,6 +2412,16 @@ class SlackIngress:
             return None
         message_ts = event.payload.get("message_ts")
         return message_ts if isinstance(message_ts, str) else None
+
+
+def _witness_suggestion_candidate_id(idempotency_key: str) -> uuid.UUID | None:
+    prefix = f"{WITNESS_CHANNEL_SUGGESTION_PURPOSE}:"
+    if not idempotency_key.startswith(prefix):
+        return None
+    try:
+        return uuid.UUID(idempotency_key[len(prefix) :])
+    except ValueError:
+        return None
 
 
 def _required_str(values: Mapping[str, Any], key: str) -> str:
