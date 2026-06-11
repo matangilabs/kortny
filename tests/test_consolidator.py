@@ -15,6 +15,7 @@ from alembic.config import Config
 from sqlalchemy import Engine, delete, func, select
 from sqlalchemy.orm import Session
 
+from kortny.config import Settings
 from kortny.consolidator import ConsolidationService
 from kortny.consolidator.passes import (
     adjudicate_candidates,
@@ -24,7 +25,7 @@ from kortny.consolidator.passes import (
     project_confirmed_facts,
     run_hygiene,
 )
-from kortny.consolidator.runner import ConsolidatorRunner
+from kortny.consolidator.runner import ConsolidatorRunner, ConsolidatorWorker
 from kortny.db.models import (
     ConsolidationRun,
     Episode,
@@ -1293,3 +1294,58 @@ def test_pass_failure_rolls_back_only_that_pass(db_session: Session) -> None:
     assert run is not None
     counters = run.counters_json
     assert "adjudication" in counters
+
+
+def test_worker_tick_survives_per_pass_commits_and_releases_lock(
+    engine: Engine,
+) -> None:
+    """Regression: the worker tick must tolerate the service's internal
+    commits (the old begin() block raised InvalidRequestError on advisory
+    unlock and crash-looped the live service) and must release the advisory
+    lock on the same connection so the next tick can acquire it."""
+
+    session_factory = make_session_factory(engine=engine)
+    with session_factory() as setup:
+        cleanup_database(setup)
+        installation = create_installation(setup)
+        create_episode(setup, installation, summary="Worker tick episode.")
+        setup.commit()
+        installation_id = installation.id
+
+    settings = Settings.model_validate(
+        {
+            "SLACK_BOT_TOKEN": "xoxb-test",
+            "SLACK_APP_TOKEN": "xapp-test",
+            "SLACK_SIGNING_SECRET": "signing-secret",
+            "LLM_PROVIDER": "openrouter",
+            "LLM_API_KEY": "test-key",
+            "LLM_MODEL": "openai/gpt-test",
+            "COMPOSIO_API_KEY": "composio-key",
+            "POSTGRES_URL": str(engine.url),
+            "KORTNY_EMBEDDINGS_BACKEND": "disabled",
+        }
+    )
+    worker = ConsolidatorWorker(
+        session_factory=session_factory,
+        settings=settings,
+        use_advisory_lock=True,
+        poll_interval_seconds=0.01,
+    )
+    first = worker.run_once(force=True)
+    assert first.status == "processed"
+    # Lock released: an immediate second forced tick acquires it again.
+    second = worker.run_once(force=True)
+    assert second.status == "processed"
+
+    with session_factory() as check:
+        runs = list(
+            check.scalars(
+                select(ConsolidationRun).where(
+                    ConsolidationRun.installation_id == installation_id,
+                    ConsolidationRun.status == "succeeded",
+                )
+            )
+        )
+        assert len(runs) == 2
+        cleanup_database(check)
+        check.commit()

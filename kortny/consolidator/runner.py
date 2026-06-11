@@ -215,16 +215,30 @@ class ConsolidatorWorker:
         now: datetime | None = None,
         force: bool = False,
     ) -> ConsolidatorTickResult:
-        with self.session_factory.begin() as session:
-            result = ConsolidatorRunner(
-                session,
-                settings=self._settings,
-                runner_id=self.runner_id,
-            ).run_once(
-                now=now,
-                use_advisory_lock=self.use_advisory_lock,
-                force=force,
-            )
+        # One dedicated connection per tick, NOT a begin() block: the
+        # service commits after every pass (crash safety), which would
+        # close an enclosing transaction context, and session-level
+        # advisory locks are connection-bound — pooled-connection swaps
+        # after a commit would leak the lock.
+        engine = self.session_factory.kw["bind"]
+        with (
+            engine.connect() as connection,
+            Session(bind=connection, expire_on_commit=False) as session,
+        ):
+            try:
+                result = ConsolidatorRunner(
+                    session,
+                    settings=self._settings,
+                    runner_id=self.runner_id,
+                ).run_once(
+                    now=now,
+                    use_advisory_lock=self.use_advisory_lock,
+                    force=force,
+                )
+                session.commit()
+            except Exception:
+                session.rollback()
+                raise
             logger.info(
                 "consolidator tick runner_id=%s status=%s runs=%s",
                 result.runner_id,
@@ -235,7 +249,12 @@ class ConsolidatorWorker:
 
     def run_forever(self) -> None:
         while True:
-            self.run_once()
+            try:
+                self.run_once()
+            except Exception:
+                # A failed tick (transient DB blip, provider outage) must
+                # not kill the service into a restart loop.
+                logger.exception("consolidator tick failed; continuing")
             time.sleep(self.poll_interval_seconds)
 
     @property
