@@ -36,11 +36,15 @@ class EmbeddingIndex:
         self.session = session
         self.backend = backend
 
-    def ensure(self, kind: str, items: Sequence[tuple[str, str]]) -> None:
-        """Embed and upsert new/changed items; skip unchanged ones (sha gate)."""
+    def ensure(self, kind: str, items: Sequence[tuple[str, str]]) -> int:
+        """Embed and upsert new/changed items; skip unchanged ones (sha gate).
+
+        Returns the number of items embedded (0 when everything was already
+        up to date or on failure).
+        """
 
         try:
-            self._ensure(kind, items)
+            return self._ensure(kind, items)
         except Exception:
             logger.warning(
                 "embedding ensure failed kind=%s model=%s item_count=%s",
@@ -49,6 +53,7 @@ class EmbeddingIndex:
                 len(items),
                 exc_info=True,
             )
+            return 0
 
     def rank(
         self,
@@ -84,10 +89,10 @@ class EmbeddingIndex:
             )
             return None
 
-    def _ensure(self, kind: str, items: Sequence[tuple[str, str]]) -> None:
+    def _ensure(self, kind: str, items: Sequence[tuple[str, str]]) -> int:
         deduped = dict(items)
         if not deduped:
-            return
+            return 0
 
         existing_shas: dict[str, str] = {
             ref_key: content_sha256
@@ -106,7 +111,7 @@ class EmbeddingIndex:
                 continue
             changed.append((ref_key, content, sha))
         if not changed:
-            return
+            return 0
 
         vectors = self.backend.embed_passages([content for _, content, _ in changed])
         statement = pg_insert(ToolEmbedding).values(
@@ -133,6 +138,7 @@ class EmbeddingIndex:
         )
         self.session.execute(statement)
         self.session.flush()
+        return len(changed)
 
 
 def _sha256(content: str) -> str:

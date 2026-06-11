@@ -16,6 +16,11 @@ from sqlalchemy import ColumnElement, Select, or_, select
 from sqlalchemy.orm import Session
 
 from kortny.db.models import Task, TaskEvent, TaskEventType, WorkspaceState
+from kortny.embeddings import (
+    FACT_EMBEDDING_KIND,
+    EmbeddingIndex,
+    fact_embedding_text,
+)
 from kortny.tasks import TaskService
 
 SCOPE_TYPES = frozenset({"workspace", "channel", "user"})
@@ -157,10 +162,12 @@ class WorkspaceStateService:
         *,
         task_service: TaskService | None = None,
         poster: ConfirmationPoster | None = None,
+        embedding_index: EmbeddingIndex | None = None,
     ) -> None:
         self.session = session
         self.task_service = task_service or TaskService(session)
         self.poster = poster
+        self.embedding_index = embedding_index
 
     def get(
         self,
@@ -408,6 +415,13 @@ class WorkspaceStateService:
 
         for previous in existing:
             previous.superseded_by_id = state.id
+
+        # Embed-on-write (failure-isolated inside ensure; no-op without index).
+        if self.embedding_index is not None:
+            self.embedding_index.ensure(
+                FACT_EMBEDDING_KIND,
+                [(str(state.id), fact_embedding_text(state))],
+            )
 
         event.payload = {
             **event.payload,

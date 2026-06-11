@@ -19,6 +19,11 @@ from sqlalchemy.orm import Session
 
 from kortny.db.models import Artifact, Episode, Task, TaskEvent, TaskEventType
 from kortny.db.models import TaskStatus as DbTaskStatus
+from kortny.embeddings import (
+    EPISODE_EMBEDDING_KIND,
+    EmbeddingIndex,
+    episode_embedding_text,
+)
 from kortny.observability import observe_task_event, set_span_attributes, start_span
 from kortny.tasks import TaskService
 
@@ -69,6 +74,7 @@ class EpisodeService:
         *,
         task_service: TaskService | None = None,
         commit_after_write: bool = False,
+        embedding_index: EmbeddingIndex | None = None,
     ) -> None:
         self.session = session
         self.task_service = task_service or TaskService(
@@ -76,6 +82,7 @@ class EpisodeService:
             commit_after_write=commit_after_write,
         )
         self.commit_after_write = commit_after_write
+        self.embedding_index = embedding_index
 
     def record_task(self, task: Task | uuid.UUID) -> TaskEpisode | None:
         """Create or refresh the compact episode for a terminal task.
@@ -127,6 +134,12 @@ class EpisodeService:
         episode.error_json = _error_json(task_obj, events)
 
         self.session.flush()
+        # Embed-on-write (failure-isolated inside ensure; no-op without index).
+        if self.embedding_index is not None:
+            self.embedding_index.ensure(
+                EPISODE_EMBEDDING_KIND,
+                [(str(episode.id), episode_embedding_text(episode))],
+            )
         observe_task_event(
             self.task_service,
             task_obj,

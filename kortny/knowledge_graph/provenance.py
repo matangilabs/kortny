@@ -23,6 +23,7 @@ OBSERVED_SOURCE_TYPES = frozenset(
     {
         "slack_authoritative",
         "user_explicit",
+        "user_confirmed",
         "workspace_state",
         "admin_import",
     }

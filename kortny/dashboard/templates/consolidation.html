@@ -1,0 +1,114 @@
+{% extends "base.html" %}
+
+{% block title %}Consolidation - Kortny Dashboard{% endblock %}
+
+{% block content %}
+  <section class="page-heading">
+    <div>
+      <h1>Consolidation</h1>
+      <p>Sleep-time memory runs: episode promotion, candidate adjudication, duplicate merge, aging, fact reconciliation, and hygiene.</p>
+    </div>
+  </section>
+
+  <section class="summary-grid" aria-label="Consolidation overview">
+    <div class="card metric-card">
+      <span>Total runs</span>
+      <strong>{{ consolidation.total_runs }}</strong>
+    </div>
+    <div class="card metric-card">
+      <span>Last run</span>
+      <strong>{{ consolidation.last_run_at.strftime('%Y-%m-%d %H:%M UTC') if consolidation.last_run_at else 'never' }}</strong>
+    </div>
+    <div class="card metric-card">
+      <span>Total LLM cost</span>
+      <strong>{{ consolidation.total_cost_label }}</strong>
+    </div>
+  </section>
+
+  <section class="card" aria-label="Recent consolidation runs">
+    <header>
+      <h2>Recent runs</h2>
+      <p>Counters per run; failures inside a single pass are noted without failing the run.</p>
+    </header>
+    {% if consolidation.runs %}
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Started</th>
+            <th>Status</th>
+            <th>Promoted</th>
+            <th>Updated</th>
+            <th>Merged</th>
+            <th>Invalidated</th>
+            <th>Archived</th>
+            <th>Purged obs.</th>
+            <th>Profiles</th>
+            <th>Embedded</th>
+            <th>Conflicts</th>
+            <th>Cost</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for run in consolidation.runs %}
+            <tr>
+              <td>{{ run.started_at.strftime('%Y-%m-%d %H:%M') }}</td>
+              <td><span class="badge badge-{{ run.status_tone }}">{{ run.status }}</span></td>
+              <td>{{ run.promoted }}</td>
+              <td>{{ run.updated }}</td>
+              <td>{{ run.merged }}</td>
+              <td>{{ run.invalidated }}</td>
+              <td>{{ run.archived }}</td>
+              <td>{{ run.purged_observations }}</td>
+              <td>{{ run.profiles_refreshed }}</td>
+              <td>{{ run.embedded }}</td>
+              <td>{{ run.conflict_count }}</td>
+              <td>{{ run.cost_label }}</td>
+            </tr>
+            {% if run.pass_errors %}
+              <tr>
+                <td colspan="12">
+                  {% for error in run.pass_errors %}
+                    <span class="badge badge-warning">{{ error }}</span>
+                  {% endfor %}
+                </td>
+              </tr>
+            {% endif %}
+          {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <p class="empty-state">No consolidation runs yet. The consolidator service runs when enough new episodes and observations accumulate, with a nightly floor.</p>
+    {% endif %}
+  </section>
+
+  <section class="card" aria-label="User-confirmed knowledge conflicts">
+    <header>
+      <h2>Conflicts</h2>
+      <p>Episodes that contradicted user-confirmed knowledge. Confirmed facts are never auto-invalidated; review these manually.</p>
+    </header>
+    {% if consolidation.conflicts %}
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Run</th>
+            <th>Entity</th>
+            <th>Episode</th>
+            <th>Reason</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for conflict in consolidation.conflicts %}
+            <tr>
+              <td>{{ conflict.run_started_at.strftime('%Y-%m-%d %H:%M') }}</td>
+              <td><code>{{ conflict.canonical_key or conflict.entity_id }}</code></td>
+              <td><code>{{ conflict.episode_id }}</code></td>
+              <td>{{ conflict.reason }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <p class="empty-state">No conflicts flagged.</p>
+    {% endif %}
+  </section>
+{% endblock %}

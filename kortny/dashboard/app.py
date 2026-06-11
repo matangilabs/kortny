@@ -57,6 +57,7 @@ from kortny.dashboard.data import (
     TaskListPage,
     get_composio_catalog_dashboard,
     get_composio_toolkit_detail,
+    get_consolidation_dashboard,
     get_dashboard_overview,
     get_integration_dashboard,
     get_knowledge_graph_dashboard,
@@ -69,6 +70,7 @@ from kortny.dashboard.data import (
     get_usage_aggregate,
     get_user_detail,
     get_witness_candidates_dashboard,
+    get_witness_kpis,
     list_tasks,
     list_users,
     llm_tier_catalog_options,
@@ -124,6 +126,7 @@ from kortny.db.models import (
     Task,
     TaskEvent,
     TaskStatus,
+    WitnessOpportunityCandidate,
 )
 from kortny.db.session import make_session_factory
 from kortny.execution.preview import verify_preview_token
@@ -160,6 +163,7 @@ from kortny.witness import (
     send_private_suggestion,
     snooze_candidate,
 )
+from kortny.witness.automation import AutomationOutcome, materialize_acceptance
 from kortny.witness.lifecycle import WitnessSlackClient
 
 TEMPLATE_DIR = Path(__file__).parent / "templates"
@@ -669,6 +673,22 @@ def register_routes(app: FastAPI) -> None:
             },
         )
 
+    @app.get("/consolidation", response_class=HTMLResponse)
+    def consolidation(
+        request: Request,
+        principal: Annotated[DashboardPrincipal, Depends(require_principal)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> Response:
+        dashboard = get_consolidation_dashboard(session)
+        return templates.TemplateResponse(
+            request=request,
+            name="consolidation.html",
+            context={
+                **_dashboard_context(principal, active_page="consolidation"),
+                "consolidation": dashboard,
+            },
+        )
+
     @app.get("/witness", response_class=HTMLResponse)
     def witness_candidates(
         request: Request,
@@ -695,12 +715,17 @@ def register_routes(app: FastAPI) -> None:
             page_size=page_size,
             installation_id=principal.installation_id,
         )
+        kpis = get_witness_kpis(
+            session,
+            installation_id=principal.installation_id,
+        )
         return templates.TemplateResponse(
             request=request,
             name="witness.html",
             context={
                 **_dashboard_context(principal, active_page="witness"),
                 "witness": candidates,
+                "witness_kpis": kpis,
                 "witness_return_path": _request_path(request),
                 "notice": notice,
                 "notice_tone": _notice_tone(notice_tone),
@@ -832,14 +857,15 @@ def register_routes(app: FastAPI) -> None:
                 notice = "Witness candidate snoozed for 7 days."
                 tone = "warning"
             elif action == "accept":
-                accept_candidate(
+                accepted = accept_candidate(
                     session,
                     candidate_id,
                     installation_id=installation_id,
                     by_user_id=actor,
                 )
-                notice = "Witness candidate marked useful."
-                tone = "success"
+                notice, tone = _witness_accept_notice(
+                    _materialize_accepted_candidate(session, accepted, actor=actor)
+                )
             elif action == "reactivate":
                 reactivate_candidate(
                     session,
@@ -4704,6 +4730,54 @@ def _witness_run_notice(result: WitnessRunResult) -> str:
         f"{'' if created_count == 1 else 's'}, "
         f"updated {updated_count:,}, skipped {skipped_count:,}."
     )
+
+
+def _materialize_accepted_candidate(
+    session: Session,
+    candidate: WitnessOpportunityCandidate,
+    *,
+    actor: str,
+) -> AutomationOutcome:
+    """Run HIG-224 materialization after a dashboard accept.
+
+    Never undoes the acceptance: configuration problems degrade to a
+    status-only accept instead of raising into the action handler.
+    """
+
+    try:
+        runtime_settings = load_settings()
+    except SettingsError:
+        return AutomationOutcome(kind="disabled")
+    if not runtime_settings.witness_automation_enabled:
+        return AutomationOutcome(kind="disabled")
+    return materialize_acceptance(
+        session,
+        runtime_settings,
+        candidate,
+        accepted_by=actor,
+        slack_client=cast(
+            WitnessSlackClient,
+            WebClient(token=runtime_settings.slack_bot_token),
+        ),
+    )
+
+
+def _witness_accept_notice(outcome: AutomationOutcome) -> tuple[str, str]:
+    if outcome.kind == "one_shot" and outcome.task_id is not None:
+        return ("Witness candidate accepted; Kortny is running it now.", "success")
+    if outcome.kind == "recurring" and outcome.schedule_id is not None:
+        return (
+            "Witness candidate accepted; schedule drafted and waiting for "
+            "Slack confirmation.",
+            "success",
+        )
+    if outcome.failure_reason is not None:
+        return (
+            "Witness candidate marked useful, but automation drafting failed: "
+            f"{outcome.failure_reason}",
+            "warning",
+        )
+    return ("Witness candidate marked useful.", "success")
 
 
 def _witness_autopilot_notice(result: WitnessAutopilotRunResult) -> str:

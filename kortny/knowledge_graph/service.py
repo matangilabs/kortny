@@ -17,6 +17,11 @@ from kortny.db.models import (
     KnowledgeGraphEntity,
     KnowledgeGraphEvidence,
 )
+from kortny.embeddings import (
+    KG_ENTITY_EMBEDDING_KIND,
+    EmbeddingIndex,
+    kg_entity_embedding_text,
+)
 from kortny.knowledge_graph.provenance import (
     provenance_kind,
     provenance_label,
@@ -66,6 +71,7 @@ class RetrievedGraphEntity:
     provenance_label: str
     review_status: str
     evidence_ids: tuple[uuid.UUID, ...]
+    last_seen_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -111,8 +117,24 @@ class GraphStalenessResult:
 class GraphService:
     """Service API for the HIG-181 workspace knowledge graph."""
 
-    def __init__(self, session: Session) -> None:
+    def __init__(
+        self,
+        session: Session,
+        *,
+        embedding_index: EmbeddingIndex | None = None,
+    ) -> None:
         self.session = session
+        self.embedding_index = embedding_index
+
+    def ensure_entity_embedding(self, entity: KnowledgeGraphEntity) -> None:
+        """Embed-on-write hook; no-op without an index, never raises."""
+
+        if self.embedding_index is None:
+            return
+        self.embedding_index.ensure(
+            KG_ENTITY_EMBEDDING_KIND,
+            [(str(entity.id), kg_entity_embedding_text(entity))],
+        )
 
     def create_entity(
         self,
@@ -153,6 +175,8 @@ class GraphService:
             confidence_reason=confidence_reason,
             freshness_window_days=freshness_window_days,
         )
+        if entity.valid_at is None:
+            entity.valid_at = datetime.now(UTC)
         self.session.add(entity)
         self.session.flush()
         if evidence is not None:
@@ -162,6 +186,7 @@ class GraphService:
                 target_id=entity.id,
                 evidence=evidence,
             )
+        self.ensure_entity_embedding(entity)
         return entity
 
     def create_edge(
@@ -199,6 +224,8 @@ class GraphService:
             confidence_reason=confidence_reason,
             freshness_window_days=freshness_window_days,
         )
+        if edge.valid_at is None:
+            edge.valid_at = datetime.now(UTC)
         self.session.add(edge)
         self.session.flush()
         if evidence is not None:
@@ -251,6 +278,7 @@ class GraphService:
         current.lifecycle_state = "superseded"
         current.valid_to = now
         current.expired_at = now
+        current.invalid_at = now
         if replacement is not None:
             replacement.is_current = True
 
@@ -264,22 +292,67 @@ class GraphService:
         current.lifecycle_state = "superseded"
         current.valid_to = now
         current.expired_at = now
+        current.invalid_at = now
         if replacement is not None:
             replacement.is_current = True
+
+    def invalidate_entity(
+        self,
+        current: KnowledgeGraphEntity,
+        *,
+        now: datetime | None = None,
+        reason: str | None = None,
+    ) -> None:
+        """Temporal contradiction: invalidate without deleting (HIG-225).
+
+        History stays queryable — the row keeps its evidence; ``invalid_at``
+        bounds its validity interval and ``is_current`` frees the canonical-key
+        slot for a successor.
+        """
+
+        effective_now = now or datetime.now(UTC)
+        current.invalid_at = effective_now
+        current.lifecycle_state = "contradicted"
+        current.is_current = False
+        current.updated_at = effective_now
+        if reason:
+            current.confidence_reason = reason
+
+    def invalidate_edge(
+        self,
+        current: KnowledgeGraphEdge,
+        *,
+        now: datetime | None = None,
+        reason: str | None = None,
+    ) -> None:
+        """Temporal contradiction for an edge; see ``invalidate_entity``."""
+
+        effective_now = now or datetime.now(UTC)
+        current.invalid_at = effective_now
+        current.lifecycle_state = "contradicted"
+        current.is_current = False
+        current.updated_at = effective_now
+        if reason:
+            current.confidence_reason = reason
 
     def mark_stale_current(
         self,
         *,
         installation_id: uuid.UUID | None = None,
         now: datetime | None = None,
+        default_stale_days: int | None = None,
     ) -> GraphStalenessResult:
-        """Mark current graph rows stale when their freshness window has elapsed."""
+        """Mark current graph rows stale when their freshness window has elapsed.
+
+        ``default_stale_days`` additionally ages rows without an explicit
+        ``freshness_window_days``: rows not reinforced within that many days
+        also go stale (HIG-225 consolidator aging pass).
+        """
 
         effective_now = now or datetime.now(UTC)
         entity_predicates: list[ColumnElement[bool]] = [
             KnowledgeGraphEntity.is_current.is_(True),
             KnowledgeGraphEntity.expired_at.is_(None),
-            KnowledgeGraphEntity.freshness_window_days.is_not(None),
             KnowledgeGraphEntity.lifecycle_state.in_(
                 ("candidate", "active", "confirmed")
             ),
@@ -287,11 +360,17 @@ class GraphService:
         edge_predicates: list[ColumnElement[bool]] = [
             KnowledgeGraphEdge.is_current.is_(True),
             KnowledgeGraphEdge.expired_at.is_(None),
-            KnowledgeGraphEdge.freshness_window_days.is_not(None),
             KnowledgeGraphEdge.lifecycle_state.in_(
                 ("candidate", "active", "confirmed")
             ),
         ]
+        if default_stale_days is None:
+            entity_predicates.append(
+                KnowledgeGraphEntity.freshness_window_days.is_not(None)
+            )
+            edge_predicates.append(
+                KnowledgeGraphEdge.freshness_window_days.is_not(None)
+            )
         if installation_id is not None:
             entity_predicates.append(
                 KnowledgeGraphEntity.installation_id == installation_id
@@ -304,7 +383,7 @@ class GraphService:
         for entity in self.session.scalars(
             select(KnowledgeGraphEntity).where(*entity_predicates)
         ):
-            if _freshness_elapsed(entity, effective_now):
+            if _staleness_elapsed(entity, effective_now, default_stale_days):
                 entity.lifecycle_state = "stale"
                 entity.updated_at = effective_now
                 stale_entities.append(entity)
@@ -313,7 +392,7 @@ class GraphService:
         for edge in self.session.scalars(
             select(KnowledgeGraphEdge).where(*edge_predicates)
         ):
-            if _freshness_elapsed(edge, effective_now):
+            if _staleness_elapsed(edge, effective_now, default_stale_days):
                 edge.lifecycle_state = "stale"
                 edge.updated_at = effective_now
                 stale_edges.append(edge)
@@ -755,6 +834,11 @@ class GraphService:
                 KnowledgeGraphEntity.valid_to.is_(None),
                 KnowledgeGraphEntity.valid_to > func.now(),
             ),
+            or_(
+                KnowledgeGraphEntity.invalid_at.is_(None),
+                KnowledgeGraphEntity.invalid_at > func.now(),
+            ),
+            KnowledgeGraphEntity.system_expired_at.is_(None),
             KnowledgeGraphEntity.lifecycle_state.in_(CURRENT_CONTEXT_STATES),
         )
 
@@ -767,6 +851,11 @@ class GraphService:
                 KnowledgeGraphEdge.valid_to.is_(None),
                 KnowledgeGraphEdge.valid_to > func.now(),
             ),
+            or_(
+                KnowledgeGraphEdge.invalid_at.is_(None),
+                KnowledgeGraphEdge.invalid_at > func.now(),
+            ),
+            KnowledgeGraphEdge.system_expired_at.is_(None),
             KnowledgeGraphEdge.lifecycle_state.in_(CURRENT_CONTEXT_STATES),
         )
 
@@ -827,6 +916,7 @@ def _retrieved_entity(
         provenance_label=provenance_label(kind),
         review_status=review_status(row.attrs_json, row.lifecycle_state),
         evidence_ids=tuple(evidence_ids),
+        last_seen_at=row.last_reinforced_at or row.updated_at,
     )
 
 
@@ -866,3 +956,18 @@ def _freshness_elapsed(
     if reference.tzinfo is None:
         reference = reference.replace(tzinfo=UTC)
     return reference + timedelta(days=row.freshness_window_days) < now
+
+
+def _staleness_elapsed(
+    row: KnowledgeGraphEntity | KnowledgeGraphEdge,
+    now: datetime,
+    default_stale_days: int | None,
+) -> bool:
+    if row.freshness_window_days is not None:
+        return _freshness_elapsed(row, now)
+    if default_stale_days is None:
+        return False
+    reference = row.last_reinforced_at or row.recorded_at or row.created_at
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=UTC)
+    return reference + timedelta(days=default_stale_days) < now

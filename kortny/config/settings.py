@@ -181,6 +181,30 @@ class Settings(BaseSettings):
     witness_delivery_limit: int = Field(
         default=5,
         validation_alias="KORTNY_WITNESS_DELIVERY_LIMIT",
+        description=(
+            "Deprecated: the per-tick drip limit is retired. Digest batching "
+            "(KORTNY_WITNESS_DIGEST_MAX_ITEMS) is the delivery budget now."
+        ),
+    )
+    witness_delivery_threshold: Decimal = Field(
+        default=Decimal("0.55"),
+        validation_alias="KORTNY_WITNESS_DELIVERY_THRESHOLD",
+    )
+    witness_digest_interval_hours: int = Field(
+        default=24,
+        validation_alias="KORTNY_WITNESS_DIGEST_INTERVAL_HOURS",
+    )
+    witness_digest_max_items: int = Field(
+        default=5,
+        validation_alias="KORTNY_WITNESS_DIGEST_MAX_ITEMS",
+    )
+    witness_quiet_hours_start: int | None = Field(
+        default=None,
+        validation_alias="KORTNY_WITNESS_QUIET_HOURS_START",
+    )
+    witness_quiet_hours_end: int | None = Field(
+        default=None,
+        validation_alias="KORTNY_WITNESS_QUIET_HOURS_END",
     )
     witness_scan_interval_seconds: int = Field(
         default=21_600,
@@ -197,6 +221,46 @@ class Settings(BaseSettings):
     witness_autopilot_min_confidence: Decimal = Field(
         default=Decimal("0.600"),
         validation_alias="KORTNY_WITNESS_AUTOPILOT_MIN_CONFIDENCE",
+    )
+    witness_automation_enabled: bool = Field(
+        default=True,
+        validation_alias="KORTNY_WITNESS_AUTOMATION_ENABLED",
+    )
+    consolidator_enabled: bool = Field(
+        default=True,
+        validation_alias="KORTNY_CONSOLIDATOR_ENABLED",
+    )
+    consolidator_poll_interval_seconds: float = Field(
+        default=600.0,
+        validation_alias="KORTNY_CONSOLIDATOR_POLL_INTERVAL_SECONDS",
+    )
+    consolidator_min_new_items: int = Field(
+        default=50,
+        validation_alias="KORTNY_CONSOLIDATOR_MIN_NEW_ITEMS",
+    )
+    consolidator_min_interval_hours: float = Field(
+        default=8.0,
+        validation_alias="KORTNY_CONSOLIDATOR_MIN_INTERVAL_HOURS",
+    )
+    consolidator_quiet_minutes: float = Field(
+        default=60.0,
+        validation_alias="KORTNY_CONSOLIDATOR_QUIET_MINUTES",
+    )
+    consolidator_nightly_floor_hours: float = Field(
+        default=24.0,
+        validation_alias="KORTNY_CONSOLIDATOR_NIGHTLY_FLOOR_HOURS",
+    )
+    consolidator_advisory_lock_key: int = Field(
+        default=759340187,
+        validation_alias="KORTNY_CONSOLIDATOR_ADVISORY_LOCK_KEY",
+    )
+    memory_recency_half_life_days: float = Field(
+        default=14.0,
+        validation_alias="KORTNY_MEMORY_RECENCY_HALF_LIFE_DAYS",
+    )
+    kg_stale_days: int = Field(
+        default=45,
+        validation_alias="KORTNY_KG_STALE_DAYS",
     )
     embeddings_backend: Literal["local", "disabled"] = Field(
         default="local", validation_alias="KORTNY_EMBEDDINGS_BACKEND"
@@ -490,6 +554,63 @@ class Settings(BaseSettings):
     def _valid_witness_scan_interval_seconds(cls, value: int) -> int:
         if value < 0:
             raise ValueError("KORTNY_WITNESS_SCAN_INTERVAL_SECONDS cannot be negative")
+        return value
+
+    @field_validator("witness_delivery_threshold")
+    @classmethod
+    def _valid_witness_delivery_threshold(cls, value: Decimal) -> Decimal:
+        if value < 0 or value > 1:
+            raise ValueError(
+                "KORTNY_WITNESS_DELIVERY_THRESHOLD must be between 0 and 1"
+            )
+        return value
+
+    @field_validator("witness_digest_interval_hours")
+    @classmethod
+    def _valid_witness_digest_interval_hours(cls, value: int) -> int:
+        if value < 1 or value > 168:
+            raise ValueError(
+                "KORTNY_WITNESS_DIGEST_INTERVAL_HOURS must be between 1 and 168"
+            )
+        return value
+
+    @field_validator("witness_digest_max_items")
+    @classmethod
+    def _valid_witness_digest_max_items(cls, value: int) -> int:
+        if value < 1 or value > 25:
+            raise ValueError("KORTNY_WITNESS_DIGEST_MAX_ITEMS must be between 1 and 25")
+        return value
+
+    @field_validator("witness_quiet_hours_start", "witness_quiet_hours_end")
+    @classmethod
+    def _valid_witness_quiet_hours(cls, value: int | None) -> int | None:
+        if value is not None and (value < 0 or value > 23):
+            raise ValueError(
+                "KORTNY_WITNESS_QUIET_HOURS_START/END must be an hour 0-23 (UTC)"
+            )
+        return value
+
+    @field_validator(
+        "consolidator_poll_interval_seconds",
+        "consolidator_min_interval_hours",
+        "consolidator_quiet_minutes",
+        "consolidator_nightly_floor_hours",
+        "memory_recency_half_life_days",
+    )
+    @classmethod
+    def _positive_consolidator_interval(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("Consolidator intervals and half-life must be positive")
+        return value
+
+    @field_validator("consolidator_min_new_items", "kg_stale_days")
+    @classmethod
+    def _positive_consolidator_count(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError(
+                "KORTNY_CONSOLIDATOR_MIN_NEW_ITEMS and KORTNY_KG_STALE_DAYS "
+                "must be at least 1"
+            )
         return value
 
     @field_validator("tool_retrieval_top_k")

@@ -150,6 +150,41 @@ services:
       - .:/app
       - uv-cache:/tmp/uv-cache
 
+  consolidator:
+    image: ghcr.io/astral-sh/uv:python3.11-bookworm-slim
+    working_dir: /app
+    command: ["uv", "run", "python", "-m", "kortny.consolidator"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    env_file:
+      - .env
+    environment:
+      KORTNY_CONSOLIDATOR_ENABLED: ${KORTNY_CONSOLIDATOR_ENABLED:-true}
+      KORTNY_CONSOLIDATOR_POLL_INTERVAL_SECONDS: ${KORTNY_CONSOLIDATOR_POLL_INTERVAL_SECONDS:-600}
+      KORTNY_CONSOLIDATOR_MIN_NEW_ITEMS: ${KORTNY_CONSOLIDATOR_MIN_NEW_ITEMS:-50}
+      KORTNY_CONSOLIDATOR_MIN_INTERVAL_HOURS: ${KORTNY_CONSOLIDATOR_MIN_INTERVAL_HOURS:-8}
+      KORTNY_CONSOLIDATOR_QUIET_MINUTES: ${KORTNY_CONSOLIDATOR_QUIET_MINUTES:-60}
+      KORTNY_CONSOLIDATOR_NIGHTLY_FLOOR_HOURS: ${KORTNY_CONSOLIDATOR_NIGHTLY_FLOOR_HOURS:-24}
+      KORTNY_CONSOLIDATOR_ADVISORY_LOCK_KEY: ${KORTNY_CONSOLIDATOR_ADVISORY_LOCK_KEY:-759340187}
+      KORTNY_MEMORY_RECENCY_HALF_LIFE_DAYS: ${KORTNY_MEMORY_RECENCY_HALF_LIFE_DAYS:-14}
+      KORTNY_KG_STALE_DAYS: ${KORTNY_KG_STALE_DAYS:-45}
+      OBSERVABILITY_ENABLED: ${OBSERVABILITY_ENABLED:-true}
+      OBSERVABILITY_CAPTURE_CONTENT: ${OBSERVABILITY_CAPTURE_CONTENT:-metadata}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      OTEL_EXPORTER_OTLP_HEADERS: ${OTEL_EXPORTER_OTLP_HEADERS:-}
+      OTEL_SERVICE_NAME: ${OTEL_CONSOLIDATOR_SERVICE_NAME:-kortny-consolidator}
+      OTEL_TRACE_SAMPLING_RATIO: ${OTEL_TRACE_SAMPLING_RATIO:-1.0}
+      FASTEMBED_CACHE_PATH: ${FASTEMBED_CACHE_PATH:-/data/fastembed-cache}
+      POSTGRES_URL: postgresql://${POSTGRES_USER:-kortny}:${POSTGRES_PASSWORD:-kortny}@postgres:5432/${POSTGRES_DB:-kortny}
+      UV_CACHE_DIR: /tmp/uv-cache
+      UV_LINK_MODE: copy
+      UV_PROJECT_ENVIRONMENT: /tmp/kortny-venv
+    volumes:
+      - .:/app
+      - uv-cache:/tmp/uv-cache
+      - fastembed-cache:/data/fastembed-cache
+
   dashboard:
     image: ghcr.io/astral-sh/uv:python3.11-bookworm-slim
     working_dir: /app

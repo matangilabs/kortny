@@ -1400,6 +1400,11 @@ class KnowledgeGraphEntity(Base):
         TZ, nullable=False, server_default=func.now()
     )
     expired_at: Mapped[datetime | None] = mapped_column(TZ)
+    # Bi-temporal validity (HIG-225): contradiction sets invalid_at instead of
+    # deleting; system_expired_at records system-side archival.
+    valid_at: Mapped[datetime | None] = mapped_column(TZ)
+    invalid_at: Mapped[datetime | None] = mapped_column(TZ)
+    system_expired_at: Mapped[datetime | None] = mapped_column(TZ)
     is_current: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("true")
     )
@@ -1436,9 +1441,9 @@ class KnowledgeGraphEntity(Base):
         ),
         CheckConstraint(
             "source_type in "
-            "('slack_authoritative', 'user_explicit', 'agent_inferred', "
-            "'onboarding_scan', 'task_summary', 'integration_result', "
-            "'workspace_state', 'admin_import')",
+            "('slack_authoritative', 'user_explicit', 'user_confirmed', "
+            "'agent_inferred', 'onboarding_scan', 'task_summary', "
+            "'integration_result', 'workspace_state', 'admin_import')",
             name="ck_kg_entities_source_type",
         ),
         CheckConstraint(
@@ -1477,6 +1482,7 @@ class KnowledgeGraphEntity(Base):
         ),
         Index("idx_kg_entities_external_ref", "external_ref_type", "external_ref_id"),
         Index("idx_kg_entities_attrs", "attrs_json", postgresql_using="gin"),
+        Index("idx_kg_entities_invalid_at", "invalid_at"),
     )
 
 
@@ -1517,6 +1523,11 @@ class KnowledgeGraphEdge(Base):
         TZ, nullable=False, server_default=func.now()
     )
     expired_at: Mapped[datetime | None] = mapped_column(TZ)
+    # Bi-temporal validity (HIG-225): contradiction sets invalid_at instead of
+    # deleting; system_expired_at records system-side archival.
+    valid_at: Mapped[datetime | None] = mapped_column(TZ)
+    invalid_at: Mapped[datetime | None] = mapped_column(TZ)
+    system_expired_at: Mapped[datetime | None] = mapped_column(TZ)
     is_current: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("true")
     )
@@ -1552,9 +1563,9 @@ class KnowledgeGraphEdge(Base):
         ),
         CheckConstraint(
             "source_type in "
-            "('slack_authoritative', 'user_explicit', 'agent_inferred', "
-            "'onboarding_scan', 'task_summary', 'integration_result', "
-            "'workspace_state', 'admin_import')",
+            "('slack_authoritative', 'user_explicit', 'user_confirmed', "
+            "'agent_inferred', 'onboarding_scan', 'task_summary', "
+            "'integration_result', 'workspace_state', 'admin_import')",
             name="ck_kg_edges_source_type",
         ),
         CheckConstraint(
@@ -1603,6 +1614,7 @@ class KnowledgeGraphEdge(Base):
             "visibility_scope_id",
         ),
         Index("idx_kg_edges_attrs", "attrs_json", postgresql_using="gin"),
+        Index("idx_kg_edges_invalid_at", "invalid_at"),
     )
 
 
@@ -1643,8 +1655,23 @@ class WitnessOpportunityCandidate(Base):
     status: Mapped[str] = mapped_column(
         String, nullable=False, server_default=text("'candidate'")
     )
+    automation_kind: Mapped[str | None] = mapped_column(Text)
+    cadence_suggestion: Mapped[str | None] = mapped_column(Text)
+    deliverable: Mapped[str | None] = mapped_column(Text)
+    automated_schedule_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("schedules.id", ondelete="SET NULL")
+    )
+    automated_task_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("tasks.id", ondelete="SET NULL")
+    )
     cooldown_until: Mapped[datetime | None] = mapped_column(TZ)
     last_suggested_at: Mapped[datetime | None] = mapped_column(TZ)
+    reinforcement_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("1")
+    )
+    first_observed_at: Mapped[datetime | None] = mapped_column(TZ)
+    last_decision: Mapped[str | None] = mapped_column(Text)
+    receptivity_score: Mapped[Decimal | None] = mapped_column(Numeric(4, 3))
     feedback_json: Mapped[dict] = mapped_column(
         JSONB, nullable=False, server_default=text("'{}'::jsonb")
     )
@@ -1685,13 +1712,28 @@ class WitnessOpportunityCandidate(Base):
         ),
         CheckConstraint(
             "status in "
-            "('candidate', 'sent', 'accepted', 'dismissed', 'cooldown', "
-            "'superseded', 'archived')",
+            "('candidate', 'sent', 'accepted', 'automated', 'dismissed', "
+            "'cooldown', 'superseded', 'archived')",
             name="ck_witness_opportunity_candidates_status",
+        ),
+        CheckConstraint(
+            "automation_kind is null or "
+            "automation_kind in ('recurring', 'one_shot', 'watch')",
+            name="ck_witness_opportunity_candidates_automation_kind",
         ),
         CheckConstraint(
             "confidence_score >= 0 and confidence_score <= 1",
             name="ck_witness_opportunity_candidates_confidence",
+        ),
+        CheckConstraint(
+            "last_decision is null or "
+            "last_decision in ('notify', 'question', 'draft', 'silent')",
+            name="ck_witness_opportunity_candidates_last_decision",
+        ),
+        CheckConstraint(
+            "receptivity_score is null or "
+            "(receptivity_score >= 0 and receptivity_score <= 1)",
+            name="ck_witness_opportunity_candidates_receptivity",
         ),
         Index(
             "idx_witness_opportunity_candidates_unique",
@@ -1726,6 +1768,48 @@ class WitnessOpportunityCandidate(Base):
             "idx_witness_opportunity_candidates_evidence",
             "evidence_json",
             postgresql_using="gin",
+        ),
+    )
+
+
+class WitnessDeliveryLog(Base):
+    """Append-only record of every Witness delivery decision (incl. silence)."""
+
+    __tablename__ = "witness_delivery_log"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    installation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("installations.id", ondelete="CASCADE"), nullable=False
+    )
+    slack_user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    candidate_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("witness_opportunity_candidates.id", ondelete="CASCADE")
+    )
+    decision: Mapped[str] = mapped_column(Text, nullable=False)
+    reason: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "decision in ('notify', 'question', 'draft', 'silent', 'digest')",
+            name="ck_witness_delivery_log_decision",
+        ),
+        Index(
+            "idx_witness_delivery_log_user_window",
+            "installation_id",
+            "slack_user_id",
+            "created_at",
+        ),
+        Index("idx_witness_delivery_log_candidate", "candidate_id"),
+        Index(
+            "idx_witness_delivery_log_decision",
+            "installation_id",
+            "decision",
+            "created_at",
         ),
     )
 
@@ -2198,7 +2282,11 @@ class McpServerTool(Base):
 
 
 class ToolEmbedding(Base):
-    """Semantic embedding for one tool card or skill (HIG-219).
+    """Semantic embedding for one tool card, skill, or memory row.
+
+    The table name is historical (HIG-219 shipped it for tool cards/skills);
+    HIG-225 reuses it as the general memory index with kinds ``fact``,
+    ``episode``, and ``kg_entity`` (``ref_key`` = source row UUID as string).
 
     ``embedding`` is an untyped ``vector`` so rows from models with different
     dimensions can coexist; queries cast the query vector at runtime and always
@@ -2225,7 +2313,7 @@ class ToolEmbedding(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "kind in ('tool_card', 'skill')",
+            "kind in ('tool_card', 'skill', 'fact', 'episode', 'kg_entity')",
             name="ck_tool_embeddings_kind",
         ),
         UniqueConstraint(
@@ -2235,6 +2323,43 @@ class ToolEmbedding(Base):
             name="uq_tool_embeddings_kind_ref_key_model",
         ),
         Index("idx_tool_embeddings_kind_model", "kind", "model"),
+    )
+
+
+class ConsolidationRun(Base):
+    """One memory-consolidation run for an installation (HIG-225)."""
+
+    __tablename__ = "consolidation_runs"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    installation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("installations.id", ondelete="CASCADE"), nullable=False
+    )
+    started_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now()
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(TZ)
+    status: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'running'")
+    )
+    counters_json: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 6))
+    error: Mapped[str | None] = mapped_column(Text)
+
+    __table_args__ = (
+        CheckConstraint(
+            "status in ('running', 'succeeded', 'failed')",
+            name="ck_consolidation_runs_status",
+        ),
+        Index(
+            "idx_consolidation_runs_installation_started",
+            "installation_id",
+            "started_at",
+        ),
     )
 
 

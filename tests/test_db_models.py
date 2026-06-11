@@ -1,3 +1,5 @@
+from sqlalchemy import CheckConstraint
+
 from kortny.db.models import Base, LLMProvider, TaskEventType, TaskStatus
 
 
@@ -30,6 +32,7 @@ def test_mvp_schema_declares_all_core_tables() -> None:
         "mcp_servers",
         "mcp_server_tools",
         "tool_embeddings",
+        "consolidation_runs",
         "episodes",
         "llm_usage",
         "llm_budget_policies",
@@ -39,6 +42,7 @@ def test_mvp_schema_declares_all_core_tables() -> None:
         "llm_provider_accounts",
         "llm_tier_assignments",
         "witness_opportunity_candidates",
+        "witness_delivery_log",
         "artifacts",
         "model_pricing",
     }
@@ -344,3 +348,44 @@ def test_knowledge_graph_tables_have_scope_lifecycle_and_evidence_indexes() -> N
         "idx_kg_evidence_observation",
         "idx_kg_evidence_slack_message",
     } <= evidence_indexes
+
+
+def test_memory_spine_schema_declares_bitemporal_columns_and_runs_table() -> None:
+    entities = Base.metadata.tables["kg_entities"]
+    edges = Base.metadata.tables["kg_edges"]
+    for table in (entities, edges):
+        columns = set(table.columns.keys())
+        assert {"valid_at", "invalid_at", "system_expired_at"} <= columns
+        assert table.columns["valid_at"].nullable is True
+        assert table.columns["invalid_at"].nullable is True
+        assert table.columns["system_expired_at"].nullable is True
+    assert "idx_kg_entities_invalid_at" in {index.name for index in entities.indexes}
+    assert "idx_kg_edges_invalid_at" in {index.name for index in edges.indexes}
+
+    runs = Base.metadata.tables["consolidation_runs"]
+    assert {
+        "id",
+        "installation_id",
+        "started_at",
+        "finished_at",
+        "status",
+        "counters_json",
+        "cost_usd",
+        "error",
+    } <= set(runs.columns.keys())
+    assert "ck_consolidation_runs_status" in {
+        constraint.name for constraint in runs.constraints
+    }
+    assert "idx_consolidation_runs_installation_started" in {
+        index.name for index in runs.indexes
+    }
+
+    embeddings = Base.metadata.tables["tool_embeddings"]
+    kind_check = next(
+        constraint
+        for constraint in embeddings.constraints
+        if isinstance(constraint, CheckConstraint)
+        and constraint.name == "ck_tool_embeddings_kind"
+    )
+    for kind in ("tool_card", "skill", "fact", "episode", "kg_entity"):
+        assert kind in str(kind_check.sqltext)

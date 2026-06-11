@@ -7,7 +7,8 @@ import logging
 import re
 import uuid
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
@@ -26,7 +27,14 @@ from kortny.db.models import (
     TaskEvent,
     TaskEventType,
 )
-from kortny.embeddings import EmbeddingIndex
+from kortny.embeddings import (
+    DEFAULT_RECENCY_HALF_LIFE_DAYS,
+    EPISODE_EMBEDDING_KIND,
+    FACT_EMBEDDING_KIND,
+    KG_ENTITY_EMBEDDING_KIND,
+    EmbeddingIndex,
+    ranked_score,
+)
 from kortny.knowledge_graph import (
     DestinationSurface,
     GraphContextPack,
@@ -56,6 +64,8 @@ DEFAULT_SKILLS_CONTEXT_MAX_CHARS = 4_000
 DEFAULT_SKILLS_CONTEXT_MAX_SKILLS = 30
 DEFAULT_CAPABILITIES_CONTEXT_MAX_CHARS = 1_200
 DEFAULT_SKILL_DIRECT_THRESHOLD = 0.60
+RELEVANCE_BUDGET_OMISSION_REASON = "relevance_budget"
+EPISODE_RELATION_TIERS = {"same_thread": 0, "same_channel": 1, "same_user": 2}
 EXECUTION_HINT_SKILL_DIRECT = "skill_direct"
 DEFAULT_CONTEXT_ENGINE_ID = "kortny.context_assembler"
 DEFAULT_CONTEXT_ENGINE_NAME = "ContextAssembler"
@@ -282,6 +292,7 @@ class ContextAssembler:
         capability_overview: CapabilityOverview | None = None,
         embedding_index: EmbeddingIndex | None = None,
         skill_direct_threshold: float = DEFAULT_SKILL_DIRECT_THRESHOLD,
+        recency_half_life_days: float = DEFAULT_RECENCY_HALF_LIFE_DAYS,
     ) -> None:
         if thread_context_max_chars < 1:
             raise ValueError("thread_context_max_chars must be at least 1")
@@ -324,6 +335,7 @@ class ContextAssembler:
         self.capability_overview = capability_overview
         self.embedding_index = embedding_index
         self.skill_direct_threshold = skill_direct_threshold
+        self.recency_half_life_days = recency_half_life_days
         self.workspace_state_service = WorkspaceStateService(
             session,
             task_service=self.task_service,
@@ -540,12 +552,28 @@ class ContextAssembler:
         if not facts:
             return _KnownFactsContext(content=None, selected_facts=(), omissions=())
 
+        fact_scores = self._memory_ranked_scores(
+            FACT_EMBEDDING_KIND,
+            task.input,
+            [(str(fact.id), fact.updated_at) for fact in facts],
+        )
+
         kept = list(facts)
         dropped = 0
         rendered = _render_known_facts(kept)
         while len(rendered) > self.known_facts_max_chars and kept:
-            oldest = min(kept, key=lambda fact: (fact.created_at, fact.id))
-            kept.remove(oldest)
+            if fact_scores is None:
+                drop = min(kept, key=lambda fact: (fact.created_at, fact.id))
+            else:
+                drop = min(
+                    kept,
+                    key=lambda fact: (
+                        fact_scores.get(str(fact.id), 0.0),
+                        fact.created_at,
+                        str(fact.id),
+                    ),
+                )
+            kept.remove(drop)
             dropped += 1
             rendered = _render_known_facts(kept)
 
@@ -554,7 +582,9 @@ class ContextAssembler:
             omissions.append(
                 ContextOmission(
                     "known_facts",
-                    "budget_exceeded_drop_oldest",
+                    "budget_exceeded_drop_oldest"
+                    if fact_scores is None
+                    else RELEVANCE_BUDGET_OMISSION_REASON,
                     dropped,
                 )
             )
@@ -682,6 +712,23 @@ class ContextAssembler:
         if not episodes:
             return _EpisodeContext(content=None, selected_episodes=(), omissions=())
 
+        episode_scores = self._memory_ranked_scores(
+            EPISODE_EMBEDDING_KIND,
+            task.input,
+            [(str(item.episode.id), item.episode.created_at) for item in episodes],
+        )
+        if episode_scores is not None:
+            # Rank within the existing thread > channel > user precedence
+            # tiers; the tier order itself stays a hard precedence.
+            order = {id(item): index for index, item in enumerate(episodes)}
+            episodes.sort(
+                key=lambda item: (
+                    EPISODE_RELATION_TIERS.get(item.relation, 99),
+                    -episode_scores.get(str(item.episode.id), 0.0),
+                    order[id(item)],
+                )
+            )
+
         dropped = 0
         rendered = _render_episode_context(episodes)
         while len(rendered) > self.episode_context_max_chars and episodes:
@@ -694,7 +741,9 @@ class ContextAssembler:
             omissions.append(
                 ContextOmission(
                     "episodes",
-                    "budget_exceeded_drop_lowest_relevance",
+                    "budget_exceeded_drop_lowest_relevance"
+                    if episode_scores is None
+                    else RELEVANCE_BUDGET_OMISSION_REASON,
                     dropped,
                 )
             )
@@ -774,6 +823,26 @@ class ContextAssembler:
                         "scope_guard_failed",
                         len(violations),
                     ),
+                ),
+            )
+
+        entity_scores = self._memory_ranked_scores(
+            KG_ENTITY_EMBEDDING_KIND,
+            task.input,
+            [(str(entity.id), entity.last_seen_at) for entity in pack.entities],
+        )
+        if entity_scores is not None and pack.entities:
+            order = {entity.id: index for index, entity in enumerate(pack.entities)}
+            pack = replace(
+                pack,
+                entities=tuple(
+                    sorted(
+                        pack.entities,
+                        key=lambda entity: (
+                            -entity_scores.get(str(entity.id), 0.0),
+                            order[entity.id],
+                        ),
+                    )
                 ),
             )
 
@@ -952,6 +1021,43 @@ class ContextAssembler:
             execution_hint=execution_hint,
             matched_skill_slug=matched_skill_slug,
         )
+
+    def _memory_ranked_scores(
+        self,
+        kind: str,
+        query_text: str,
+        refs: Sequence[tuple[str, object]],
+    ) -> dict[str, float] | None:
+        """Recency-weighted relevance scores for memory rows, or None.
+
+        ``None`` means semantic ranking is unavailable (no embedding index, or
+        ranking failed) and callers must fall back to the exact legacy
+        behavior. Rows without an embedding score 0.0 and drop first.
+        """
+
+        if self.embedding_index is None or not refs:
+            return None
+        ranked = self.embedding_index.rank(
+            kind,
+            query_text,
+            [ref_key for ref_key, _ in refs],
+            top_k=len(refs),
+        )
+        if ranked is None:
+            return None
+        similarity_by_ref = dict(ranked)
+        scores: dict[str, float] = {}
+        for ref_key, last_seen in refs:
+            similarity = similarity_by_ref.get(ref_key)
+            if similarity is None:
+                scores[ref_key] = 0.0
+                continue
+            scores[ref_key] = ranked_score(
+                similarity,
+                last_seen if isinstance(last_seen, datetime) else None,
+                half_life_days=self.recency_half_life_days,
+            )
+        return scores
 
     def _rank_skills(
         self,

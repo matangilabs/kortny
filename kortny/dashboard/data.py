@@ -31,6 +31,7 @@ from kortny.dashboard.settings import DashboardSettings
 from kortny.db.models import (
     Artifact,
     ComposioConnection,
+    ConsolidationRun,
     Episode,
     Installation,
     KnowledgeGraphEdge,
@@ -51,6 +52,7 @@ from kortny.db.models import (
     TaskEvent,
     TaskEventType,
     TaskStatus,
+    WitnessDeliveryLog,
     WitnessOpportunityCandidate,
     WorkspaceState,
 )
@@ -822,6 +824,7 @@ class WitnessCandidatesDashboard:
     due_candidate_count: int
     sent_count: int
     accepted_count: int
+    automated_count: int
     inactive_count: int
     query: str
     status_filter: str
@@ -833,6 +836,64 @@ class WitnessCandidatesDashboard:
     next_page_url: str | None
     reset_url: str
     rows: tuple[WitnessCandidateRow, ...]
+
+
+@dataclass(frozen=True)
+class WitnessDecisionCount:
+    """One row of the delivery-decision breakdown table."""
+
+    decision: str
+    label: str
+    count: int
+
+
+@dataclass(frozen=True)
+class WitnessKpis:
+    """Proactivity quality KPIs (HIG-227), computed over a rolling window."""
+
+    window_days: int
+    candidates_created: int
+    trigger_rate_per_day: float
+    delivered_count: int
+    silent_count: int
+    silent_rate: float | None
+    acceptance_rate: float | None
+    dismissal_rate: float | None
+    time_to_action_median_hours: float | None
+    conversion_to_automation: float | None
+    decision_counts: tuple[WitnessDecisionCount, ...]
+
+    @property
+    def trigger_rate_label(self) -> str:
+        return f"{self.trigger_rate_per_day:.1f}/day"
+
+    @property
+    def silent_rate_label(self) -> str:
+        return _rate_label(self.silent_rate)
+
+    @property
+    def acceptance_rate_label(self) -> str:
+        return _rate_label(self.acceptance_rate)
+
+    @property
+    def dismissal_rate_label(self) -> str:
+        return _rate_label(self.dismissal_rate)
+
+    @property
+    def conversion_label(self) -> str:
+        return _rate_label(self.conversion_to_automation)
+
+    @property
+    def time_to_action_label(self) -> str:
+        if self.time_to_action_median_hours is None:
+            return "-"
+        return f"{self.time_to_action_median_hours:.1f}h"
+
+
+def _rate_label(value: float | None) -> str:
+    if value is None:
+        return "-"
+    return f"{value * 100:.1f}%"
 
 
 @dataclass(frozen=True)
@@ -2223,6 +2284,17 @@ def get_witness_candidates_dashboard(
         )
         or 0
     )
+    automated_count = (
+        session.scalar(
+            select(func.count())
+            .select_from(WitnessOpportunityCandidate)
+            .where(
+                *installation_scope,
+                WitnessOpportunityCandidate.status == "automated",
+            )
+        )
+        or 0
+    )
     inactive_count = (
         session.scalar(
             select(func.count())
@@ -2260,6 +2332,7 @@ def get_witness_candidates_dashboard(
         due_candidate_count=int(due_candidate_count),
         sent_count=int(sent_count),
         accepted_count=int(accepted_count),
+        automated_count=int(automated_count),
         inactive_count=int(inactive_count),
         query=normalized_query,
         status_filter=normalized_status,
@@ -2298,6 +2371,204 @@ def get_witness_candidates_dashboard(
         reset_url=base_path,
         rows=rows,
     )
+
+
+_WITNESS_DELIVERED_DECISIONS = ("notify", "question", "draft")
+_WITNESS_DECISION_LABELS = {
+    "notify": "Notify (digest)",
+    "question": "Question (cadence ask)",
+    "draft": "Draft (say go)",
+    "silent": "Silent (below threshold)",
+    "digest": "Digest DMs sent",
+}
+
+
+def get_witness_kpis(
+    session: Session,
+    *,
+    installation_id: uuid.UUID | None = None,
+    now: datetime | None = None,
+    window_days: int = 30,
+) -> WitnessKpis:
+    """Compute proactivity-loop KPIs from witness_delivery_log + candidates."""
+
+    observed_now = now or datetime.now(UTC)
+    cutoff = observed_now - timedelta(days=window_days)
+    candidate_scope = _kg_installation_filter(
+        WitnessOpportunityCandidate, installation_id
+    )
+    log_scope = _kg_installation_filter(WitnessDeliveryLog, installation_id)
+
+    candidates_created = int(
+        session.scalar(
+            select(func.count())
+            .select_from(WitnessOpportunityCandidate)
+            .where(
+                *candidate_scope,
+                WitnessOpportunityCandidate.created_at >= cutoff,
+            )
+        )
+        or 0
+    )
+    decision_rows = session.execute(
+        select(WitnessDeliveryLog.decision, func.count())
+        .where(*log_scope, WitnessDeliveryLog.created_at >= cutoff)
+        .group_by(WitnessDeliveryLog.decision)
+    ).all()
+    decision_totals = {decision: int(count) for decision, count in decision_rows}
+    delivered_count = int(
+        session.scalar(
+            select(func.count())
+            .select_from(WitnessDeliveryLog)
+            .where(
+                *log_scope,
+                WitnessDeliveryLog.created_at >= cutoff,
+                WitnessDeliveryLog.decision.in_(_WITNESS_DELIVERED_DECISIONS),
+                WitnessDeliveryLog.reason == "sent",
+            )
+        )
+        or 0
+    )
+    silent_count = decision_totals.get("silent", 0)
+    decided_count = silent_count + delivered_count
+    silent_rate = silent_count / decided_count if decided_count else None
+
+    delivered_pairs = session.execute(
+        select(
+            WitnessDeliveryLog.candidate_id,
+            func.min(WitnessDeliveryLog.created_at),
+        )
+        .where(
+            *log_scope,
+            WitnessDeliveryLog.created_at >= cutoff,
+            WitnessDeliveryLog.decision.in_(_WITNESS_DELIVERED_DECISIONS),
+            WitnessDeliveryLog.reason == "sent",
+            WitnessDeliveryLog.candidate_id.is_not(None),
+        )
+        .group_by(WitnessDeliveryLog.candidate_id)
+    ).all()
+    delivered_at_by_candidate = {
+        candidate_id: delivered_at for candidate_id, delivered_at in delivered_pairs
+    }
+    delivered_candidates = (
+        tuple(
+            session.scalars(
+                select(WitnessOpportunityCandidate).where(
+                    WitnessOpportunityCandidate.id.in_(tuple(delivered_at_by_candidate))
+                )
+            )
+        )
+        if delivered_at_by_candidate
+        else ()
+    )
+    accepted = sum(
+        1
+        for candidate in delivered_candidates
+        if candidate.status in ("accepted", "automated")
+    )
+    dismissed = sum(
+        1 for candidate in delivered_candidates if candidate.status == "dismissed"
+    )
+    delivered_total = len(delivered_candidates)
+    acceptance_rate = accepted / delivered_total if delivered_total else None
+    dismissal_rate = dismissed / delivered_total if delivered_total else None
+
+    latencies_hours: list[float] = []
+    for candidate in delivered_candidates:
+        delivered_at = delivered_at_by_candidate.get(candidate.id)
+        if delivered_at is None:
+            continue
+        action_at = _witness_first_action_at(candidate, after=delivered_at)
+        if action_at is None:
+            continue
+        latencies_hours.append((action_at - delivered_at).total_seconds() / 3600.0)
+    time_to_action = _median(latencies_hours)
+
+    accepted_total = int(
+        session.scalar(
+            select(func.count())
+            .select_from(WitnessOpportunityCandidate)
+            .where(
+                *candidate_scope,
+                WitnessOpportunityCandidate.status.in_(("accepted", "automated")),
+                WitnessOpportunityCandidate.updated_at >= cutoff,
+            )
+        )
+        or 0
+    )
+    automated_total = int(
+        session.scalar(
+            select(func.count())
+            .select_from(WitnessOpportunityCandidate)
+            .where(
+                *candidate_scope,
+                WitnessOpportunityCandidate.status == "automated",
+                WitnessOpportunityCandidate.updated_at >= cutoff,
+            )
+        )
+        or 0
+    )
+    conversion = automated_total / accepted_total if accepted_total else None
+
+    decision_counts = tuple(
+        WitnessDecisionCount(
+            decision=decision,
+            label=_WITNESS_DECISION_LABELS[decision],
+            count=decision_totals.get(decision, 0),
+        )
+        for decision in ("notify", "question", "draft", "silent", "digest")
+    )
+    return WitnessKpis(
+        window_days=window_days,
+        candidates_created=candidates_created,
+        trigger_rate_per_day=candidates_created / window_days if window_days else 0.0,
+        delivered_count=delivered_count,
+        silent_count=silent_count,
+        silent_rate=silent_rate,
+        acceptance_rate=acceptance_rate,
+        dismissal_rate=dismissal_rate,
+        time_to_action_median_hours=time_to_action,
+        conversion_to_automation=conversion,
+        decision_counts=decision_counts,
+    )
+
+
+def _witness_first_action_at(
+    candidate: WitnessOpportunityCandidate,
+    *,
+    after: datetime,
+) -> datetime | None:
+    feedback = candidate.feedback_json or {}
+    history = feedback.get("history")
+    if not isinstance(history, list):
+        return None
+    for entry in history:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("action") not in ("accepted", "dismissed"):
+            continue
+        at_value = entry.get("at")
+        if not isinstance(at_value, str):
+            continue
+        try:
+            at = datetime.fromisoformat(at_value)
+        except ValueError:
+            continue
+        if at.tzinfo is None:
+            at = at.replace(tzinfo=UTC)
+        if at >= after:
+            return at
+    return None
+
+
+def _median(values: list[float]) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2 == 1:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) / 2.0
 
 
 def get_system_health(
@@ -4471,6 +4742,7 @@ _WITNESS_STATUSES = frozenset(
         "candidate",
         "sent",
         "accepted",
+        "automated",
         "dismissed",
         "cooldown",
         "superseded",
@@ -5599,6 +5871,8 @@ def _witness_status_tone(
 ) -> str:
     if status == "accepted":
         return "success"
+    if status == "automated":
+        return "accent"
     if status == "sent":
         return "accent"
     if status == "candidate":
@@ -7633,3 +7907,154 @@ def _format_money(value: Decimal) -> str:
 
 def _format_number(value: int) -> str:
     return f"{value:,}"
+
+
+# --- Consolidation (HIG-225) -------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class ConsolidationConflictRow:
+    """A user-confirmed-knowledge conflict flagged by the promotion pass."""
+
+    run_id: uuid.UUID
+    run_started_at: datetime
+    entity_id: str
+    canonical_key: str
+    episode_id: str
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class ConsolidationRunRow:
+    """One consolidation run for the dashboard."""
+
+    id: uuid.UUID
+    installation_label: str
+    started_at: datetime
+    finished_at: datetime | None
+    status: str
+    status_tone: str
+    promoted: int
+    updated: int
+    merged: int
+    invalidated: int
+    archived: int
+    purged_observations: int
+    profiles_refreshed: int
+    embedded: int
+    conflict_count: int
+    pass_errors: tuple[str, ...]
+    cost_label: str
+
+
+@dataclass(frozen=True, slots=True)
+class ConsolidationDashboard:
+    """Read model for the consolidation dashboard page."""
+
+    runs: tuple[ConsolidationRunRow, ...]
+    conflicts: tuple[ConsolidationConflictRow, ...]
+    total_runs: int
+    total_cost_label: str
+    last_run_at: datetime | None
+
+
+def get_consolidation_dashboard(
+    session: Session,
+    *,
+    limit: int = 25,
+) -> ConsolidationDashboard:
+    """Recent consolidation runs with counters, cost, and flagged conflicts."""
+
+    rows = list(
+        session.scalars(
+            select(ConsolidationRun)
+            .order_by(ConsolidationRun.started_at.desc())
+            .limit(limit)
+        )
+    )
+    total_runs = int(
+        session.scalar(select(func.count()).select_from(ConsolidationRun)) or 0
+    )
+    total_cost = session.scalar(
+        select(func.coalesce(func.sum(ConsolidationRun.cost_usd), 0))
+    )
+    runs = tuple(_consolidation_run_row(session, run) for run in rows)
+    conflicts: list[ConsolidationConflictRow] = []
+    for run in rows:
+        for conflict in _run_conflicts(run):
+            conflicts.append(conflict)
+    return ConsolidationDashboard(
+        runs=runs,
+        conflicts=tuple(conflicts[:50]),
+        total_runs=total_runs,
+        total_cost_label=_format_money(Decimal(total_cost or 0)),
+        last_run_at=rows[0].started_at if rows else None,
+    )
+
+
+def _consolidation_run_row(
+    session: Session, run: ConsolidationRun
+) -> ConsolidationRunRow:
+    counters = run.counters_json if isinstance(run.counters_json, dict) else {}
+    pass_errors = counters.get("pass_errors")
+    error_labels: list[str] = []
+    if isinstance(pass_errors, dict):
+        for name, message in sorted(pass_errors.items()):
+            error_labels.append(f"{name}: {message}")
+    if run.error:
+        error_labels.append(run.error)
+    conflicts = counters.get("conflicts")
+    return ConsolidationRunRow(
+        id=run.id,
+        installation_label=_installation_label(session, run.installation_id),
+        started_at=run.started_at,
+        finished_at=run.finished_at,
+        status=run.status,
+        status_tone=_consolidation_status_tone(run.status),
+        promoted=_counter_int(counters, "promoted"),
+        updated=_counter_int(counters, "updated"),
+        merged=_counter_int(counters, "merged"),
+        invalidated=_counter_int(counters, "invalidated"),
+        archived=_counter_int(counters, "archived"),
+        purged_observations=_counter_int(counters, "purged_observations"),
+        profiles_refreshed=_counter_int(counters, "profiles_refreshed"),
+        embedded=_counter_int(counters, "embedded"),
+        conflict_count=len(conflicts) if isinstance(conflicts, list) else 0,
+        pass_errors=tuple(error_labels),
+        cost_label=_format_money(Decimal(run.cost_usd or 0)),
+    )
+
+
+def _run_conflicts(run: ConsolidationRun) -> tuple[ConsolidationConflictRow, ...]:
+    counters = run.counters_json if isinstance(run.counters_json, dict) else {}
+    raw_conflicts = counters.get("conflicts")
+    if not isinstance(raw_conflicts, list):
+        return ()
+    rows: list[ConsolidationConflictRow] = []
+    for item in raw_conflicts:
+        if not isinstance(item, dict):
+            continue
+        rows.append(
+            ConsolidationConflictRow(
+                run_id=run.id,
+                run_started_at=run.started_at,
+                entity_id=str(item.get("entity_id", "")),
+                canonical_key=str(item.get("canonical_key", "")),
+                episode_id=str(item.get("episode_id", "")),
+                reason=str(item.get("reason", "")),
+            )
+        )
+    return tuple(rows)
+
+
+def _counter_int(counters: Mapping[str, Any], key: str) -> int:
+    value = counters.get(key)
+    return value if isinstance(value, int) else 0
+
+
+def _consolidation_status_tone(status: str) -> str:
+    if status == "succeeded":
+        return "success"
+    if status == "failed":
+        return "danger"
+    return "neutral"

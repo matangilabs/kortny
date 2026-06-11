@@ -1,0 +1,463 @@
+"""Consolidation run orchestration (HIG-225).
+
+One ``run_once`` call executes all consolidation passes for one installation,
+records a ``consolidation_runs`` row with per-pass counters and LLM cost, and
+keeps each pass failure-isolated: a broken pass is noted in
+``counters_json["pass_errors"]`` and the run still succeeds.
+"""
+
+from __future__ import annotations
+
+import logging
+import uuid
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from datetime import UTC, datetime
+
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
+
+from kortny.config import Settings
+from kortny.consolidator.passes import (
+    CONSOLIDATOR_EXTRACTOR,
+    adjudicate_candidates,
+    age_graph,
+    backfill_embeddings,
+    merge_duplicate_entities,
+    project_confirmed_facts,
+    run_hygiene,
+)
+from kortny.consolidator.promotion import EpisodePromotionPass
+from kortny.db.models import (
+    ConsolidationRun,
+    Episode,
+    KnowledgeGraphEntity,
+    ObservationEvent,
+    Task,
+    TaskStatus,
+)
+from kortny.db.models import (
+    LLMProvider as DbLLMProvider,
+)
+from kortny.embeddings import EmbeddingIndex
+from kortny.knowledge_graph import GraphService
+from kortny.llm import (
+    LLMProvider,
+    LLMService,
+    ModelRoute,
+    ModelRouter,
+    ModelRouteTier,
+)
+from kortny.llm.runtime_config import (
+    create_provider_for_selection,
+    select_runtime_model,
+)
+from kortny.tasks import TaskService
+from kortny.tasks.identity import TaskIdentity
+
+logger = logging.getLogger(__name__)
+
+CONSOLIDATION_TASK_SOURCE = "consolidator"
+DEFAULT_KG_STALE_DAYS = 45
+DEFAULT_PROMOTION_EPISODE_CAP = 50
+
+
+@dataclass(frozen=True, slots=True)
+class ConsolidationOutcome:
+    """Result of one consolidation run."""
+
+    run_id: uuid.UUID
+    installation_id: uuid.UUID
+    status: str
+    counters: dict[str, object]
+    task_id: uuid.UUID | None = None
+
+
+class ConsolidationService:
+    """Runs the full consolidation pass sequence for one installation."""
+
+    def __init__(
+        self,
+        session: Session,
+        *,
+        settings: Settings | None = None,
+        llm_provider: LLMProvider | None = None,
+        provider_name: DbLLMProvider | str | None = None,
+        embedding_index: EmbeddingIndex | None = None,
+        kg_stale_days: int | None = None,
+        promotion_episode_cap: int = DEFAULT_PROMOTION_EPISODE_CAP,
+    ) -> None:
+        self.session = session
+        self.settings = settings
+        self.llm_provider = llm_provider
+        self.provider_name = provider_name
+        self.embedding_index = embedding_index
+        self.kg_stale_days = kg_stale_days or (
+            settings.kg_stale_days if settings is not None else DEFAULT_KG_STALE_DAYS
+        )
+        self.promotion_episode_cap = promotion_episode_cap
+
+    # -- trigger inputs -----------------------------------------------------
+
+    def last_successful_run_started_at(
+        self, installation_id: uuid.UUID
+    ) -> datetime | None:
+        return self.session.scalar(
+            select(func.max(ConsolidationRun.started_at)).where(
+                ConsolidationRun.installation_id == installation_id,
+                ConsolidationRun.status == "succeeded",
+            )
+        )
+
+    def new_item_count(
+        self,
+        installation_id: uuid.UUID,
+        since: datetime | None,
+    ) -> int:
+        total = 0
+        for model, column in (
+            (Episode, Episode.created_at),
+            (ObservationEvent, ObservationEvent.observed_at),
+            (KnowledgeGraphEntity, KnowledgeGraphEntity.created_at),
+        ):
+            predicates = [model.installation_id == installation_id]
+            if model is KnowledgeGraphEntity:
+                predicates.append(KnowledgeGraphEntity.lifecycle_state == "candidate")
+            if since is not None:
+                predicates.append(column > since)
+            total += int(
+                self.session.scalar(
+                    select(func.count()).select_from(model).where(*predicates)
+                )
+                or 0
+            )
+        return total
+
+    def promotion_since(self, installation_id: uuid.UUID) -> datetime | None:
+        """Window start for episode promotion.
+
+        Uses the anchor (created_at of the last episode the promotion pass
+        actually processed) recorded by the previous successful run, so a
+        backlog larger than the per-run cap drains across runs instead of
+        being skipped. Falls back to the run start time for older runs that
+        recorded no anchor.
+        """
+
+        last_run = self.session.scalar(
+            select(ConsolidationRun)
+            .where(
+                ConsolidationRun.installation_id == installation_id,
+                ConsolidationRun.status == "succeeded",
+            )
+            .order_by(ConsolidationRun.started_at.desc())
+            .limit(1)
+        )
+        if last_run is None:
+            return None
+        counters = (
+            last_run.counters_json if isinstance(last_run.counters_json, dict) else {}
+        )
+        promotion = counters.get("promotion")
+        if isinstance(promotion, dict) and "anchor" in promotion:
+            anchor = promotion.get("anchor")
+            if isinstance(anchor, str) and anchor:
+                try:
+                    return datetime.fromisoformat(anchor)
+                except ValueError:
+                    return last_run.started_at
+            # Anchor recorded as null: nothing was processed yet (e.g. the
+            # LLM was unavailable) — keep the window open from the start.
+            return None
+        return last_run.started_at
+
+    def last_activity_at(self, installation_id: uuid.UUID) -> datetime | None:
+        latest_observation = self.session.scalar(
+            select(func.max(ObservationEvent.observed_at)).where(
+                ObservationEvent.installation_id == installation_id
+            )
+        )
+        # Only user-driven tasks count as activity; synthetic/scheduled tasks
+        # (including the consolidator's own) must not block the quiet window.
+        latest_task = self.session.scalar(
+            select(func.max(Task.created_at)).where(
+                Task.installation_id == installation_id,
+                (Task.identity_kind.is_(None))
+                | (Task.identity_kind.in_(("slack_message", "slack_event", "manual"))),
+            )
+        )
+        candidates = [
+            value for value in (latest_observation, latest_task) if value is not None
+        ]
+        if not candidates:
+            return None
+        return max(candidates)
+
+    # -- run ----------------------------------------------------------------
+
+    def run_once(
+        self,
+        *,
+        installation_id: uuid.UUID,
+        now: datetime | None = None,
+    ) -> ConsolidationOutcome:
+        effective_now = now or datetime.now(UTC)
+        since = self.promotion_since(installation_id)
+        run = ConsolidationRun(
+            installation_id=installation_id,
+            started_at=effective_now,
+            status="running",
+        )
+        self.session.add(run)
+        self.session.flush()
+
+        task_service = TaskService(self.session)
+        task = self._create_run_task(
+            task_service=task_service,
+            installation_id=installation_id,
+            run_id=run.id,
+        )
+        task_service.transition(task, TaskStatus.running)
+
+        counters: dict[str, object] = {}
+        pass_errors: dict[str, str] = {}
+        graph = GraphService(self.session, embedding_index=self.embedding_index)
+        llm = self._llm_service(
+            task=task, task_service=task_service, pass_errors=pass_errors
+        )
+
+        passes: list[tuple[str, Callable[[], Mapping[str, object]]]] = [
+            (
+                "promotion",
+                lambda: (
+                    EpisodePromotionPass(
+                        self.session,
+                        graph=graph,
+                        llm=llm,
+                        embedding_index=self.embedding_index,
+                    )
+                    .run(
+                        installation_id=installation_id,
+                        task=task,
+                        since=since,
+                        now=effective_now,
+                        episode_cap=self.promotion_episode_cap,
+                    )
+                    .to_payload()
+                ),
+            ),
+            (
+                "adjudication",
+                lambda: adjudicate_candidates(
+                    self.session,
+                    installation_id=installation_id,
+                    now=effective_now,
+                ).to_payload(),
+            ),
+            (
+                "merge",
+                lambda: merge_duplicate_entities(
+                    self.session,
+                    installation_id=installation_id,
+                    graph=graph,
+                    embedding_index=self.embedding_index,
+                    llm=llm,
+                    task=task,
+                    now=effective_now,
+                ).to_payload(),
+            ),
+            (
+                "aging",
+                lambda: age_graph(
+                    self.session,
+                    installation_id=installation_id,
+                    graph=graph,
+                    stale_days=self.kg_stale_days,
+                    now=effective_now,
+                ).to_payload(),
+            ),
+            (
+                "fact_reconciliation",
+                lambda: project_confirmed_facts(
+                    self.session,
+                    installation_id=installation_id,
+                    graph=graph,
+                    task=task,
+                    now=effective_now,
+                ).to_payload(),
+            ),
+            (
+                "hygiene",
+                lambda: run_hygiene(
+                    self.session,
+                    installation_id=installation_id,
+                    task_service=task_service,
+                    now=effective_now,
+                ).to_payload(),
+            ),
+            (
+                "backfill",
+                lambda: backfill_embeddings(
+                    self.session,
+                    installation_id=installation_id,
+                    embedding_index=self.embedding_index,
+                ).to_payload(),
+            ),
+        ]
+        for pass_name, pass_fn in passes:
+            try:
+                counters[pass_name] = pass_fn()
+            except Exception as exc:
+                logger.exception(
+                    "consolidation pass failed installation_id=%s pass=%s",
+                    installation_id,
+                    pass_name,
+                )
+                pass_errors[pass_name] = f"{type(exc).__name__}: {exc}"
+
+        if "promotion" not in counters:
+            # Promotion blew up: keep the episode window open for retry.
+            counters["promotion"] = {
+                "anchor": since.isoformat() if since is not None else None,
+            }
+        if pass_errors:
+            counters["pass_errors"] = dict(pass_errors)
+        counters.update(_rollup_counters(counters))
+
+        run.status = "succeeded"
+        run.finished_at = datetime.now(UTC)
+        run.counters_json = counters
+        self.session.flush()
+        self.session.refresh(task)
+        run.cost_usd = task.total_cost_usd
+
+        task.result_summary = (
+            f"Consolidation run {run.id} finished: "
+            f"promoted={counters.get('promoted', 0)} "
+            f"merged={counters.get('merged', 0)} "
+            f"invalidated={counters.get('invalidated', 0)} "
+            f"archived={counters.get('archived', 0)}"
+        )
+        task_service.transition(task, TaskStatus.succeeded)
+        self.session.flush()
+        return ConsolidationOutcome(
+            run_id=run.id,
+            installation_id=installation_id,
+            status=run.status,
+            counters=counters,
+            task_id=task.id,
+        )
+
+    def _create_run_task(
+        self,
+        *,
+        task_service: TaskService,
+        installation_id: uuid.UUID,
+        run_id: uuid.UUID,
+    ) -> Task:
+        task_input = (
+            "Run Kortny's memory consolidation pass (episode promotion, "
+            "candidate adjudication, duplicate merge, aging, fact "
+            "reconciliation, hygiene, embedding backfill)."
+        )
+        return task_service.create_task(
+            installation_id=installation_id,
+            slack_event_id=f"consolidator:{run_id}",
+            slack_channel_id="consolidator",
+            slack_user_id="consolidator",
+            input=task_input,
+            identity=TaskIdentity.synthetic(
+                source=CONSOLIDATION_TASK_SOURCE,
+                source_id=str(run_id),
+                input_text=task_input,
+            ),
+            source_surface=CONSOLIDATION_TASK_SOURCE,
+        )
+
+    def _llm_service(
+        self,
+        *,
+        task: Task,
+        task_service: TaskService,
+        pass_errors: dict[str, str],
+    ) -> LLMService | None:
+        try:
+            if self.llm_provider is not None:
+                model_route = ModelRoute(
+                    tier=ModelRouteTier.cheap_fast,
+                    model=self.llm_provider.model,
+                    reason="consolidator_run",
+                )
+                provider: LLMProvider = self.llm_provider
+                provider_name = self.provider_name or DbLLMProvider.openrouter
+            else:
+                if self.settings is None:
+                    raise RuntimeError("Settings are required to build an LLM service")
+                model_route = ModelRouter(self.settings).route_for_tier(
+                    ModelRouteTier.cheap_fast,
+                    reason="consolidator_run",
+                )
+                selection = select_runtime_model(
+                    session=self.session,
+                    settings=self.settings,
+                    installation_id=task.installation_id,
+                    model_route=model_route,
+                )
+                model_route = selection.model_route
+                provider = create_provider_for_selection(
+                    settings=self.settings,
+                    selection=selection,
+                )
+                provider_name = selection.provider_name
+            return LLMService(
+                session=self.session,
+                provider=provider,
+                provider_name=provider_name,
+                task_service=task_service,
+                model_route=model_route,
+            )
+        except Exception as exc:
+            logger.warning(
+                "consolidator LLM unavailable; LLM passes will be skipped",
+                exc_info=True,
+            )
+            pass_errors["llm"] = f"{type(exc).__name__}: {exc}"
+            return None
+
+
+def _rollup_counters(counters: dict[str, object]) -> dict[str, object]:
+    """Flatten the headline counters the dashboard and design doc name."""
+
+    def _get(pass_name: str, key: str) -> int:
+        section = counters.get(pass_name)
+        if isinstance(section, dict):
+            value = section.get(key)
+            if isinstance(value, int):
+                return value
+        return 0
+
+    def _conflicts() -> list[object]:
+        section = counters.get("promotion")
+        if isinstance(section, dict):
+            value = section.get("conflicts")
+            if isinstance(value, list):
+                return value
+        return []
+
+    return {
+        "promoted": _get("promotion", "promoted"),
+        "updated": _get("promotion", "updated"),
+        "invalidated": _get("promotion", "invalidated"),
+        "merged": _get("merge", "merged"),
+        "archived": _get("adjudication", "archived") + _get("aging", "archived"),
+        "purged_observations": _get("hygiene", "purged_observations"),
+        "profiles_refreshed": _get("hygiene", "profiles_refreshed"),
+        "embedded": _get("backfill", "embedded"),
+        "conflicts": _conflicts(),
+    }
+
+
+__all__ = [
+    "CONSOLIDATOR_EXTRACTOR",
+    "ConsolidationOutcome",
+    "ConsolidationService",
+]
