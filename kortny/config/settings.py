@@ -166,6 +166,14 @@ class Settings(BaseSettings):
         default=True,
         validation_alias="KORTNY_WITNESS_ENABLED",
     )
+    app_home_enabled: bool = Field(
+        default=True,
+        validation_alias="KORTNY_APP_HOME_ENABLED",
+    )
+    assistant_enabled: bool = Field(
+        default=True,
+        validation_alias="KORTNY_ASSISTANT_ENABLED",
+    )
     witness_deliver_private: bool = Field(
         default=False,
         validation_alias="KORTNY_WITNESS_DELIVER_PRIVATE",

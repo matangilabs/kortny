@@ -33,9 +33,12 @@ from kortny.logging_config import configure_logging
 from kortny.observability import configure_tracing, record_span_exception, start_span
 from kortny.scheduler import LLMScheduleParser
 from kortny.slack.acknowledgement import LLMAcknowledgementGenerator
+from kortny.slack.app_home import register_app_home
+from kortny.slack.assistant import register_assistant
 from kortny.slack.ingress import SlackIngress, is_bare_app_mention
 from kortny.slack.outbox import SlackSideEffectOutbox
 from kortny.slack.schedule_blocks import SCHEDULE_ACTION_PREFIX
+from kortny.slack.witness_actions import register_witness_actions
 
 T = TypeVar("T")
 logger = logging.getLogger(__name__)
@@ -287,6 +290,18 @@ def create_bolt_app(
                     raise
 
         acknowledge_then_handle(ack, handle)
+
+    if resolved_settings.app_home_enabled:
+        register_app_home(
+            app, settings=resolved_settings, session_factory=session_factory
+        )
+    if resolved_settings.assistant_enabled:
+        register_assistant(
+            app, settings=resolved_settings, session_factory=session_factory
+        )
+    register_witness_actions(
+        app, settings=resolved_settings, session_factory=session_factory
+    )
 
     return app
 
