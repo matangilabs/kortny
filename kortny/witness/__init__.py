@@ -1,5 +1,14 @@
 """Witness candidate primitives for proactive Kortny behavior."""
 
+from kortny.witness.automation import (
+    WITNESS_AUTOMATED_MESSAGE,
+    WITNESS_AUTOMATION_CONFIRMATION_PURPOSE,
+    WITNESS_AUTOMATION_DRAFTED_MESSAGE,
+    WITNESS_AUTOMATION_FAILED_MESSAGE,
+    AutomationOutcome,
+    materialize_acceptance,
+    sync_candidate_for_schedule_action,
+)
 from kortny.witness.autopilot import (
     DEFAULT_WITNESS_AUTOPILOT_LIMIT,
     DEFAULT_WITNESS_AUTOPILOT_MIN_CONFIDENCE,
@@ -38,17 +47,32 @@ from kortny.witness.lifecycle import (
 )
 from kortny.witness.opportunities import (
     ALLOWED_CANDIDATE_TYPES,
+    RECURRENCE_MIN_REINFORCEMENT,
+    RECURRENCE_MIN_SPAN,
     WITNESS_OPPORTUNITY_CANDIDATES_PROJECTED_MESSAGE,
     WitnessOpportunityCandidateInput,
     WitnessOpportunityCandidateResult,
     WitnessOpportunityService,
+    recurrence_evidence_line,
+    recurrence_is_proven,
+)
+from kortny.witness.receptivity import (
+    UserFeedbackEvent,
+    collect_user_feedback_events,
+    effective_confidence,
+    receptivity,
 )
 from kortny.witness.runner import (
     DEFAULT_WITNESS_DELIVERY_LIMIT,
+    DEFAULT_WITNESS_DELIVERY_THRESHOLD,
+    DEFAULT_WITNESS_DIGEST_INTERVAL,
+    DEFAULT_WITNESS_DIGEST_MAX_ITEMS,
     DEFAULT_WITNESS_PROFILE_SCAN_LIMIT,
     DEFAULT_WITNESS_SCAN_INTERVAL,
+    WITNESS_DIGEST_PURPOSE,
     WITNESS_RUNNER_DELIVERY_SENT_MESSAGE,
     WITNESS_RUNNER_DELIVERY_SKIPPED_MESSAGE,
+    WITNESS_RUNNER_DIGEST_SENT_MESSAGE,
     WITNESS_RUNNER_PROFILE_SCAN_COMPLETED_MESSAGE,
     WITNESS_RUNNER_PROFILE_SCAN_FAILED_MESSAGE,
     WITNESS_RUNNER_PROFILE_SCAN_STARTED_MESSAGE,
@@ -61,6 +85,26 @@ from kortny.witness.runner import (
 
 __all__ = [
     "ALLOWED_CANDIDATE_TYPES",
+    "RECURRENCE_MIN_REINFORCEMENT",
+    "RECURRENCE_MIN_SPAN",
+    "DEFAULT_WITNESS_DELIVERY_THRESHOLD",
+    "DEFAULT_WITNESS_DIGEST_INTERVAL",
+    "DEFAULT_WITNESS_DIGEST_MAX_ITEMS",
+    "WITNESS_DIGEST_PURPOSE",
+    "WITNESS_RUNNER_DIGEST_SENT_MESSAGE",
+    "UserFeedbackEvent",
+    "collect_user_feedback_events",
+    "effective_confidence",
+    "receptivity",
+    "recurrence_evidence_line",
+    "recurrence_is_proven",
+    "WITNESS_AUTOMATED_MESSAGE",
+    "WITNESS_AUTOMATION_CONFIRMATION_PURPOSE",
+    "WITNESS_AUTOMATION_DRAFTED_MESSAGE",
+    "WITNESS_AUTOMATION_FAILED_MESSAGE",
+    "AutomationOutcome",
+    "materialize_acceptance",
+    "sync_candidate_for_schedule_action",
     "DEFAULT_WITNESS_AUTOPILOT_LIMIT",
     "DEFAULT_WITNESS_AUTOPILOT_MIN_CONFIDENCE",
     "WITNESS_CHANNEL_PROFILE_EXTRACTOR_PROMPT_NAME",

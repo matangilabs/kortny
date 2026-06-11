@@ -221,6 +221,13 @@ class ScheduleCommandService:
             previous_status=previous_status,
             now=now,
         )
+        _sync_witness_candidate(
+            self.session,
+            schedule,
+            action="activate",
+            by_user_id=context.slack_user_id,
+            now=now,
+        )
         return ScheduleCommandResult(
             action="activate",
             schedule=schedule,
@@ -257,6 +264,13 @@ class ScheduleCommandService:
             message=SCHEDULE_CANCELLED_MESSAGE,
             action="cancel",
             previous_status=previous_status,
+            now=now,
+        )
+        _sync_witness_candidate(
+            self.session,
+            schedule,
+            action="cancel",
+            by_user_id=context.slack_user_id,
             now=now,
         )
         return ScheduleCommandResult(
@@ -423,6 +437,31 @@ class ScheduleCommandService:
 
     def _stamp_metadata(self, schedule: Schedule, values: dict[str, str]) -> None:
         schedule.metadata_json = {**dict(schedule.metadata_json or {}), **values}
+
+
+def _sync_witness_candidate(
+    session: Session,
+    schedule: Schedule,
+    *,
+    action: str,
+    by_user_id: str,
+    now: datetime,
+) -> None:
+    """Link witness-drafted schedule confirmations back to their candidate.
+
+    Imported lazily: kortny.witness.automation depends on this package, so a
+    module-level import would be circular.
+    """
+
+    from kortny.witness.automation import sync_candidate_for_schedule_action
+
+    sync_candidate_for_schedule_action(
+        session,
+        schedule,
+        action=action,
+        by_user_id=by_user_id,
+        now=now,
+    )
 
 
 def parse_schedule_command(text: str) -> ScheduleCommand | None:

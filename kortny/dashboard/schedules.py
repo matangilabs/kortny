@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from kortny.db.models import Schedule, SlackIdentity, Task
 from kortny.scheduler.creation import parse_schedule_request
+from kortny.witness.automation import sync_candidate_for_schedule_action
 
 SCHEDULE_PAGE_SIZE = 25
 SCHEDULE_RUN_LIMIT = 10
@@ -254,6 +255,14 @@ def apply_schedule_action(
     schedule.metadata_json = metadata
     schedule.updated_at = now or datetime.now(UTC)
     session.add(schedule)
+    if action in {"activate", "cancel"}:
+        sync_candidate_for_schedule_action(
+            session,
+            schedule,
+            action=action,
+            by_user_id=slack_user_id or "dashboard",
+            now=now,
+        )
     session.commit()
     return notice
 

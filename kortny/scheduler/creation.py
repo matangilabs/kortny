@@ -269,6 +269,7 @@ class ScheduleCreationService:
         context: ScheduleCreationContext,
         text: str,
         now: datetime | None = None,
+        force_confirmation: bool = False,
     ) -> ScheduleProposal | None:
         """Create a schedule if the text has a supported schedule."""
 
@@ -288,9 +289,13 @@ class ScheduleCreationService:
         if draft is None:
             return None
 
-        needs_confirmation = draft.needs_confirmation or _needs_confirmation(
-            text=text,
-            draft=draft,
+        needs_confirmation = (
+            force_confirmation
+            or draft.needs_confirmation
+            or _needs_confirmation(
+                text=text,
+                draft=draft,
+            )
         )
         status = "proposed" if needs_confirmation else "active"
         delivery = infer_schedule_delivery(context=context, text=text)

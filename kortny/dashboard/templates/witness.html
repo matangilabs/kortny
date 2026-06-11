@@ -45,12 +45,80 @@
       <strong>{{ witness.accepted_count|number }}</strong>
       <small>Suggestions that became useful work</small>
     </div>
+    <div class="card metric-card metric-success">
+      <span>Automated</span>
+      <strong>{{ witness.automated_count|number }}</strong>
+      <small>Accepted suggestions converted to standing automations</small>
+    </div>
     <div class="card metric-card metric-warning">
       <span>Inactive</span>
       <strong>{{ witness.inactive_count|number }}</strong>
       <small>Dismissed, cooled down, superseded, or archived</small>
     </div>
   </section>
+
+  {% if witness_kpis %}
+  <section class="summary-grid witness-summary" aria-label="Proactivity quality KPIs (last {{ witness_kpis.window_days }} days)">
+    <div class="card metric-card">
+      <span>Trigger rate</span>
+      <strong>{{ witness_kpis.trigger_rate_label }}</strong>
+      <small>{{ witness_kpis.candidates_created|number }} candidates created in {{ witness_kpis.window_days }}d</small>
+    </div>
+    <div class="card metric-card metric-success">
+      <span>Delivered</span>
+      <strong>{{ witness_kpis.delivered_count|number }}</strong>
+      <small>Digest items sent in {{ witness_kpis.window_days }}d</small>
+    </div>
+    <div class="card metric-card">
+      <span>Silent rate</span>
+      <strong>{{ witness_kpis.silent_rate_label }}</strong>
+      <small>{{ witness_kpis.silent_count|number }} below-threshold decisions</small>
+    </div>
+    <div class="card metric-card metric-success">
+      <span>Acceptance rate</span>
+      <strong>{{ witness_kpis.acceptance_rate_label }}</strong>
+      <small>Of delivered suggestions</small>
+    </div>
+    <div class="card metric-card metric-warning">
+      <span>Dismissal rate</span>
+      <strong>{{ witness_kpis.dismissal_rate_label }}</strong>
+      <small>Of delivered suggestions</small>
+    </div>
+    <div class="card metric-card">
+      <span>Time to action</span>
+      <strong>{{ witness_kpis.time_to_action_label }}</strong>
+      <small>Median accept/dismiss latency</small>
+    </div>
+    <div class="card metric-card metric-success">
+      <span>Conversion</span>
+      <strong>{{ witness_kpis.conversion_label }}</strong>
+      <small>Accepted suggestions that became automations</small>
+    </div>
+  </section>
+
+  <section class="card detail-section" aria-label="Delivery decision breakdown">
+    <header>
+      <h2>Delivery decisions (last {{ witness_kpis.window_days }} days)</h2>
+      <p>Every delivery decision is recorded, including silence. Volume is budgeted into one digest DM per user per window.</p>
+    </header>
+    <table class="table">
+      <thead>
+        <tr>
+          <th scope="col">Decision</th>
+          <th scope="col">Count</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in witness_kpis.decision_counts %}
+          <tr>
+            <td>{{ row.label }}</td>
+            <td>{{ row.count|number }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+  {% endif %}
 
   <section class="memory-toolbar graph-toolbar" aria-label="Witness candidate result count">
     <p>
@@ -77,6 +145,7 @@
           <option value="all" {{ "selected" if witness.status_filter == "all" else "" }}>All statuses</option>
           <option value="sent" {{ "selected" if witness.status_filter == "sent" else "" }}>Sent</option>
           <option value="accepted" {{ "selected" if witness.status_filter == "accepted" else "" }}>Accepted</option>
+          <option value="automated" {{ "selected" if witness.status_filter == "automated" else "" }}>Automated</option>
           <option value="dismissed" {{ "selected" if witness.status_filter == "dismissed" else "" }}>Dismissed</option>
           <option value="cooldown" {{ "selected" if witness.status_filter == "cooldown" else "" }}>Cooldown</option>
           <option value="superseded" {{ "selected" if witness.status_filter == "superseded" else "" }}>Superseded</option>
@@ -129,6 +198,9 @@
               <strong>{{ row.candidate.title }}</strong>
               <span class="badge badge-{{ row.tone }}">{{ row.status_label }}</span>
               <span class="badge badge-accent">{{ row.type_label }}</span>
+              {% if row.candidate.automation_kind %}
+                <span class="badge badge-neutral">{{ row.candidate.automation_kind|replace("_", " ")|title }}</span>
+              {% endif %}
               <span class="badge badge-neutral">{{ row.confidence_label }} confidence</span>
             </div>
             <p class="witness-summary-text">{{ row.candidate.summary }}</p>
@@ -226,6 +298,12 @@
                 {% endif %}
                 {% if row.source_profile %}
                   <span>Profile v{{ row.source_profile.profile_version }}</span>
+                {% endif %}
+                {% if row.candidate.automated_schedule_id %}
+                  <a href="/schedules/{{ row.candidate.automated_schedule_id }}">View automation schedule</a>
+                {% endif %}
+                {% if row.candidate.automated_task_id %}
+                  <a href="/tasks/{{ row.candidate.automated_task_id }}">View automation task</a>
                 {% endif %}
                 <code class="inline-code">{{ row.candidate.dedupe_key }}</code>
               </div>

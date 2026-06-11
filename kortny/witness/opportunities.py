@@ -10,7 +10,7 @@ import hashlib
 import re
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -40,6 +40,12 @@ ALLOWED_CANDIDATE_TYPES = frozenset(
         "general_help",
     )
 )
+ALLOWED_AUTOMATION_KINDS = frozenset(("recurring", "one_shot", "watch"))
+
+# Recurring framing gate (HIG-227 / HIG-197 Phase 1): only claim recurrence in
+# user-facing copy once the pattern is proven by repeated observation.
+RECURRENCE_MIN_REINFORCEMENT = 3
+RECURRENCE_MIN_SPAN = timedelta(days=7)
 
 _WHITESPACE_RE = re.compile(r"\s+")
 
@@ -71,6 +77,9 @@ class WitnessOpportunityCandidateInput:
     confidence_score: Decimal
     confidence_reason: str
     metadata_json: dict[str, Any]
+    automation_kind: str | None = None
+    cadence_suggestion: str | None = None
+    deliverable: str | None = None
 
 
 class WitnessOpportunityService:
@@ -187,6 +196,11 @@ class WitnessOpportunityService:
                         500,
                     ),
                     status="candidate",
+                    automation_kind=candidate_input.automation_kind,
+                    cadence_suggestion=candidate_input.cadence_suggestion,
+                    deliverable=candidate_input.deliverable,
+                    reinforcement_count=1,
+                    first_observed_at=now,
                     feedback_json={},
                     metadata_json=metadata,
                     created_at=now,
@@ -205,6 +219,8 @@ class WitnessOpportunityService:
                 candidate.source_id = str(profile.id)
                 candidate.source_task_id = task.id
                 candidate.source_profile_id = profile.id
+                _record_reinforcement(candidate)
+                _refresh_automation_fields(candidate, candidate_input)
                 candidate.confidence_score = max(
                     candidate.confidence_score or Decimal("0.000"),
                     _bounded_confidence(candidate_input.confidence_score),
@@ -342,6 +358,11 @@ class WitnessOpportunityService:
                         500,
                     ),
                     status="candidate",
+                    automation_kind=candidate_input.automation_kind,
+                    cadence_suggestion=candidate_input.cadence_suggestion,
+                    deliverable=candidate_input.deliverable,
+                    reinforcement_count=1,
+                    first_observed_at=now,
                     feedback_json={},
                     metadata_json=metadata,
                     created_at=now,
@@ -360,6 +381,8 @@ class WitnessOpportunityService:
                 if candidate.source_type == "task_summary":
                     candidate.source_id = str(task.id)
                 candidate.source_task_id = task.id
+                _record_reinforcement(candidate)
+                _refresh_automation_fields(candidate, candidate_input)
                 candidate.confidence_score = max(
                     candidate.confidence_score or Decimal("0.000"),
                     _bounded_confidence(candidate_input.confidence_score),
@@ -433,6 +456,72 @@ class WitnessOpportunityService:
                 WitnessOpportunityCandidate.dedupe_key == dedupe_key,
             )
         )
+
+
+def _record_reinforcement(candidate: WitnessOpportunityCandidate) -> None:
+    """Count one re-observation of an existing candidate (dedupe-update path)."""
+
+    candidate.reinforcement_count = (candidate.reinforcement_count or 1) + 1
+    if candidate.first_observed_at is None:
+        candidate.first_observed_at = candidate.created_at
+
+
+def recurrence_is_proven(
+    candidate: WitnessOpportunityCandidate,
+    *,
+    now: datetime,
+) -> bool:
+    """True when a recurring candidate has earned a recurrence claim in copy.
+
+    Requires ``automation_kind='recurring'``, at least
+    ``RECURRENCE_MIN_REINFORCEMENT`` observations, and an observation span of
+    at least ``RECURRENCE_MIN_SPAN`` since ``first_observed_at``.
+    """
+
+    if candidate.automation_kind != "recurring":
+        return False
+    if (candidate.reinforcement_count or 1) < RECURRENCE_MIN_REINFORCEMENT:
+        return False
+    first_observed = candidate.first_observed_at or candidate.created_at
+    if first_observed is None:
+        return False
+    if first_observed.tzinfo is None:
+        first_observed = first_observed.replace(tzinfo=UTC)
+    return now - first_observed >= RECURRENCE_MIN_SPAN
+
+
+def recurrence_evidence_line(
+    candidate: WitnessOpportunityCandidate,
+    *,
+    now: datetime,
+) -> str | None:
+    """Return the proven-recurrence evidence line, or None below the gate."""
+
+    if not recurrence_is_proven(candidate, now=now):
+        return None
+    first_observed = candidate.first_observed_at or candidate.created_at
+    if first_observed.tzinfo is None:
+        first_observed = first_observed.replace(tzinfo=UTC)
+    return (
+        f"I've seen this {candidate.reinforcement_count} times since "
+        f"{first_observed.date().isoformat()}"
+    )
+
+
+def _refresh_automation_fields(
+    candidate: WitnessOpportunityCandidate,
+    candidate_input: WitnessOpportunityCandidateInput,
+) -> None:
+    """Refresh automation intent on dedupe updates without wiping known values."""
+
+    if candidate_input.automation_kind is not None:
+        candidate.automation_kind = candidate_input.automation_kind
+    if candidate_input.cadence_suggestion is not None:
+        candidate.cadence_suggestion = _bounded_text(
+            candidate_input.cadence_suggestion, 160
+        )
+    if candidate_input.deliverable is not None:
+        candidate.deliverable = _bounded_text(candidate_input.deliverable, 300)
 
 
 def _channel_profile_candidate_evidence_items(

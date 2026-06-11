@@ -55,6 +55,7 @@ def dismiss_candidate(
 ) -> WitnessOpportunityCandidate:
     candidate = _candidate_for_update(session, candidate_id, installation_id)
     _ensure_not_archived(candidate)
+    _ensure_not_automated(candidate)
     now = datetime.now(UTC)
     candidate.status = "dismissed"
     candidate.cooldown_until = None
@@ -82,6 +83,7 @@ def snooze_candidate(
         raise ValueError("Snooze duration must be positive.")
     candidate = _candidate_for_update(session, candidate_id, installation_id)
     _ensure_not_archived(candidate)
+    _ensure_not_automated(candidate)
     now = datetime.now(UTC)
     cooldown_until = now + duration
     candidate.status = "cooldown"
@@ -110,6 +112,7 @@ def accept_candidate(
 ) -> WitnessOpportunityCandidate:
     candidate = _candidate_for_update(session, candidate_id, installation_id)
     _ensure_not_archived(candidate)
+    _ensure_not_automated(candidate)
     now = datetime.now(UTC)
     candidate.status = "accepted"
     candidate.cooldown_until = None
@@ -135,6 +138,7 @@ def reactivate_candidate(
     candidate = _candidate_for_update(session, candidate_id, installation_id)
     if candidate.status == "archived":
         raise ValueError("Archived Witness candidates cannot be reactivated.")
+    _ensure_not_automated(candidate)
     now = datetime.now(UTC)
     candidate.status = "candidate"
     candidate.cooldown_until = None
@@ -275,6 +279,11 @@ def _candidate_for_update(
 def _ensure_not_archived(candidate: WitnessOpportunityCandidate) -> None:
     if candidate.status == "archived":
         raise ValueError("This Witness candidate is archived.")
+
+
+def _ensure_not_automated(candidate: WitnessOpportunityCandidate) -> None:
+    if candidate.status == "automated":
+        raise ValueError("This Witness candidate already became a standing automation.")
 
 
 def _ensure_private_deliverable(

@@ -10,6 +10,7 @@ from kortny.db.models import ObserveChannelProfile, SlackChannelMembership, Task
 from kortny.llm import ChatMessage, LLMService
 from kortny.tools.types import JsonObject
 from kortny.witness.opportunities import (
+    ALLOWED_AUTOMATION_KINDS,
     ALLOWED_CANDIDATE_TYPES,
     WitnessOpportunityCandidateInput,
 )
@@ -176,9 +177,16 @@ def _task_response_messages(
                 '"title":"short title","summary":"what Kortny should watch '
                 'for or help with","suggested_action":"operator-facing action",'
                 '"suggested_message":"low-pressure Slack DM or channel suggestion",'
+                '"automation_kind":"recurring|one_shot|watch",'
+                '"cadence_suggestion":"natural language cadence or empty",'
+                '"deliverable":"concrete recurring output, e.g. \'post a trading '
+                "summary in this channel'\","
                 '"evidence":["short evidence from the answer or request"],'
                 '"confidence_score":0.0,"confidence_reason":"why"}],'
                 '"skipped_reason":"only when no candidates"}. '
+                "Frame opportunities as concrete deliverables with a cadence when "
+                "the evidence suggests recurrence; default automation_kind to "
+                "watch when unsure. "
                 "Only create candidates that would make Kortny more useful later. "
                 "Return no candidates for routine greetings, generic answers, or "
                 "claims without evidence."
@@ -230,10 +238,18 @@ def _channel_profile_messages(
                 'general_help","title":"short title","summary":"what '
                 'Kortny should watch for or help with","suggested_action":'
                 '"operator-facing action","suggested_message":"low-pressure '
-                'Slack DM or channel suggestion","evidence":["short evidence '
+                'Slack DM or channel suggestion",'
+                '"automation_kind":"recurring|one_shot|watch",'
+                '"cadence_suggestion":"natural language cadence or empty",'
+                '"deliverable":"concrete recurring output, e.g. \'post a trading '
+                "summary in this channel'\","
+                '"evidence":["short evidence '
                 'from the profile"],"confidence_score":0.0,'
                 '"confidence_reason":"why"}],"skipped_reason":"only when '
-                'no candidates"}. Only create candidates that would make Kortny '
+                'no candidates"}. Frame opportunities as concrete deliverables '
+                "with a cadence when the evidence suggests recurrence; default "
+                "automation_kind to watch when unsure. "
+                "Only create candidates that would make Kortny "
                 "more useful later. Return no candidates when the profile is too "
                 "thin, too speculative, or lacks actionable future help."
             ),
@@ -409,7 +425,24 @@ def _candidate_from_payload(
         metadata_json={
             "extractor": extractor_prompt_name,
         },
+        automation_kind=_automation_kind(value.get("automation_kind")),
+        cadence_suggestion=_optional_text(
+            value.get("cadence_suggestion"), max_chars=160
+        ),
+        deliverable=_optional_text(value.get("deliverable"), max_chars=300),
     )
+
+
+def _automation_kind(value: object) -> str | None:
+    """Lenient automation kind parsing: missing/invalid means None (watch)."""
+
+    text = _optional_text(value, max_chars=40)
+    if text is None:
+        return None
+    normalized = text.lower()
+    if normalized not in ALLOWED_AUTOMATION_KINDS:
+        return None
+    return normalized
 
 
 def _optional_text(value: object, *, max_chars: int) -> str | None:

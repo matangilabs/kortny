@@ -1059,15 +1059,21 @@ def test_witness_runner_delivers_only_dm_scoped_candidates(
     assert result.status == "processed"
     assert result.projected_count == 0
     assert result.delivered_count == 1
-    assert result.deliveries[0].candidate_id == dm_candidate.id
-    assert client.calls == [
-        {
-            "channel": "DRunnerUser",
-            "text": "I can keep an eye on your weekly vendor follow-up.",
-            "thread_ts": None,
-        }
-    ]
+    sent_outcome = next(
+        outcome for outcome in result.deliveries if outcome.status == "sent"
+    )
+    assert sent_outcome.candidate_id == dm_candidate.id
+    assert sent_outcome.decision == "notify"
+    # Digest delivery (HIG-227): one batched DM, not a per-candidate message.
+    assert len(client.calls) == 1
+    call = client.calls[0]
+    assert call["channel"] == "DRunnerUser"
+    assert call["thread_ts"] is None
+    assert call["text"] is not None
+    assert "Kortny digest" in call["text"]
+    assert "I can keep an eye on your weekly vendor follow-up." in call["text"]
     assert dm_candidate.status == "sent"
+    assert dm_candidate.last_decision == "notify"
     assert all(candidate.status == "candidate" for candidate in channel_candidates)
     delivery_event = next(
         event
@@ -1076,6 +1082,7 @@ def test_witness_runner_delivers_only_dm_scoped_candidates(
     )
     assert delivery_event.payload["candidate_id"] == str(dm_candidate.id)
     assert delivery_event.payload["runner_id"] == "witness-delivery-test"
+    assert delivery_event.payload["delivery_policy"] == "digest_dm"
 
 
 def cleanup_database(session: Session) -> None:

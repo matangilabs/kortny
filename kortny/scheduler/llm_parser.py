@@ -101,6 +101,7 @@ class LLMScheduleParser:
     ) -> None:
         self.llm = llm
         self.min_confidence = min_confidence
+        self.last_clarifying_question: str | None = None
 
     def parse(
         self,
@@ -113,6 +114,7 @@ class LLMScheduleParser:
         """Parse with an LLM and return only validated schedule drafts."""
 
         parse_time = _coerce_utc(now)
+        self.last_clarifying_question = None
         completion = self.llm.complete(
             task_id=task.id,
             messages=(
@@ -139,6 +141,8 @@ class LLMScheduleParser:
             )
         except (ValueError, ValidationError):
             return None
+        question = (payload.clarifying_question or "").strip()
+        self.last_clarifying_question = question or None
         return _draft_from_payload(
             payload,
             now=parse_time,

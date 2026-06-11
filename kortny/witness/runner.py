@@ -5,6 +5,13 @@ The runner coordinates existing Witness primitives:
 - active channel profiles are re-read by the LLM extractor;
 - candidate rows are persisted through the opportunity service;
 - optional delivery is restricted to DM-scoped candidates by lifecycle policy.
+
+Delivery (HIG-227) is digest-based: each due DM-scoped candidate gets one of
+four decisions — notify / question / draft / silent — scored by
+``effective_confidence * receptivity`` against a threshold. Deliverable
+candidates batch into ONE digest DM per user per digest window (hard budget),
+sent through the Slack outbox with a per-window idempotency key. Every
+decision, including silence, lands in ``witness_delivery_log``.
 """
 
 from __future__ import annotations
@@ -15,11 +22,11 @@ import os
 import socket
 import time
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import cast
+from typing import Any, cast
 
 from slack_sdk import WebClient
 from sqlalchemy import and_, desc, func, select
@@ -35,6 +42,7 @@ from kortny.db.models import (
     Task,
     TaskEventType,
     TaskStatus,
+    WitnessDeliveryLog,
     WitnessOpportunityCandidate,
 )
 from kortny.db.session import make_session_factory
@@ -45,6 +53,8 @@ from kortny.llm.runtime_config import (
 )
 from kortny.logging_config import configure_logging
 from kortny.observability import configure_tracing, start_span
+from kortny.slack.formatting import normalize_user_facing_text
+from kortny.slack.outbox import SlackSideEffectOutbox
 from kortny.tasks import TaskService
 from kortny.witness.autopilot import (
     DEFAULT_WITNESS_AUTOPILOT_LIMIT,
@@ -53,10 +63,17 @@ from kortny.witness.autopilot import (
     WitnessAutopilotOutcome,
 )
 from kortny.witness.extractor import WitnessChannelProfileExtractor
-from kortny.witness.lifecycle import WitnessSlackClient, send_private_suggestion
+from kortny.witness.lifecycle import WitnessSlackClient, _record_feedback
 from kortny.witness.opportunities import (
     WITNESS_OPPORTUNITY_CANDIDATES_PROJECTED_MESSAGE,
     WitnessOpportunityService,
+    recurrence_evidence_line,
+    recurrence_is_proven,
+)
+from kortny.witness.receptivity import (
+    collect_user_feedback_events,
+    effective_confidence,
+    receptivity,
 )
 
 logger = logging.getLogger(__name__)
@@ -67,11 +84,22 @@ DEFAULT_WITNESS_SCAN_INTERVAL = timedelta(hours=6)
 DEFAULT_WITNESS_POLL_INTERVAL_SECONDS = 300.0
 DEFAULT_WITNESS_ADVISORY_LOCK_KEY = 759340186
 
+DEFAULT_WITNESS_DELIVERY_THRESHOLD = Decimal("0.55")
+DEFAULT_WITNESS_DIGEST_INTERVAL = timedelta(hours=24)
+DEFAULT_WITNESS_DIGEST_MAX_ITEMS = 5
+# Unproven recurrence (HIG-197 framing gate failed) lowers receptivity at the
+# delivery decision instead of claiming recurrence in copy.
+UNPROVEN_RECURRENCE_RECEPTIVITY_FACTOR = 0.8
+WITNESS_DIGEST_CANDIDATE_SCAN_LIMIT = 50
+WITNESS_DIGEST_PURPOSE = "witness_digest"
+WITNESS_DIGEST_MAX_CHARS = 3500
+
 WITNESS_RUNNER_PROFILE_SCAN_STARTED_MESSAGE = "witness_runner_profile_scan_started"
 WITNESS_RUNNER_PROFILE_SCAN_COMPLETED_MESSAGE = "witness_runner_profile_scan_completed"
 WITNESS_RUNNER_PROFILE_SCAN_FAILED_MESSAGE = "witness_runner_profile_scan_failed"
 WITNESS_RUNNER_DELIVERY_SKIPPED_MESSAGE = "witness_runner_delivery_skipped"
 WITNESS_RUNNER_DELIVERY_SENT_MESSAGE = "witness_runner_delivery_sent"
+WITNESS_RUNNER_DIGEST_SENT_MESSAGE = "witness_runner_digest_sent"
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,13 +123,19 @@ class WitnessProjectionOutcome:
 
 @dataclass(frozen=True, slots=True)
 class WitnessDeliveryOutcome:
-    """Delivery result for one candidate."""
+    """Delivery decision result for one candidate.
+
+    ``status`` is one of: sent, silent, budget_deferred, interval_deferred,
+    quiet_hours_deferred, window_deduped, skipped.
+    """
 
     candidate_id: uuid.UUID
     status: str
     reason: str | None = None
     channel_id: str | None = None
     message_ts: str | None = None
+    decision: str | None = None
+    score: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,17 +203,26 @@ class WitnessRunner:
         autopilot_min_confidence: Decimal = DEFAULT_WITNESS_AUTOPILOT_MIN_CONFIDENCE,
         min_scan_interval: timedelta = DEFAULT_WITNESS_SCAN_INTERVAL,
         use_advisory_lock: bool = False,
+        delivery_threshold: Decimal = DEFAULT_WITNESS_DELIVERY_THRESHOLD,
+        digest_interval: timedelta = DEFAULT_WITNESS_DIGEST_INTERVAL,
+        digest_max_items: int = DEFAULT_WITNESS_DIGEST_MAX_ITEMS,
+        quiet_hours_start: int | None = None,
+        quiet_hours_end: int | None = None,
     ) -> WitnessRunResult:
         """Run one Witness tick.
 
         Channel delivery is intentionally not supported here. Private delivery
-        only attempts candidates that already have DM scope.
+        only attempts candidates that already have DM scope, batched into one
+        digest DM per user per digest window. ``delivery_limit`` is deprecated:
+        the digest budget (``digest_max_items``) is the volume control now.
         """
 
         if profile_limit < 0:
             raise ValueError("profile_limit must be non-negative")
         if delivery_limit < 0:
             raise ValueError("delivery_limit must be non-negative")
+        if digest_max_items < 1:
+            raise ValueError("digest_max_items must be positive")
         run_at = _coerce_utc(now)
 
         lock_acquired = True
@@ -208,10 +251,14 @@ class WitnessRunner:
                     min_scan_interval=min_scan_interval,
                 )
                 deliveries = (
-                    self._deliver_private_suggestions(
+                    self._deliver_digests(
                         installation_id=installation_id,
                         now=run_at,
-                        limit=delivery_limit,
+                        delivery_threshold=delivery_threshold,
+                        digest_interval=digest_interval,
+                        digest_max_items=digest_max_items,
+                        quiet_hours_start=quiet_hours_start,
+                        quiet_hours_end=quiet_hours_end,
                     )
                     if deliver_private
                     else ()
@@ -425,74 +472,331 @@ class WitnessRunner:
             self.session.flush()
             raise
 
-    def _deliver_private_suggestions(
+    def _deliver_digests(
         self,
         *,
         installation_id: uuid.UUID | None,
         now: datetime,
-        limit: int,
+        delivery_threshold: Decimal,
+        digest_interval: timedelta,
+        digest_max_items: int,
+        quiet_hours_start: int | None,
+        quiet_hours_end: int | None,
     ) -> tuple[WitnessDeliveryOutcome, ...]:
-        if limit == 0:
-            return ()
         if self.slack_client is None:
             return ()
 
         candidates = self._eligible_dm_candidates(
             installation_id=installation_id,
             now=now,
-            limit=limit,
+            limit=WITNESS_DIGEST_CANDIDATE_SCAN_LIMIT,
+        )
+        if not candidates:
+            return ()
+
+        if _in_quiet_hours(now, quiet_hours_start, quiet_hours_end):
+            # Deferred, never dropped: candidates stay pending for the next
+            # window outside quiet hours.
+            return tuple(
+                WitnessDeliveryOutcome(
+                    candidate_id=candidate.id,
+                    status="quiet_hours_deferred",
+                    reason="quiet_hours",
+                )
+                for candidate in candidates
+            )
+
+        grouped: dict[
+            tuple[uuid.UUID, str, str], list[WitnessOpportunityCandidate]
+        ] = {}
+        for candidate in candidates:
+            user_id = candidate.target_slack_user_id
+            channel_id = candidate.channel_id
+            if user_id is None or channel_id is None:
+                continue
+            grouped.setdefault(
+                (candidate.installation_id, user_id, channel_id), []
+            ).append(candidate)
+
+        outcomes: list[WitnessDeliveryOutcome] = []
+        for (group_installation_id, user_id, channel_id), group in grouped.items():
+            outcomes.extend(
+                self._deliver_user_digest(
+                    installation_id=group_installation_id,
+                    user_id=user_id,
+                    channel_id=channel_id,
+                    candidates=group,
+                    now=now,
+                    delivery_threshold=delivery_threshold,
+                    digest_interval=digest_interval,
+                    digest_max_items=digest_max_items,
+                )
+            )
+        self.session.flush()
+        return tuple(outcomes)
+
+    def _deliver_user_digest(
+        self,
+        *,
+        installation_id: uuid.UUID,
+        user_id: str,
+        channel_id: str,
+        candidates: list[WitnessOpportunityCandidate],
+        now: datetime,
+        delivery_threshold: Decimal,
+        digest_interval: timedelta,
+        digest_max_items: int,
+    ) -> tuple[WitnessDeliveryOutcome, ...]:
+        if self._digest_sent_in_window(
+            installation_id=installation_id,
+            user_id=user_id,
+            now=now,
+            digest_interval=digest_interval,
+        ):
+            return tuple(
+                WitnessDeliveryOutcome(
+                    candidate_id=candidate.id,
+                    status="interval_deferred",
+                    reason="digest_interval",
+                )
+                for candidate in candidates
+            )
+
+        events = collect_user_feedback_events(
+            self.session,
+            installation_id=installation_id,
+            slack_user_id=user_id,
+            now=now,
         )
         outcomes: list[WitnessDeliveryOutcome] = []
+        deliverable: list[tuple[float, str, WitnessOpportunityCandidate]] = []
         for candidate in candidates:
-            try:
-                result = send_private_suggestion(
-                    self.session,
-                    candidate.id,
-                    installation_id=candidate.installation_id,
-                    by_user_id="witness_runner",
-                    client=self.slack_client,
+            evidence_count = len(candidate.evidence_json or [])
+            confidence = effective_confidence(
+                candidate.confidence_score or Decimal("0.500"),
+                reinforcement_count=candidate.reinforcement_count or 1,
+                evidence_count=evidence_count,
+            )
+            receptivity_value = receptivity(events, candidate.candidate_type, now)
+            if candidate.automation_kind == "recurring" and not recurrence_is_proven(
+                candidate, now=now
+            ):
+                receptivity_value *= UNPROVEN_RECURRENCE_RECEPTIVITY_FACTOR
+            score = float(confidence) * receptivity_value
+            candidate.receptivity_score = _quantized_score(receptivity_value)
+            if Decimal(str(score)) < delivery_threshold:
+                candidate.last_decision = "silent"
+                candidate.updated_at = now
+                self._log_delivery_decision(
+                    installation_id=installation_id,
+                    user_id=user_id,
+                    candidate_id=candidate.id,
+                    decision="silent",
+                    reason=(
+                        f"score={score:.3f} below threshold={delivery_threshold} "
+                        f"(confidence={confidence} receptivity="
+                        f"{receptivity_value:.3f})"
+                    ),
                     now=now,
-                )
-            except ValueError as exc:
-                _append_candidate_event(
-                    self.session,
-                    candidate,
-                    message=WITNESS_RUNNER_DELIVERY_SKIPPED_MESSAGE,
-                    payload={
-                        "runner_id": self.runner_id,
-                        "reason": str(exc),
-                    },
                 )
                 outcomes.append(
                     WitnessDeliveryOutcome(
                         candidate_id=candidate.id,
-                        status="skipped",
-                        reason=str(exc),
+                        status="silent",
+                        reason="below_threshold",
+                        decision="silent",
+                        score=score,
                     )
                 )
                 continue
+            decision = _candidate_decision(candidate)
+            candidate.last_decision = decision
+            candidate.updated_at = now
+            deliverable.append((score, decision, candidate))
+
+        deliverable.sort(key=lambda item: item[0], reverse=True)
+        included = deliverable[:digest_max_items]
+        overflow = deliverable[digest_max_items:]
+        for score, decision, candidate in overflow:
+            # HARD budget stop: overflow stays pending for the next window.
+            self._log_delivery_decision(
+                installation_id=installation_id,
+                user_id=user_id,
+                candidate_id=candidate.id,
+                decision=decision,
+                reason="budget_deferred",
+                now=now,
+            )
+            outcomes.append(
+                WitnessDeliveryOutcome(
+                    candidate_id=candidate.id,
+                    status="budget_deferred",
+                    reason="budget_deferred",
+                    decision=decision,
+                    score=score,
+                )
+            )
+
+        if not included:
+            return tuple(outcomes)
+
+        text = _digest_text(
+            [(decision, candidate) for _score, decision, candidate in included],
+            now=now,
+        )
+        window_index = int(now.timestamp()) // max(
+            int(digest_interval.total_seconds()), 1
+        )
+        idempotency_key = (
+            f"{WITNESS_DIGEST_PURPOSE}:{installation_id}:{user_id}:{window_index}"
+        )
+        request: dict[str, object] = {
+            "channel": channel_id,
+            "text": text,
+            "thread_ts": None,
+        }
+        client = self.slack_client
+        assert client is not None  # checked by caller
+        side_effect = SlackSideEffectOutbox(self.session).deliver(
+            installation_id=installation_id,
+            task_id=None,
+            idempotency_key=idempotency_key,
+            operation="chat_postMessage",
+            purpose=WITNESS_DIGEST_PURPOSE,
+            target_channel_id=channel_id,
+            request=request,
+            call=lambda: client.chat_postMessage(
+                channel=channel_id,
+                text=text,
+                thread_ts=None,
+            ),
+        )
+        if side_effect.deduped:
+            # A digest already went out in this window; do not mark anything
+            # sent, the candidates stay pending for the next window.
+            outcomes.extend(
+                WitnessDeliveryOutcome(
+                    candidate_id=candidate.id,
+                    status="window_deduped",
+                    reason="digest_window_deduped",
+                    decision=decision,
+                    score=score,
+                )
+                for score, decision, candidate in included
+            )
+            return tuple(outcomes)
+
+        message_ts = _response_ts(side_effect.response)
+        for score, decision, candidate in included:
+            candidate.status = "sent"
+            candidate.cooldown_until = None
+            candidate.last_suggested_at = now
+            candidate.updated_at = now
+            _record_feedback(
+                candidate,
+                action="sent",
+                by_user_id="witness_runner",
+                now=now,
+                details={
+                    "channel_id": channel_id,
+                    "message_ts": message_ts,
+                    "side_effect_id": str(side_effect.side_effect.id),
+                    "deduped": side_effect.deduped,
+                    "delivery_policy": "digest_dm",
+                    "decision": decision,
+                },
+            )
+            self._log_delivery_decision(
+                installation_id=installation_id,
+                user_id=user_id,
+                candidate_id=candidate.id,
+                decision=decision,
+                reason="sent",
+                now=now,
+            )
             _append_candidate_event(
                 self.session,
                 candidate,
                 message=WITNESS_RUNNER_DELIVERY_SENT_MESSAGE,
                 payload={
                     "runner_id": self.runner_id,
-                    "channel_id": result.channel_id,
-                    "message_ts": result.message_ts,
-                    "side_effect_id": str(result.side_effect_id),
-                    "deduped": result.deduped,
+                    "channel_id": channel_id,
+                    "message_ts": message_ts,
+                    "decision": decision,
+                    "delivery_policy": "digest_dm",
                 },
             )
             outcomes.append(
                 WitnessDeliveryOutcome(
                     candidate_id=candidate.id,
                     status="sent",
-                    channel_id=result.channel_id,
-                    message_ts=result.message_ts,
+                    channel_id=channel_id,
+                    message_ts=message_ts,
+                    decision=decision,
+                    score=score,
                 )
             )
-        self.session.flush()
+        self._log_delivery_decision(
+            installation_id=installation_id,
+            user_id=user_id,
+            candidate_id=None,
+            decision="digest",
+            reason=f"sent:{len(included)}",
+            now=now,
+        )
+        logger.info(
+            "%s runner_id=%s user_id=%s items=%s",
+            WITNESS_RUNNER_DIGEST_SENT_MESSAGE,
+            self.runner_id,
+            user_id,
+            len(included),
+        )
         return tuple(outcomes)
+
+    def _digest_sent_in_window(
+        self,
+        *,
+        installation_id: uuid.UUID,
+        user_id: str,
+        now: datetime,
+        digest_interval: timedelta,
+    ) -> bool:
+        cutoff = now - digest_interval
+        return (
+            self.session.scalar(
+                select(func.count())
+                .select_from(WitnessDeliveryLog)
+                .where(
+                    WitnessDeliveryLog.installation_id == installation_id,
+                    WitnessDeliveryLog.slack_user_id == user_id,
+                    WitnessDeliveryLog.decision == "digest",
+                    WitnessDeliveryLog.reason.like("sent%"),
+                    WitnessDeliveryLog.created_at > cutoff,
+                )
+            )
+            or 0
+        ) > 0
+
+    def _log_delivery_decision(
+        self,
+        *,
+        installation_id: uuid.UUID,
+        user_id: str,
+        candidate_id: uuid.UUID | None,
+        decision: str,
+        reason: str | None,
+        now: datetime,
+    ) -> None:
+        self.session.add(
+            WitnessDeliveryLog(
+                installation_id=installation_id,
+                slack_user_id=user_id,
+                candidate_id=candidate_id,
+                decision=decision,
+                reason=reason,
+                created_at=now,
+            )
+        )
 
     def _candidate_profiles(
         self,
@@ -695,6 +999,13 @@ class WitnessWorker:
                 ),
                 min_scan_interval=self.scan_interval,
                 use_advisory_lock=self.use_advisory_lock,
+                delivery_threshold=self._settings.witness_delivery_threshold,
+                digest_interval=timedelta(
+                    hours=self._settings.witness_digest_interval_hours
+                ),
+                digest_max_items=self._settings.witness_digest_max_items,
+                quiet_hours_start=self._settings.witness_quiet_hours_start,
+                quiet_hours_end=self._settings.witness_quiet_hours_end,
             )
             logger.info(
                 "witness runner tick runner_id=%s status=%s projected=%s delivered=%s autopilot_reviewed=%s autopilot_executed=%s",
@@ -783,6 +1094,112 @@ def _append_candidate_event(
             **payload,
         },
     )
+
+
+def _in_quiet_hours(
+    now: datetime,
+    start_hour: int | None,
+    end_hour: int | None,
+) -> bool:
+    """True when ``now`` (UTC hour) falls inside the configured quiet window."""
+
+    if start_hour is None or end_hour is None or start_hour == end_hour:
+        return False
+    hour = now.astimezone(UTC).hour
+    if start_hour < end_hour:
+        return start_hour <= hour < end_hour
+    return hour >= start_hour or hour < end_hour
+
+
+def _candidate_decision(candidate: WitnessOpportunityCandidate) -> str:
+    """Assign the above-threshold action: notify / question / draft.
+
+    - ``question``: recurring automation with no cadence — the digest line
+      asks the user for one instead of guessing.
+    - ``draft``: one-shot with an above-threshold score — the digest offers
+      "say go and I'll do it".
+    - ``notify`` otherwise.
+    """
+
+    if (
+        candidate.automation_kind == "recurring"
+        and not (candidate.cadence_suggestion or "").strip()
+    ):
+        return "question"
+    if candidate.automation_kind == "one_shot":
+        return "draft"
+    return "notify"
+
+
+def _digest_text(
+    items: list[tuple[str, WitnessOpportunityCandidate]],
+    *,
+    now: datetime,
+) -> str:
+    count = len(items)
+    plural = "s" if count != 1 else ""
+    lines = [f"Here's your Kortny digest - {count} suggestion{plural} worth a look:"]
+    for index, (decision, candidate) in enumerate(items, start=1):
+        body = candidate.suggested_message or candidate.summary
+        lines.append(f"{index}. {candidate.title} - {body}")
+        evidence = _digest_evidence_line(candidate, now=now)
+        if evidence:
+            lines.append(f"   Evidence: {evidence}")
+        lines.append(f"   {_digest_action_line(decision, candidate)}")
+    text = "\n".join(lines)
+    return normalize_user_facing_text(text[:WITNESS_DIGEST_MAX_CHARS])
+
+
+def _digest_evidence_line(
+    candidate: WitnessOpportunityCandidate,
+    *,
+    now: datetime,
+) -> str | None:
+    recurrence = recurrence_evidence_line(candidate, now=now)
+    if recurrence is not None:
+        return recurrence
+    evidence = candidate.evidence_json or []
+    for item in evidence:
+        if not isinstance(item, dict):
+            continue
+        snippet = item.get("snippet")
+        if isinstance(snippet, str) and snippet.strip():
+            return snippet.strip()[:240]
+    return None
+
+
+def _digest_action_line(
+    decision: str,
+    candidate: WitnessOpportunityCandidate,
+) -> str:
+    if decision == "draft":
+        return "Say go and I'll do it."
+    if decision == "question":
+        return (
+            "What cadence should I use? Reply with one (like 'every weekday "
+            "5pm') and I'll set it up."
+        )
+    cadence = (candidate.cadence_suggestion or "").strip()
+    if candidate.automation_kind == "recurring" and cadence:
+        return f"Approve once and I'll run it {cadence}."
+    return "Reply with the number to act on it."
+
+
+def _quantized_score(value: float) -> Decimal:
+    bounded = min(1.0, max(0.0, value))
+    return Decimal(str(bounded)).quantize(Decimal("0.001"))
+
+
+def _response_ts(response: Mapping[str, Any]) -> str | None:
+    value = response.get("ts")
+    if isinstance(value, str) and value:
+        return value
+    message = response.get("message")
+    if isinstance(message, Mapping):
+        message_ts = message.get("ts")
+        if isinstance(message_ts, str) and message_ts:
+            return message_ts
+    return None
 
 
 def _parse_datetime(value: object) -> datetime | None:
