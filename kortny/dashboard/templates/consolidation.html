@@ -43,6 +43,7 @@
             <th>Archived</th>
             <th>Purged obs.</th>
             <th>Profiles</th>
+            <th>Style cards</th>
             <th>Embedded</th>
             <th>Conflicts</th>
             <th>Cost</th>
@@ -60,13 +61,14 @@
               <td>{{ run.archived }}</td>
               <td>{{ run.purged_observations }}</td>
               <td>{{ run.profiles_refreshed }}</td>
+              <td>{{ run.style_cards_derived }}</td>
               <td>{{ run.embedded }}</td>
               <td>{{ run.conflict_count }}</td>
               <td>{{ run.cost_label }}</td>
             </tr>
             {% if run.pass_errors %}
               <tr>
-                <td colspan="12">
+                <td colspan="13">
                   {% for error in run.pass_errors %}
                     <span class="badge badge-warning">{{ error }}</span>
                   {% endfor %}
@@ -78,6 +80,73 @@
       </table>
     {% else %}
       <p class="empty-state">No consolidation runs yet. The consolidator service runs when enough new episodes and observations accumulate, with a nightly floor.</p>
+    {% endif %}
+  </section>
+
+  <section class="card" aria-label="Channel style cards">
+    <header>
+      <h2>Channel style cards</h2>
+      <p>Learned per-channel register (formality, brevity, emoji and punctuation norms) the responder matches. Reset clears the derived card for re-derivation; a pinned style overrides the derived channel voice verbatim.</p>
+    </header>
+    {% if consolidation.style_cards %}
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Channel</th>
+            <th>Register</th>
+            <th>Common phrases</th>
+            <th>Notes</th>
+            <th>Updated</th>
+            <th>Pinned style</th>
+            {% if dashboard_is_admin %}<th>Actions</th>{% endif %}
+          </tr>
+        </thead>
+        <tbody>
+          {% for card in consolidation.style_cards %}
+            <tr>
+              <td>
+                {{ card.channel.name }}
+                {% if card.channel.secondary %}<span class="muted">{{ card.channel.secondary }}</span>{% endif %}
+              </td>
+              <td>
+                {% if card.has_card %}
+                  <span class="badge badge-accent">{{ card.formality }}</span>
+                  <span class="badge badge-neutral">{{ card.brevity }}</span>
+                  <span class="badge badge-neutral">emoji: {{ card.emoji_culture }}</span>
+                  <span class="badge badge-neutral">punctuation: {{ card.punctuation }}</span>
+                  <span class="badge badge-neutral">{{ card.threading_norm }}</span>
+                {% else %}
+                  <span class="badge badge-neutral">not derived yet</span>
+                {% endif %}
+              </td>
+              <td>{{ card.common_phrases_label or '—' }}</td>
+              <td>{{ card.notes or '—' }}</td>
+              <td>{{ card.updated_at_label or '—' }}</td>
+              <td>
+                {% if dashboard_is_admin %}
+                  <form method="post" action="/consolidation/style-cards/{{ card.profile_id }}/pin" class="inline-form">
+                    <input type="hidden" name="next" value="/consolidation">
+                    <input type="text" name="pinned_style" value="{{ card.pinned_style or '' }}" maxlength="240" placeholder="Pinned style override">
+                    <button type="submit" class="btn-ghost">Save</button>
+                  </form>
+                {% else %}
+                  {{ card.pinned_style or '—' }}
+                {% endif %}
+              </td>
+              {% if dashboard_is_admin %}
+                <td>
+                  <form method="post" action="/consolidation/style-cards/{{ card.profile_id }}/reset" class="inline-form">
+                    <input type="hidden" name="next" value="/consolidation">
+                    <button type="submit" class="btn-ghost" {% if not card.has_card %}disabled{% endif %}>Reset card</button>
+                  </form>
+                </td>
+              {% endif %}
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <p class="empty-state">No active channel profiles yet. Style cards appear after the consolidator has profiled channels with enough recent observed messages.</p>
     {% endif %}
   </section>
 

@@ -66,6 +66,11 @@ from kortny.llm.litellm_catalog import (
     litellm_provider_options,
 )
 from kortny.llm.provider_config import CONFIG_TIERS
+from kortny.observe.style_cards import (
+    STYLE_CARD_UPDATED_AT_KEY,
+    pinned_style_from_profile,
+    style_card_from_profile,
+)
 from kortny.tools.catalog import ToolDescriptor, tool_descriptor_from_class
 from kortny.tools.native_runtime import native_dashboard_tool_classes
 
@@ -7941,10 +7946,29 @@ class ConsolidationRunRow:
     archived: int
     purged_observations: int
     profiles_refreshed: int
+    style_cards_derived: int
     embedded: int
     conflict_count: int
     pass_errors: tuple[str, ...]
     cost_label: str
+
+
+@dataclass(frozen=True, slots=True)
+class ChannelStyleCardRow:
+    """One channel's learned style card for the consolidation page."""
+
+    profile_id: uuid.UUID
+    channel: IdentityLabel
+    has_card: bool
+    formality: str | None
+    brevity: str | None
+    emoji_culture: str | None
+    punctuation: str | None
+    threading_norm: str | None
+    notes: str | None
+    common_phrases_label: str
+    updated_at_label: str | None
+    pinned_style: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -7953,6 +7977,7 @@ class ConsolidationDashboard:
 
     runs: tuple[ConsolidationRunRow, ...]
     conflicts: tuple[ConsolidationConflictRow, ...]
+    style_cards: tuple[ChannelStyleCardRow, ...]
     total_runs: int
     total_cost_label: str
     last_run_at: datetime | None
@@ -7986,10 +8011,68 @@ def get_consolidation_dashboard(
     return ConsolidationDashboard(
         runs=runs,
         conflicts=tuple(conflicts[:50]),
+        style_cards=_channel_style_card_rows(session),
         total_runs=total_runs,
         total_cost_label=_format_money(Decimal(total_cost or 0)),
         last_run_at=rows[0].started_at if rows else None,
     )
+
+
+def _channel_style_card_rows(
+    session: Session,
+    *,
+    limit: int = 50,
+) -> tuple[ChannelStyleCardRow, ...]:
+    profiles = list(
+        session.scalars(
+            select(ObserveChannelProfile)
+            .where(ObserveChannelProfile.profile_status == "active")
+            .order_by(ObserveChannelProfile.channel_id)
+            .limit(limit)
+        )
+    )
+    identities = _identity_map_from_keys(
+        session,
+        ((cp.installation_id, "channel", cp.channel_id) for cp in profiles),
+    )
+    rows: list[ChannelStyleCardRow] = []
+    for profile in profiles:
+        payload = profile.profile_json if isinstance(profile.profile_json, dict) else {}
+        card = style_card_from_profile(payload)
+        rows.append(
+            ChannelStyleCardRow(
+                profile_id=profile.id,
+                channel=_identity_label(
+                    identities,
+                    installation_id=profile.installation_id,
+                    kind="channel",
+                    slack_id=profile.channel_id,
+                ),
+                has_card=card is not None,
+                formality=card.formality if card else None,
+                brevity=card.brevity if card else None,
+                emoji_culture=card.emoji_culture if card else None,
+                punctuation=card.punctuation if card else None,
+                threading_norm=card.threading_norm if card else None,
+                notes=(card.notes or None) if card else None,
+                common_phrases_label=(", ".join(card.common_phrases) if card else ""),
+                updated_at_label=_style_card_updated_label(
+                    payload.get(STYLE_CARD_UPDATED_AT_KEY)
+                ),
+                pinned_style=pinned_style_from_profile(payload),
+            )
+        )
+    return tuple(rows)
+
+
+def _style_card_updated_label(value: object) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return value
+    return parsed.strftime("%Y-%m-%d %H:%M UTC")
 
 
 def _consolidation_run_row(
@@ -8018,6 +8101,7 @@ def _consolidation_run_row(
         archived=_counter_int(counters, "archived"),
         purged_observations=_counter_int(counters, "purged_observations"),
         profiles_refreshed=_counter_int(counters, "profiles_refreshed"),
+        style_cards_derived=_counter_int(counters, "style_cards_derived"),
         embedded=_counter_int(counters, "embedded"),
         conflict_count=len(conflicts) if isinstance(conflicts, list) else 0,
         pass_errors=tuple(error_labels),

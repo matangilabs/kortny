@@ -258,6 +258,14 @@ class Settings(BaseSettings):
         default=14.0,
         validation_alias="KORTNY_MEMORY_RECENCY_HALF_LIFE_DAYS",
     )
+    style_cards_enabled: bool = Field(
+        default=True,
+        validation_alias="KORTNY_STYLE_CARDS_ENABLED",
+    )
+    style_card_min_messages: int = Field(
+        default=30,
+        validation_alias="KORTNY_STYLE_CARD_MIN_MESSAGES",
+    )
     kg_stale_days: int = Field(
         default=45,
         validation_alias="KORTNY_KG_STALE_DAYS",

@@ -122,6 +122,7 @@ from kortny.db.models import (
     LLMModelPricing,
     LLMProviderAccount,
     LLMTierAssignment,
+    ObserveChannelProfile,
     SlackIdentity,
     Task,
     TaskEvent,
@@ -146,6 +147,7 @@ from kortny.llm.provider_config import (
     bootstrap_llm_provider_config_from_env,
     secret_resolver_from_settings,
 )
+from kortny.observe.style_cards import reset_style_card, set_pinned_style
 from kortny.secrets import SecretEncryptionError, encrypt_secret_value
 from kortny.skills import SkillRegistryService
 from kortny.skills.ingestion import SkillIngestionError
@@ -688,6 +690,51 @@ def register_routes(app: FastAPI) -> None:
                 "consolidation": dashboard,
             },
         )
+
+    @app.post("/consolidation/style-cards/{profile_id}/reset")
+    async def consolidation_style_card_reset(
+        request: Request,
+        profile_id: UUID,
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> RedirectResponse:
+        form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+        next_path = _safe_next_path(form.get("next", ["/consolidation"])[0])
+        profile = session.get(ObserveChannelProfile, profile_id)
+        if profile is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+        reset_style_card(profile, by=dashboard_actor(principal.display_name))
+        session.commit()
+        return _redirect_with_notice(
+            next_path,
+            "Style card reset; the consolidator will re-derive it.",
+        )
+
+    @app.post("/consolidation/style-cards/{profile_id}/pin")
+    async def consolidation_style_card_pin(
+        request: Request,
+        profile_id: UUID,
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> RedirectResponse:
+        form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+        next_path = _safe_next_path(form.get("next", ["/consolidation"])[0])
+        pinned_style = form.get("pinned_style", [""])[0]
+        profile = session.get(ObserveChannelProfile, profile_id)
+        if profile is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+        set_pinned_style(
+            profile,
+            pinned_style=pinned_style,
+            by=dashboard_actor(principal.display_name),
+        )
+        session.commit()
+        notice = (
+            "Pinned style saved; it overrides the derived channel voice."
+            if pinned_style.strip()
+            else "Pinned style cleared; the derived card applies again."
+        )
+        return _redirect_with_notice(next_path, notice)
 
     @app.get("/witness", response_class=HTMLResponse)
     def witness_candidates(

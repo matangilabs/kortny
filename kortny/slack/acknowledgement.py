@@ -21,6 +21,7 @@ from kortny.llm.runtime_config import (
     create_provider_for_selection,
     select_runtime_model,
 )
+from kortny.observe.style_cards import load_channel_style
 from kortny.tasks import TaskService
 
 ROOT_ACK_FALLBACK_TEXT = "I'll take a look and post back here."
@@ -117,12 +118,50 @@ class LLMAcknowledgementGenerator:
         ).complete(
             task_id=task.id,
             messages=(
-                ChatMessage(role="system", content=ACK_SYSTEM_PROMPT),
+                ChatMessage(
+                    role="system",
+                    content=ACK_SYSTEM_PROMPT
+                    + _channel_register_line(
+                        session=session,
+                        task=task,
+                        settings=self.settings,
+                    ),
+                ),
                 ChatMessage(role="user", content=task.input),
             ),
             prompt_name="kortny.ack_generator",
         )
         return sanitize_acknowledgement(completion.content)
+
+
+def _channel_register_line(
+    *,
+    session: Session,
+    task: Task,
+    settings: Settings,
+) -> str:
+    """One register hint line when the channel has a learned style card.
+
+    Flag off, DM surface, or no card => empty string, so the ack prompt is
+    byte-identical to the pre-style-card behavior.
+    """
+
+    if not settings.style_cards_enabled:
+        return ""
+    if task.slack_channel_id.startswith("D"):
+        return ""
+    try:
+        style = load_channel_style(
+            session,
+            installation_id=task.installation_id,
+            channel_id=task.slack_channel_id,
+        )
+    except Exception:
+        logger.exception("channel register lookup failed task_id=%s", task.id)
+        return ""
+    if style.card is None:
+        return ""
+    return f"\nChannel register: {style.card.formality}, {style.card.brevity}."
 
 
 def generate_acknowledgement(

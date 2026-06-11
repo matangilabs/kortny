@@ -28,6 +28,10 @@ from kortny.consolidator.passes import (
     run_hygiene,
 )
 from kortny.consolidator.promotion import EpisodePromotionPass
+from kortny.consolidator.style_cards import (
+    DEFAULT_STYLE_CARD_MIN_MESSAGES,
+    StyleCardPass,
+)
 from kortny.db.models import (
     ConsolidationRun,
     Episode,
@@ -86,6 +90,7 @@ class ConsolidationService:
         embedding_index: EmbeddingIndex | None = None,
         kg_stale_days: int | None = None,
         promotion_episode_cap: int = DEFAULT_PROMOTION_EPISODE_CAP,
+        style_card_min_messages: int | None = None,
     ) -> None:
         self.session = session
         self.settings = settings
@@ -96,6 +101,11 @@ class ConsolidationService:
             settings.kg_stale_days if settings is not None else DEFAULT_KG_STALE_DAYS
         )
         self.promotion_episode_cap = promotion_episode_cap
+        self.style_card_min_messages = style_card_min_messages or (
+            settings.style_card_min_messages
+            if settings is not None
+            else DEFAULT_STYLE_CARD_MIN_MESSAGES
+        )
 
     # -- trigger inputs -----------------------------------------------------
 
@@ -295,6 +305,22 @@ class ConsolidationService:
                 ).to_payload(),
             ),
             (
+                "style_cards",
+                lambda: (
+                    StyleCardPass(
+                        self.session,
+                        llm=llm,
+                        min_messages=self.style_card_min_messages,
+                    )
+                    .run(
+                        installation_id=installation_id,
+                        task=task,
+                        now=effective_now,
+                    )
+                    .to_payload()
+                ),
+            ),
+            (
                 "backfill",
                 lambda: backfill_embeddings(
                     self.session,
@@ -357,7 +383,7 @@ class ConsolidationService:
         task_input = (
             "Run Kortny's memory consolidation pass (episode promotion, "
             "candidate adjudication, duplicate merge, aging, fact "
-            "reconciliation, hygiene, embedding backfill)."
+            "reconciliation, hygiene, channel style cards, embedding backfill)."
         )
         return task_service.create_task(
             installation_id=installation_id,
@@ -451,6 +477,7 @@ def _rollup_counters(counters: dict[str, object]) -> dict[str, object]:
         "archived": _get("adjudication", "archived") + _get("aging", "archived"),
         "purged_observations": _get("hygiene", "purged_observations"),
         "profiles_refreshed": _get("hygiene", "profiles_refreshed"),
+        "style_cards_derived": _get("style_cards", "derived"),
         "embedded": _get("backfill", "embedded"),
         "conflicts": _conflicts(),
     }

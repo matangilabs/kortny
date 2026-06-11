@@ -44,6 +44,7 @@ from kortny.db.models import (
     LLMTierAssignment,
     LLMUsage,
     ModelPricing,
+    ObserveChannelProfile,
     Schedule,
     SlackChannelMembership,
     SlackIdentity,
@@ -4150,6 +4151,132 @@ def test_dashboard_memory_supersede_replaces_active_fact_and_links_history(
     assert str(replacement.id) in superseded_view.text
 
 
+def create_dashboard_channel_profile(
+    session: Session,
+    *,
+    channel_id: str = "CStyle",
+    profile_json: dict[str, object] | None = None,
+) -> ObserveChannelProfile:
+    installation = Installation(slack_team_id=f"T{uuid.uuid4().hex}")
+    session.add(installation)
+    session.flush()
+    profile = ObserveChannelProfile(
+        installation_id=installation.id,
+        channel_id=channel_id,
+        profile_status="active",
+        profile_version=1,
+        summary="Launch coordination channel.",
+        profile_json=profile_json or {},
+    )
+    session.add(profile)
+    session.flush()
+    return profile
+
+
+DASHBOARD_STYLE_CARD = {
+    "formality": "casual",
+    "brevity": "terse",
+    "emoji_culture": "heavy",
+    "punctuation": "relaxed",
+    "common_phrases": ["ship it"],
+    "threading_norm": "threads_heavy",
+    "notes": "Quick informal replies.",
+}
+
+
+def test_dashboard_consolidation_page_renders_style_cards(
+    client: tuple[TestClient, Session],
+) -> None:
+    test_client, session = client
+    create_dashboard_channel_profile(
+        session,
+        profile_json={
+            "style_card": dict(DASHBOARD_STYLE_CARD),
+            "style_card_updated_at": "2026-06-10T03:00:00+00:00",
+            "pinned_style": "Keep it short.",
+        },
+    )
+    session.commit()
+    login(test_client)
+
+    response = test_client.get("/consolidation")
+
+    assert response.status_code == 200
+    assert "Channel style cards" in response.text
+    assert "casual" in response.text
+    assert "terse" in response.text
+    assert "Quick informal replies." in response.text
+    assert "Keep it short." in response.text
+
+
+def test_dashboard_style_card_reset_action(
+    client: tuple[TestClient, Session],
+) -> None:
+    test_client, session = client
+    profile = create_dashboard_channel_profile(
+        session,
+        profile_json={
+            "style_card": dict(DASHBOARD_STYLE_CARD),
+            "style_card_updated_at": "2026-06-10T03:00:00+00:00",
+            "style_card_input_sha": "abc123",
+        },
+    )
+    session.commit()
+    login(test_client)
+
+    response = test_client.post(
+        f"/consolidation/style-cards/{profile.id}/reset",
+        data={"next": "/consolidation"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"].startswith("/consolidation")
+    assert "Style+card+reset" in response.headers["location"]
+    session.refresh(profile)
+    assert "style_card" not in profile.profile_json
+    assert "style_card_updated_at" not in profile.profile_json
+    assert "style_card_input_sha" not in profile.profile_json
+    assert profile.profile_json["style_card_reset_by"] == "dashboard:admin"
+
+
+def test_dashboard_style_card_pin_and_clear_actions(
+    client: tuple[TestClient, Session],
+) -> None:
+    test_client, session = client
+    profile = create_dashboard_channel_profile(
+        session,
+        profile_json={"style_card": dict(DASHBOARD_STYLE_CARD)},
+    )
+    session.commit()
+    login(test_client)
+
+    pin_response = test_client.post(
+        f"/consolidation/style-cards/{profile.id}/pin",
+        data={"next": "/consolidation", "pinned_style": "Always boardroom formal."},
+        follow_redirects=False,
+    )
+
+    assert pin_response.status_code == 303
+    assert "Pinned+style+saved" in pin_response.headers["location"]
+    session.refresh(profile)
+    assert profile.profile_json["pinned_style"] == "Always boardroom formal."
+    assert profile.profile_json["pinned_style_set_by"] == "dashboard:admin"
+    # The derived card survives a pin; the pin only overrides the voice line.
+    assert profile.profile_json["style_card"]["formality"] == "casual"
+
+    clear_response = test_client.post(
+        f"/consolidation/style-cards/{profile.id}/pin",
+        data={"next": "/consolidation", "pinned_style": ""},
+        follow_redirects=False,
+    )
+
+    assert clear_response.status_code == 303
+    assert "Pinned+style+cleared" in clear_response.headers["location"]
+    session.refresh(profile)
+    assert "pinned_style" not in profile.profile_json
+
+
 def login(test_client: TestClient) -> Response:
     return test_client.post(
         "/login",
@@ -4622,6 +4749,7 @@ def cleanup_database(session: Session) -> None:
         KnowledgeGraphEdge,
         KnowledgeGraphEntity,
         WitnessOpportunityCandidate,
+        ObserveChannelProfile,
         Artifact,
         LLMUsage,
         WorkspaceState,

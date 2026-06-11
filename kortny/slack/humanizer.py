@@ -26,6 +26,7 @@ from kortny.llm.runtime_config import (
     create_provider_for_selection,
     select_runtime_model,
 )
+from kortny.observe.style_cards import ChannelStyleCard, load_channel_style
 from kortny.skills import (
     RESPONSE_HUMANIZER_INVOCATION,
     SkillActivation,
@@ -102,6 +103,8 @@ Rules:
 - Keep it concise for Slack, but do not omit important recommendations.
 - Apply human editing principles: remove inflated/promotional language, cut
   chatbot artifacts, vary rhythm naturally, and preserve substance.
+- The style_profile may include channel_voice: match its register (formality,
+  brevity, emoji norms). Never imitate a specific person.
 """
 MAX_RAW_ANSWER_CHARS = 8000
 MAX_TRACE_OUTPUT_CHARS = 1200
@@ -215,15 +218,72 @@ class ResponseStyleProfile:
     polish: str = "professional"
     humor: str = "off_by_default"
     proactive_suggestions: str = "only_when_clearly_useful"
+    channel_voice: str = ""
 
     def to_payload(self) -> JsonObject:
-        return {
+        payload: JsonObject = {
             "tone": self.tone,
             "brevity": self.brevity,
             "polish": self.polish,
             "humor": self.humor,
             "proactive_suggestions": self.proactive_suggestions,
         }
+        if self.channel_voice:
+            payload["channel_voice"] = self.channel_voice
+        return payload
+
+    @staticmethod
+    def from_style_card(
+        card: ChannelStyleCard,
+        surface: SlackSurface,
+    ) -> ResponseStyleProfile:
+        """Map channel register dimensions onto the response style profile.
+
+        DMs keep the static default profile: per-user style is explicitly out
+        of scope, and a channel card never describes a DM surface.
+        """
+
+        if surface.kind != "channel":
+            return ResponseStyleProfile()
+        return ResponseStyleProfile(
+            tone=CHANNEL_VOICE_TONES.get(
+                card.formality, "approachable, steady, direct"
+            ),
+            brevity=CHANNEL_VOICE_BREVITY.get(card.brevity, "concise"),
+            polish="relaxed" if card.punctuation == "relaxed" else "professional",
+            channel_voice=render_channel_voice(card),
+        )
+
+
+CHANNEL_VOICE_TONES = {
+    "casual": "casual, friendly, direct",
+    "neutral": "approachable, steady, direct",
+    "formal": "polished, professional, direct",
+}
+CHANNEL_VOICE_BREVITY = {
+    "terse": "very concise",
+    "moderate": "concise",
+    "expansive": "thorough but tight",
+}
+CHANNEL_VOICE_EMOJI = {
+    "none": "no emoji",
+    "light": "light emoji use",
+    "heavy": "emoji are welcome",
+}
+CHANNEL_VOICE_MAX_CHARS = 240
+
+
+def render_channel_voice(card: ChannelStyleCard) -> str:
+    """Render the card's dims + notes as one bounded instruction line."""
+
+    dims = (
+        f"Match this channel's register: {card.formality} formality, "
+        f"{card.brevity} replies, "
+        f"{CHANNEL_VOICE_EMOJI.get(card.emoji_culture, 'light emoji use')}, "
+        f"{card.punctuation} punctuation."
+    )
+    line = f"{dims} {card.notes}".strip() if card.notes else dims
+    return _shorten(" ".join(line.split()), max_chars=CHANNEL_VOICE_MAX_CHARS)
 
 
 @dataclass(frozen=True, slots=True)
@@ -421,6 +481,56 @@ class ResponseSynthesisResult:
     reason: str
 
 
+class ChannelStyleResolver(Protocol):
+    """Resolves the per-channel response style for a task, if any."""
+
+    def resolve(
+        self,
+        *,
+        session: Session,
+        task: Task,
+        surface: SlackSurface,
+    ) -> ResponseStyleProfile | None:
+        """Return a channel-adapted style profile, or None for the default."""
+
+
+class ChannelStyleCardResolver:
+    """Builds the response style from the channel's learned style card.
+
+    Only constructed when KORTNY_STYLE_CARDS_ENABLED is on; with no resolver,
+    no card, or a non-channel surface the static default profile is used and
+    behavior is byte-identical to the pre-style-card path.
+    """
+
+    def resolve(
+        self,
+        *,
+        session: Session,
+        task: Task,
+        surface: SlackSurface,
+    ) -> ResponseStyleProfile | None:
+        if surface.kind != "channel":
+            return None
+        style = load_channel_style(
+            session,
+            installation_id=task.installation_id,
+            channel_id=task.slack_channel_id,
+        )
+        profile: ResponseStyleProfile | None = None
+        if style.card is not None:
+            profile = ResponseStyleProfile.from_style_card(style.card, surface)
+        if style.pinned_style:
+            pinned_voice = _shorten(
+                " ".join(style.pinned_style.split()),
+                max_chars=CHANNEL_VOICE_MAX_CHARS,
+            )
+            profile = replace(
+                profile if profile is not None else ResponseStyleProfile(),
+                channel_voice=pinned_voice,
+            )
+        return profile
+
+
 class ResponseSynthesizer(Protocol):
     """Rewrites raw coordinator output into Slack-facing text."""
 
@@ -565,6 +675,7 @@ def synthesize_response(
     task: Task,
     raw_text: str,
     task_service: TaskService,
+    style_resolver: ChannelStyleResolver | None = None,
 ) -> str:
     """Generate Slack-facing response text, failing open to the raw answer."""
 
@@ -572,6 +683,7 @@ def synthesize_response(
         session=session,
         task=task,
         raw_text=raw_text,
+        style_resolver=style_resolver,
     )
     if getattr(synthesizer, "uses_procedural_skills", False):
         activations = SkillRegistryService(
@@ -762,6 +874,7 @@ def build_response_record(
     session: Session,
     task: Task,
     raw_text: str,
+    style_resolver: ChannelStyleResolver | None = None,
 ) -> ResponseRecord:
     """Build the typed response contract from task events and artifacts."""
 
@@ -809,17 +922,29 @@ def build_response_record(
         artifacts=artifacts,
         failures=failures,
     )
+    slack_surface = SlackSurface(
+        kind="dm" if task.slack_channel_id.startswith("D") else "channel",
+        threaded=task.slack_thread_ts != task.slack_message_ts,
+    )
+    style_profile: ResponseStyleProfile | None = None
+    if style_resolver is not None:
+        try:
+            style_profile = style_resolver.resolve(
+                session=session,
+                task=task,
+                surface=slack_surface,
+            )
+        except Exception:
+            logger.exception("channel style resolution failed task_id=%s", task.id)
+            style_profile = None
     return ResponseRecord(
         user_request=task.input,
         raw_answer=raw_text.strip(),
         response_mode=response_mode,
         response_shape=response_shape,
         task_status=_response_status(failures),
-        slack_surface=SlackSurface(
-            kind="dm" if task.slack_channel_id.startswith("D") else "channel",
-            threaded=task.slack_thread_ts != task.slack_message_ts,
-        ),
-        style_profile=ResponseStyleProfile(),
+        slack_surface=slack_surface,
+        style_profile=style_profile or ResponseStyleProfile(),
         actions_taken=actions[-10:],
         evidence=evidence[-10:],
         artifacts=artifacts,

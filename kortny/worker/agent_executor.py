@@ -87,6 +87,8 @@ from kortny.slack.comments import (
     generate_artifact_comment,
 )
 from kortny.slack.humanizer import (
+    ChannelStyleCardResolver,
+    ChannelStyleResolver,
     LLMResponseSynthesizer,
     ResponseSynthesizer,
     StaticResponseSynthesizer,
@@ -1217,6 +1219,12 @@ class AgentTaskExecutor:
             provider_name=self.provider_name,
         )
 
+    @staticmethod
+    def _build_style_resolver(settings: Settings) -> ChannelStyleResolver | None:
+        if not settings.style_cards_enabled:
+            return None
+        return ChannelStyleCardResolver()
+
     def _build_registry(
         self,
         *,
@@ -2060,6 +2068,7 @@ class AgentTaskExecutor:
                     task=task,
                     raw_text=response_source,
                     task_service=task_service,
+                    style_resolver=self._build_style_resolver(settings),
                 )
             poster.post_message(thread, response_text)
             return response_text
