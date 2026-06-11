@@ -279,15 +279,16 @@ def test_workbench_tools_share_one_approval_key() -> None:
     assert approval_key_for("code_exec", "hash-a") == "code_exec:hash-a"
 
 
-def test_workbench_tools_require_user_approval() -> None:
+def test_workbench_tools_run_auto_approved() -> None:
+    # The sandbox container is the safety boundary; workbench commands no
+    # longer pause the task for a human gate.
     policy = ToolApprovalPolicy()
     workbench, _ = _workbench()
     requirement = policy.requirement_for(
         SandboxBashTool(workbench=workbench), {"command": "echo hi"}
     )
 
-    assert requirement.scope is ApprovalScope.user
-    assert requirement.risk == "sandboxed_code_execution"
+    assert requirement.scope is ApprovalScope.none
 
 
 def test_workbench_approval_prompt_mentions_session_scope() -> None:

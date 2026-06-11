@@ -1258,7 +1258,7 @@ def test_worker_registry_exposes_integration_inventory_for_capability_lookup(
     }
     code_exec = next(tool for tool in native_tools if tool["name"] == "code_exec")
     assert code_exec["category"] == "Execution"
-    assert code_exec["approval"] == "user_approval"
+    assert code_exec["approval"] == "none"
     assert code_exec["sandbox"]["requires_sandbox"] is True
     assert code_exec["sandbox"]["network"] == "none"
     assert code_exec["required_env_vars"] == ["KORTNY_SANDBOX_RUNNER_URL"]
@@ -1488,6 +1488,9 @@ def build_settings(
         ),
         "BRAVE_SEARCH_API_KEY": brave_search_api_key,
         "POSTGRES_URL": TEST_POSTGRES_URL,
+        # Tests must never load a real embedding model (HIG-219); the semantic
+        # retrieval path is covered with fake backends elsewhere.
+        "KORTNY_EMBEDDINGS_BACKEND": "disabled",
     }
     if sandbox_runner_url is not None:
         kwargs["KORTNY_SANDBOX_RUNNER_URL"] = sandbox_runner_url

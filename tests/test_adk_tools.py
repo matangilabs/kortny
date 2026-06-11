@@ -10,7 +10,6 @@ from kortny.agent.adk_tools import KortnyAdkTool, KortnyRegistryToolset
 from kortny.approvals import (
     TOOL_APPROVAL_REQUIRED_MESSAGE,
     ToolApprovalRequired,
-    approval_prompt_text,
 )
 from kortny.db.models import TaskEventType
 from kortny.execution import SandboxResult, SandboxSpec
@@ -69,86 +68,40 @@ def test_adk_tool_enforces_existing_approval_policy() -> None:
     ]
 
 
-def test_adk_code_exec_requires_user_approval_before_running() -> None:
+def test_adk_code_exec_runs_without_prior_approval() -> None:
+    # The sandbox is the safety boundary: code_exec no longer pauses the task
+    # for a human gate, even when no approval has ever been recorded.
     task_service = _RecordingTaskService()
+    runner = _SuccessfulSandboxRunner(stdout="42\n")
     adapter = KortnyAdkTool(
         tool=CodeExecTool(
-            runner=_FailingSandboxRunner(),
+            runner=runner,
             image="python:3.11-slim",
         ),
-        task=cast(Any, SimpleNamespace(id=uuid.uuid4())),
+        task=cast(Any, _fake_task()),
         session=cast(Any, _NoApprovalSession()),
         task_service=cast(Any, task_service),
     )
 
-    with pytest.raises(ToolApprovalRequired) as exc:
-        asyncio.run(
-            adapter.run_async(
-                args={
-                    "code": "print(6 * 7)",
-                    "language": "python",
-                    "timeout_seconds": 5,
-                },
-                tool_context=cast(
-                    Any,
-                    SimpleNamespace(function_call_id="call-code-exec"),
-                ),
-            )
-        )
-
-    assert exc.value.request.tool_name == "code_exec"
-    assert exc.value.request.scope == "user"
-    assert exc.value.request.risk == "sandboxed_code_execution"
-    assert exc.value.request.argument_keys == (
-        "code",
-        "language",
-        "timeout_seconds",
-    )
-    assert task_service.events == [
-        (
-            TaskEventType.log,
-            {
-                "message": TOOL_APPROVAL_REQUIRED_MESSAGE,
-                "runtime": "adk",
-                "turn": 1,
-                "step_id": "adk_tool_call",
-                "request": exc.value.request.to_payload(),
+    result = asyncio.run(
+        adapter.run_async(
+            args={
+                "code": "print(6 * 7)",
+                "language": "python",
+                "timeout_seconds": 5,
             },
+            tool_context=cast(
+                Any,
+                SimpleNamespace(function_call_id="call-code-exec"),
+            ),
         )
-    ]
-
-
-def test_code_exec_approval_prompt_is_human_readable_and_sandbox_specific() -> None:
-    task_service = _RecordingTaskService()
-    adapter = KortnyAdkTool(
-        tool=CodeExecTool(
-            runner=_FailingSandboxRunner(),
-            image="python:3.11-slim",
-        ),
-        task=cast(Any, SimpleNamespace(id=uuid.uuid4())),
-        session=cast(Any, _NoApprovalSession()),
-        task_service=cast(Any, task_service),
     )
 
-    with pytest.raises(ToolApprovalRequired) as exc:
-        asyncio.run(
-            adapter.run_async(
-                args={"code": "print('hello')"},
-                tool_context=cast(
-                    Any,
-                    SimpleNamespace(function_call_id="call-code-prompt"),
-                ),
-            )
-        )
-
-    prompt = approval_prompt_text(exc.value.request)
-
-    assert "locked-down Python sandbox" in prompt
-    assert "Please approve before I run it." in prompt
-    assert "no network" in prompt
-    assert "no access to the host filesystem" in prompt
-    assert "*code_exec*" not in prompt
-    assert "React with :white_check_mark:" in prompt
+    assert result["output"]["successful"] is True
+    assert [event_type for event_type, _payload in task_service.events] == [
+        TaskEventType.tool_call,
+        TaskEventType.tool_result,
+    ]
 
 
 def test_adk_code_exec_runs_after_user_approval_is_recorded() -> None:
@@ -184,19 +137,17 @@ def test_adk_code_exec_runs_after_user_approval_is_recorded() -> None:
     assert result["output"]["successful"] is True
     assert result["output"]["stdout"] == "42\n"
     assert [event_type for event_type, _payload in task_service.events] == [
-        TaskEventType.log,
         TaskEventType.tool_call,
         TaskEventType.tool_result,
     ]
-    assert task_service.events[0][1]["message"] == "tool_approval_previously_granted"
-    assert task_service.events[1][1]["tool"] == "code_exec"
-    assert task_service.events[1][1]["argument_keys"] == [
+    assert task_service.events[0][1]["tool"] == "code_exec"
+    assert task_service.events[0][1]["argument_keys"] == [
         "code",
         "language",
         "timeout_seconds",
     ]
-    assert task_service.events[2][1]["tool"] == "code_exec"
-    assert task_service.events[2][1]["output"]["stdout"] == "42\n"
+    assert task_service.events[1][1]["tool"] == "code_exec"
+    assert task_service.events[1][1]["output"]["stdout"] == "42\n"
 
 
 def test_adk_tool_returns_recoverable_result_for_tool_exception() -> None:

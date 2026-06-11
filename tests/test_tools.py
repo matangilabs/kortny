@@ -126,15 +126,11 @@ def test_native_tool_surfaces_are_derived_from_metadata() -> None:
         if metadata.side_effect == "write" and metadata.approval == "none"
     )
     assert native_tool_names_by_approval("self_gated") == frozenset({"remember_fact"})
+    # Sandbox tools are auto-approved (isolated container); only memory
+    # deletion and outward-facing deployment still require user approval.
     assert native_tool_names_by_approval("user_approval") == frozenset(
         {
-            "code_exec",
             "forget_fact",
-            "sandbox_bash",
-            "sandbox_write_file",
-            "sandbox_read_file",
-            "sandbox_export_artifact",
-            "sandbox_publish_preview",
             "deploy_site",
         }
     )
@@ -174,7 +170,7 @@ def test_pdf_generator_stays_unsandboxed_until_runner_slice() -> None:
     assert descriptor.to_payload()["sandbox"] == metadata.sandbox.to_payload()
 
 
-def test_code_exec_metadata_requires_sandbox_and_requester_approval() -> None:
+def test_code_exec_metadata_requires_sandbox_but_runs_auto_approved() -> None:
     metadata = tool_metadata("code_exec")
     descriptor = tool_descriptor_from_class(CodeExecTool)
     policy = ToolApprovalPolicy()
@@ -187,14 +183,14 @@ def test_code_exec_metadata_requires_sandbox_and_requester_approval() -> None:
     assert metadata.namespace == "native.execution"
     assert metadata.category == "Execution"
     assert metadata.side_effect == "destructive"
-    assert metadata.approval == "user_approval"
+    # Auto-approved: isolation is the safety boundary, not a human gate.
+    assert metadata.approval == "none"
     assert metadata.required_env_vars == ("KORTNY_SANDBOX_RUNNER_URL",)
     assert metadata.sandbox.requires_sandbox is True
     assert metadata.sandbox.network == "none"
     assert metadata.sandbox.resource_limits.timeout_seconds == 30
     assert descriptor.to_payload()["sandbox"] == metadata.sandbox.to_payload()
-    assert requirement.scope is ApprovalScope.user
-    assert requirement.risk == "sandboxed_code_execution"
+    assert requirement.scope is ApprovalScope.none
 
 
 def test_observed_slack_search_metadata_is_local_and_read_only() -> None:
