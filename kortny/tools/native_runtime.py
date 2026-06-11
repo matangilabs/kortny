@@ -512,6 +512,7 @@ NATIVE_TOOL_REGISTRATIONS: tuple[NativeToolRegistration, ...] = (
         SlackLookupCanvasSectionsTool,
         lambda context: SlackLookupCanvasSectionsTool(
             client=context.slack_action_client,
+            task=context.task,
         ),
     ),
     NativeToolRegistration(

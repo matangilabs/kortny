@@ -260,12 +260,12 @@ def test_slack_action_metadata_is_current_scope_and_write_classed() -> None:
     assert lookup_canvas_sections.category == "Slack context"
     assert lookup_canvas_sections.side_effect == "read"
     assert lookup_canvas_sections.required_slack_scopes == ("canvases:read",)
-    assert "known_canvas_id_required" in lookup_canvas_sections.plan_gates
+    assert "criteria_required" in lookup_canvas_sections.plan_gates
     assert "criteria_required" in lookup_canvas_sections.plan_gates
     assert edit_canvas.category == "Slack actions"
     assert edit_canvas.side_effect == "write"
     assert edit_canvas.required_slack_scopes == ("canvases:write",)
-    assert "known_canvas_id_required" in edit_canvas.plan_gates
+    assert "one_canvas_change_per_call" in edit_canvas.plan_gates
 
 
 def test_slack_action_tools_do_not_require_human_approval_by_default() -> None:

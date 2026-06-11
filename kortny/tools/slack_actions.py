@@ -88,6 +88,13 @@ class SlackActionClient(Protocol):
     ) -> Any:
         """Create a Slack channel canvas."""
 
+    def conversations_info(
+        self,
+        *,
+        channel: str,
+    ) -> Any:
+        """Fetch Slack channel info (includes the channel canvas file id)."""
+
     def canvases_edit(
         self,
         *,
@@ -750,18 +757,22 @@ class SlackLookupCanvasSectionsTool:
 
     name = "slack_lookup_canvas_sections"
     description = (
-        "Finds section IDs in a known Slack canvas by heading type and/or text. "
+        "Finds section IDs in a Slack canvas by heading type and/or text. "
         "Use this before slack_edit_canvas when the user asks to update a "
         "specific section, insert near a section, or replace a section but only "
-        "the section heading or text is known. This is read-only and requires a "
-        "known canvas_id from Slack channel info, prior context, or the user."
+        "the section heading or text is known. This is read-only. When "
+        "canvas_id is omitted it targets the current channel's canvas "
+        "automatically."
     )
     parameters: JsonSchema = {
         "type": "object",
         "properties": {
             "canvas_id": {
                 "type": "string",
-                "description": "Slack canvas ID, such as F1234ABCD.",
+                "description": (
+                    "Slack canvas ID, such as F1234ABCD. Omit to target the "
+                    "current channel's canvas."
+                ),
             },
             "contains_text": {
                 "type": "string",
@@ -782,15 +793,21 @@ class SlackLookupCanvasSectionsTool:
                 },
             },
         },
-        "required": ["canvas_id"],
+        "required": [],
         "additionalProperties": False,
     }
 
-    def __init__(self, *, client: SlackActionClient) -> None:
+    def __init__(self, *, client: SlackActionClient, task: Task) -> None:
         self.client = client
+        self.task = task
 
     def invoke(self, args: JsonObject) -> ToolResult:
-        canvas_id = _coerce_canvas_id(args.get("canvas_id"), tool_name=self.name)
+        canvas_id = _resolve_canvas_id(
+            args.get("canvas_id"),
+            client=self.client,
+            task=self.task,
+            tool_name=self.name,
+        )
         criteria = _coerce_canvas_lookup_criteria(args, tool_name=self.name)
         response = _require_ok(
             self.client.canvases_sections_lookup(
@@ -822,18 +839,21 @@ class SlackEditCanvasTool:
 
     name = "slack_edit_canvas"
     description = (
-        "Edits a known Slack canvas by appending, inserting, replacing, or "
-        "renaming content. Use this only when the user explicitly asks Kortny "
-        "to update a canvas and a canvas_id is known from Slack context, a "
-        "previous tool result, or the user's message. This tool performs one "
-        "canvas edit per call."
+        "Edits a Slack canvas by appending, inserting, replacing, or "
+        "renaming content. Use this when the user asks Kortny to update a "
+        "canvas. When canvas_id is omitted it targets the current channel's "
+        "canvas automatically — the usual case for 'the canvas' in a channel. "
+        "This tool performs one canvas edit per call."
     )
     parameters: JsonSchema = {
         "type": "object",
         "properties": {
             "canvas_id": {
                 "type": "string",
-                "description": "Slack canvas ID, such as F1234ABCD.",
+                "description": (
+                    "Slack canvas ID, such as F1234ABCD. Omit to target the "
+                    "current channel's canvas."
+                ),
             },
             "operation": {
                 "type": "string",
@@ -869,7 +889,7 @@ class SlackEditCanvasTool:
                 ),
             },
         },
-        "required": ["canvas_id", "operation"],
+        "required": ["operation"],
         "additionalProperties": False,
     }
 
@@ -887,7 +907,12 @@ class SlackEditCanvasTool:
         self.task_service = task_service or TaskService(session)
 
     def invoke(self, args: JsonObject) -> ToolResult:
-        canvas_id = _coerce_canvas_id(args.get("canvas_id"), tool_name=self.name)
+        canvas_id = _resolve_canvas_id(
+            args.get("canvas_id"),
+            client=self.client,
+            task=self.task,
+            tool_name=self.name,
+        )
         operation = _coerce_canvas_operation(args.get("operation"), tool_name=self.name)
         change = _canvas_change_from_args(
             args, operation=operation, tool_name=self.name
@@ -1073,6 +1098,40 @@ def _coerce_canvas_markdown(value: object, *, tool_name: str) -> str:
             f"{tool_name} 'markdown' must be {MAX_CANVAS_MARKDOWN_CHARS} characters or fewer"
         )
     return markdown
+
+
+def _resolve_canvas_id(
+    value: object,
+    *,
+    client: SlackActionClient,
+    task: Task,
+    tool_name: str,
+) -> str:
+    """Return an explicit canvas_id, or the current channel's canvas.
+
+    The channel canvas is discoverable via ``conversations.info`` ->
+    ``channel.properties.canvas.file_id``, so "edit the canvas" in a channel
+    must not require the model to dig the id out of prior context (it
+    routinely can't — the id lives only in an old task's tool result).
+    """
+
+    if value is not None and (not isinstance(value, str) or value.strip()):
+        return _coerce_canvas_id(value, tool_name=tool_name)
+    response = _require_ok(
+        client.conversations_info(channel=task.slack_channel_id),
+        "conversations.info",
+    )
+    channel = response.get("channel")
+    properties = channel.get("properties") if isinstance(channel, Mapping) else None
+    canvas = properties.get("canvas") if isinstance(properties, Mapping) else None
+    file_id = canvas.get("file_id") if isinstance(canvas, Mapping) else None
+    if isinstance(file_id, str) and file_id:
+        return file_id
+    raise ValueError(
+        f"{tool_name}: no 'canvas_id' was given and the current channel has "
+        "no channel canvas. Pass the canvas_id explicitly (for a standalone "
+        "canvas) or create the channel canvas first."
+    )
 
 
 def _coerce_canvas_id(value: object, *, tool_name: str) -> str:

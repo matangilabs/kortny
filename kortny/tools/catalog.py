@@ -322,10 +322,11 @@ NATIVE_TOOL_METADATA: dict[str, ToolMetadata] = {
         approval="none",
         required_env_vars=("SLACK_BOT_TOKEN",),
         required_slack_scopes=("canvases:write",),
-        plan_gates=("known_canvas_id_required", "one_canvas_change_per_call"),
+        plan_gates=("one_canvas_change_per_call",),
         result_budget="visible_channel_resource",
         notes=(
-            "Edits a known Slack canvas with one operation per call.",
+            "Edits a Slack canvas with one operation per call; defaults "
+            "to the current channel canvas when no canvas_id is given.",
             "Supports append, insert, replace, and rename operations.",
         ),
     ),
@@ -344,10 +345,11 @@ NATIVE_TOOL_METADATA: dict[str, ToolMetadata] = {
         required_env_vars=("SLACK_BOT_TOKEN",),
         required_slack_scopes=("canvases:read",),
         context_hint=True,
-        plan_gates=("known_canvas_id_required", "criteria_required"),
+        plan_gates=("criteria_required",),
         result_budget="small_lookup",
         notes=(
-            "Finds section IDs in a known Slack canvas.",
+            "Finds section IDs in a Slack canvas; defaults to the current "
+            "channel canvas when no canvas_id is given.",
             "Use before targeted canvas edits when only a heading or phrase is known.",
         ),
     ),

@@ -157,6 +157,7 @@ def test_product_benchmark_tracks_known_route_gaps() -> None:
         "linear_project_tasks",
         "james_bond_ranked_research",
         "website_cpt_audit",
+        "pypl_report_iteration",
     }
     for scenario in benchmark["scenarios"]:
         if scenario["id"] in known_gap_ids:

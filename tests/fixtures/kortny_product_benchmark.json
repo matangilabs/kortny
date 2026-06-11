@@ -497,8 +497,8 @@
       "prompt": "@Kortny enhance the PYPL report with more company info, current price info, earnings call info, and generate a 3-page PDF.",
       "primary_guardrail": "operator_trust_debuggability",
       "desired_runtime_route": "planned_candidate",
-      "baseline_classifier_route": "planned_candidate",
-      "known_gap": "Document iterations still need stronger artifact versioning and proof that the new file materially differs from the prior file.",
+      "baseline_classifier_route": "inline",
+      "known_gap": "Document iterations still need stronger artifact versioning and proof that the new file materially differs from the prior file. Since the lone-write-verb fix (2026-06-11) the deterministic override no longer fires on 'generate' alone, so depth for this prompt rests on the LLM intent decision; the deterministic override now requires a second planning signal.",
       "routing_expectation": {
         "expected_runtime_class": "durable_workflow_task",
         "expected_intent": "document.current_data_report",

@@ -24,6 +24,12 @@ logger = logging.getLogger(__name__)
 _FASTEMBED_MODELS: dict[str, Any] = {}
 _UNAVAILABLE_WARNED = False
 
+# fastembed's default internal batch is 256 documents. ONNX materializes the
+# attention tensors for the whole batch (batch x heads x seq^2 floats), which
+# peaks at ~2.4GB for a few hundred long passages — enough to get the process
+# OOM-killed on a small Docker VM. 16 passages bounds the peak under ~200MB.
+PASSAGE_EMBED_BATCH_SIZE = 16
+
 
 class EmbeddingBackend(Protocol):
     """Minimal embedding contract used by the EmbeddingIndex."""
@@ -64,7 +70,9 @@ class FastembedBackend:
     def embed_passages(self, texts: Sequence[str]) -> list[list[float]]:
         return [
             [float(value) for value in vector]
-            for vector in self._model().passage_embed(list(texts))
+            for vector in self._model().passage_embed(
+                list(texts), batch_size=PASSAGE_EMBED_BATCH_SIZE
+            )
         ]
 
 

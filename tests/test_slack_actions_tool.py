@@ -45,6 +45,8 @@ class FakeSlackActionClient:
         self.channel_canvases: list[dict[str, Any]] = []
         self.canvas_section_lookups: list[dict[str, Any]] = []
         self.canvas_edits: list[dict[str, Any]] = []
+        self.channel_canvas_file_id: str | None = None
+        self.conversations_info_calls: list[str] = []
 
     def chat_postMessage(
         self,
@@ -153,6 +155,16 @@ class FakeSlackActionClient:
             }
         )
         return {"ok": True}
+
+    def conversations_info(self, *, channel: str) -> dict[str, Any]:
+        self.conversations_info_calls.append(channel)
+        properties: dict[str, Any] = {}
+        if self.channel_canvas_file_id is not None:
+            properties["canvas"] = {"file_id": self.channel_canvas_file_id}
+        return {
+            "ok": True,
+            "channel": {"id": channel, "properties": properties},
+        }
 
     def canvases_sections_lookup(
         self,
@@ -601,10 +613,10 @@ def test_slack_edit_canvas_appends_markdown_and_records_event(
 def test_slack_lookup_canvas_sections_returns_normalized_sections(
     db_session: Session,
 ) -> None:
-    create_task(db_session)
+    task = create_task(db_session)
     client = FakeSlackActionClient()
 
-    result = SlackLookupCanvasSectionsTool(client=client).invoke(
+    result = SlackLookupCanvasSectionsTool(client=client, task=task).invoke(
         {
             "canvas_id": "Fcanvas123",
             "contains_text": "  Open   Items  ",
@@ -648,11 +660,11 @@ def test_slack_lookup_canvas_sections_returns_normalized_sections(
 def test_slack_lookup_canvas_sections_requires_criteria(
     db_session: Session,
 ) -> None:
-    create_task(db_session)
+    task = create_task(db_session)
     client = FakeSlackActionClient()
 
     with pytest.raises(ValueError, match="criteria"):
-        SlackLookupCanvasSectionsTool(client=client).invoke(
+        SlackLookupCanvasSectionsTool(client=client, task=task).invoke(
             {
                 "canvas_id": "Fcanvas123",
             }
@@ -686,6 +698,68 @@ def test_slack_edit_canvas_requires_section_for_insert_after(
 def cleanup_database(session: Session) -> None:
     for model in (SlackSideEffect, TaskEvent, Task, Installation):
         session.execute(delete(model))
+
+
+def test_slack_edit_canvas_resolves_channel_canvas_when_id_omitted(
+    db_session: Session,
+) -> None:
+    task = create_task(db_session)
+    client = FakeSlackActionClient()
+    client.channel_canvas_file_id = "Fchannelcanvas9"
+
+    result = SlackEditCanvasTool(
+        client=client,
+        session=db_session,
+        task=task,
+    ).invoke(
+        {
+            "operation": "insert_at_end",
+            "markdown": "## Notes",
+        }
+    )
+
+    assert client.conversations_info_calls == [task.slack_channel_id]
+    assert client.canvas_edits[0]["canvas_id"] == "Fchannelcanvas9"
+    assert result.output["canvas_id"] == "Fchannelcanvas9"
+
+
+def test_slack_edit_canvas_errors_when_channel_has_no_canvas(
+    db_session: Session,
+) -> None:
+    task = create_task(db_session)
+    client = FakeSlackActionClient()
+
+    with pytest.raises(ValueError, match="no channel canvas"):
+        SlackEditCanvasTool(
+            client=client,
+            session=db_session,
+            task=task,
+        ).invoke(
+            {
+                "operation": "insert_at_end",
+                "markdown": "## Notes",
+            }
+        )
+
+    assert client.canvas_edits == []
+
+
+def test_slack_lookup_canvas_sections_resolves_channel_canvas(
+    db_session: Session,
+) -> None:
+    task = create_task(db_session)
+    client = FakeSlackActionClient()
+    client.channel_canvas_file_id = "Fchannelcanvas9"
+
+    result = SlackLookupCanvasSectionsTool(client=client, task=task).invoke(
+        {
+            "contains_text": "Open Items",
+        }
+    )
+
+    assert client.conversations_info_calls == [task.slack_channel_id]
+    assert client.canvas_section_lookups[0]["canvas_id"] == "Fchannelcanvas9"
+    assert result.output["canvas_id"] == "Fchannelcanvas9"
 
 
 def create_task(

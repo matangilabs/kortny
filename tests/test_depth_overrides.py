@@ -53,9 +53,21 @@ def test_broad_research_with_synthesis_forces_deep_workflow() -> None:
     assert "research_synthesis_work" in override.reason_codes
 
 
-def test_write_or_destructive_verb_forces_deep_workflow() -> None:
+def test_lone_write_verb_does_not_force_deep_workflow() -> None:
+    # "remove the part about the issue tracker" must not trigger the planner
+    # plus parallel branches; a single everyday write verb is not a planning
+    # signal by itself, so depth stays with the LLM decision.
+    override = classify_depth_override(
+        text="Remove the part about the issue tracker.",
+    )
+
+    assert override is None
+
+
+def test_write_verb_with_second_signal_forces_deep_workflow() -> None:
     override = classify_depth_override(
         text="Create a Linear issue for the onboarding bug and post it.",
+        likely_tools=("composio_linear", "composio_notion"),
     )
 
     assert override is not None

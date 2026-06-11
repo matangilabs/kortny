@@ -83,6 +83,12 @@ def classify_depth_override(
         likely_tools=likely_tools,
         is_scheduled_identity=is_scheduled_identity,
     )
+    if deep_reasons == ("write_or_destructive_intent",):
+        # A lone everyday write verb ("remove the part about...", "post this")
+        # is not a planning signal by itself — forcing the planner + parallel
+        # branches on short follow-ups added minutes of latency and an Opus
+        # call. The verb still matters for approvals; depth stays with the LLM.
+        return None
     if deep_reasons:
         return DepthOverride("deep_workflow", deep_reasons)
 

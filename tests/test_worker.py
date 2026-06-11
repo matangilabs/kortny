@@ -1238,6 +1238,86 @@ def test_agent_executor_posts_planned_workflow_progress_update(
     assert usage_count == 0
 
 
+def test_agent_executor_suppresses_progress_post_when_ack_reaction_added(
+    db_session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ingress ack reaction is the acknowledgement; no templated "On it..."
+    message should be posted on top of it (user feedback: reads as bot filler).
+    """
+
+    task = create_task(db_session, event_id="EvProgressSuppressed")
+    task.input = "Research best AI agents for trading and summarize the options."
+    db_session.commit()
+    task_service = TaskService(db_session)
+    _seed_deep_workflow_intent(task_service, task)
+    from kortny.slack.reactions import ACK_REACTION_ADDED_MESSAGE
+
+    task_service.append_event(
+        task,
+        TaskEventType.log,
+        {"message": ACK_REACTION_ADDED_MESSAGE, "reaction": "eyes"},
+    )
+    settings = Settings.model_validate(
+        {
+            "SLACK_BOT_TOKEN": "xoxb-test",
+            "SLACK_APP_TOKEN": "xapp-test",
+            "SLACK_SIGNING_SECRET": "signing-secret",
+            "LLM_PROVIDER": SettingsLLMProvider.openrouter,
+            "LLM_API_KEY": "openrouter-key",
+            "LLM_MODEL": "anthropic/sonnet-default",
+            "LLM_CHEAP_MODEL": "deepseek/deepseek-v4-flash",
+            "LLM_ANALYSIS_MODEL": "anthropic/claude-sonnet-4.6",
+            "POSTGRES_URL": "postgresql://kortny:kortny@localhost/kortny",
+            "AGENT_RUNTIME": "adk",
+            "KORTNY_PLANNED_WORKFLOW_PROGRESS_UPDATES_ENABLED": True,
+        }
+    )
+    slack_client = FakeSlackClient()
+    provider = FakeAgentProvider([])
+
+    class FakeAdkRuntime:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        def run(self, task_arg: Task) -> AgentRunResult:
+            return AgentRunResult(
+                task_id=task_arg.id,
+                result_summary="Done.",
+                turns=1,
+                artifact_count=0,
+            )
+
+    monkeypatch.setattr(
+        "kortny.agent.adk_runtime.AdkAgentRuntime",
+        FakeAdkRuntime,
+    )
+
+    AgentTaskExecutor(
+        settings=settings,
+        llm_provider=provider,
+        provider_name="openrouter",
+        slack_client=slack_client,
+    )._run_agent_runtime(
+        settings=settings,
+        session=db_session,
+        task=task,
+        task_service=task_service,
+        working_dir=tmp_path,
+    )
+
+    events = task_events(db_session, task)
+    event_messages = [event.payload.get("message") for event in events]
+    assert "planned_task_progress_posted" not in event_messages
+    assert not any(
+        event.type is TaskEventType.message_posted
+        and event.payload.get("purpose") == "planned_progress_start"
+        for event in events
+    )
+    assert slack_client.messages == []
+
+
 def test_agent_executor_planned_progress_template_is_deterministic(
     db_session: Session,
     tmp_path: Path,

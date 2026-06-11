@@ -2278,6 +2278,18 @@ class AgentTaskExecutor:
         task: Task,
         task_service: TaskService,
     ) -> None:
+        if _ack_reaction_already_added(session, task):
+            # The ingress ack reaction is the acknowledgement; a templated
+            # "On it..." message on top reads as bot filler (user feedback).
+            log_observation(
+                logger,
+                "planned_task_progress_suppressed",
+                task=task,
+                runtime="adk",
+                phase="started",
+                reason="ack_reaction_present",
+            )
+            return
         client = self.slack_client
         if client is None:
             client = cast(
@@ -2959,6 +2971,14 @@ def _task_events(session: Session, task: Task) -> tuple[TaskEvent, ...]:
             .where(TaskEvent.task_id == task.id)
             .order_by(TaskEvent.seq)
         )
+    )
+
+
+def _ack_reaction_already_added(session: Session, task: Task) -> bool:
+    return any(
+        event.payload.get("message") == ACK_REACTION_ADDED_MESSAGE
+        for event in _task_events(session, task)
+        if event.type == TaskEventType.log
     )
 
 

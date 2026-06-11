@@ -131,10 +131,20 @@ class ConsolidationService:
                 )
             )
         )
+        task_service = TaskService(self.session)
         for run in stale:
             run.status = "failed"
             run.error = "interrupted"
             run.finished_at = effective_now
+            task = self.session.scalar(
+                select(Task).where(
+                    Task.slack_event_id == f"consolidator:{run.id}",
+                    Task.status == TaskStatus.running,
+                )
+            )
+            if task is not None:
+                task_service.transition(task, TaskStatus.failed)
+                task.error = {"code": "interrupted", "message": "interrupted"}
         if stale:
             self.session.commit()
             logger.warning(

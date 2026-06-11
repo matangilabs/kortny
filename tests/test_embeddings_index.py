@@ -184,3 +184,34 @@ def test_backend_failure_is_isolated(db_session: Session) -> None:
 
     # The shared session stays usable after the failure.
     assert db_session.scalars(select(ToolEmbedding)).all() == []
+
+
+def test_fastembed_passages_use_bounded_batch_size() -> None:
+    """A few hundred passages in one ONNX batch peaks at ~2.4GB of attention
+    tensors and got the consolidator OOM-killed; the backend must always pass
+    its bounded batch size through to fastembed."""
+
+    from kortny.embeddings import backends as backends_module
+    from kortny.embeddings.backends import (
+        PASSAGE_EMBED_BATCH_SIZE,
+        FastembedBackend,
+    )
+
+    seen_kwargs: list[dict[str, object]] = []
+
+    class StubModel:
+        def passage_embed(
+            self, texts: list[str], **kwargs: object
+        ) -> Iterator[list[float]]:
+            seen_kwargs.append(dict(kwargs))
+            yield from ([0.0, 1.0] for _ in texts)
+
+    backends_module._FASTEMBED_MODELS["stub-model"] = StubModel()
+    try:
+        vectors = FastembedBackend("stub-model").embed_passages(["a", "b", "c"])
+    finally:
+        del backends_module._FASTEMBED_MODELS["stub-model"]
+
+    assert len(vectors) == 3
+    assert seen_kwargs == [{"batch_size": PASSAGE_EMBED_BATCH_SIZE}]
+    assert PASSAGE_EMBED_BATCH_SIZE <= 32
