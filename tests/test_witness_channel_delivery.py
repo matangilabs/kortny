@@ -6,7 +6,7 @@ import uuid
 from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from alembic import command
@@ -1341,3 +1341,202 @@ def test_channel_delivery_disabled_with_zero_budget(db_session: Session) -> None
     assert result.deliveries == ()
     assert candidate.status == "candidate"
     assert delivery_log_rows(db_session) == ()
+
+
+# --- HIG-235: Block Kit affordances on channel suggestions + action handler ---
+
+
+class _FakeBoltApp:
+    """Captures the action handler registered against a regex action_id."""
+
+    def __init__(self) -> None:
+        self.action_handler: Any = None
+
+    def action(self, _matcher: Any) -> Any:
+        def decorator(func: Any) -> Any:
+            self.action_handler = func
+            return func
+
+        return decorator
+
+
+def test_channel_suggestion_post_includes_accept_dismiss_buttons(
+    db_session: Session,
+) -> None:
+    installation, source_task = make_channel_fixture(db_session)
+    candidate = make_channel_candidate(
+        db_session,
+        installation.id,
+        title="Blotter exception follow-up",
+        source_task_id=source_task.id,
+    )
+    client = FakeWitnessSlackClient()
+
+    run_channel_delivery(db_session, installation.id, client)
+    db_session.flush()
+
+    assert len(client.calls) == 1
+    blocks = client.calls[0]["blocks"]
+    assert blocks is not None
+    # markdown block (prose) + actions block (buttons).
+    assert any(block["type"] == "markdown" for block in blocks)
+    actions = next(block for block in blocks if block["type"] == "actions")
+    button_ids = [el["action_id"] for el in actions["elements"]]
+    assert button_ids == ["kortny_witness_accept", "kortny_witness_dismiss"]
+    values = {el["value"] for el in actions["elements"]}
+    assert values == {str(candidate.id)}
+    accept_btn = next(
+        el for el in actions["elements"] if el["action_id"] == "kortny_witness_accept"
+    )
+    assert accept_btn["style"] == "primary"
+    # Fallback reaction copy stays in the text.
+    assert "React :white_check_mark:" in client.calls[0]["text"]
+
+
+def _invoke_witness_action(
+    *,
+    engine: Engine,
+    settings: Settings,
+    action_suffix: str,
+    candidate_id: uuid.UUID,
+    user_id: str = "UButton",
+    channel_id: str = CHANNEL_ID,
+    message_ts: str = "1780300100.000001",
+) -> FakeWitnessSlackClient:
+    from kortny.slack.witness_actions import register_witness_actions
+
+    fake_app = _FakeBoltApp()
+    session_factory = make_session_factory(engine=engine)
+    register_witness_actions(
+        cast(Any, fake_app),
+        settings=settings,
+        session_factory=session_factory,
+    )
+    assert fake_app.action_handler is not None
+
+    client = FakeWitnessSlackClient()
+    body = {
+        "user": {"id": user_id},
+        "channel": {"id": channel_id},
+        "message": {"ts": message_ts},
+    }
+    action = {
+        "action_id": f"kortny_witness_{action_suffix}",
+        "value": str(candidate_id),
+    }
+    acked: list[bool] = []
+    fake_app.action_handler(
+        ack=lambda: acked.append(True),
+        body=body,
+        action=action,
+        client=client,
+    )
+    assert acked == [True]
+    return client
+
+
+def test_witness_action_accept_flips_status_idempotently(
+    db_session: Session, engine: Engine
+) -> None:
+    installation, source_task = make_channel_fixture(db_session)
+    candidate = make_channel_candidate(
+        db_session,
+        installation.id,
+        title="Accept via button",
+        source_task_id=source_task.id,
+        automation_kind="one_shot",
+    )
+    candidate_id = candidate.id
+    db_session.commit()
+
+    settings = make_settings()
+    client = _invoke_witness_action(
+        engine=engine,
+        settings=settings,
+        action_suffix="accept",
+        candidate_id=candidate_id,
+    )
+
+    db_session.expire_all()
+    refreshed = db_session.get(WitnessOpportunityCandidate, candidate_id)
+    assert refreshed is not None
+    # one_shot acceptance materializes immediately (same path as the reaction).
+    assert refreshed.status == "automated"
+    history = [entry["action"] for entry in refreshed.feedback_json["history"]]
+    assert "accepted" in history
+    # Threaded confirmation posted.
+    assert client.calls
+    assert client.calls[-1]["channel"] == CHANNEL_ID
+    assert client.calls[-1]["thread_ts"] == "1780300100.000001"
+
+    # Double-click: a second accept on an automated candidate is a quiet no-op.
+    client2 = _invoke_witness_action(
+        engine=engine,
+        settings=settings,
+        action_suffix="accept",
+        candidate_id=candidate_id,
+    )
+    db_session.expire_all()
+    again = db_session.get(WitnessOpportunityCandidate, candidate_id)
+    assert again is not None
+    assert again.status == "automated"
+    # No confirmation posted on the no-op double click.
+    assert client2.calls == []
+
+
+def test_witness_action_dismiss_flips_status_idempotently(
+    db_session: Session, engine: Engine
+) -> None:
+    installation, source_task = make_channel_fixture(db_session)
+    candidate = make_channel_candidate(
+        db_session,
+        installation.id,
+        title="Dismiss via button",
+        source_task_id=source_task.id,
+    )
+    candidate_id = candidate.id
+    db_session.commit()
+
+    settings = make_settings()
+    client = _invoke_witness_action(
+        engine=engine,
+        settings=settings,
+        action_suffix="dismiss",
+        candidate_id=candidate_id,
+    )
+
+    db_session.expire_all()
+    refreshed = db_session.get(WitnessOpportunityCandidate, candidate_id)
+    assert refreshed is not None
+    assert refreshed.status == "dismissed"
+    history = [entry["action"] for entry in refreshed.feedback_json["history"]]
+    assert "dismissed" in history
+    assert client.calls
+    assert client.calls[-1]["channel"] == CHANNEL_ID
+
+    # Double-click dismiss on an already-dismissed candidate: harmless re-dismiss
+    # (dismiss has no terminal guard), the end state stays dismissed, no error.
+    _invoke_witness_action(
+        engine=engine,
+        settings=settings,
+        action_suffix="dismiss",
+        candidate_id=candidate_id,
+    )
+    db_session.expire_all()
+    again = db_session.get(WitnessOpportunityCandidate, candidate_id)
+    assert again is not None
+    assert again.status == "dismissed"
+
+
+def test_witness_action_unknown_candidate_is_noop(
+    db_session: Session, engine: Engine
+) -> None:
+    settings = make_settings()
+    client = _invoke_witness_action(
+        engine=engine,
+        settings=settings,
+        action_suffix="accept",
+        candidate_id=uuid.uuid4(),
+    )
+    # Unknown candidate: handler logs and swallows, posts nothing.
+    assert client.calls == []

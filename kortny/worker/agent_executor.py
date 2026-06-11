@@ -105,6 +105,7 @@ from kortny.slack.reactions import (
     LibraryReactionProvider,
     ReactionProvider,
 )
+from kortny.slack.response_blocks import render_response_blocks
 from kortny.slack.thread_context import SlackThreadTranscriptProvider
 from kortny.tasks import TaskCancelledError, TaskService
 from kortny.tool_selection import (
@@ -2070,7 +2071,8 @@ class AgentTaskExecutor:
                     task_service=task_service,
                     style_resolver=self._build_style_resolver(settings),
                 )
-            poster.post_message(thread, response_text)
+            blocks = render_response_blocks(response_text)
+            poster.post_message(thread, response_text, blocks=blocks)
             return response_text
 
         for index, artifact in enumerate(artifacts):

@@ -54,6 +54,7 @@ from kortny.llm.runtime_config import (
 )
 from kortny.logging_config import configure_logging
 from kortny.observability import configure_tracing, start_span
+from kortny.slack import blockkit
 from kortny.slack.formatting import normalize_user_facing_text
 from kortny.slack.outbox import SlackSideEffectOutbox
 from kortny.tasks import TaskService
@@ -689,10 +690,15 @@ class WitnessRunner:
         idempotency_key = (
             f"{WITNESS_DIGEST_PURPOSE}:{installation_id}:{user_id}:{window_index}"
         )
+        digest_blocks = _digest_blocks(
+            text,
+            [(decision, candidate) for _score, decision, candidate in included],
+        )
         request: dict[str, object] = {
             "channel": channel_id,
             "text": text,
             "thread_ts": None,
+            "blocks": digest_blocks,
         }
         client = self.slack_client
         assert client is not None  # checked by caller
@@ -708,6 +714,7 @@ class WitnessRunner:
                 channel=channel_id,
                 text=text,
                 thread_ts=None,
+                blocks=digest_blocks,
             ),
         )
         if side_effect.deduped:
@@ -1000,10 +1007,15 @@ class WitnessRunner:
         )
         thread_ts = candidate_thread_ts(candidate, source_task=source_task)
         text = _channel_suggestion_text(candidate, decision=decision, now=now)
+        blocks = [
+            blockkit.markdown_block(text),
+            _candidate_actions_block(candidate),
+        ]
         request: dict[str, object] = {
             "channel": channel_id,
             "text": text,
             "thread_ts": thread_ts,
+            "blocks": blocks,
         }
 
         def _post(
@@ -1011,11 +1023,13 @@ class WitnessRunner:
             channel_id: str = channel_id,
             text: str = text,
             thread_ts: str | None = thread_ts,
+            blocks: list[dict[str, Any]] = blocks,
         ) -> Mapping[str, Any]:
             return client.chat_postMessage(
                 channel=channel_id,
                 text=text,
                 thread_ts=thread_ts,
+                blocks=blocks,
             )
 
         side_effect = SlackSideEffectOutbox(self.session).deliver(
@@ -1700,6 +1714,48 @@ def _digest_action_line(
     if candidate.automation_kind == "recurring" and cadence:
         return f"Approve once and I'll run it {cadence}."
     return "Reply with the number to act on it."
+
+
+def _candidate_actions_block(candidate: WitnessOpportunityCandidate) -> dict[str, Any]:
+    """Accept/Dismiss buttons for one candidate (HIG-235).
+
+    The reaction-instruction copy stays in the message text as the fallback;
+    these buttons drive the same lifecycle through ``kortny_witness_*`` actions.
+    """
+
+    candidate_value = str(candidate.id)
+    return blockkit.actions(
+        blockkit.button(
+            "Accept",
+            f"{blockkit.WITNESS_ACTION_PREFIX}accept",
+            value=candidate_value,
+            style="primary",
+        ),
+        blockkit.button(
+            "Dismiss",
+            f"{blockkit.WITNESS_ACTION_PREFIX}dismiss",
+            value=candidate_value,
+        ),
+    )
+
+
+def _digest_blocks(
+    text: str,
+    items: list[tuple[str, WitnessOpportunityCandidate]],
+) -> list[dict[str, Any]]:
+    """Block Kit layout for a DM digest: prose section + per-candidate actions.
+
+    Respects the 50-block message cap: the leading markdown block plus two
+    blocks per candidate (section context is folded into the prose), so we cap
+    the number of candidates that receive buttons accordingly.
+    """
+
+    blocks: list[dict[str, Any]] = [blockkit.markdown_block(text)]
+    # One actions block per candidate; leave headroom under the 50-block cap.
+    max_candidates = blockkit.MAX_MESSAGE_BLOCKS - len(blocks)
+    for _decision, candidate in items[:max_candidates]:
+        blocks.append(_candidate_actions_block(candidate))
+    return blocks
 
 
 def _quantized_score(value: float) -> Decimal:

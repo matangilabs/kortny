@@ -105,7 +105,14 @@ class FakeWitnessSlackClient:
         thread_ts: str | None = None,
         blocks: list[dict[str, Any]] | None = None,
     ) -> dict[str, str | bool]:
-        self.calls.append({"channel": channel, "text": text, "thread_ts": thread_ts})
+        self.calls.append(
+            {
+                "channel": channel,
+                "text": text,
+                "thread_ts": thread_ts,
+                "blocks": blocks,
+            }
+        )
         return {"ok": True, "ts": f"1780300{len(self.calls):03d}.000001"}
 
 
@@ -648,6 +655,40 @@ def test_digest_batches_items_into_one_outbox_dm(db_session: Session) -> None:
     assert digest_rows[0].candidate_id is None
     sent_rows = [row for row in rows if row.reason == "sent"]
     assert len(sent_rows) == 3
+
+
+def test_digest_includes_per_candidate_action_blocks(db_session: Session) -> None:
+    # HIG-235: each digest item carries Accept/Dismiss buttons; reaction copy
+    # stays in the prose as the fallback.
+    installation = make_installation(db_session)
+    candidates = [
+        make_dm_candidate(
+            db_session,
+            installation.id,
+            title=f"Suggestion {index}",
+            evidence_count=2,
+        )
+        for index in range(3)
+    ]
+    client = FakeWitnessSlackClient()
+
+    run_delivery(db_session, installation.id, client)
+    db_session.flush()
+
+    assert len(client.calls) == 1
+    blocks = client.calls[0]["blocks"]
+    assert blocks is not None
+    # One leading markdown (prose) block + one actions block per candidate.
+    assert blocks[0]["type"] == "markdown"
+    action_blocks = [block for block in blocks if block["type"] == "actions"]
+    assert len(action_blocks) == 3
+    seen_values: set[str] = set()
+    for block in action_blocks:
+        button_ids = [el["action_id"] for el in block["elements"]]
+        assert button_ids == ["kortny_witness_accept", "kortny_witness_dismiss"]
+        for el in block["elements"]:
+            seen_values.add(el["value"])
+    assert seen_values == {str(candidate.id) for candidate in candidates}
 
 
 def test_digest_hard_cap_defers_overflow_with_budget_reason(
