@@ -14,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from kortny.db.models import (
+    Installation,
     ProceduralSkill,
     ProceduralSkillInvocation,
     ProceduralSkillVersion,
@@ -33,6 +34,19 @@ EXECUTION_INVOCATION = "execution"
 SCRIPT_EXECUTION_INVOCATION = "script_execution"
 
 CURATED_SKILLS_DIR = Path(__file__).parent / "curated"
+
+# HIG-229 coworker playbook pack: curated skills are normally catalog-only
+# until an admin enables them from the dashboard, but the playbook pack ships
+# enabled at workspace scope for every installation.
+PLAYBOOK_SKILL_SLUGS: tuple[str, ...] = (
+    "ambient-responder",
+    "anticipatory-draft",
+    "data-brief",
+    "decision-tracker",
+    "project-checkin",
+)
+PLAYBOOK_ENABLEMENT_ADDED_BY = "system:playbook-seed"
+
 SKILL_SCOPE_TYPES = frozenset({"workspace", "channel", "user"})
 _SCOPE_SPECIFICITY = {"workspace": 0, "channel": 1, "user": 2}
 
@@ -131,7 +145,55 @@ class SkillRegistryService:
                 trust_level="trusted",
                 created_by="system",
             )
+        self._ensure_playbook_enablements()
         self.session.flush()
+
+    def _ensure_playbook_enablements(self) -> None:
+        """Seed workspace enablements for the coworker playbook pack.
+
+        Only rows that are entirely missing are created; existing
+        workspace-scope rows — including admin-disabled ones — are never
+        touched, so a deliberate disable sticks across re-seeds.
+        """
+
+        skill_ids = list(
+            self.session.scalars(
+                select(ProceduralSkill.id).where(
+                    ProceduralSkill.owner_type == "system",
+                    ProceduralSkill.owner_id.is_(None),
+                    ProceduralSkill.slug.in_(PLAYBOOK_SKILL_SLUGS),
+                    ProceduralSkill.status == "active",
+                )
+            )
+        )
+        if not skill_ids:
+            return
+        installation_ids = list(self.session.scalars(select(Installation.id)))
+        if not installation_ids:
+            return
+        existing = {
+            (row.installation_id, row.skill_id)
+            for row in self.session.execute(
+                select(SkillEnablement.installation_id, SkillEnablement.skill_id).where(
+                    SkillEnablement.skill_id.in_(skill_ids),
+                    SkillEnablement.scope_type == "workspace",
+                )
+            )
+        }
+        for installation_id in installation_ids:
+            for skill_id in skill_ids:
+                if (installation_id, skill_id) in existing:
+                    continue
+                self.session.add(
+                    SkillEnablement(
+                        installation_id=installation_id,
+                        skill_id=skill_id,
+                        scope_type="workspace",
+                        scope_id=None,
+                        status="enabled",
+                        added_by=PLAYBOOK_ENABLEMENT_ADDED_BY,
+                    )
+                )
 
     def enable_skill(
         self,
