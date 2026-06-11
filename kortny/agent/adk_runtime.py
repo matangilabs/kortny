@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import difflib
 import logging
 import re
 import uuid
@@ -350,6 +351,28 @@ def _unwrap_control_flow_exception(exc: BaseException) -> BaseException | None:
     return None
 
 
+def _unwrap_unknown_tool_error(exc: BaseException) -> ValueError | None:
+    """Return ADK's unknown-tool ValueError buried in (possibly nested) groups.
+
+    A sub-agent occasionally hallucinates a tool name that was never selected
+    (observed live: ``composio_linear_search_issues`` invented after the
+    capability card said Linear is connected). ADK raises a bare ``ValueError``
+    for that, which would otherwise kill the task instead of being corrected.
+    """
+
+    if isinstance(exc, ValueError):
+        message = str(exc)
+        if message.startswith("Tool '") and "not found" in message:
+            return exc
+        return None
+    if isinstance(exc, BaseExceptionGroup):
+        for inner in exc.exceptions:
+            found = _unwrap_unknown_tool_error(inner)
+            if found is not None:
+                return found
+    return None
+
+
 class AdkAgentRuntime:
     """ADK runtime behind Kortny's durable worker boundary."""
 
@@ -526,14 +549,56 @@ class AdkAgentRuntime:
             parts=[genai_types.Part.from_text(text=task.input)],
         )
 
-        final_text, event_count, final_author, authors = await self._drive_runner(
-            runner,
-            task=task,
-            user_id=user_id,
-            session_id=session_id,
-            message=message,
-            start_event_count=0,
-        )
+        try:
+            final_text, event_count, final_author, authors = await self._drive_runner(
+                runner,
+                task=task,
+                user_id=user_id,
+                session_id=session_id,
+                message=message,
+                start_event_count=0,
+            )
+        except BaseException as exc:
+            if _unwrap_control_flow_exception(exc) is not None:
+                raise
+            unknown_tool_error = _unwrap_unknown_tool_error(exc)
+            if unknown_tool_error is None:
+                raise
+            # One bounded corrective retry; a second unknown-tool call fails
+            # the task through the normal error path.
+            self.task_service.append_event(
+                task,
+                TaskEventType.log,
+                {
+                    "message": "adk_unknown_tool_retry",
+                    "runtime": "adk",
+                    "error": str(unknown_tool_error),
+                },
+            )
+            correction = genai_types.Content(
+                role="user",
+                parts=[
+                    genai_types.Part.from_text(
+                        text=(
+                            "The previous attempt failed because a sub-task "
+                            "called a tool that does not exist: "
+                            f"{unknown_tool_error} Retry the request using "
+                            "ONLY tools actually available to you. If no "
+                            "available tool covers part of the request, "
+                            "complete what you can and state plainly which "
+                            "integration would be needed for the rest."
+                        )
+                    )
+                ],
+            )
+            final_text, event_count, final_author, authors = await self._drive_runner(
+                runner,
+                task=task,
+                user_id=user_id,
+                session_id=session_id,
+                message=correction,
+                start_event_count=0,
+            )
 
         if not final_text.strip():
             # Providers occasionally return an empty completion (observed
@@ -1563,10 +1628,78 @@ class AdkAgentRuntime:
         """Record usage, then suppress direct Slack-post tool calls from ADK."""
 
         self._record_adk_model_usage(callback_context, llm_response)
+        self._correct_near_miss_tool_calls(callback_context, llm_response)
         return self._suppress_direct_slack_post_tool_calls(
             callback_context,
             llm_response,
         )
+
+    def _correct_near_miss_tool_calls(
+        self,
+        callback_context: CallbackContext,
+        llm_response: LlmResponse,
+    ) -> None:
+        """Rewrite typo'd tool-call names to the registered tool in place.
+
+        Cheap-tier models retyping long registry names occasionally drop or
+        swap a character (observed live: ``composeio_notion_fetch_data``);
+        ADK raises a task-killing ValueError for unknown names, so the last
+        safe place to fix the spelling is this after-model callback.
+        """
+
+        try:
+            content = llm_response.content
+            if content is None or not content.parts:
+                return
+            known = self._known_tool_names()
+            if not known:
+                return
+            for part in content.parts:
+                function_call = getattr(part, "function_call", None)
+                name = getattr(function_call, "name", None)
+                if function_call is None or not name or name in known:
+                    continue
+                matches = difflib.get_close_matches(name, known, n=1, cutoff=0.8)
+                if not matches:
+                    continue
+                function_call.name = matches[0]
+                task_id = _task_id_from_context(callback_context)
+                logger.warning(
+                    "adk_tool_name_corrected task_id=%s from=%s to=%s",
+                    task_id,
+                    name,
+                    matches[0],
+                )
+                task = (
+                    self.task_service.get_task(task_id) if task_id is not None else None
+                )
+                if task is not None:
+                    self.task_service.append_event(
+                        task,
+                        TaskEventType.log,
+                        {
+                            "message": "adk_tool_name_corrected",
+                            "runtime": "adk",
+                            "from_name": name,
+                            "to_name": matches[0],
+                            "agent_name": callback_context.agent_name,
+                        },
+                    )
+        except Exception:  # pragma: no cover - never break the model path
+            logger.exception("adk tool-name correction failed; continuing")
+
+    def _known_tool_names(self) -> tuple[str, ...]:
+        """Names of runtime-registered tools (registry factory is memoized)."""
+
+        if self.registry is not None:
+            return self.registry.names()
+        if self.registry_factory is not None:
+            try:
+                return self.registry_factory().names()
+            except Exception:  # pragma: no cover - registry build failures
+                logger.exception("adk known-tool-name lookup failed")
+                return ()
+        return ()
 
     def _record_adk_model_usage(
         self,

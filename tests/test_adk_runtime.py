@@ -10,6 +10,7 @@ from google.genai import types as genai_types
 from kortny.agent.adk_runtime import (
     AdkAgentRuntime,
     _unwrap_control_flow_exception,
+    _unwrap_unknown_tool_error,
     adk_litellm_model,
     adk_litellm_model_name,
 )
@@ -997,6 +998,80 @@ def test_adk_runtime_suppresses_direct_slack_post_tool_calls(
     }
 
 
+def test_adk_runtime_corrects_near_miss_tool_call_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    set_required_settings_env(monkeypatch)
+    settings = load_settings(env_file=None)
+    task = Task(
+        id=uuid.UUID("9c53f4e1-9d72-468d-ab18-5021d9e15dad"),
+        installation_id=uuid.UUID("1c53f4e1-9d72-468d-ab18-5021d9e15dad"),
+        slack_channel_id="C123",
+        slack_thread_ts="123.456",
+        slack_user_id="U123",
+        input="check notion",
+    )
+    task_service = _FakeTaskService()
+    task_service.tasks[task.id] = task
+    notion_tool = _EchoTool()
+    notion_tool.name = "composio_notion_fetch_data"
+    runtime = AdkAgentRuntime(
+        settings=settings,
+        session=cast(Any, None),
+        task_service=cast(Any, task_service),
+        registry=ToolRegistry([cast(Any, notion_tool)]),
+    )
+    callback_context = SimpleNamespace(
+        agent_name="planned_integration_worker",
+        invocation_id="inv-test",
+        state={"task_id": str(task.id)},
+    )
+    response = LlmResponse(
+        content=genai_types.Content(
+            role="model",
+            parts=[
+                genai_types.Part(
+                    function_call=genai_types.FunctionCall(
+                        # One-letter hallucination observed live.
+                        name="composeio_notion_fetch_data",
+                        args={"page": "roadmap"},
+                    )
+                ),
+                genai_types.Part(
+                    function_call=genai_types.FunctionCall(
+                        name="totally_unrelated_tool",
+                        args={},
+                    )
+                ),
+            ],
+        )
+    )
+
+    runtime._correct_near_miss_tool_calls(cast(Any, callback_context), response)
+
+    assert response.content is not None
+    parts = response.content.parts or []
+    assert parts[0].function_call is not None
+    assert parts[0].function_call.name == "composio_notion_fetch_data"
+    # Distant names are left alone for the unknown-tool retry to handle.
+    assert parts[1].function_call is not None
+    assert parts[1].function_call.name == "totally_unrelated_tool"
+    correction_events = [
+        payload
+        for _, payload in task_service.events
+        if payload.get("message") == "adk_tool_name_corrected"
+    ]
+    assert correction_events == [
+        {
+            "message": "adk_tool_name_corrected",
+            "runtime": "adk",
+            "from_name": "composeio_notion_fetch_data",
+            "to_name": "composio_notion_fetch_data",
+            "agent_name": "planned_integration_worker",
+        }
+    ]
+
+
 class _EchoTool:
     name = "echo_tool"
     description = "Echoes provided text."
@@ -1146,3 +1221,26 @@ def test_unwrap_control_flow_ignores_ordinary_errors() -> None:
 
     assert _unwrap_control_flow_exception(group) is None
     assert _unwrap_control_flow_exception(ValueError("boom")) is None
+
+
+def test_unwrap_unknown_tool_error_finds_nested_adk_value_error() -> None:
+    error = ValueError(
+        "Tool 'composio_linear_search_issues' not found. "
+        "Available tools: web_search, load_skill"
+    )
+    group = ExceptionGroup(
+        "outer",
+        [ExceptionGroup("inner", [RuntimeError("noise"), error])],
+    )
+
+    assert _unwrap_unknown_tool_error(group) is error
+    assert _unwrap_unknown_tool_error(error) is error
+
+
+def test_unwrap_unknown_tool_error_ignores_other_value_errors() -> None:
+    assert _unwrap_unknown_tool_error(ValueError("boom")) is None
+    assert (
+        _unwrap_unknown_tool_error(ExceptionGroup("outer", [ValueError("boom")]))
+        is None
+    )
+    assert _unwrap_unknown_tool_error(RuntimeError("Tool 'x' not found.")) is None
