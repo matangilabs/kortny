@@ -1920,6 +1920,10 @@ class AgentTaskExecutor:
                     ),
                     per_toolkit_limit=settings.composio_catalog_limit,
                     result_max_chars=settings.tool_result_max_chars,
+                    embedding_index=self._embedding_index_for(
+                        settings=settings, session=session
+                    ),
+                    top_k=settings.tool_retrieval_top_k,
                 )
             )
         if settings.mcp_enabled and self._installation_has_mcp_servers(session, task):

@@ -197,6 +197,7 @@ def build_default_loops(settings: Settings) -> list[LoopSpec]:
 
     # Imported lazily so importing the supervisor (e.g. in tests) does not pull
     # in the heavy worker dependency graphs.
+    from kortny.composio.catalog_sync import ComposioCatalogSyncWorker
     from kortny.consolidator.runner import ConsolidatorWorker
     from kortny.scheduler.service import SchedulerWorker
     from kortny.witness.runner import WitnessWorker
@@ -224,6 +225,13 @@ def build_default_loops(settings: Settings) -> list[LoopSpec]:
             poll_interval_seconds=settings.consolidator_poll_interval_seconds,
         ).run_forever()
 
+    def _composio_catalog_sync() -> None:
+        ComposioCatalogSyncWorker(
+            settings=settings,
+            poll_interval_seconds=settings.composio_sync_interval_hours * 3600.0,
+            advisory_lock_key=settings.composio_sync_advisory_lock_key,
+        ).run_forever()
+
     return [
         LoopSpec(name="scheduler", target=_scheduler, enabled=True),
         LoopSpec(
@@ -236,4 +244,15 @@ def build_default_loops(settings: Settings) -> list[LoopSpec]:
             target=_consolidator,
             enabled=settings.consolidator_enabled,
         ),
+        LoopSpec(
+            name="composio_catalog_sync",
+            target=_composio_catalog_sync,
+            enabled=_composio_configured(settings),
+        ),
     ]
+
+
+def _composio_configured(settings: Settings) -> bool:
+    """Composio sync runs only when Composio is configured + catalog enabled."""
+
+    return bool(settings.composio_api_key) and settings.composio_catalog_enabled

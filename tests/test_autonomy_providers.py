@@ -5,7 +5,12 @@ from __future__ import annotations
 import uuid
 
 from kortny.composio.client import ComposioTool
-from kortny.composio.provider import _is_read_only, _side_effect
+from kortny.composio.tool_cards import (
+    is_read_only as _is_read_only,
+)
+from kortny.composio.tool_cards import (
+    side_effect_for_tool as _side_effect,
+)
 from kortny.db.models import McpServer, McpServerTool
 from kortny.mcp.provider import _tool_card
 

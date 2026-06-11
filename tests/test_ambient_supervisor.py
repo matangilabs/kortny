@@ -240,6 +240,41 @@ def test_returning_target_is_restarted() -> None:
         supervisor.join(timeout=0.0)
 
 
+def _settings(**overrides: object):  # type: ignore[no-untyped-def]
+    from kortny.config.settings import LLMProvider, Settings
+
+    kwargs: dict[str, object] = {
+        "SLACK_BOT_TOKEN": "xoxb-test-token",
+        "SLACK_APP_TOKEN": "xapp-test-token",
+        "SLACK_SIGNING_SECRET": "test-signing-secret",
+        "LLM_PROVIDER": LLMProvider.openrouter,
+        "LLM_API_KEY": "test-llm-key",
+        "LLM_MODEL": "openai/gpt-5.4-mini",
+        "COMPOSIO_API_KEY": "composio-key",
+        "POSTGRES_URL": "postgresql://kortny:kortny@localhost:5432/kortny_test",
+    }
+    kwargs.update(overrides)
+    return Settings(**kwargs)  # type: ignore[arg-type]
+
+
+def test_build_default_loops_includes_composio_sync_when_configured() -> None:
+    from kortny.ambient.supervisor import build_default_loops
+
+    loops = {loop.name: loop for loop in build_default_loops(_settings())}
+    assert "composio_catalog_sync" in loops
+    assert loops["composio_catalog_sync"].enabled is True
+
+
+def test_build_default_loops_disables_composio_sync_when_catalog_off() -> None:
+    from kortny.ambient.supervisor import build_default_loops
+
+    loops = {
+        loop.name: loop
+        for loop in build_default_loops(_settings(COMPOSIO_CATALOG_ENABLED=False))
+    }
+    assert loops["composio_catalog_sync"].enabled is False
+
+
 def test_main_list_loops_exits_cleanly(monkeypatch: pytest.MonkeyPatch) -> None:
     # The entrypoint's --list-loops path must not start any threads.
     from kortny.ambient import __main__ as ambient_main

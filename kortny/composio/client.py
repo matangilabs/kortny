@@ -16,6 +16,15 @@ class ComposioCatalogError(RuntimeError):
     """Raised when the Composio catalog cannot be fetched."""
 
 
+class ComposioRateLimitError(ComposioCatalogError):
+    """Raised when Composio returns HTTP 429 (rate limited).
+
+    A subclass of :class:`ComposioCatalogError` so existing ``except
+    ComposioCatalogError`` blocks keep treating it as a catalog failure, while
+    the catalog sync can catch it specifically to back off and retry.
+    """
+
+
 class ComposioConnectionError(RuntimeError):
     """Raised when a Composio connection action fails."""
 
@@ -178,6 +187,61 @@ class ComposioClient:
             _tool_from_payload(item) for item in items if isinstance(item, dict)
         )
 
+    def list_tools_page(
+        self,
+        *,
+        toolkit_slug: str,
+        limit: int = 20,
+        cursor: str | None = None,
+    ) -> tuple[tuple[ComposioTool, ...], str | None]:
+        """Return one page of a toolkit's full tool list plus the next cursor.
+
+        Unlike :meth:`list_tools`, this is query-free (the full catalog, not a
+        relevance-pruned slice) and surfaces the pagination cursor so the
+        catalog sync can walk every tool. ``next_cursor`` is ``None`` on the
+        last page.
+        """
+
+        params: dict[str, str | int] = {
+            "toolkit_slug": toolkit_slug,
+            "limit": limit,
+        }
+        if cursor:
+            params["cursor"] = cursor
+
+        response = self._get("/api/v3.1/tools", params=params)
+        payload = response.json()
+        next_cursor: str | None = None
+        items: Any
+        if isinstance(payload, list):
+            items = payload
+        elif isinstance(payload, dict):
+            next_cursor = _optional_str(
+                payload.get("next_cursor") or payload.get("nextCursor")
+            )
+            items = (
+                payload.get("items")
+                or payload.get("tools")
+                or payload.get("data")
+                or ()
+            )
+            if isinstance(items, dict):
+                next_cursor = next_cursor or _optional_str(
+                    items.get("next_cursor") or items.get("nextCursor")
+                )
+                items = (
+                    items.get("items")
+                    or items.get("tools")
+                    or items.get("schemas")
+                    or ()
+                )
+        else:
+            items = ()
+        tools = tuple(
+            _tool_from_payload(item) for item in items if isinstance(item, dict)
+        )
+        return tools, next_cursor
+
     def list_auth_configs(
         self,
         *,
@@ -339,6 +403,8 @@ class ComposioClient:
             response.raise_for_status()
             return response
         except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 429:
+                raise ComposioRateLimitError(_http_error_summary(exc)) from exc
             raise ComposioCatalogError(_http_error_summary(exc)) from exc
         except httpx.HTTPError as exc:
             raise ComposioCatalogError(str(exc)) from exc

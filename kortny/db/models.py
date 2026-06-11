@@ -1149,6 +1149,60 @@ class ComposioConnection(Base):
     )
 
 
+class ComposioToolCard(Base):
+    """One synced Composio tool card for an installation (HIG-222).
+
+    The full catalog of every connected toolkit is synced into this table by
+    ``kortny.composio.catalog_sync`` so per-task tool retrieval is purely
+    semantic (rank over ``tool_embeddings`` kind ``tool_card``) with no hot-path
+    Composio HTTP for candidate listing. ``side_effect`` is the verb-mapped
+    coarse class (read/write/destructive); full input schemas are fetched lazily
+    only for tools that survive selection, so they are intentionally not stored
+    here. ``card_sha`` gates re-embedding the same way the embedding index does.
+    """
+
+    __tablename__ = "composio_tool_cards"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    installation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("installations.id", ondelete="CASCADE"), nullable=False
+    )
+    toolkit_slug: Mapped[str] = mapped_column(String, nullable=False)
+    tool_slug: Mapped[str] = mapped_column(String, nullable=False)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    side_effect: Mapped[str] = mapped_column(String, nullable=False)
+    card_sha: Mapped[str] = mapped_column(String(64), nullable=False)
+    synced_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now()
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "side_effect in ('read', 'write', 'destructive')",
+            name="ck_composio_tool_cards_side_effect",
+        ),
+        UniqueConstraint(
+            "installation_id",
+            "tool_slug",
+            name="uq_composio_tool_cards_installation_tool",
+        ),
+        Index(
+            "idx_composio_tool_cards_toolkit",
+            "installation_id",
+            "toolkit_slug",
+        ),
+    )
+
+
 class ObservePolicy(Base):
     __tablename__ = "observe_policies"
 

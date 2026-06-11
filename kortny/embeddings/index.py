@@ -5,8 +5,9 @@ from __future__ import annotations
 import hashlib
 import logging
 from collections.abc import Sequence
+from typing import Any, cast
 
-from sqlalchemy import select, text
+from sqlalchemy import CursorResult, delete, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -88,6 +89,37 @@ class EmbeddingIndex:
                 exc_info=True,
             )
             return None
+
+    def delete(self, kind: str, ref_keys: Sequence[str]) -> int:
+        """Tombstone embedding rows for the given ``(kind, ref_key)`` pairs.
+
+        Used when a tool card is removed (tool vanished from a toolkit or the
+        toolkit was disconnected). Failure-isolated like the rest of the index:
+        any exception is logged and turned into ``0``.
+        """
+
+        try:
+            keys = list(dict.fromkeys(ref_keys))
+            if not keys:
+                return 0
+            result = self.session.execute(
+                delete(ToolEmbedding).where(
+                    ToolEmbedding.kind == kind,
+                    ToolEmbedding.model == self.backend.model_name,
+                    ToolEmbedding.ref_key.in_(keys),
+                )
+            )
+            self.session.flush()
+            return int(cast("CursorResult[Any]", result).rowcount or 0)
+        except Exception:
+            logger.warning(
+                "embedding delete failed kind=%s model=%s ref_key_count=%s",
+                kind,
+                self.backend.model_name,
+                len(ref_keys),
+                exc_info=True,
+            )
+            return 0
 
     def _ensure(self, kind: str, items: Sequence[tuple[str, str]]) -> int:
         deduped = dict(items)

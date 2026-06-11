@@ -186,6 +186,28 @@ def test_backend_failure_is_isolated(db_session: Session) -> None:
     assert db_session.scalars(select(ToolEmbedding)).all() == []
 
 
+def test_delete_tombstones_only_matching_kind_and_refs(db_session: Session) -> None:
+    backend = FakeEmbeddingBackend()
+    index = EmbeddingIndex(db_session, backend)
+    index.ensure(
+        "tool_card",
+        [
+            ("keep_card", "Linear. Manage issues."),
+            ("drop_card", "Firecrawl. Scrape websites."),
+        ],
+    )
+    index.ensure("skill", [("drop_card", "A skill that also uses this ref key.")])
+
+    deleted = index.delete("tool_card", ["drop_card", "missing_card"])
+
+    assert deleted == 1
+    rows = {
+        (row.kind, row.ref_key) for row in db_session.scalars(select(ToolEmbedding))
+    }
+    assert rows == {("tool_card", "keep_card"), ("skill", "drop_card")}
+    assert index.delete("tool_card", []) == 0
+
+
 def test_fastembed_passages_use_bounded_batch_size() -> None:
     """A few hundred passages in one ONNX batch peaks at ~2.4GB of attention
     tensors and got the consolidator OOM-killed; the backend must always pass

@@ -349,6 +349,15 @@ class Settings(BaseSettings):
     composio_request_timeout_seconds: float = Field(
         default=10.0, validation_alias="COMPOSIO_REQUEST_TIMEOUT_SECONDS"
     )
+    composio_sync_interval_hours: float = Field(
+        default=6.0, validation_alias="KORTNY_COMPOSIO_SYNC_INTERVAL_HOURS"
+    )
+    composio_sync_page_size: int = Field(
+        default=20, validation_alias="KORTNY_COMPOSIO_SYNC_PAGE_SIZE"
+    )
+    composio_sync_advisory_lock_key: int = Field(
+        default=759340222, validation_alias="KORTNY_COMPOSIO_SYNC_ADVISORY_LOCK_KEY"
+    )
     mcp_enabled: bool = Field(default=True, validation_alias="KORTNY_MCP_ENABLED")
     mcp_tool_timeout_seconds: float = Field(
         default=60.0, validation_alias="KORTNY_MCP_TOOL_TIMEOUT_SECONDS"
