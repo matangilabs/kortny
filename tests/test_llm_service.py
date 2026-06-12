@@ -71,6 +71,73 @@ def test_calculate_cost_usd_uses_per_million_token_pricing() -> None:
     ) == Decimal("0.070000")
 
 
+def test_calculate_cost_usd_zero_cache_passthrough() -> None:
+    pricing = ModelPricing(
+        provider=LLMProvider.openrouter,
+        model="m",
+        input_price_per_mtok=Decimal("10.000000"),
+        output_price_per_mtok=Decimal("30.000000"),
+    )
+    # No cache split → identical to the plain per-token cost.
+    assert calculate_cost_usd(
+        TokenUsage(
+            input_tokens=1000,
+            output_tokens=2000,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+        ),
+        pricing,
+    ) == Decimal("0.070000")
+
+
+def test_calculate_cost_usd_applies_cache_multipliers() -> None:
+    pricing = ModelPricing(
+        provider=LLMProvider.openrouter,
+        model="m",
+        input_price_per_mtok=Decimal("10.000000"),
+        output_price_per_mtok=Decimal("0.000000"),
+        cache_write_multiplier=Decimal("1.25"),
+        cache_read_multiplier=Decimal("0.10"),
+    )
+    # 1000 total prompt = 200 uncached + 300 creation + 500 read.
+    # cost = (200*1 + 300*1.25 + 500*0.10) * 10 / 1e6
+    #      = (200 + 375 + 50) * 10 / 1e6 = 6250 / 1e6 = 0.006250
+    cost = calculate_cost_usd(
+        TokenUsage(
+            input_tokens=1000,
+            output_tokens=0,
+            cache_creation_input_tokens=300,
+            cache_read_input_tokens=500,
+        ),
+        pricing,
+    )
+    assert cost == Decimal("0.006250")
+
+
+def test_calculate_cost_usd_clamps_uncached_remainder() -> None:
+    pricing = ModelPricing(
+        provider=LLMProvider.openrouter,
+        model="m",
+        input_price_per_mtok=Decimal("10.000000"),
+        output_price_per_mtok=Decimal("0.000000"),
+        cache_write_multiplier=Decimal("1.25"),
+        cache_read_multiplier=Decimal("0.10"),
+    )
+    # cache tokens exceed the reported total → uncached must clamp to 0,
+    # never produce a negative charge.
+    cost = calculate_cost_usd(
+        TokenUsage(
+            input_tokens=100,
+            output_tokens=0,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=500,
+        ),
+        pricing,
+    )
+    # uncached = max(0, 100 - 500) = 0; read = 500*0.10*10/1e6 = 0.000500
+    assert cost == Decimal("0.000500")
+
+
 @pytest.fixture(scope="session")
 def engine() -> Iterator[Engine]:
     if TEST_POSTGRES_URL is None:
@@ -173,6 +240,65 @@ def test_llm_service_records_usage_and_rolls_up_cost(
     assert span_attributes[-1]["llm.token_count.prompt"] == 1000
     assert span_attributes[-1]["llm.token_count.completion"] == 2000
     assert span_attributes[-1]["llm.token_count.total"] == 3000
+
+
+def test_llm_service_records_cache_token_split(
+    db_session: Session,
+) -> None:
+    task = create_task(db_session)
+    pricing = ModelPricing(
+        provider=LLMProvider.openrouter,
+        model="openai/gpt-4o-mini",
+        input_price_per_mtok=Decimal("10.000000"),
+        output_price_per_mtok=Decimal("30.000000"),
+        cache_write_multiplier=Decimal("1.25"),
+        cache_read_multiplier=Decimal("0.10"),
+        effective_from=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    db_session.add(pricing)
+    db_session.flush()
+    provider = FakeProvider(
+        Completion(
+            content="ok",
+            tool_calls=(),
+            usage=TokenUsage(
+                input_tokens=1000,
+                output_tokens=100,
+                cache_creation_input_tokens=200,
+                cache_read_input_tokens=600,
+            ),
+            response_id="gen-cache",
+            model="openai/gpt-4o-mini",
+        )
+    )
+
+    LLMService(
+        session=db_session,
+        provider=provider,
+        provider_name=LLMProvider.openrouter,
+    ).complete(
+        task_id=task.id,
+        messages=[ChatMessage(role="user", content="hello")],
+    )
+
+    usage = db_session.scalar(select(LLMUsage).where(LLMUsage.task_id == task.id))
+    assert usage is not None
+    assert usage.input_tokens == 1000
+    assert usage.cache_creation_input_tokens == 200
+    assert usage.cache_read_input_tokens == 600
+    # Cost reflects the cache split (D5):
+    # uncached = 200, creation = 200*1.25, read = 600*0.10
+    # input = (200 + 250 + 60) * 10 / 1e6 = 5100/1e6 = 0.005100
+    # output = 100 * 30 / 1e6 = 0.003000 ; total = 0.008100
+    assert usage.cost_usd == Decimal("0.008100")
+    event = db_session.scalar(
+        select(TaskEvent).where(
+            TaskEvent.task_id == task.id, TaskEvent.type == TaskEventType.llm_call
+        )
+    )
+    assert event is not None
+    assert event.payload["cache_creation_input_tokens"] == 200
+    assert event.payload["cache_read_input_tokens"] == 600
 
 
 def test_llm_service_records_model_tier(db_session: Session) -> None:

@@ -293,6 +293,7 @@ class StyleCardPass:
                             {"channels": [item.payload for item in batch]},
                             separators=(",", ":"),
                             default=str,
+                            sort_keys=True,
                         ),
                     ),
                 ),

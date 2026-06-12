@@ -7,9 +7,9 @@ import math
 import uuid
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Protocol
 from urllib.parse import urlencode, urlsplit, urlunsplit
 
@@ -43,6 +43,7 @@ from kortny.db.models import (
     LLMProviderAccount,
     LLMTierAssignment,
     LLMUsage,
+    ModelPricing,
     ObserveChannelProfile,
     ProceduralSkillInvocation,
     ProceduralSkillVersion,
@@ -74,6 +75,7 @@ from kortny.observe.style_cards import (
 from kortny.tools.catalog import ToolDescriptor, tool_descriptor_from_class
 from kortny.tools.native_runtime import native_dashboard_tool_classes
 
+_TOKENS_PER_MTOK = Decimal("1000000")
 DEFAULT_PAGE_SIZE = 25
 MAX_PAGE_SIZE = 100
 MODEL_CATALOG_PAGE_SIZE = 25
@@ -339,6 +341,34 @@ class UsageCharts:
 
 
 @dataclass(frozen=True)
+class CacheStats:
+    """Prompt-cache rollup for the usage view (HIG-196)."""
+
+    total_input_tokens: int
+    cache_read_input_tokens: int
+    cache_creation_input_tokens: int
+    estimated_savings_usd: Decimal
+
+    @property
+    def hit_rate(self) -> float:
+        if self.total_input_tokens <= 0:
+            return 0.0
+        return self.cache_read_input_tokens / self.total_input_tokens
+
+    @property
+    def hit_rate_label(self) -> str:
+        return f"{self.hit_rate * 100:.1f}%"
+
+    @property
+    def estimated_savings_label(self) -> str:
+        return f"${self.estimated_savings_usd:.2f}"
+
+    @property
+    def has_activity(self) -> bool:
+        return self.cache_read_input_tokens > 0 or self.cache_creation_input_tokens > 0
+
+
+@dataclass(frozen=True)
 class UsageAggregate:
     start: datetime | None
     end: datetime | None
@@ -347,6 +377,7 @@ class UsageAggregate:
     by_channel: tuple[AggregateRow, ...]
     by_day: tuple[DailyUsageRow, ...]
     by_task_day: tuple[DailyTaskRow, ...]
+    cache: CacheStats = field(default_factory=lambda: CacheStats(0, 0, 0, Decimal("0")))
 
     @property
     def total_calls(self) -> int:
@@ -1426,6 +1457,11 @@ def get_usage_aggregate(
         .group_by(task_day_bucket)
         .order_by(task_day_bucket.desc())
     ).all()
+    cache = _cache_stats(
+        session,
+        usage_filter=usage_filter,
+        scoped_task_filter=scoped_task_filter,
+    )
     return UsageAggregate(
         start=start,
         end=end,
@@ -1434,6 +1470,83 @@ def get_usage_aggregate(
         by_channel=by_channel_rows,
         by_day=tuple(_daily_row(row) for row in by_day_rows),
         by_task_day=tuple(_daily_task_row(row) for row in by_task_day_rows),
+        cache=cache,
+    )
+
+
+def _cache_stats(
+    session: Session,
+    *,
+    usage_filter: Sequence[Any],
+    scoped_task_filter: Sequence[Any],
+) -> CacheStats:
+    """Prompt-cache rollup: hit rate + estimated savings USD (HIG-196).
+
+    Savings = cache_read * base_input_price * (1 - cache_read_multiplier),
+    matched per (provider, model) against the latest effective pricing row.
+    Rows without a pricing match contribute tokens to the hit-rate denominator
+    but $0 to savings (we can't price them).
+    """
+
+    totals = session.execute(
+        select(
+            func.coalesce(func.sum(LLMUsage.input_tokens), 0),
+            func.coalesce(func.sum(LLMUsage.cache_read_input_tokens), 0),
+            func.coalesce(func.sum(LLMUsage.cache_creation_input_tokens), 0),
+        )
+        .join(Task, Task.id == LLMUsage.task_id)
+        .where(*usage_filter, *scoped_task_filter)
+    ).one()
+    total_input = int(totals[0])
+    total_read = int(totals[1])
+    total_creation = int(totals[2])
+
+    # Latest pricing row per (provider, model) — savings priced against it.
+    latest_pricing = (
+        select(
+            ModelPricing.provider.label("provider"),
+            ModelPricing.model.label("model"),
+            func.max(ModelPricing.effective_from).label("effective_from"),
+        )
+        .group_by(ModelPricing.provider, ModelPricing.model)
+        .subquery()
+    )
+    savings_rows = session.execute(
+        select(
+            func.coalesce(func.sum(LLMUsage.cache_read_input_tokens), 0),
+            ModelPricing.input_price_per_mtok,
+            ModelPricing.cache_read_multiplier,
+        )
+        .join(Task, Task.id == LLMUsage.task_id)
+        .join(
+            ModelPricing,
+            (ModelPricing.provider == LLMUsage.provider)
+            & (ModelPricing.model == LLMUsage.model),
+        )
+        .join(
+            latest_pricing,
+            (latest_pricing.c.provider == ModelPricing.provider)
+            & (latest_pricing.c.model == ModelPricing.model)
+            & (latest_pricing.c.effective_from == ModelPricing.effective_from),
+        )
+        .where(*usage_filter, *scoped_task_filter)
+        .group_by(
+            ModelPricing.input_price_per_mtok,
+            ModelPricing.cache_read_multiplier,
+        )
+    ).all()
+    savings = Decimal("0")
+    for read_tokens, input_price, read_multiplier in savings_rows:
+        full = Decimal(read_tokens) * Decimal(input_price)
+        discounted = full * Decimal(read_multiplier)
+        savings += (full - discounted) / _TOKENS_PER_MTOK
+    savings = savings.quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)
+
+    return CacheStats(
+        total_input_tokens=total_input,
+        cache_read_input_tokens=total_read,
+        cache_creation_input_tokens=total_creation,
+        estimated_savings_usd=savings,
     )
 
 

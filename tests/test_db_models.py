@@ -392,3 +392,19 @@ def test_memory_spine_schema_declares_bitemporal_columns_and_runs_table() -> Non
     )
     for kind in ("tool_card", "skill", "fact", "episode", "kg_entity"):
         assert kind in str(kind_check.sqltext)
+
+
+def test_llm_usage_table_has_cache_token_columns() -> None:
+    columns = Base.metadata.tables["llm_usage"].columns
+    assert "cache_creation_input_tokens" in columns
+    assert "cache_read_input_tokens" in columns
+    assert columns["cache_creation_input_tokens"].nullable is False
+    assert columns["cache_read_input_tokens"].nullable is False
+
+
+def test_model_pricing_table_has_cache_multiplier_columns() -> None:
+    columns = Base.metadata.tables["model_pricing"].columns
+    assert "cache_write_multiplier" in columns
+    assert "cache_read_multiplier" in columns
+    assert columns["cache_write_multiplier"].nullable is False
+    assert columns["cache_read_multiplier"].nullable is False

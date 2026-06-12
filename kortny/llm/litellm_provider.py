@@ -26,6 +26,7 @@ class LiteLLMProvider:
         api_version: str | None = None,
         extra_headers: Mapping[str, str] | None = None,
         timeout: float = 60.0,
+        prompt_cache_enabled: bool = True,
     ) -> None:
         if not api_key.strip():
             raise ValueError("LLM API key is required")
@@ -38,6 +39,7 @@ class LiteLLMProvider:
         self.api_version = api_version
         self.extra_headers = dict(extra_headers or {})
         self.timeout = timeout
+        self.prompt_cache_enabled = prompt_cache_enabled
 
     @classmethod
     def from_settings(
@@ -50,6 +52,9 @@ class LiteLLMProvider:
 
         resolved_settings = settings or load_settings()
         api_key = kwargs.pop("api_key", resolved_settings.llm_api_key)
+        kwargs.setdefault(
+            "prompt_cache_enabled", resolved_settings.prompt_cache_enabled
+        )
         provider_model = model or resolved_settings.llm_model
         if resolved_settings.llm_provider.value == "openrouter" and not (
             provider_model.startswith("openrouter/")
@@ -68,10 +73,20 @@ class LiteLLMProvider:
         *,
         response_format: JsonObject | None = None,
     ) -> Completion:
+        payload_messages = [_message_to_payload(message) for message in messages]
+        payload_tools = (
+            [_tool_to_openai_payload(tool) for tool in tools] if tools else []
+        )
+
+        if _should_inject_cache_control(self.model, enabled=self.prompt_cache_enabled):
+            payload_messages, payload_tools = _inject_cache_control(
+                payload_messages, payload_tools
+            )
+
         kwargs: dict[str, Any] = {
             "model": self.model,
             "api_key": self.api_key,
-            "messages": [_message_to_payload(message) for message in messages],
+            "messages": payload_messages,
             "request_timeout": self.timeout,
         }
         if self.api_base is not None:
@@ -80,10 +95,17 @@ class LiteLLMProvider:
             kwargs["api_version"] = self.api_version
         if self.extra_headers:
             kwargs["extra_headers"] = self.extra_headers
-        if tools:
-            kwargs["tools"] = [_tool_to_openai_payload(tool) for tool in tools]
+        if payload_tools:
+            kwargs["tools"] = payload_tools
         if response_format is not None:
             kwargs["response_format"] = response_format
+        if _is_openrouter_route(self.model):
+            # Provider-sticky routing + cache accounting on OpenRouter (HIG-196
+            # D6). ``usage.include`` returns cache_discount and the cached-token
+            # split that multi-provider slugs otherwise omit. session_id is not
+            # plumbed to the adapter today (would require widening the
+            # LLMProvider protocol); usage.include is the load-bearing extra.
+            kwargs["extra_body"] = {"usage": {"include": True}}
 
         response = litellm.completion(**kwargs)
         return _parse_completion(response, fallback_model=self.model)
@@ -157,6 +179,111 @@ def _tool_to_openai_payload(tool: Mapping[str, Any]) -> JsonObject:
     }
 
 
+_CACHE_CONTROL_EPHEMERAL: dict[str, str] = {"type": "ephemeral"}
+
+
+def _is_openrouter_route(model: str) -> bool:
+    return model.lower().startswith("openrouter/")
+
+
+def _is_claude_model(model: str) -> bool:
+    return "claude" in model.lower()
+
+
+def _should_inject_cache_control(model: str, *, enabled: bool) -> bool:
+    """Cache-control markers are Claude-gated and flag-gated (HIG-196 D2).
+
+    Non-Claude providers cache automatically on byte-stable prefixes; markers
+    add nothing (and LiteLLM strips them on the openrouter/ route anyway).
+    """
+
+    return enabled and _is_claude_model(model)
+
+
+def _inject_cache_control(
+    messages: list[JsonObject],
+    tools: list[JsonObject],
+) -> tuple[list[JsonObject], list[JsonObject]]:
+    """Return new message/tool lists with ``cache_control`` breakpoints set.
+
+    Marks up to three breakpoints (Anthropic's max is 4): the last tool entry,
+    the last block of the last system message, and the last content block of the
+    final message. Pure: never mutates the caller's structures. Idempotent: a
+    block that already carries ``cache_control`` is left as-is. Defensive about
+    string-vs-list ``content`` and absent/empty tool lists.
+    """
+
+    new_tools = [_copy_json(tool) for tool in tools]
+    if new_tools:
+        _mark_block(new_tools[-1])
+
+    new_messages = [_copy_message(message) for message in messages]
+
+    last_system_index = _last_index(new_messages, lambda m: m.get("role") == "system")
+    if last_system_index is not None:
+        _mark_message_content(new_messages[last_system_index])
+
+    if new_messages:
+        _mark_message_content(new_messages[-1])
+
+    return new_messages, new_tools
+
+
+def _mark_message_content(message: JsonObject) -> None:
+    """Mark the last content block of a message, normalizing str content.
+
+    A string ``content`` is wrapped into a single ``text`` part so the marker
+    has somewhere to live. Empty/absent content is left untouched (nothing to
+    cache).
+    """
+
+    content = message.get("content")
+    if isinstance(content, str):
+        if not content:
+            return
+        message["content"] = [
+            {
+                "type": "text",
+                "text": content,
+                "cache_control": dict(_CACHE_CONTROL_EPHEMERAL),
+            }
+        ]
+        return
+    if isinstance(content, list) and content:
+        last = content[-1]
+        if isinstance(last, dict):
+            _mark_block(last)
+
+
+def _mark_block(block: JsonObject) -> None:
+    if "cache_control" not in block:
+        block["cache_control"] = dict(_CACHE_CONTROL_EPHEMERAL)
+
+
+def _copy_message(message: JsonObject) -> JsonObject:
+    new_message = dict(message)
+    content = new_message.get("content")
+    if isinstance(content, list):
+        new_message["content"] = [
+            dict(part) if isinstance(part, dict) else part for part in content
+        ]
+    return new_message
+
+
+def _copy_json(value: JsonObject) -> JsonObject:
+    return dict(value)
+
+
+def _last_index(
+    items: list[JsonObject],
+    predicate: Any,
+) -> int | None:
+    for index in range(len(items) - 1, -1, -1):
+        if predicate(items[index]):
+            return index
+    return None
+
+
 def _parse_completion(response: object, *, fallback_model: str) -> Completion:
     choices = _get(response, "choices")
     if not isinstance(choices, Sequence) or isinstance(choices, str | bytes):
@@ -195,10 +322,34 @@ def _parse_usage(raw_usage: object) -> TokenUsage:
         "completion_tokens",
         _get(raw_usage, "output_tokens", 0),
     )
+    cache_read, cache_creation = _parse_cache_split(raw_usage)
     return TokenUsage(
         input_tokens=_coerce_token_count(input_tokens),
         output_tokens=_coerce_token_count(output_tokens),
+        cache_creation_input_tokens=cache_creation,
+        cache_read_input_tokens=cache_read,
     )
+
+
+def _parse_cache_split(raw_usage: object) -> tuple[int, int]:
+    """Extract (cache_read, cache_creation) from a LiteLLM usage object.
+
+    Reads ``prompt_tokens_details.cached_tokens`` (OpenAI-normalized across all
+    providers) for reads, and the Anthropic-specific
+    ``cache_creation_input_tokens`` for writes — preferring the public field but
+    falling back to the older private ``_cache_creation_input_tokens``. Every
+    access is getattr/mapping-guarded; absent fields collapse to 0.
+    """
+
+    details = _get(raw_usage, "prompt_tokens_details")
+    cache_read = _coerce_token_count(_get(details, "cached_tokens", 0))
+
+    cache_creation_raw = _get(raw_usage, "cache_creation_input_tokens")
+    if cache_creation_raw is None:
+        cache_creation_raw = _get(raw_usage, "_cache_creation_input_tokens", 0)
+    cache_creation = _coerce_token_count(cache_creation_raw)
+
+    return cache_read, cache_creation
 
 
 def _coerce_token_count(value: object) -> int:

@@ -483,6 +483,57 @@ def test_coordinator_finishes_with_final_answer(db_session: Session) -> None:
     assert context_event.payload["context_budget"]["thread_context_max_chars"] == 12000
 
 
+def test_coordinator_tool_schemas_identical_across_turns(
+    db_session: Session,
+) -> None:
+    """HIG-196: tool schemas must be byte-stable across turns of one run.
+
+    Prompt caching keys on the rendered tools/system prefix; a reordered or
+    rebuilt schema between turns silently busts the within-task cache.
+    """
+
+    task = create_task(db_session, input_text="echo something")
+    llm = FakeLLM(
+        [
+            Completion(
+                content=None,
+                tool_calls=(
+                    ToolCall(
+                        id="call-1",
+                        name="echo_json",
+                        arguments={"message": "hi"},
+                    ),
+                ),
+                usage=TokenUsage(input_tokens=10, output_tokens=5),
+                response_id="gen-1",
+                model="openai/gpt-4o-mini",
+            ),
+            Completion(
+                content="Done.",
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=12, output_tokens=4),
+                response_id="gen-2",
+                model="openai/gpt-4o-mini",
+            ),
+        ]
+    )
+
+    AgentCoordinator(
+        session=db_session,
+        llm=llm,
+        registry=ToolRegistry([EchoJsonTool()]),
+    ).run(task)
+
+    assert len(llm.calls) == 2
+    first_turn_tools = llm.calls[0][2]
+    second_turn_tools = llm.calls[1][2]
+    assert first_turn_tools == second_turn_tools
+    # Stable JSON serialization across turns (the actual cache-key invariant).
+    assert json.dumps(list(first_turn_tools), sort_keys=True) == json.dumps(
+        list(second_turn_tools), sort_keys=True
+    )
+
+
 def test_coordinator_compacts_large_search_tool_result_for_next_turn(
     db_session: Session,
 ) -> None:

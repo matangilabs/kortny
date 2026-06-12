@@ -50,6 +50,15 @@
       <strong>{{ aggregate.task_failure_rate_label }}</strong>
       <small>of tasks in this window</small>
     </div>
+    <div class="card metric-card {% if aggregate.cache.has_activity %}metric-success{% endif %}">
+      <span>Prompt Cache</span>
+      <strong>{{ aggregate.cache.hit_rate_label }}</strong>
+      {% if aggregate.cache.has_activity %}
+      <small>{{ aggregate.cache.estimated_savings_label }} saved · {{ aggregate.cache.cache_read_input_tokens|number }} cached in</small>
+      {% else %}
+      <small>no cache hits in this window</small>
+      {% endif %}
+    </div>
   </section>
 
   <!-- Hero: spend trend -->

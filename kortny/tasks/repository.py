@@ -557,6 +557,8 @@ class TaskRepository:
         input_tokens: int,
         output_tokens: int,
         cost_usd: Decimal | int | str,
+        cache_creation_input_tokens: int = 0,
+        cache_read_input_tokens: int = 0,
         event_id: int | None = None,
         model_tier: str | None = None,
         metadata: dict[str, Any] | None = None,
@@ -565,6 +567,8 @@ class TaskRepository:
 
         if input_tokens < 0 or output_tokens < 0:
             raise ValueError("Token counts must be non-negative")
+        if cache_creation_input_tokens < 0 or cache_read_input_tokens < 0:
+            raise ValueError("Cache token counts must be non-negative")
 
         task_obj = self._resolve_task(task, for_update=True)
         provider_value = LLMProvider(provider)
@@ -581,6 +585,8 @@ class TaskRepository:
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
                 "total_tokens": input_tokens + output_tokens,
+                "cache_creation_input_tokens": cache_creation_input_tokens,
+                "cache_read_input_tokens": cache_read_input_tokens,
                 "cost_usd": str(cost),
             }
             if metadata:
@@ -600,6 +606,8 @@ class TaskRepository:
             model_tier=model_tier,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
+            cache_creation_input_tokens=cache_creation_input_tokens,
+            cache_read_input_tokens=cache_read_input_tokens,
             cost_usd=cost,
         )
         self.session.add(usage)

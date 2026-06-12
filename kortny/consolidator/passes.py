@@ -295,7 +295,9 @@ def _confirm_merges(
             ),
             ChatMessage(
                 role="user",
-                content=json.dumps({"pairs": payload}, separators=(",", ":")),
+                content=json.dumps(
+                    {"pairs": payload}, separators=(",", ":"), sort_keys=True
+                ),
             ),
         ),
         response_format=MERGE_RESPONSE_FORMAT,

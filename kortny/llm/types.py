@@ -35,10 +35,17 @@ class ChatMessage:
 
 @dataclass(frozen=True, slots=True)
 class TokenUsage:
-    """Token usage returned by an LLM provider."""
+    """Token usage returned by an LLM provider.
+
+    ``input_tokens`` is the LiteLLM-normalized total prompt count (cached +
+    uncached). ``cache_creation_input_tokens`` and ``cache_read_input_tokens``
+    are a split *within* that total, not additions to it (HIG-196).
+    """
 
     input_tokens: int
     output_tokens: int
+    cache_creation_input_tokens: int = 0
+    cache_read_input_tokens: int = 0
 
     @property
     def total_tokens(self) -> int:

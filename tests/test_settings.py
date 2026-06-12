@@ -36,6 +36,7 @@ SETTINGS_ENV_VARS = {
     "KORTNY_SCHEDULER_POLL_INTERVAL_SECONDS",
     "KORTNY_SCHEDULER_MATERIALIZE_LIMIT",
     "KORTNY_SCHEDULER_ADVISORY_LOCK_KEY",
+    "KORTNY_PROMPT_CACHE_ENABLED",
     "KORTNY_WITNESS_ENABLED",
     "KORTNY_WITNESS_DELIVER_PRIVATE",
     "KORTNY_WITNESS_POLL_INTERVAL_SECONDS",
@@ -130,6 +131,7 @@ def test_settings_loads_required_environment(monkeypatch: pytest.MonkeyPatch) ->
     assert settings.witness_recurring_min_span_days == 14
     assert settings.composio_api_key == "composio-key"
     assert settings.composio_catalog_enabled is True
+    assert settings.prompt_cache_enabled is True
     assert settings.composio_catalog_limit == 60
     assert settings.composio_request_timeout_seconds == 10.0
     assert settings.tool_selector_max_external_candidates == 24
@@ -175,6 +177,7 @@ def test_settings_loads_optional_environment(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("KORTNY_SCHEDULER_POLL_INTERVAL_SECONDS", "2.5")
     monkeypatch.setenv("KORTNY_SCHEDULER_MATERIALIZE_LIMIT", "25")
     monkeypatch.setenv("KORTNY_SCHEDULER_ADVISORY_LOCK_KEY", "123456")
+    monkeypatch.setenv("KORTNY_PROMPT_CACHE_ENABLED", "false")
     monkeypatch.setenv("KORTNY_WITNESS_ENABLED", "false")
     monkeypatch.setenv("KORTNY_WITNESS_DELIVER_PRIVATE", "true")
     monkeypatch.setenv("KORTNY_WITNESS_POLL_INTERVAL_SECONDS", "90")
@@ -232,6 +235,7 @@ def test_settings_loads_optional_environment(monkeypatch: pytest.MonkeyPatch) ->
     assert settings.scheduler_poll_interval_seconds == 2.5
     assert settings.scheduler_materialize_limit == 25
     assert settings.scheduler_advisory_lock_key == 123456
+    assert settings.prompt_cache_enabled is False
     assert settings.witness_enabled is False
     assert settings.witness_deliver_private is True
     assert settings.witness_poll_interval_seconds == 90

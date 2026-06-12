@@ -2542,6 +2542,14 @@ class LLMUsage(Base):
     output_tokens: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default=text("0")
     )
+    # Prompt-cache split of input_tokens (HIG-196). These are a partition *within*
+    # input_tokens (the total prompt count), not additions to it.
+    cache_creation_input_tokens: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    cache_read_input_tokens: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
     cost_usd: Mapped[Decimal] = mapped_column(
         Numeric(12, 6), nullable=False, server_default=text("0")
     )
@@ -2586,6 +2594,14 @@ class ModelPricing(Base):
     )
     output_price_per_mtok: Mapped[Decimal] = mapped_column(
         Numeric(12, 6), nullable=False
+    )
+    # Prompt-cache cost multipliers vs the base input price (HIG-196 D5):
+    # cache writes default to 1.25x (5-minute TTL), cache reads to 0.1x.
+    cache_write_multiplier: Mapped[Decimal] = mapped_column(
+        Numeric(6, 4), nullable=False, server_default=text("1.25")
+    )
+    cache_read_multiplier: Mapped[Decimal] = mapped_column(
+        Numeric(6, 4), nullable=False, server_default=text("0.10")
     )
     effective_from: Mapped[datetime] = mapped_column(
         TZ, nullable=False, server_default=func.now()

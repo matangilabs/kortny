@@ -3258,6 +3258,42 @@ def test_dashboard_usage_renders_visual_analytics(
     assert "usage-chart-canvas" in response.text
 
 
+def test_dashboard_usage_shows_prompt_cache_stat(
+    client: tuple[TestClient, Session],
+) -> None:
+    test_client, session = client
+    session.add(
+        ModelPricing(
+            provider=LLMProvider.openrouter,
+            model="anthropic/claude-opus-4-8",
+            input_price_per_mtok=Decimal("5.000000"),
+            output_price_per_mtok=Decimal("25.000000"),
+            cache_write_multiplier=Decimal("1.25"),
+            cache_read_multiplier=Decimal("0.10"),
+            effective_from=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+    )
+    session.flush()
+    create_dashboard_task(
+        session,
+        model="anthropic/claude-opus-4-8",
+        input_tokens=10000,
+        output_tokens=500,
+        cache_creation_input_tokens=2000,
+        cache_read_input_tokens=6000,
+    )
+    login(test_client)
+
+    response = test_client.get("/usage?from=2026-05-24&to=2026-05-24")
+
+    assert response.status_code == 200
+    assert "Prompt Cache" in response.text
+    # hit rate = 6000 / 10000 = 60.0%
+    assert "60.0%" in response.text
+    # savings = 6000 * 5 * (1 - 0.10) / 1e6 = 0.027 → "$0.03"
+    assert "$0.03 saved" in response.text
+
+
 def test_dashboard_users_list_shows_rollups_and_detail_links(
     client: tuple[TestClient, Session],
 ) -> None:
@@ -4363,6 +4399,8 @@ def create_dashboard_task(
     cost_usd: Decimal | None = None,
     input_tokens: int = 1200,
     output_tokens: int = 300,
+    cache_creation_input_tokens: int = 0,
+    cache_read_input_tokens: int = 0,
     model: str = "openai/gpt-5.4-mini",
 ) -> Task:
     task_created_at = created_at or datetime(2026, 5, 24, 12, 0, tzinfo=UTC)
@@ -4508,6 +4546,8 @@ def create_dashboard_task(
                 model_tier="analysis",
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
+                cache_creation_input_tokens=cache_creation_input_tokens,
+                cache_read_input_tokens=cache_read_input_tokens,
                 cost_usd=task_cost_usd,
                 created_at=task_created_at + timedelta(seconds=30),
             ),

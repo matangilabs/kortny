@@ -374,6 +374,9 @@ class Settings(BaseSettings):
     composio_sync_advisory_lock_key: int = Field(
         default=759340222, validation_alias="KORTNY_COMPOSIO_SYNC_ADVISORY_LOCK_KEY"
     )
+    prompt_cache_enabled: bool = Field(
+        default=True, validation_alias="KORTNY_PROMPT_CACHE_ENABLED"
+    )
     mcp_enabled: bool = Field(default=True, validation_alias="KORTNY_MCP_ENABLED")
     mcp_tool_timeout_seconds: float = Field(
         default=60.0, validation_alias="KORTNY_MCP_TOOL_TIMEOUT_SECONDS"

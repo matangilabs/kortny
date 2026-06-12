@@ -34,6 +34,8 @@ from kortny.tools.types import JsonObject, JsonSchema
 
 USD_QUANTUM = Decimal("0.000001")
 TOKENS_PER_MTOK = Decimal("1000000")
+DEFAULT_CACHE_WRITE_MULTIPLIER = Decimal("1.25")
+DEFAULT_CACHE_READ_MULTIPLIER = Decimal("0.10")
 logger = logging.getLogger(__name__)
 
 
@@ -148,6 +150,10 @@ class LLMService:
                 "response_id": completion.response_id,
                 "latency_ms": latency_ms,
                 "has_content": bool(completion.content),
+                "cache_creation_input_tokens": (
+                    completion.usage.cache_creation_input_tokens
+                ),
+                "cache_read_input_tokens": completion.usage.cache_read_input_tokens,
                 "tool_call_count": len(completion.tool_calls),
                 "tool_call_names": [
                     tool_call.name for tool_call in completion.tool_calls
@@ -162,6 +168,10 @@ class LLMService:
                 model_tier=self.model_tier,
                 input_tokens=completion.usage.input_tokens,
                 output_tokens=completion.usage.output_tokens,
+                cache_creation_input_tokens=(
+                    completion.usage.cache_creation_input_tokens
+                ),
+                cache_read_input_tokens=completion.usage.cache_read_input_tokens,
                 cost_usd=cost_usd,
                 metadata=metadata,
             )
@@ -192,6 +202,12 @@ class LLMService:
                     "llm.input_tokens": completion.usage.input_tokens,
                     "llm.output_tokens": completion.usage.output_tokens,
                     "llm.total_tokens": total_tokens,
+                    "llm.cache_creation_input_tokens": (
+                        completion.usage.cache_creation_input_tokens
+                    ),
+                    "llm.cache_read_input_tokens": (
+                        completion.usage.cache_read_input_tokens
+                    ),
                     "llm.token_count.prompt": completion.usage.input_tokens,
                     "llm.token_count.completion": completion.usage.output_tokens,
                     "llm.token_count.total": total_tokens,
@@ -310,9 +326,40 @@ def _default_prompt_name(
 
 
 def calculate_cost_usd(usage: TokenUsage, pricing: ModelPricing) -> Decimal:
-    """Calculate USD cost from token usage and per-million-token pricing."""
+    """Calculate USD cost from token usage and per-million-token pricing.
 
-    input_cost = Decimal(usage.input_tokens) * pricing.input_price_per_mtok
+    Splits the prompt total into uncached / cache-creation / cache-read bands
+    (HIG-196 D5). ``input_tokens`` is the *total* prompt count; cache-creation
+    and cache-read are partitions within it. The uncached remainder is clamped
+    at 0 so a provider reporting more cache tokens than the total can never
+    produce a negative charge. Cache-write/read multipliers come from the
+    pricing row (defaults 1.25x / 0.1x).
+    """
+
+    base_input = pricing.input_price_per_mtok
+    # server_default only fires on a DB insert; an in-memory pricing row built
+    # without these columns leaves them None — fall back to the D5 defaults.
+    write_multiplier = (
+        pricing.cache_write_multiplier
+        if pricing.cache_write_multiplier is not None
+        else DEFAULT_CACHE_WRITE_MULTIPLIER
+    )
+    read_multiplier = (
+        pricing.cache_read_multiplier
+        if pricing.cache_read_multiplier is not None
+        else DEFAULT_CACHE_READ_MULTIPLIER
+    )
+    cache_creation = Decimal(usage.cache_creation_input_tokens)
+    cache_read = Decimal(usage.cache_read_input_tokens)
+    uncached = Decimal(usage.input_tokens) - cache_creation - cache_read
+    if uncached < 0:
+        uncached = Decimal(0)
+
+    input_cost = (
+        uncached * base_input
+        + cache_creation * write_multiplier * base_input
+        + cache_read * read_multiplier * base_input
+    )
     output_cost = Decimal(usage.output_tokens) * pricing.output_price_per_mtok
     return ((input_cost + output_cost) / TOKENS_PER_MTOK).quantize(
         USD_QUANTUM,
