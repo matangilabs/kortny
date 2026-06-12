@@ -160,6 +160,16 @@ class SessionManager:
             self._sessions[record.session_id] = record
             return _session_info(record, reused=False)
 
+    def live_container_ids(self) -> frozenset[str]:
+        """Return the container ids of all sessions this process still owns.
+
+        Used by the container GC to protect in-use workbench containers from
+        being reaped no matter their age.
+        """
+
+        with self._lock:
+            return frozenset(record.container_id for record in self._sessions.values())
+
     def get(self, session_id: str) -> SessionRecord:
         """Return the registry record for a session id."""
 

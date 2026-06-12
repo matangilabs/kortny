@@ -156,6 +156,23 @@ class DockerSessionContainer:
 
 
 @dataclass(frozen=True, slots=True)
+class DockerSandboxContainer:
+    """One Kortny-labeled sandbox container (ephemeral or session) for GC.
+
+    Spans every container carrying the ``kortny.sandbox=true`` label, not just
+    sessions: ephemeral one-shot run containers carry the same marker but no
+    ``kortny.sandbox.kind=session`` label, so the GC needs the wider view to
+    reap leaked one-shots after a runner crash.
+    """
+
+    container_id: str
+    kind: str
+    session_id: str
+    state: str
+    created_at_epoch: int
+
+
+@dataclass(frozen=True, slots=True)
 class DockerContainerRunResult:
     """Result of one Docker-backed sandbox execution attempt."""
 
@@ -234,6 +251,18 @@ class DockerApiSessionClient(Protocol):
 
     def remove_session_container(self, container_id: str) -> str | None:
         """Force-remove one session container; return an error string if any."""
+        ...
+
+
+class DockerApiGcClient(Protocol):
+    """Shape used by the sandbox container GC sweep."""
+
+    def list_sandbox_containers(self) -> tuple[DockerSandboxContainer, ...]:
+        """List every container carrying the ``kortny.sandbox`` label."""
+        ...
+
+    def remove_session_container(self, container_id: str) -> str | None:
+        """Force-remove one sandbox container; return an error string if any."""
         ...
 
 
@@ -671,6 +700,42 @@ class DockerApiClient:
                     task_id=str(labels.get("kortny.sandbox.task", "")),
                     created_at_epoch=int(entry.get("Created") or 0),
                     running=entry.get("State") == "running",
+                )
+            )
+        return tuple(containers)
+
+    def list_sandbox_containers(self) -> tuple[DockerSandboxContainer, ...]:
+        """List every container carrying the ``kortny.sandbox`` label."""
+
+        base_url = _docker_host_base_url(self.docker_host)
+        response = httpx.get(
+            f"{base_url}/containers/json",
+            params={
+                "all": "1",
+                "filters": json.dumps({"label": ["kortny.sandbox=true"]}),
+            },
+            timeout=self.timeout_seconds,
+        )
+        if not response.is_success:
+            return ()
+        payload = response.json()
+        if not isinstance(payload, list):
+            return ()
+        containers: list[DockerSandboxContainer] = []
+        for entry in payload:
+            if not isinstance(entry, dict):
+                continue
+            labels = entry.get("Labels") or {}
+            container_id = entry.get("Id")
+            if not isinstance(container_id, str) or not isinstance(labels, dict):
+                continue
+            containers.append(
+                DockerSandboxContainer(
+                    container_id=container_id,
+                    kind=str(labels.get("kortny.sandbox.kind", "")),
+                    session_id=str(labels.get("kortny.sandbox.session", "")),
+                    state=str(entry.get("State") or ""),
+                    created_at_epoch=int(entry.get("Created") or 0),
                 )
             )
         return tuple(containers)

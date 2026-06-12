@@ -21,6 +21,7 @@ from kortny.sandbox_runner.docker_api import (
     DockerApiRunnerClient,
     DockerContainerRunSpec,
 )
+from kortny.sandbox_runner.gc import SandboxContainerGc, gc_loop
 from kortny.sandbox_runner.sessions import (
     SessionConfig,
     SessionDockerError,
@@ -54,6 +55,10 @@ class SandboxRunnerSettings:
     session_idle_seconds: int = 1800
     session_max_age_seconds: int = 14400
     session_exec_max_timeout_seconds: int = 300
+    gc_enabled: bool = True
+    gc_max_age_minutes: int = 60
+    gc_interval_seconds: int = 600
+    gc_orphan_running_max_age_hours: int = 24
 
     @property
     def docker_host_configured(self) -> bool:
@@ -265,6 +270,22 @@ def load_sandbox_runner_settings(
             source.get("KORTNY_SANDBOX_SESSION_EXEC_MAX_TIMEOUT_SECONDS"),
             default=300,
         ),
+        gc_enabled=_env_bool(
+            source.get("KORTNY_SANDBOX_GC_ENABLED"),
+            default=True,
+        ),
+        gc_max_age_minutes=_env_int(
+            source.get("KORTNY_SANDBOX_GC_MAX_AGE_MINUTES"),
+            default=60,
+        ),
+        gc_interval_seconds=_env_int(
+            source.get("KORTNY_SANDBOX_GC_INTERVAL_SECONDS"),
+            default=600,
+        ),
+        gc_orphan_running_max_age_hours=_env_int(
+            source.get("KORTNY_SANDBOX_GC_ORPHAN_RUNNING_MAX_AGE_HOURS"),
+            default=24,
+        ),
     )
 
 
@@ -291,12 +312,15 @@ def create_app(
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         stop_event = threading.Event()
-        reaper: threading.Thread | None = None
+        threads: list[threading.Thread] = []
+        execution_active = (
+            resolved_settings.execution_enabled
+            and resolved_settings.docker_host_configured
+        )
         if (
             resolved_session_manager is not None
-            and resolved_settings.execution_enabled
+            and execution_active
             and resolved_settings.sessions_enabled
-            and resolved_settings.docker_host_configured
         ):
             reaper = threading.Thread(
                 target=_session_reaper_loop,
@@ -305,12 +329,41 @@ def create_app(
                 daemon=True,
             )
             reaper.start()
+            threads.append(reaper)
+        if (
+            execution_active
+            and resolved_settings.gc_enabled
+            and hasattr(resolved_docker_client, "list_sandbox_containers")
+        ):
+            live_ids = (
+                resolved_session_manager.live_container_ids
+                if resolved_session_manager is not None
+                else None
+            )
+            gc = SandboxContainerGc(
+                docker_client=resolved_docker_client,  # type: ignore[arg-type]
+                max_age_seconds=resolved_settings.gc_max_age_minutes * 60,
+                interval_seconds=resolved_settings.gc_interval_seconds,
+                orphan_running_max_age_seconds=(
+                    resolved_settings.gc_orphan_running_max_age_hours * 3600
+                ),
+                live_container_ids=live_ids,
+            )
+            gc_thread = threading.Thread(
+                target=gc_loop,
+                args=(gc, stop_event),
+                kwargs={"interval_seconds": resolved_settings.gc_interval_seconds},
+                name="sandbox-container-gc",
+                daemon=True,
+            )
+            gc_thread.start()
+            threads.append(gc_thread)
         try:
             yield
         finally:
             stop_event.set()
-            if reaper is not None:
-                reaper.join(timeout=2)
+            for thread in threads:
+                thread.join(timeout=2)
 
     app = FastAPI(
         title="Kortny Sandbox Runner",

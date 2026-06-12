@@ -1,0 +1,221 @@
+# Production overlay for Kortny (HIG-200).
+#
+# Usage:
+#   docker compose -f compose.yaml -f compose.prod.yaml up -d
+#
+# This overlay turns the dev stack into a production-shaped deployment:
+#   * every Python service runs the published GHCR app image instead of the uv
+#     dev image + source bind mount (source mounts are removed),
+#   * the sandbox execution image points at the published sandbox-exec image,
+#   * the fail-fast secret guard is armed (KORTNY_REQUIRE_SECURE_ENV=1) so the
+#     stack refuses to boot with placeholder secrets,
+#   * restart policies, resource limits, and secure cookies are set,
+#   * the dashboard stays bound to localhost; front it with a reverse proxy
+#     (see docs/deployment.md for Caddy / nginx snippets).
+#
+# It is intentionally additive: the dev stack (compose.yaml alone) is untouched.
+#
+# Set KORTNY_VERSION to the tag you want to run (defaults to "latest").
+
+x-app-image: &app-image
+  image: ghcr.io/boffti/kortny:${KORTNY_VERSION:-latest}
+
+# Common production env for every app service: arm the secret guard and pin the
+# venv-on-PATH image (no uv project resolution at runtime).
+x-prod-env: &prod-env
+  KORTNY_REQUIRE_SECURE_ENV: "1"
+
+# Anchor that strips the dev source bind mount. Services re-declare their own
+# data volumes on top of this where needed.
+x-no-source-mount: &no-source-mount
+  volumes: []
+
+services:
+  postgres:
+    restart: always
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+
+  # The migrate job also runs from the app image so migrations match the
+  # deployed code exactly (no uv resolution, no source mount).
+  migrate:
+    <<: *app-image
+    command: ["python", "-m", "alembic", "upgrade", "head"]
+    volumes: []
+    environment:
+      POSTGRES_URL: postgresql://${POSTGRES_USER:-kortny}:${POSTGRES_PASSWORD:-kortny}@postgres:5432/${POSTGRES_DB:-kortny}
+
+  app:
+    <<: [*app-image, *no-source-mount]
+    restart: always
+    command: ["python", "-m", "kortny.slack"]
+    environment:
+      <<: *prod-env
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+
+  worker:
+    <<: *app-image
+    restart: always
+    command: ["python", "-m", "kortny.worker"]
+    environment:
+      <<: *prod-env
+      KORTNY_SANDBOX_DEFAULT_IMAGE: ${KORTNY_SANDBOX_DEFAULT_IMAGE:-ghcr.io/boffti/kortny-sandbox-exec:${KORTNY_VERSION:-latest}}
+    # Drop the source bind mount but keep the data volumes.
+    volumes:
+      - task-artifacts:/data/artifacts
+      - fastembed-cache:/data/fastembed-cache
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+
+  ambient:
+    <<: *app-image
+    restart: always
+    command: ["python", "-m", "kortny.ambient"]
+    environment:
+      <<: *prod-env
+    volumes:
+      - fastembed-cache:/data/fastembed-cache
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+
+  dashboard:
+    <<: *app-image
+    restart: always
+    command:
+      [
+        "python",
+        "-m",
+        "uvicorn",
+        "kortny.dashboard.app:create_app",
+        "--factory",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8080",
+      ]
+    environment:
+      <<: *prod-env
+      # Secure cookies forced on behind the reverse proxy's TLS termination.
+      # Hardcoded (not env-interpolated) so the prod overlay is secure by
+      # default and never inherits the dev file's `false`.
+      DASHBOARD_SECURE_COOKIES: "true"
+    volumes:
+      - task-artifacts:/data/artifacts
+    # /login is the always-reachable unauthenticated route (returns 200 in both
+    # setup and normal modes); a generic `import kortny` liveness check would be
+    # useless, so probe the real HTTP surface instead. python is on PATH via the
+    # venv; no curl needed in the slim image.
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/login', timeout=3).status==200 else 1)",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+
+  sandbox-runner:
+    <<: *app-image
+    restart: always
+    command: ["python", "-m", "kortny.sandbox_runner"]
+    environment:
+      DOCKER_HOST: tcp://sandbox-docker-proxy:2375
+      KORTNY_SANDBOX_EXECUTION_ENABLED: ${KORTNY_SANDBOX_EXECUTION_ENABLED:-true}
+      KORTNY_SANDBOX_RUNNER_NAME: ${KORTNY_SANDBOX_RUNNER_NAME:-kortny-sandbox-runner}
+      KORTNY_SANDBOX_DEFAULT_IMAGE: ${KORTNY_SANDBOX_DEFAULT_IMAGE:-ghcr.io/boffti/kortny-sandbox-exec:${KORTNY_VERSION:-latest}}
+      KORTNY_SANDBOX_DEFAULT_NETWORK: ${KORTNY_SANDBOX_DEFAULT_NETWORK:-none}
+      KORTNY_SANDBOX_CPUS: ${KORTNY_SANDBOX_CPUS:-1.0}
+      KORTNY_SANDBOX_MEMORY_MB: ${KORTNY_SANDBOX_MEMORY_MB:-512}
+      KORTNY_SANDBOX_PIDS_LIMIT: ${KORTNY_SANDBOX_PIDS_LIMIT:-128}
+      KORTNY_SANDBOX_TIMEOUT_SECONDS: ${KORTNY_SANDBOX_TIMEOUT_SECONDS:-60}
+      KORTNY_SANDBOX_SESSIONS_ENABLED: ${KORTNY_SANDBOX_SESSIONS_ENABLED:-true}
+      # Container GC (HIG-200): startup + periodic sweep of leaked sandbox
+      # containers. Defaults mirror kortny/config/settings.py.
+      KORTNY_SANDBOX_GC_ENABLED: ${KORTNY_SANDBOX_GC_ENABLED:-true}
+      KORTNY_SANDBOX_GC_MAX_AGE_MINUTES: ${KORTNY_SANDBOX_GC_MAX_AGE_MINUTES:-60}
+      KORTNY_SANDBOX_GC_INTERVAL_SECONDS: ${KORTNY_SANDBOX_GC_INTERVAL_SECONDS:-600}
+      KORTNY_SANDBOX_GC_ORPHAN_RUNNING_MAX_AGE_HOURS: ${KORTNY_SANDBOX_GC_ORPHAN_RUNNING_MAX_AGE_HOURS:-24}
+    # Override the dev healthcheck: the slim runtime image has no `uv`; use the
+    # venv python that is on PATH.
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8090/health', timeout=2).read()",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    volumes: []
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+
+  sandbox-docker-proxy:
+    restart: always
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+
+  # The sandbox execution image in prod is pulled from GHCR rather than built
+  # locally. This keeps the build-only service definition valid under the
+  # overlay while pointing it at the published tag.
+  sandbox-exec-image:
+    image: ghcr.io/boffti/kortny-sandbox-exec:${KORTNY_VERSION:-latest}
+
+  # Optional daily Postgres backup. Disabled by default (backup profile); enable
+  # with `--profile backup`. Dumps to a named volume; see docs/deployment.md for
+  # the manual pg_dump command and retention guidance.
+  backup:
+    # Uses the same Postgres image so pg_dump matches the server version.
+    image: pgvector/pgvector:pg16-bookworm
+    profiles:
+      - backup
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        while true; do
+          ts=$$(date +%Y%m%d-%H%M%S);
+          echo "[backup] dumping to /backups/kortny-$${ts}.sql.gz";
+          PGPASSWORD="$${POSTGRES_PASSWORD}" pg_dump \
+            -h postgres -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}" \
+            | gzip > "/backups/kortny-$${ts}.sql.gz" || echo "[backup] dump failed";
+          # Retain the most recent 7 dumps.
+          ls -1t /backups/kortny-*.sql.gz 2>/dev/null | tail -n +8 | xargs -r rm -f;
+          sleep 86400;
+        done
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-kortny}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-kortny}
+      POSTGRES_DB: ${POSTGRES_DB:-kortny}
+    volumes:
+      - postgres-backups:/backups
+
+volumes:
+  postgres-backups:

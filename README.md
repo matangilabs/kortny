@@ -283,6 +283,20 @@ Kortny executes model-written code and acts on your tools, so the guardrails are
 
 There is no Kortny cloud in the data path — no telemetry, no phone-home. If you need a fully self-contained integration plane, the bring-your-own-MCP path is on the roadmap.
 
+## 📦 Production deployment
+
+The Quickstart stack bind-mounts your source and builds nothing — perfect for hacking, wrong for a server. For production, run the published GHCR images with the hardened overlay:
+
+```sh
+export KORTNY_VERSION=v1.2.3
+docker compose -f compose.yaml -f compose.prod.yaml pull
+docker compose -f compose.yaml -f compose.prod.yaml up -d
+```
+
+The overlay swaps every service to `ghcr.io/boffti/kortny` (non-root image, no source mount), forces secure cookies, sets restart policies and memory limits, and arms a **startup secret guard** that refuses to boot with placeholder secrets (`ENCRYPTION_KEY`, `DASHBOARD_SESSION_SECRET`, `DASHBOARD_PASSWORD`). Front the localhost-bound dashboard with a reverse proxy.
+
+Full guide — images, required env, reverse proxy (Caddy + nginx), backups, upgrades, and sandbox container GC — in **[docs/deployment.md](./docs/deployment.md)**.
+
 ## 🏗 Architecture
 
 ```mermaid

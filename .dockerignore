@@ -1,0 +1,24 @@
+# Keep the build context small and deterministic for docker/kortny.Dockerfile.
+.git
+.github
+.venv
+**/__pycache__
+**/*.pyc
+.mypy_cache
+.pytest_cache
+.ruff_cache
+tests
+docs
+*.md
+!README.md
+.env
+.env.*
+*.log
+build
+dist
+node_modules
+.DS_Store
+# Local sandbox/runtime artifacts that must never bake into the image.
+data
+fastembed-cache
+task-artifacts
