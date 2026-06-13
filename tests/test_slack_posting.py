@@ -1052,7 +1052,9 @@ def test_clear_assistant_status_clears_for_assistant_thread(
             "channel_id": "D0AU8HZT285",
             "thread_ts": "1716400000.000777",
             "status": "",
-            "loading_messages": [],
+            # Clearing passes no loading_messages (Slack rejects an empty list);
+            # the empty status clears the whole indicator.
+            "loading_messages": None,
         }
     ]
 

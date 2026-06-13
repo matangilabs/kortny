@@ -76,8 +76,9 @@ def test_reporter_sets_status() -> None:
             "channel_id": "D1",
             "thread_ts": "123.45",
             "status": "Searching the web…",
-            # Composer status only; loop cleared so it doesn't echo the status.
-            "loading_messages": [],
+            # Single-item list — Slack rejects an empty loading_messages; the one
+            # item replaces the app's static intro loop with the current step.
+            "loading_messages": ["Searching the web…"],
         }
     ]
 

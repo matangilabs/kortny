@@ -360,13 +360,14 @@ class SlackPoster:
         if not callable(setter):
             return
         try:
-            # Clear both the status line and the loading-messages loop so the
-            # app's static rotating intro doesn't linger after the reply.
+            # Clear the status with an empty status string. Do NOT pass
+            # loading_messages=[] — Slack rejects an empty list
+            # (invalid_arguments); the empty status clears the whole indicator,
+            # loading messages included.
             setter(
                 channel_id=thread.channel_id,
                 thread_ts=thread.thread_ts,
                 status="",
-                loading_messages=[],
             )
         except Exception:
             logger.warning(

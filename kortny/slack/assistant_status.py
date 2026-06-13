@@ -73,16 +73,18 @@ class AssistantStatusReporter:
         if not callable(setter):
             return
         try:
-            # Drive ONLY the composer status line with the live step, and clear
-            # the loading_messages loop (the line below the app name) so it
-            # neither rotates the app's static intro forever NOR echoes the same
-            # text as the status line. Stopgap until native step-streaming
-            # (TaskUpdateChunk timeline) replaces text-status progress (HIG-252).
+            # Drive both the composer status line and the below-app-name line to
+            # the current step. loading_messages must be a NON-EMPTY list — Slack
+            # rejects [] with invalid_arguments ("must provide at least 1 items"),
+            # and there is no way to clear it back to nothing — so we send the
+            # single current step (one item = no rotation, replaces the app's
+            # static intro loop). The native step-timeline (TaskUpdateChunk) that
+            # makes the two lines distinct is HIG-252.
             setter(
                 channel_id=self._channel_id,
                 thread_ts=self._thread_ts,
                 status=cleaned,
-                loading_messages=[],
+                loading_messages=[cleaned],
             )
             self._last = cleaned
         except Exception:
