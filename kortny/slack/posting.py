@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -64,6 +64,41 @@ class SlackPostingClient(Protocol):
         """Upload and share a Slack file."""
 
 
+class StreamingSlackClient(Protocol):
+    """Assistant streaming surface — a superset of ``SlackPostingClient``.
+
+    Kept separate so plain posting doubles (which only implement
+    ``chat_postMessage``/``files_upload_v2``) still satisfy ``SlackPostingClient``.
+    The streaming path casts to this only after a runtime capability check.
+    """
+
+    def chat_startStream(
+        self,
+        *,
+        channel: str,
+        thread_ts: str | None = None,
+    ) -> Mapping[str, Any]:
+        """Begin a streaming assistant reply; returns the stream message ts."""
+
+    def chat_appendStream(
+        self,
+        *,
+        channel: str,
+        ts: str,
+        markdown_text: str,
+    ) -> Mapping[str, Any]:
+        """Append a chunk to an in-progress streaming reply."""
+
+    def chat_stopStream(
+        self,
+        *,
+        channel: str,
+        ts: str,
+        blocks: list[dict[str, Any]] | None = None,
+    ) -> Mapping[str, Any]:
+        """Finalize a streaming reply (ends the live "thinking" state)."""
+
+
 @dataclass(frozen=True, slots=True)
 class SlackThread:
     """Slack channel/thread target, optionally tied to a task."""
@@ -71,6 +106,7 @@ class SlackThread:
     channel_id: str
     thread_ts: str | None
     task_id: uuid.UUID | None = None
+    is_assistant: bool = False
 
     @classmethod
     def from_task(cls, task: Task) -> SlackThread:
@@ -81,6 +117,7 @@ class SlackThread:
             channel_id=task.slack_channel_id,
             thread_ts=thread_ts,
             task_id=task.id,
+            is_assistant=_is_assistant_task(task),
         )
 
 
@@ -107,8 +144,16 @@ class SlackPoster:
         *,
         purpose: str = "result",
         blocks: list[dict[str, Any]] | None = None,
+        idempotency_purpose: str | None = None,
     ) -> str:
-        """Post text into a Slack thread and return the Slack message ts."""
+        """Post text into a Slack thread and return the Slack message ts.
+
+        ``idempotency_purpose`` overrides the outbox idempotency key without
+        changing the recorded ``purpose``. This lets a single task post several
+        distinct messages of the same purpose (e.g. one approval prompt per
+        approval) without the outbox deduping the later ones against the first,
+        while reaction/purpose-based lookups still match on ``purpose`` (HIG-248).
+        """
 
         post_thread_ts = _post_thread_ts(thread)
         slack_text = normalize_user_facing_text(text)
@@ -157,7 +202,9 @@ class SlackPoster:
                 )
             else:
                 task = self._resolve_task(thread.task_id)
-                idempotency_key = slack_message_key(task.id, purpose)
+                idempotency_key = slack_message_key(
+                    task.id, idempotency_purpose or purpose
+                )
                 request: dict[str, Any] = {
                     "channel": thread.channel_id,
                     "text": slack_text,
@@ -218,6 +265,151 @@ class SlackPoster:
                 event_payload,
             )
         return posted_message_ts
+
+    def stream_message(
+        self,
+        thread: SlackThread,
+        text: str,
+        *,
+        purpose: str = "result",
+        blocks: list[dict[str, Any]] | None = None,
+    ) -> str:
+        """Stream a reply into an assistant thread; return the message ts.
+
+        Uses the Slack streaming suite (``chat.startStream`` →
+        ``chat.appendStream`` → ``chat.stopStream``) so the answer renders
+        natively token-by-token in the live agent pane and the loading status
+        ends on ``stopStream`` (HIG-247). Idempotent across task retries via the
+        ``message_posted`` event guard. Falls back to a plain threaded post when
+        the client lacks streaming support (e.g. test/playground doubles).
+        """
+
+        post_thread_ts = _post_thread_ts(thread)
+        slack_text = normalize_user_facing_text(text)
+        self._flag_egress_urls(thread, slack_text, purpose=purpose)
+
+        if thread.task_id is not None:
+            existing_ts = self._existing_text_message_ts(thread.task_id, purpose)
+            if existing_ts is not None:
+                return existing_ts
+
+        if not self._client_supports_streaming() or thread.channel_id == "playground":
+            return self.post_message(thread, text, purpose=purpose, blocks=blocks)
+
+        stream_client = cast("StreamingSlackClient", self.client)
+        with start_span(
+            "slack.stream_message",
+            attributes={
+                "kortny.task.id": thread.task_id,
+                "slack.channel_id": thread.channel_id,
+                "slack.thread_ts": post_thread_ts,
+                "slack.message_purpose": purpose,
+                "slack.text_chars": len(slack_text),
+                "slack.delivery": "stream",
+            },
+        ):
+            start = stream_client.chat_startStream(
+                channel=thread.channel_id,
+                thread_ts=post_thread_ts,
+            )
+            stream_ts = _response_ts(start)
+            if stream_ts is None:
+                raise SlackPostingError("Slack chat_startStream response is missing ts")
+            stream_client.chat_appendStream(
+                channel=thread.channel_id,
+                ts=stream_ts,
+                markdown_text=slack_text,
+            )
+            # The streamed markdown_text IS the rendered content; passing blocks
+            # here would re-render the same answer a second time. Finalize plain.
+            stream_client.chat_stopStream(
+                channel=thread.channel_id,
+                ts=stream_ts,
+            )
+            set_span_attributes({"slack.posted_message_ts": stream_ts})
+
+        if thread.task_id is not None:
+            event_payload: dict[str, Any] = {
+                "channel": thread.channel_id,
+                "thread_ts": post_thread_ts,
+                "message_ts": stream_ts,
+                "text": slack_text,
+                "purpose": purpose,
+                "delivery": "stream",
+            }
+            self.task_service.append_event(
+                thread.task_id,
+                TaskEventType.message_posted,
+                event_payload,
+            )
+        return stream_ts
+
+    def clear_assistant_status(self, thread: SlackThread) -> None:
+        """Clear the assistant loading status (``setStatus`` with empty string).
+
+        Belt-and-suspenders for the assistant pane: ``stopStream`` already ends
+        the live status, but an explicit empty-string ``setStatus`` guarantees
+        the indicator clears even on the fallback post path or after the worker's
+        out-of-band reply. Never raises — a status-clear failure must not fail
+        the task.
+        """
+
+        if not thread.is_assistant or thread.thread_ts is None:
+            return
+        setter = getattr(self.client, "assistant_threads_setStatus", None)
+        if not callable(setter):
+            return
+        try:
+            # Clear both the status line and the loading-messages loop so the
+            # app's static rotating intro doesn't linger after the reply.
+            setter(
+                channel_id=thread.channel_id,
+                thread_ts=thread.thread_ts,
+                status="",
+                loading_messages=[],
+            )
+        except Exception:
+            logger.warning(
+                "failed to clear assistant status channel=%s thread_ts=%s",
+                thread.channel_id,
+                thread.thread_ts,
+                exc_info=True,
+            )
+
+    def _client_supports_streaming(self) -> bool:
+        return all(
+            callable(getattr(self.client, name, None))
+            for name in ("chat_startStream", "chat_appendStream", "chat_stopStream")
+        )
+
+    def _existing_text_message_ts(
+        self,
+        task_id: uuid.UUID,
+        purpose: str,
+    ) -> str | None:
+        """Return the ts of a prior text reply for this task+purpose, if any.
+
+        Idempotency guard for the streaming path (which doesn't go through the
+        outbox): a retried task that already delivered its reply must not stream
+        a duplicate.
+        """
+
+        row = self.session.scalar(
+            select(TaskEvent)
+            .where(
+                TaskEvent.task_id == task_id,
+                TaskEvent.type == TaskEventType.message_posted,
+                TaskEvent.payload["purpose"].as_string() == purpose,
+            )
+            .order_by(TaskEvent.created_at.desc())
+            .limit(1)
+        )
+        if row is None:
+            return None
+        message_ts = (
+            row.payload.get("message_ts") if isinstance(row.payload, dict) else None
+        )
+        return message_ts if isinstance(message_ts, str) and message_ts else None
 
     def upload_file(
         self,
@@ -505,11 +697,24 @@ class SlackPoster:
 
 
 def _post_thread_ts(thread: SlackThread) -> str | None:
-    # Slack direct-message channels are linear by default. Posting with thread_ts
-    # creates a hidden DM thread, which makes Kortny feel like it replied twice.
+    # Assistant ("Agents & AI Apps") threads are DM ("D") channels but they are
+    # genuinely threaded: the live agent pane is bound to the assistant thread
+    # root, and Slack only renders the reply (and auto-clears the loading status)
+    # when the app posts WITH that thread_ts. So assistant replies must stay
+    # threaded even though the channel starts with "D" (HIG-247).
+    if thread.is_assistant:
+        return thread.thread_ts
+    # Non-assistant direct-message channels are linear by default. Posting with
+    # thread_ts creates a hidden DM thread, which makes Kortny feel like it
+    # replied twice.
     if thread.channel_id.startswith("D"):
         return None
     return thread.thread_ts
+
+
+def _is_assistant_task(task: Task) -> bool:
+    payload = task.identity_payload if isinstance(task.identity_payload, dict) else {}
+    return payload.get("source_surface") == "assistant"
 
 
 def _normalize_blocks(

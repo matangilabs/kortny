@@ -67,6 +67,9 @@ class Settings(BaseSettings):
     response_humanizer_min_chars: int = Field(
         default=120, validation_alias="RESPONSE_HUMANIZER_MIN_CHARS"
     )
+    assistant_streaming_enabled: bool = Field(
+        default=True, validation_alias="KORTNY_ASSISTANT_STREAMING_ENABLED"
+    )
     agent_runtime: Literal["custom", "adk"] = Field(
         default="custom", validation_alias="AGENT_RUNTIME"
     )

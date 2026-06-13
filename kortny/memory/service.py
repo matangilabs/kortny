@@ -94,6 +94,9 @@ class MemoryPromptThread:
     channel_id: str
     thread_ts: str
     task_id: uuid.UUID | None = None
+    # Matches SlackThread so the posting boundary threads assistant replies
+    # correctly even for memory-confirmation prompts (HIG-247).
+    is_assistant: bool = False
 
 
 class ConfirmationPoster(Protocol):
@@ -831,10 +834,12 @@ def _thread_from_task(task: Task) -> MemoryPromptThread:
     thread_ts = task.slack_thread_ts or task.slack_message_ts
     if not thread_ts:
         raise ValueError("Task has no Slack thread timestamp")
+    payload = task.identity_payload if isinstance(task.identity_payload, dict) else {}
     return MemoryPromptThread(
         channel_id=task.slack_channel_id,
         thread_ts=thread_ts,
         task_id=task.id,
+        is_assistant=payload.get("source_surface") == "assistant",
     )
 
 

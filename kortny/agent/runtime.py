@@ -22,6 +22,7 @@ from kortny.agent.thread_context import ThreadTranscriptProvider
 from kortny.approvals import ToolApprovalPolicy
 from kortny.db.models import Task
 from kortny.embeddings import EmbeddingIndex
+from kortny.slack.assistant_status import StatusReporter
 from kortny.tasks import TaskService
 from kortny.tools import ToolRegistry
 
@@ -61,6 +62,7 @@ class CustomAgentRuntime:
         embedding_index: EmbeddingIndex | None = None,
         skill_direct_threshold: float = DEFAULT_SKILL_DIRECT_THRESHOLD,
         trifecta_gate_enabled: bool = True,
+        status_reporter: StatusReporter | None = None,
     ) -> None:
         self.coordinator = AgentCoordinator(
             session=session,
@@ -85,6 +87,7 @@ class CustomAgentRuntime:
             embedding_index=embedding_index,
             skill_direct_threshold=skill_direct_threshold,
             trifecta_gate_enabled=trifecta_gate_enabled,
+            status_reporter=status_reporter,
         )
 
     def run(self, task: Task | uuid.UUID) -> AgentRunResult:

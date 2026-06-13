@@ -45,9 +45,14 @@ _OUTWARD_NATIVE_NAMESPACES = frozenset(
         "native.deploy",  # publishes externally
         "native.memory",  # persists possibly-injected content into memory
         "native.scheduler",  # arms a future autonomous action
-        "native.skills",  # run_skill_script executes code
     }
 )
+# NOTE: native.skills is intentionally NOT outward. run_skill_script runs
+# vetted ('trusted'-tier) skill code inside the same network-none sandbox as
+# code_exec/sandbox_bash — it has no egress channel, so it's sandbox-local
+# compute, not the trifecta's egress leg (see _TRIFECTA_FREE_NATIVE_TOOLS).
+# load_skill/load_skill_resource are read-only and never escalate. The real
+# egress for skill output is the export/preview/deploy/post tools below.
 
 # Specific native tools that deliver content out of the sandbox to the user,
 # plus the always-outward deploy tool. ``slack_add_reaction`` is intentionally
@@ -65,10 +70,16 @@ _OUTWARD_NATIVE_TOOLS = frozenset(
 _TRIFECTA_FREE_NATIVE_TOOLS = frozenset(
     {
         "slack_add_reaction",
+        # Pinning an existing message creates no new outbound payload (parity
+        # with slack_add_reaction) — not an egress leg.
+        "slack_pin_message",
         "code_exec",
         "sandbox_bash",
         "sandbox_write_file",
         "sandbox_read_file",
+        # Vetted ('trusted'-tier) skill code in the same network-none sandbox as
+        # code_exec — no egress channel, so not the trifecta's egress leg.
+        "run_skill_script",
     }
 )
 

@@ -54,14 +54,22 @@ class ExecutionGuardrailLimits:
     def for_depth(cls, depth: str) -> ExecutionGuardrailLimits:
         """Return depth-scaled limits for the unified router (HIG-218).
 
-        ``quick_response`` gets a tight budget; ``standard_tool_task`` and
-        ``deep_workflow`` use the current defaults (planned budgets already
-        exist for the deep/planned path). Full adaptive scaling is HIG-220.
+        ``quick_response`` gets a tight budget. ``standard_tool_task`` and
+        ``deep_workflow`` get progressively larger budgets: a research +
+        document task (load skill → several web searches → write file → run
+        skill script → finalize) legitimately needs more than the old 6-turn
+        default, which hard-failed such tasks with "exceeded max_turns"
+        (HIG-250). The circuit breaker (max_same_tool_call / error) still bounds
+        runaway loops independently of the turn cap. Full adaptive scaling and
+        graceful finalization-on-cap are HIG-220.
         """
 
         if depth == "quick_response":
             return cls(max_turns=2, max_tool_calls=3)
-        return cls()
+        if depth == "deep_workflow":
+            return cls(max_turns=16, max_tool_calls=40)
+        # standard_tool_task (and any unrecognized depth)
+        return cls(max_turns=10, max_tool_calls=20)
 
     def __post_init__(self) -> None:
         if self.max_turns < 1:

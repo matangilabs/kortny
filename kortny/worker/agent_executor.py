@@ -88,6 +88,11 @@ from kortny.routing import (
     Tier0Router,
 )
 from kortny.slack import SlackPoster, SlackThread
+from kortny.slack.assistant_status import (
+    AssistantStatusClient,
+    AssistantStatusReporter,
+    StatusReporter,
+)
 from kortny.slack.comments import (
     ArtifactCommentGenerator,
     LLMArtifactCommentGenerator,
@@ -1039,7 +1044,37 @@ class AgentTaskExecutor:
             ),
             skill_direct_threshold=settings.skill_direct_similarity_threshold,
             trifecta_gate_enabled=settings.trifecta_gate_enabled,
+            status_reporter=self._build_status_reporter(settings=settings, task=task),
         ).run(task)
+
+    def _build_status_reporter(
+        self,
+        *,
+        settings: Settings,
+        task: Task,
+    ) -> StatusReporter | None:
+        """Live assistant-pane status reporter for assistant-surface tasks.
+
+        Returns None for every other surface so the coordinator falls back to
+        its no-op reporter (HIG-247 follow-up).
+        """
+
+        payload = (
+            task.identity_payload if isinstance(task.identity_payload, dict) else {}
+        )
+        if payload.get("source_surface") != "assistant":
+            return None
+        thread_ts = task.slack_thread_ts or task.slack_message_ts
+        if not (task.slack_channel_id and thread_ts):
+            return None
+        client = self.slack_client or cast(
+            SlackPostingClient, WebClient(token=settings.slack_bot_token)
+        )
+        return AssistantStatusReporter(
+            client=cast(AssistantStatusClient, client),
+            channel_id=task.slack_channel_id,
+            thread_ts=thread_ts,
+        )
 
     def _record_semantic_router_shadow(
         self,
@@ -2112,7 +2147,11 @@ class AgentTaskExecutor:
                     style_resolver=self._build_style_resolver(settings),
                 )
             blocks = render_response_blocks(response_text)
-            poster.post_message(thread, response_text, blocks=blocks)
+            if thread.is_assistant and settings.assistant_streaming_enabled:
+                poster.stream_message(thread, response_text, blocks=blocks)
+            else:
+                poster.post_message(thread, response_text, blocks=blocks)
+            poster.clear_assistant_status(thread)
             return response_text
 
         for index, artifact in enumerate(artifacts):
@@ -2140,6 +2179,7 @@ class AgentTaskExecutor:
                 initial_comment=initial_comment,
                 title=artifact.filename,
             )
+        poster.clear_assistant_status(thread)
         return None
 
     def _park_for_composio_connect(
@@ -2244,6 +2284,11 @@ class AgentTaskExecutor:
                     redirect_url=redirect_url,
                 ),
                 purpose=TOOL_APPROVAL_PROMPT_PURPOSE,
+                # Unique per toolkit so connecting a second app in one task
+                # isn't deduped away by the outbox (HIG-248).
+                idempotency_purpose=(
+                    f"{TOOL_APPROVAL_PROMPT_PURPOSE}:connect:{toolkit_slug}"
+                ),
             ),
         )
 
@@ -2278,6 +2323,11 @@ class AgentTaskExecutor:
                     approval=approval,
                 ),
                 purpose=TOOL_APPROVAL_PROMPT_PURPOSE,
+                # Unique per approval so a task needing >1 approval doesn't have
+                # its later prompts deduped away by the outbox (HIG-248).
+                idempotency_purpose=(
+                    f"{TOOL_APPROVAL_PROMPT_PURPOSE}:{approval.request.approval_key}"
+                ),
             ),
         )
 

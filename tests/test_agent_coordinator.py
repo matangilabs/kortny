@@ -483,6 +483,36 @@ def test_coordinator_finishes_with_final_answer(db_session: Session) -> None:
     assert context_event.payload["context_budget"]["thread_context_max_chars"] == 12000
 
 
+def test_coordinator_reports_assistant_status(db_session: Session) -> None:
+    task = create_task(db_session, input_text="summarize this")
+    llm = FakeLLM(
+        [
+            Completion(
+                content="Here is the summary.",
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=10, output_tokens=5),
+                response_id="gen-final",
+                model="openai/gpt-4o-mini",
+            )
+        ]
+    )
+    statuses: list[str] = []
+
+    class Recorder:
+        def report(self, status: str) -> None:
+            statuses.append(status)
+
+    AgentCoordinator(
+        session=db_session,
+        llm=llm,
+        registry=ToolRegistry(),
+        status_reporter=Recorder(),
+    ).run(task)
+
+    assert "Getting up to speed…" in statuses
+    assert "Writing the response…" in statuses
+
+
 def test_coordinator_tool_schemas_identical_across_turns(
     db_session: Session,
 ) -> None:
@@ -682,16 +712,23 @@ def test_execution_planner_falls_back_to_legacy_without_intent(
     assert gate.reason == "no_intent_signal"
 
 
-def test_guardrail_limits_for_depth_scales_quick_response() -> None:
+def test_guardrail_limits_for_depth_scales_by_depth() -> None:
     quick = ExecutionGuardrailLimits.for_depth("quick_response")
     assert quick.max_turns == 2
     assert quick.max_tool_calls == 3
 
+    # Multi-step research + document tasks need more than the old 6-turn default
+    # (HIG-250): standard gets a wider budget, deep wider still.
     standard = ExecutionGuardrailLimits.for_depth("standard_tool_task")
+    assert standard.max_turns == 10
+    assert standard.max_tool_calls == 20
+
     deep = ExecutionGuardrailLimits.for_depth("deep_workflow")
-    default = ExecutionGuardrailLimits()
-    assert standard == default
-    assert deep == default
+    assert deep.max_turns == 16
+    assert deep.max_tool_calls == 40
+
+    # An unrecognized depth falls back to the standard (not quick) budget.
+    assert ExecutionGuardrailLimits.for_depth("???") == standard
 
 
 def test_coordinator_gates_sensitive_tool_before_invocation(

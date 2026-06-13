@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 
 from kortny.agent.coordinator import TRIFECTA_GATE_MESSAGE, AgentCoordinator
 from kortny.agent.planner import ExecutionPlanner, PlannerGateDecision
+from kortny.agent.trifecta import is_outward_or_write_tool
 from kortny.approvals import ToolApprovalRequired
 from kortny.db.models import (
     Artifact,
@@ -37,6 +38,27 @@ from kortny.tools import ToolRegistry, ToolResult
 from kortny.tools.types import JsonObject, JsonSchema
 
 TEST_POSTGRES_URL = os.environ.get("KORTNY_TEST_POSTGRES_URL")
+
+
+def test_run_skill_script_is_not_outward() -> None:
+    # Vetted skill scripts run in the same network-none sandbox as code_exec,
+    # so the trifecta gate must treat them as local compute, not egress (HIG-248
+    # follow-up): no per-call approval even after untrusted content armed the task.
+    assert is_outward_or_write_tool("run_skill_script") is False
+    assert is_outward_or_write_tool("code_exec") is False
+    assert is_outward_or_write_tool("sandbox_bash") is False
+    # Read-only skill tools are never escalated.
+    assert is_outward_or_write_tool("load_skill") is False
+    assert is_outward_or_write_tool("load_skill_resource") is False
+    # Pin/reaction carry no new outbound payload — not egress.
+    assert is_outward_or_write_tool("slack_add_reaction") is False
+    assert is_outward_or_write_tool("slack_pin_message") is False
+    # The genuine egress legs stay outward.
+    assert is_outward_or_write_tool("deploy_site") is True
+    assert is_outward_or_write_tool("sandbox_export_artifact") is True
+    assert is_outward_or_write_tool("sandbox_publish_preview") is True
+    assert is_outward_or_write_tool("slack_reply_thread") is True
+    assert is_outward_or_write_tool("composio__notion__create_page") is True
 
 
 class FakeLLM:

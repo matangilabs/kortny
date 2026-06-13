@@ -30,7 +30,7 @@ from kortny.slack.outbox import (
     SlackSideEffectOutbox,
     slack_message_key,
 )
-from kortny.tasks import TaskService
+from kortny.tasks import TaskIdentity, TaskService
 
 TEST_POSTGRES_URL = os.environ.get("KORTNY_TEST_POSTGRES_URL")
 
@@ -871,3 +871,259 @@ def create_task(
         slack_user_id="U123",
         input="make a report",
     )
+
+
+def create_assistant_task(
+    session: Session,
+    *,
+    channel_id: str = "D0AU8HZT285",
+    thread_ts: str = "1716400000.000777",
+) -> Task:
+    """A task on an assistant ("Agents & AI Apps") thread — a 'D' DM channel
+    whose reply MUST stay threaded under the assistant thread root."""
+
+    installation = Installation(slack_team_id=f"T{uuid.uuid4().hex}")
+    session.add(installation)
+    session.flush()
+    event_id = f"Ev{uuid.uuid4().hex}"
+    identity = TaskIdentity.slack_message(
+        channel_id=channel_id,
+        message_ts=thread_ts,
+        thread_ts=thread_ts,
+        user_id="U123",
+        input_text="what do you know about this workspace?",
+        slack_event_id=event_id,
+        source_surface="assistant",
+    )
+    return TaskService(session).create_task(
+        installation_id=installation.id,
+        slack_event_id=event_id,
+        slack_channel_id=channel_id,
+        slack_thread_ts=thread_ts,
+        slack_message_ts=thread_ts,
+        slack_user_id="U123",
+        input="what do you know about this workspace?",
+        identity=identity,
+        source_surface="assistant",
+    )
+
+
+class FakeStreamingSlackClient(FakeSlackClient):
+    """FakeSlackClient + the assistant streaming/status surface (HIG-246)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.stream_starts: list[dict[str, Any]] = []
+        self.stream_appends: list[dict[str, Any]] = []
+        self.stream_stops: list[dict[str, Any]] = []
+        self.status_calls: list[dict[str, Any]] = []
+
+    def chat_startStream(
+        self,
+        *,
+        channel: str,
+        thread_ts: str | None = None,
+    ) -> dict[str, Any]:
+        self.stream_starts.append({"channel": channel, "thread_ts": thread_ts})
+        return {"ok": True, "ts": f"1716400002.{len(self.stream_starts):06d}"}
+
+    def chat_appendStream(
+        self,
+        *,
+        channel: str,
+        ts: str,
+        markdown_text: str,
+    ) -> dict[str, Any]:
+        self.stream_appends.append(
+            {"channel": channel, "ts": ts, "markdown_text": markdown_text}
+        )
+        return {"ok": True, "ts": ts}
+
+    def chat_stopStream(
+        self,
+        *,
+        channel: str,
+        ts: str,
+        blocks: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        self.stream_stops.append({"channel": channel, "ts": ts, "blocks": blocks})
+        return {"ok": True, "ts": ts}
+
+    def assistant_threads_setStatus(
+        self,
+        *,
+        channel_id: str,
+        thread_ts: str,
+        status: str,
+        loading_messages: list[str] | None = None,
+    ) -> dict[str, Any]:
+        self.status_calls.append(
+            {
+                "channel_id": channel_id,
+                "thread_ts": thread_ts,
+                "status": status,
+                "loading_messages": loading_messages,
+            }
+        )
+        return {"ok": True}
+
+
+def test_assistant_thread_keeps_thread_ts_on_dm_channel(db_session: Session) -> None:
+    # Regression: assistant threads are 'D' channels but must stay threaded so
+    # the live agent pane renders the reply (HIG-246).
+    task = create_assistant_task(db_session)
+    thread = SlackThread.from_task(task)
+    assert thread.is_assistant is True
+    client = FakeSlackClient()
+    SlackPoster(session=db_session, client=client).post_message(thread, "Done.")
+    assert client.messages[0]["thread_ts"] == "1716400000.000777"
+
+
+def test_stream_message_streams_and_records_event(db_session: Session) -> None:
+    task = create_assistant_task(db_session)
+    client = FakeStreamingSlackClient()
+    thread = SlackThread.from_task(task)
+
+    ts = SlackPoster(session=db_session, client=client).stream_message(
+        thread, "Here's what I know."
+    )
+
+    assert client.stream_starts == [
+        {"channel": "D0AU8HZT285", "thread_ts": "1716400000.000777"}
+    ]
+    assert client.stream_appends[0]["markdown_text"] == "Here's what I know."
+    assert client.stream_stops[0]["ts"] == ts
+    # No plain chat.postMessage when streaming.
+    assert client.messages == []
+
+    event = db_session.scalar(
+        select(TaskEvent)
+        .where(
+            TaskEvent.task_id == task.id,
+            TaskEvent.type == TaskEventType.message_posted,
+        )
+        .order_by(TaskEvent.seq.desc())
+        .limit(1)
+    )
+    assert event is not None
+    assert event.payload["delivery"] == "stream"
+    assert event.payload["thread_ts"] == "1716400000.000777"
+    assert event.payload["message_ts"] == ts
+
+
+def test_stream_message_idempotent_on_retry(db_session: Session) -> None:
+    task = create_assistant_task(db_session)
+    client = FakeStreamingSlackClient()
+    poster = SlackPoster(session=db_session, client=client)
+    thread = SlackThread.from_task(task)
+
+    first = poster.stream_message(thread, "Answer.")
+    second = poster.stream_message(thread, "Answer.")
+
+    assert first == second
+    # Only one stream sequence — the retry short-circuits on the prior event.
+    assert len(client.stream_starts) == 1
+
+
+def test_stream_message_falls_back_without_streaming_support(
+    db_session: Session,
+) -> None:
+    task = create_assistant_task(db_session)
+    client = FakeSlackClient()  # no chat_startStream
+    poster = SlackPoster(session=db_session, client=client)
+
+    poster.stream_message(SlackThread.from_task(task), "Answer.")
+
+    # Fell back to a plain (but still threaded) post.
+    assert client.messages[0]["thread_ts"] == "1716400000.000777"
+    assert client.messages[0]["text"] == "Answer."
+
+
+def test_clear_assistant_status_clears_for_assistant_thread(
+    db_session: Session,
+) -> None:
+    task = create_assistant_task(db_session)
+    client = FakeStreamingSlackClient()
+    SlackPoster(session=db_session, client=client).clear_assistant_status(
+        SlackThread.from_task(task)
+    )
+    assert client.status_calls == [
+        {
+            "channel_id": "D0AU8HZT285",
+            "thread_ts": "1716400000.000777",
+            "status": "",
+            "loading_messages": [],
+        }
+    ]
+
+
+def test_clear_assistant_status_noop_for_non_assistant(db_session: Session) -> None:
+    task = create_task(db_session, channel_id="D123")
+    client = FakeStreamingSlackClient()
+    SlackPoster(session=db_session, client=client).clear_assistant_status(
+        SlackThread.from_task(task)
+    )
+    assert client.status_calls == []
+
+
+def test_post_message_distinct_idempotency_purpose_posts_both(
+    db_session: Session,
+) -> None:
+    # Two approvals in one task must each get their own prompt — the outbox must
+    # not dedup the second against the first (HIG-248).
+    task = create_task(db_session, channel_id="C123")
+    client = FakeSlackClient()
+    poster = SlackPoster(session=db_session, client=client)
+    thread = SlackThread.from_task(task)
+
+    poster.post_message(
+        thread,
+        "Approve A?",
+        purpose="tool_approval_request",
+        idempotency_purpose="tool_approval_request:keyA",
+    )
+    poster.post_message(
+        thread,
+        "Approve B?",
+        purpose="tool_approval_request",
+        idempotency_purpose="tool_approval_request:keyB",
+    )
+
+    assert [m["text"] for m in client.messages] == ["Approve A?", "Approve B?"]
+    events = db_session.scalars(
+        select(TaskEvent)
+        .where(
+            TaskEvent.task_id == task.id,
+            TaskEvent.type == TaskEventType.message_posted,
+        )
+        .order_by(TaskEvent.seq)
+    ).all()
+    # Both recorded under the same purpose so reaction lookup finds the latest.
+    assert [e.payload["purpose"] for e in events] == [
+        "tool_approval_request",
+        "tool_approval_request",
+    ]
+
+
+def test_post_message_same_idempotency_purpose_dedups(db_session: Session) -> None:
+    task = create_task(db_session, channel_id="C123")
+    client = FakeSlackClient()
+    poster = SlackPoster(session=db_session, client=client)
+    thread = SlackThread.from_task(task)
+
+    first = poster.post_message(
+        thread,
+        "Approve?",
+        purpose="tool_approval_request",
+        idempotency_purpose="tool_approval_request:sameKey",
+    )
+    second = poster.post_message(
+        thread,
+        "Approve?",
+        purpose="tool_approval_request",
+        idempotency_purpose="tool_approval_request:sameKey",
+    )
+
+    # Same key → outbox dedups → posted once, same ts returned.
+    assert first == second
+    assert len(client.messages) == 1

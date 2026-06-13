@@ -92,6 +92,13 @@ from kortny.observability import (
     set_span_attributes,
     start_span,
 )
+from kortny.slack.assistant_status import (
+    STATUS_GETTING_STARTED,
+    STATUS_WRITING,
+    NullStatusReporter,
+    StatusReporter,
+    status_for_tool,
+)
 from kortny.tasks import TaskService
 from kortny.tools import ToolRegistry
 from kortny.tools.catalog import tool_metadata, tool_timeout_seconds
@@ -282,6 +289,7 @@ class AgentCoordinator:
         embedding_index: EmbeddingIndex | None = None,
         skill_direct_threshold: float = DEFAULT_SKILL_DIRECT_THRESHOLD,
         trifecta_gate_enabled: bool = True,
+        status_reporter: StatusReporter | None = None,
     ) -> None:
         if max_turns < 1:
             raise ValueError("max_turns must be at least 1")
@@ -314,6 +322,7 @@ class AgentCoordinator:
         self._autonomy_level_cache: dict[uuid.UUID, AutonomyLevel] = {}
         self.trifecta_gate_enabled = trifecta_gate_enabled
         self._trifecta_states: dict[uuid.UUID, TrifectaGateState] = {}
+        self.status_reporter: StatusReporter = status_reporter or NullStatusReporter()
         self.tool_result_prompt_max_chars = tool_result_prompt_max_chars
         if context_engine is not None:
             self.context_engine = context_engine
@@ -342,6 +351,7 @@ class AgentCoordinator:
         context_package: ContextPackage | None = None
         run_outcome = "failed"
         try:
+            self.status_reporter.report(STATUS_GETTING_STARTED)
             context_package = self._initial_context(task_obj)
             self._record_skill_ranking(task_obj, context_package)
             messages = list(context_package.messages)
@@ -437,6 +447,7 @@ class AgentCoordinator:
                         ChatMessage(role="system", content=EMPTY_RESPONSE_REPAIR_PROMPT)
                     )
                     continue
+                self.status_reporter.report(STATUS_WRITING)
                 result = self._finish_with_text(
                     task_obj,
                     completion.content,
@@ -519,6 +530,13 @@ class AgentCoordinator:
         )
         return completion
 
+    def _tool_status(self, tool_name: str) -> str:
+        """Human activity status for a tool, enriched with its catalog name."""
+
+        return status_for_tool(
+            tool_name, display_name=tool_metadata(tool_name).display_name
+        )
+
     def _invoke_tool_calls(
         self,
         *,
@@ -588,6 +606,7 @@ class AgentCoordinator:
                     "arguments": arguments,
                 },
             )
+            self.status_reporter.report(self._tool_status(tool_call.name))
             log_observation(
                 logger,
                 "tool_call_started",
