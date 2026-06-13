@@ -2,7 +2,7 @@
 name: styled-report-pdf
 description: Use when asked to produce a polished PDF report, formatted document, investment research note, one-pager, brief, or leave-behind to upload to Slack — when the deliverable is a styled, print-ready PDF with a cover, heading hierarchy, stat cards, tables, and page numbers, not plain text in a message.
 metadata:
-  version: 2.0.0
+  version: 2.1.0
   display_name: Styled Report PDF
   tags: pdf, report, document, one-pager, brief, leave-behind, weasyprint, html, print, investment-research, editorial
 ---
@@ -91,8 +91,17 @@ python scripts/render_pdf.py \
   --title "SpaceX IPO Readiness Analysis" \
   --subtitle "A field analysis of capital formation and market timing." \
   --kicker "Investment Research — Confidential" \
-  --date "13 Jun 2026"
+  --date "13 Jun 2026" \
+  --brand "Northwind Capital"
 ```
+
+**Brand the report with the user's organization, never the assistant's own
+name.** Pass `--brand` with the firm/team/company name — pull it from workspace
+facts or the channel/workspace context. It appears on the cover top-left and the
+page footer. If you genuinely don't know the org name, **omit `--brand`** (the
+label is dropped cleanly) rather than guessing or branding it with the
+assistant's name. In full-document mode, put the same name in your cover markup —
+do not hardcode the assistant's name as the publisher.
 
 Pass `--accent "#hex"` to override the theme accent for a specific brand color
 (e.g. a client's primary color). Otherwise the theme default is used.
@@ -151,6 +160,7 @@ data as a workbook (`spreadsheet-builder`).
 | `--subtitle TEXT` | no | Cover deck/subtitle |
 | `--kicker TEXT` | no | Mono CAPS eyebrow above cover title |
 | `--date TEXT` | no | Cover date string (default: today) |
+| `--brand TEXT` | no | Org/firm name for cover + footer (use the user's org, not the assistant's name; omit if unknown) |
 | `--accent HEX` | no | Override theme accent color |
 
 Deps: `weasyprint` (pango/cairo baked into sandbox image). No network.

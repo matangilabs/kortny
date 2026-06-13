@@ -161,11 +161,13 @@ THEMES: dict[str, dict[str, str]] = {
         "--font-display": '"Fraunces", Georgia, "Times New Roman", serif',
         "--font-body": '"Newsreader", "Spectral", Georgia, serif',
         "--font-mono": '"Space Grotesk", "IBM Plex Mono", ui-monospace, Menlo, monospace',
-        # Palette — Warm paper, editorial orange accent
+        # Palette — White pages, warm editorial orange accent. Pages are white;
+        # the warmth lives in the cards (--surface), zebra rows, and callouts so
+        # the body sheets read clean rather than cream-tinted.
         "--ink": "#1B1A17",
         "--ink-soft": "#6E675C",
-        "--paper": "#FBF7F0",
-        "--surface": "#FFFFFF",
+        "--paper": "#FFFFFF",
+        "--surface": "#FAF6EF",
         "--line": "#E3DCCF",
         "--line-strong": "#1B1A17",
         "--accent": "#E8552D",
@@ -229,7 +231,7 @@ BASE_CSS = """
     color: %(--ink-soft)s;
   }
   @bottom-left {
-    content: "KORTNY RESEARCH";
+    content: %(brand_footer)s;
     font-family: var(--font-mono);
     font-size: 7pt;
     letter-spacing: 0.1em;
@@ -733,7 +735,7 @@ li { margin-bottom: 4px; }
 COVER_TEMPLATE = """\
 <section class="cover">
   <div class="cover__top">
-    <span>KORTNY RESEARCH</span>
+    <span>%(brand)s</span>
     <span>%(meta_right)s</span>
   </div>
   <div class="cover__main">
@@ -768,7 +770,24 @@ DOC_TEMPLATE = """\
 # HELPERS
 # ---------------------------------------------------------------------------
 
-def _build_css(theme_name: str, accent_override: str | None) -> str:
+def _css_string_literal(value: str) -> str:
+    """Quote *value* as a CSS string literal, or ``none`` when empty.
+
+    Used for @page margin-box ``content`` — CSS vars can't be referenced there in
+    all WeasyPrint versions, so the brand is substituted as a literal.
+    """
+    cleaned = value.strip()
+    if not cleaned:
+        return "none"
+    escaped = cleaned.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _build_css(
+    theme_name: str,
+    accent_override: str | None,
+    brand: str = "",
+) -> str:
     """Interpolate the BASE_CSS template with theme tokens."""
     theme = THEMES[theme_name]
     vals: dict[str, str] = {k: v for k, v in theme.items() if k != "font_face"}
@@ -778,6 +797,9 @@ def _build_css(theme_name: str, accent_override: str | None) -> str:
         vals["--accent-override"] = accent_override
     else:
         vals["--accent-override"] = theme["--accent"]
+    # Brand goes into the @page footer as a literal CSS string (uppercased to
+    # match the mono running-foot style); empty brand drops the footer label.
+    vals["brand_footer"] = _css_string_literal(brand.upper())
     # Flatten remaining tokens for @page literal references (can't use CSS vars
     # inside @page margin box content in all WeasyPrint versions)
     return BASE_CSS % vals
@@ -788,6 +810,7 @@ def _build_cover(
     subtitle: str | None,
     kicker: str,
     doc_date: str,
+    brand: str = "",
 ) -> str:
     deck_html = (
         f'<p class="cover__deck">{html_lib.escape(subtitle)}</p>'
@@ -795,6 +818,7 @@ def _build_cover(
         else ""
     )
     return COVER_TEMPLATE % {
+        "brand": html_lib.escape(brand.strip().upper()),
         "meta_right": html_lib.escape(doc_date.upper()),
         "kicker": html_lib.escape(kicker),
         "title": html_lib.escape(title),
@@ -822,6 +846,7 @@ def render(
     accent: str | None = None,
     doc_date: str | None = None,
     style: str = "editorial-mono",
+    brand: str = "",
 ) -> Path:
     """Render *markup* (HTML fragment or full document) to a themed PDF.
 
@@ -841,7 +866,7 @@ def render(
             f"Unknown style {style!r}. Choose from: {', '.join(THEMES)}"
         )
     shown_date = doc_date or date.today().strftime("%d %b %Y").upper()
-    css = _build_css(style, accent)
+    css = _build_css(style, accent, brand)
 
     if _looks_like_full_document(markup):
         # Full-document mode: inject theme CSS into existing <head>.
@@ -854,7 +879,7 @@ def render(
     else:
         # Fragment mode: wrap with cover + page-body.
         cover_html = (
-            _build_cover(title or "Report", subtitle, kicker, shown_date)
+            _build_cover(title or "Report", subtitle, kicker, shown_date, brand)
             if title
             else ""
         )
@@ -1015,6 +1040,15 @@ def main(argv: list[str] | None = None) -> int:
         "--date", dest="doc_date", help="Cover date string (default: today)."
     )
     parser.add_argument(
+        "--brand",
+        default="",
+        help=(
+            "Organization/firm name for the cover top-left and page footer "
+            "(e.g. the user's company). Omit to drop the brand label entirely. "
+            "Use the user's organization, not the assistant's own name."
+        ),
+    )
+    parser.add_argument(
         "--accent",
         default=None,
         help="Override theme accent color (hex, e.g. '#C8102E').",
@@ -1046,6 +1080,7 @@ def main(argv: list[str] | None = None) -> int:
         accent=args.accent,
         doc_date=args.doc_date,
         style=args.style,
+        brand=args.brand,
     )
     print(f"wrote pdf: {out} ({out.stat().st_size:,} bytes)")
     if args.analyze:
