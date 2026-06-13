@@ -15,10 +15,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v8.2.0
         with:
           enable-cache: true
 
@@ -26,7 +26,7 @@ jobs:
         run: uv sync --frozen
 
       - name: Restore mypy cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: .mypy_cache
           key: mypy-${{ runner.os }}-${{ hashFiles('uv.lock', 'pyproject.toml') }}-${{ github.sha }}
@@ -63,10 +63,10 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v8.2.0
         with:
           enable-cache: true
 
