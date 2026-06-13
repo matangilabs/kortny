@@ -1,0 +1,1390 @@
+Project kortny {
+  database_type: 'PostgreSQL'
+  Note: '''
+  Kortny database schema — generated reference snapshot.
+
+  This file is a snapshot of the live Postgres schema, generated from the
+  database at Alembic migration `0041`. It is NOT hand-maintained and NOT the
+  source of truth: the SQLAlchemy models (`kortny/db/models.py`) and the Alembic
+  migrations (`kortny/db/migrations/versions/`) are. Change the schema there,
+  then refresh this snapshot:
+
+    docker compose exec -T postgres pg_dump -U kortny -d kortny --schema-only --no-owner --no-privileges -T alembic_version > schema.sql
+    npx -y -p @dbml/cli sql2dbml --postgres schema.sql -o docs/schema.dbml
+    (then restore this Project header at the top)
+
+  Paste into https://dbdiagram.io to visualize. 44 tables spanning: tasks &
+  the Postgres work queue, append-only task events, LLM usage & cost accounting,
+  memory (workspace_state + episodes), the knowledge graph (entities / edges /
+  evidence), observation, witness, scheduling, skills (procedural skills +
+  files + enablements), MCP & Composio integration planes, dashboard auth, and
+  Slack surfaces.
+  '''
+}
+
+Enum "llm_provider" {
+  "openai"
+  "anthropic"
+  "openrouter"
+}
+
+Enum "task_event_type" {
+  "task_created"
+  "status_changed"
+  "llm_call"
+  "tool_call"
+  "tool_result"
+  "artifact_created"
+  "message_posted"
+  "error"
+  "log"
+}
+
+Enum "task_status" {
+  "pending"
+  "running"
+  "succeeded"
+  "failed"
+  "crashed"
+  "cancelled"
+  "waiting_approval"
+}
+
+Table "artifacts" {
+  "id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "task_id" uuid [not null]
+  "filename" "character varying" [not null]
+  "mime_type" "character varying"
+  "size_bytes" bigint
+  "storage_path" "character varying"
+  "slack_file_id" "character varying"
+  "posted_at" timestamp
+  "created_at" timestamp [not null, default: `now()`]
+
+  Indexes {
+    task_id [type: btree, name: "idx_artifacts_task"]
+  }
+}
+
+Table "assistant_thread_context" {
+  "id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "channel_id" "character varying" [not null]
+  "thread_ts" "character varying" [not null]
+  "context_json" jsonb [not null, default: `'{}'::jsonb`]
+  "created_at" timestamp [not null, default: `now()`]
+  "updated_at" timestamp [not null, default: `now()`]
+
+  Indexes {
+    (channel_id, thread_ts) [unique, name: "uq_assistant_thread_context_channel_thread"]
+  }
+}
+
+Table "autonomy_policies" {
+  "id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "installation_id" uuid [not null]
+  "scope_type" "character varying" [not null]
+  "scope_id" "character varying"
+  "level" "character varying" [not null]
+  "updated_by_user_id" "character varying"
+  "created_at" timestamp [not null, default: `now()`]
+  "updated_at" timestamp [not null, default: `now()`]
+
+  Checks {
+    `((level)::text = ANY ((ARRAY['conservative'::character varying, 'balanced'::character varying, 'autonomous'::character varying])::text[]))` [name: 'ck_autonomy_policies_level']
+    `((((scope_type)::text = 'workspace'::text) AND (scope_id IS NULL)) OR (((scope_type)::text = 'channel'::text) AND (scope_id IS NOT NULL)))` [name: 'ck_autonomy_policies_scope_id']
+    `((scope_type)::text = ANY ((ARRAY['workspace'::character varying, 'channel'::character varying])::text[]))` [name: 'ck_autonomy_policies_scope_type']
+  }
+
+  Indexes {
+    (installation_id, scope_type, scope_id) [type: btree, name: "idx_autonomy_policies_lookup"]
+    (installation_id, scope_type, `COALESCE(scope_id,''::charactervarying)`) [type: btree, unique, name: "idx_autonomy_policies_scope_unique"]
+  }
+}
+
+Table "composio_connections" {
+  "id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "installation_id" uuid [not null]
+  "toolkit_slug" "character varying" [not null]
+  "auth_config_id" "character varying"
+  "connected_account_id" "character varying"
+  "connection_request_id" "character varying"
+  "composio_user_id" "character varying" [not null]
+  "owner_slack_user_id" "character varying" [not null]
+  "visibility_scope_type" "character varying" [not null]
+  "visibility_scope_id" "character varying"
+  "status" "character varying" [not null]
+  "display_name" "character varying"
+  "external_account_label" "character varying"
+  "metadata_json" jsonb [not null, default: `'{}'::jsonb`]
+  "created_at" timestamp [not null, default: `now()`]
+  "updated_at" timestamp [not null, default: `now()`]
+
+  Checks {
+    `((status)::text = ANY ((ARRAY['pending'::character varying, 'active'::character varying, 'expired'::character varying, 'failed'::character varying, 'disabled'::character varying])::text[]))` [name: 'ck_composio_connections_status']
+    `((((visibility_scope_type)::text = 'workspace'::text) AND (visibility_scope_id IS NULL)) OR (((visibility_scope_type)::text = ANY ((ARRAY['channel'::character varying, 'user'::character varying])::text[])) AND (visibility_scope_id IS NOT NULL)))` [name: 'ck_composio_connections_visibility_scope_id']
+    `((visibility_scope_type)::text = ANY ((ARRAY['workspace'::character varying, 'channel'::character varying, 'user'::character varying])::text[]))` [name: 'ck_composio_connections_visibility_scope_type']
+  }
+
+  Indexes {
+    (installation_id, status, visibility_scope_type, visibility_scope_id) [type: btree, name: "idx_composio_connections_allowed_lookup"]
+    (installation_id, connected_account_id) [type: btree, unique, name: "idx_composio_connections_connected_account"]
+    (installation_id, owner_slack_user_id) [type: btree, name: "idx_composio_connections_owner"]
+    (installation_id, toolkit_slug, status) [type: btree, name: "idx_composio_connections_toolkit"]
+  }
+}
+
+Table "composio_tool_cards" {
+  "id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "installation_id" uuid [not null]
+  "toolkit_slug" "character varying" [not null]
+  "tool_slug" "character varying" [not null]
+  "name" "character varying" [not null]
+  "description" text [not null]
+  "side_effect" "character varying" [not null]
+  "card_sha" "character varying(64)" [not null]
+  "synced_at" timestamp [not null, default: `now()`]
+  "created_at" timestamp [not null, default: `now()`]
+  "updated_at" timestamp [not null, default: `now()`]
+
+  Checks {
+    `((side_effect)::text = ANY ((ARRAY['read'::character varying, 'write'::character varying, 'destructive'::character varying])::text[]))` [name: 'ck_composio_tool_cards_side_effect']
+  }
+
+  Indexes {
+    (installation_id, tool_slug) [unique, name: "uq_composio_tool_cards_installation_tool"]
+    (installation_id, toolkit_slug) [type: btree, name: "idx_composio_tool_cards_toolkit"]
+  }
+}
+
+Table "consolidation_runs" {
+  "id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "installation_id" uuid [not null]
+  "started_at" timestamp [not null, default: `now()`]
+  "finished_at" timestamp
+  "status" text [not null, default: `'running'::text`]
+  "counters_json" jsonb [not null, default: `'{}'::jsonb`]
+  "cost_usd" numeric(12,6)
+  "error" text
+
+  Checks {
+    `(status = ANY (ARRAY['running'::text, 'succeeded'::text, 'failed'::text]))` [name: 'ck_consolidation_runs_status']
+  }
+
+  Indexes {
+    (installation_id, started_at) [type: btree, name: "idx_consolidation_runs_installation_started"]
+  }
+}
+
+Table "dashboard_oauth_states" {
+  "id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "provider" "character varying" [not null]
+  "state" "character varying" [unique, not null]
+  "redirect_path" "character varying" [not null]
+  "created_at" timestamp [not null, default: `now()`]
+  "expires_at" timestamp [not null]
+  "used_at" timestamp
+
+  Checks {
+    `((provider)::text = 'slack'::text)` [name: 'ck_dashboard_oauth_states_provider']
+  }
+
+  Indexes {
+    (provider, state, expires_at) [type: btree, name: "idx_dashboard_oauth_states_lookup"]
+  }
+}
+
+Table "dashboard_users" {
+  "id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "installation_id" uuid [not null]
+  "slack_user_id" "character varying" [not null]
+  "email" "character varying"
+  "display_name" "character varying" [not null]
+  "avatar_url" "character varying"
+  "role" "character varying" [not null]
+  "status" "character varying" [not null]
+  "last_login_at" timestamp
+  "created_at" timestamp [not null, default: `now()`]
+  "updated_at" timestamp [not null, default: `now()`]
+
+  Checks {
+    `((role)::text = ANY ((ARRAY['admin'::character varying, 'member'::character varying])::text[]))` [name: 'ck_dashboard_users_role']
+    `((status)::text = ANY ((ARRAY['active'::character varying, 'disabled'::character varying])::text[]))` [name: 'ck_dashboard_users_status']
+  }
+
+  Indexes {
+    (installation_id, slack_user_id) [unique, name: "idx_dashboard_users_slack_user_unique"]
+    (installation_id, email) [type: btree, unique, name: "idx_dashboard_users_email_unique"]
+    (installation_id, role) [type: btree, name: "idx_dashboard_users_installation_role"]
+    (installation_id, status) [type: btree, name: "idx_dashboard_users_status"]
+  }
+}
+
+Table "encrypted_secrets" {
+  "id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "installation_id" uuid [not null]
+  "secret_type" "character varying" [not null]
+  "ciphertext" bytea [not null]
+  "created_at" timestamp [not null, default: `now()`]
+  "updated_at" timestamp [not null, default: `now()`]
+
+  Indexes {
+    (installation_id, secret_type) [unique, name: "idx_secret_lookup"]
+  }
+}
+
+Table "episodes" {
+  "id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "installation_id" uuid [not null]
+  "task_id" uuid [unique, not null]
+  "channel_id" "character varying" [not null]
+  "user_id" "character varying" [not null]
+  "thread_ts" "character varying"
+  "summary" text [not null]
+  "tools_used" jsonb [not null, default: `'[]'::jsonb`]
+  "artifacts_created" jsonb [not null, default: `'[]'::jsonb`]
+  "source_refs" jsonb [not null, default: `'[]'::jsonb`]
+  "outcome" "character varying" [not null]
+  "error_json" jsonb
+  "created_at" timestamp [not null, default: `now()`]
+  "updated_at" timestamp [not null, default: `now()`]
+
+  Checks {
+    `((outcome)::text = ANY ((ARRAY['succeeded'::character varying, 'failed'::character varying, 'cancelled'::character varying])::text[]))` [name: 'ck_episodes_outcome']
+  }
+
+  Indexes {
+    (installation_id, channel_id, created_at) [type: btree, name: "idx_episodes_channel"]
+    (installation_id, channel_id, thread_ts) [type: btree, name: "idx_episodes_thread"]
+    (installation_id, user_id, created_at) [type: btree, name: "idx_episodes_user"]
+  }
+}
+
+Table "installations" {
+  "id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "slack_team_id" "character varying" [unique, not null]
+  "team_name" "character varying"
+  "bot_user_id" "character varying"
+  "created_at" timestamp [not null, default: `now()`]
+  "updated_at" timestamp [not null, default: `now()`]
+}
+
+Table "kg_edges" {
+  "id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "installation_id" uuid [not null]
+  "source_entity_id" uuid [not null]
+  "target_entity_id" uuid [not null]
+  "relationship_type" "character varying" [not null]
+  "attrs_json" jsonb [not null, default: `'{}'::jsonb`]
+  "visibility_scope_type" "character varying" [not null]
+  "visibility_scope_id" "character varying"
+  "source_type" "character varying" [not null]
+  "confidence_score" numeric(4,3) [not null, default: 0.500]
+  "confidence_reason" text
+  "lifecycle_state" "character varying" [not null, default: `'candidate'::charactervarying`]
+  "valid_from" timestamp [not null, default: `now()`]
+  "valid_to" timestamp
+  "recorded_at" timestamp [not null, default: `now()`]
+  "expired_at" timestamp
+  "is_current" boolean [not null, default: true]
+  "freshness_window_days" integer
+  "last_reinforced_at" timestamp
+  "reinforcement_count" integer [not null, default: 0]
+  "created_at" timestamp [not null, default: `now()`]
+  "updated_at" timestamp [not null, default: `now()`]
+  "valid_at" timestamp
+  "invalid_at" timestamp
+  "system_expired_at" timestamp
+
+  Checks {
+    `((confidence_score >= (0)::numeric) AND (confidence_score <= (1)::numeric))` [name: 'ck_kg_edges_confidence_score']
+    `((lifecycle_state)::text = ANY ((ARRAY['candidate'::character varying, 'active'::character varying, 'confirmed'::character varying, 'stale'::character varying, 'superseded'::character varying, 'contradicted'::character varying, 'archived'::character varying, 'forgotten'::character varying])::text[]))` [name: 'ck_kg_edges_lifecycle_state']
+    `(reinforcement_count >= 0)` [name: 'ck_kg_edges_reinforcement_count']
+    `((relationship_type)::text = ANY ((ARRAY['member_of'::character varying, 'maps_to'::character varying, 'works_on'::character varying, 'owns'::character varying, 'belongs_to'::character varying, 'referenced_in'::character varying, 'made_in'::character varying, 'affects'::character varying, 'relates_to'::character varying, 'available_for'::character varying])::text[]))` [name: 'ck_kg_edges_relationship_type']
+    `((source_type)::text = ANY ((ARRAY['slack_authoritative'::character varying, 'user_explicit'::character varying, 'user_confirmed'::character varying, 'agent_inferred'::character varying, 'onboarding_scan'::character varying, 'task_summary'::character varying, 'integration_result'::character varying, 'workspace_state'::character varying, 'admin_import'::character varying])::text[]))` [name: 'ck_kg_edges_source_type']
+    `((((visibility_scope_type)::text = 'workspace'::text) AND (visibility_scope_id IS NULL)) OR (((visibility_scope_type)::text = ANY ((ARRAY['channel'::character varying, 'private_channel'::character varying, 'dm'::character varying, 'user'::character varying])::text[])) AND (visibility_scope_id IS NOT NULL)))` [name: 'ck_kg_edges_visibility_scope_id']
+    `((visibility_scope_type)::text = ANY ((ARRAY['workspace'::character varying, 'channel'::character varying, 'private_channel'::character varying, 'dm'::character varying, 'user'::character varying])::text[]))` [name: 'ck_kg_edges_visibility_scope_type']
+  }
+
+  Indexes {
+    attrs_json [type: gin, name: "idx_kg_edges_attrs"]
+    (installation_id, source_entity_id, target_entity_id, relationship_type, visibility_scope_type, `COALESCE(visibility_scope_id,''::charactervarying)`) [type: btree, unique, name: "idx_kg_edges_current_unique"]
+    invalid_at [type: btree, name: "idx_kg_edges_invalid_at"]
+    (installation_id, visibility_scope_type, visibility_scope_id) [type: btree, name: "idx_kg_edges_scope"]
+    (installation_id, source_entity_id, relationship_type, is_current) [type: btree, name: "idx_kg_edges_source_lookup"]
+    (installation_id, target_entity_id, relationship_type, is_current) [type: btree, name: "idx_kg_edges_target_lookup"]
+  }
+}
+
+Table "kg_entities" {
+  "id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "installation_id" uuid [not null]
+  "entity_type" "character varying" [not null]
+  "canonical_key" "character varying" [not null]
+  "display_name" "character varying"
+  "external_ref_type" "character varying"
+  "external_ref_id" "character varying"
+  "attrs_json" jsonb [not null, default: `'{}'::jsonb`]
+  "visibility_scope_type" "character varying" [not null]
+  "visibility_scope_id" "character varying"
+  "source_type" "character varying" [not null]
+  "confidence_score" numeric(4,3) [not null, default: 0.500]
+  "confidence_reason" text
+  "lifecycle_state" "character varying" [not null, default: `'candidate'::charactervarying`]
+  "valid_from" timestamp [not null, default: `now()`]
+  "valid_to" timestamp
+  "recorded_at" timestamp [not null, default: `now()`]
+  "expired_at" timestamp
+  "is_current" boolean [not null, default: true]
+  "freshness_window_days" integer
+  "last_reinforced_at" timestamp
+  "reinforcement_count" integer [not null, default: 0]
+  "created_at" timestamp [not null, default: `now()`]
+  "updated_at" timestamp [not null, default: `now()`]
+  "valid_at" timestamp
+  "invalid_at" timestamp
+  "system_expired_at" timestamp
+
+  Checks {
+    `((confidence_score >= (0)::numeric) AND (confidence_score <= (1)::numeric))` [name: 'ck_kg_entities_confidence_score']
+    `((lifecycle_state)::text = ANY ((ARRAY['candidate'::character varying, 'active'::character varying, 'confirmed'::character varying, 'stale'::character varying, 'superseded'::character varying, 'contradicted'::character varying, 'archived'::character varying, 'forgotten'::character varying])::text[]))` [name: 'ck_kg_entities_lifecycle_state']
+    `(reinforcement_count >= 0)` [name: 'ck_kg_entities_reinforcement_count']
+    `((source_type)::text = ANY ((ARRAY['slack_authoritative'::character varying, 'user_explicit'::character varying, 'user_confirmed'::character varying, 'agent_inferred'::character varying, 'onboarding_scan'::character varying, 'task_summary'::character varying, 'integration_result'::character varying, 'workspace_state'::character varying, 'admin_import'::character varying])::text[]))` [name: 'ck_kg_entities_source_type']
+    `((entity_type)::text = ANY ((ARRAY['person'::character varying, 'channel'::character varying, 'project'::character varying, 'firm_fact'::character varying, 'artifact'::character varying, 'decision'::character varying, 'open_question'::character varying, 'commitment'::character varying, 'integration'::character varying, 'external_entity'::character varying])::text[]))` [name: 'ck_kg_entities_type']
+    `((((visibility_scope_type)::text = 'workspace'::text) AND (visibility_scope_id IS NULL)) OR (((visibility_scope_type)::text = ANY ((ARRAY['channel'::character varying, 'private_channel'::character varying, 'dm'::character varying, 'user'::character varying])::text[])) AND (visibility_scope_id IS NOT NULL)))` [name: 'ck_kg_entities_visibility_scope_id']
+    `((visibility_scope_type)::text = ANY ((ARRAY['workspace'::character varying, 'channel'::character varying, 'private_channel'::character varying, 'dm'::character varying, 'user'::character varying])::text[]))` [name: 'ck_kg_entities_visibility_scope_type']
+  }
+
+  Indexes {
+    attrs_json [type: gin, name: "idx_kg_entities_attrs"]
+    (installation_id, canonical_key) [type: btree, unique, name: "idx_kg_entities_current_unique_key"]
+    (external_ref_type, external_ref_id) [type: btree, name: "idx_kg_entities_external_ref"]
+    invalid_at [type: btree, name: "idx_kg_entities_invalid_at"]
+    (installation_id, entity_type, lifecycle_state, is_current) [type: btree, name: "idx_kg_entities_lookup"]
+    (installation_id, visibility_scope_type, visibility_scope_id) [type: btree, name: "idx_kg_entities_scope"]
+  }
+}
+
+Table "kg_evidence" {
+  "id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "installation_id" uuid [not null]
+  "target_kind" "character varying" [not null]
+  "target_id" uuid [not null]
+  "source_type" "character varying" [not null]
+  "source_task_id" uuid
+  "source_episode_id" uuid
+  "source_task_event_id" bigint
+  "source_observation_id" uuid
+  "source_slack_channel_id" "character varying"
+  "source_slack_message_ts" "character varying"
+  "source_slack_file_id" "character varying"
+  "source_url" text
+  "extracted_by" "character varying" [not null]
+  "raw_snippet" text
+  "confidence_score" numeric(4,3)
+  "confidence_reason" text
+  "consensus_count" integer [not null, default: 1]
+  "created_at" timestamp [not null, default: `now()`]
+
+  Checks {
+    `((confidence_score IS NULL) OR ((confidence_score >= (0)::numeric) AND (confidence_score <= (1)::numeric)))` [name: 'ck_kg_evidence_confidence_score']
+    `(consensus_count > 0)` [name: 'ck_kg_evidence_consensus_count']
+    `(((source_type)::text = 'admin_import'::text) OR (source_task_id IS NOT NULL) OR (source_episode_id IS NOT NULL) OR (source_task_event_id IS NOT NULL) OR (source_observation_id IS NOT NULL) OR (source_slack_channel_id IS NOT NULL) OR (source_slack_file_id IS NOT NULL) OR (source_url IS NOT NULL))` [name: 'ck_kg_evidence_source_reference']
+    `((source_type)::text = ANY ((ARRAY['slack_authoritative'::character varying, 'user_explicit'::character varying, 'agent_inferred'::character varying, 'onboarding_scan'::character varying, 'task_summary'::character varying, 'integration_result'::character varying, 'workspace_state'::character varying, 'admin_import'::character varying])::text[]))` [name: 'ck_kg_evidence_source_type']
+    `((target_kind)::text = ANY ((ARRAY['entity'::character varying, 'edge'::character varying])::text[]))` [name: 'ck_kg_evidence_target_kind']
+  }
+
+  Indexes {
+    source_episode_id [type: btree, name: "idx_kg_evidence_episode"]
+    source_observation_id [type: btree, name: "idx_kg_evidence_observation"]
+    (installation_id, source_slack_channel_id, source_slack_message_ts) [type: btree, name: "idx_kg_evidence_slack_message"]
+    (target_kind, target_id) [type: btree, name: "idx_kg_evidence_target"]
+    source_task_id [type: btree, name: "idx_kg_evidence_task"]
+  }
+}
+
+Table "llm_budget_policies" {
+  "id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "installation_id" uuid [not null]
+  "tier" "character varying"
+  "daily_budget_usd" numeric(12,2)
+  "monthly_budget_usd" numeric(12,2)
+  "alert_threshold_pct" integer [not null, default: 80]
+  "behavior" "character varying" [not null, default: `'soft_stop'::charactervarying`]
+  "is_active" boolean [not null, default: true]
+  "metadata_json" jsonb [not null, default: `'{}'::jsonb`]
+  "created_at" timestamp [not null, default: `now()`]
+  "updated_at" timestamp [not null, default: `now()`]
+
+  Checks {
+    `((alert_threshold_pct >= 1) AND (alert_threshold_pct <= 100))` [name: 'ck_llm_budget_policies_alert_threshold']
+    `((behavior)::text = ANY ((ARRAY['soft_stop'::character varying, 'hard_stop'::character varying])::text[]))` [name: 'ck_llm_budget_policies_behavior']
+    `((tier IS NULL) OR ((tier)::text = ANY ((ARRAY['cheap_fast'::character varying, 'standard'::character varying, 'analysis'::character varying, 'document'::character varying, 'high_reasoning'::character varying, 'humanizer'::character varying])::text[])))` [name: 'ck_llm_budget_policies_tier']
+  }
+
+  Indexes {
+    (installation_id, is_active) [type: btree, name: "idx_llm_budget_policies_installation"]
+  }
+}
+
+Table "llm_config_audit" {
+  "id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "installation_id" uuid [not null]
+  "actor_slack_user_id" "character varying"
+  "action" "character varying" [not null]
+  "entity_type" "character varying" [not null]
+  "entity_id" "character varying"
+  "previous_value" jsonb
+  "new_value" jsonb
+  "created_at" timestamp [not null, default: `now()`]
+
+  Checks {
+    `((action)::text = ANY ((ARRAY['create'::character varying, 'update'::character varying, 'disable'::character varying, 'enable'::character varying, 'delete'::character varying, 'bootstrap'::character varying])::text[]))` [name: 'ck_llm_config_audit_action']
+  }
+
+  Indexes {
+    (installation_id, created_at) [type: btree, name: "idx_llm_config_audit_installation"]
+  }
+}
+
+Table "llm_model_catalog" {
+  "id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "provider_account_id" uuid [not null]
+  "model_identifier" "character varying" [not null]
+  "display_name" "character varying" [not null]
+  "is_enabled" boolean [not null, default: true]
+  "capabilities_json" jsonb [not null, default: `'{}'::jsonb`]
+  "source" "character varying" [not null, default: `'manual'::charactervarying`]
+  "metadata_json" jsonb [not null, default: `'{}'::jsonb`]
+  "created_at" timestamp [not null, default: `now()`]
+  "updated_at" timestamp [not null, default: `now()`]
+
+  Checks {
+    `((source)::text = ANY ((ARRAY['manual'::character varying, 'env_bootstrap'::character varying, 'litellm_catalog'::character varying, 'provider_api'::character varying])::text[]))` [name: 'ck_llm_model_catalog_source']
+  }
+
+  Indexes {
+    (provider_account_id, model_identifier) [unique, name: "idx_llm_model_catalog_provider_model"]
+    (provider_account_id, is_enabled) [type: btree, name: "idx_llm_model_catalog_enabled"]
+  }
+}
+
+Table "llm_model_pricing" {
+  "id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "provider_account_id" uuid [not null]
+  "model_identifier" "character varying" [not null]
+  "input_price_per_mtok" numeric(12,6)
+  "output_price_per_mtok" numeric(12,6)
+  "currency" "character varying" [not null, default: `'USD'::charactervarying`]
+  "pricing_source" "character varying" [not null]
+  "effective_from" timestamp [not null, default: `now()`]
+  "metadata_json" jsonb [not null, default: `'{}'::jsonb`]
+  "created_at" timestamp [not null, default: `now()`]
+
+  Indexes {
+    (provider_account_id, model_identifier, effective_from) [unique, name: "idx_llm_model_pricing_lookup"]
+    (provider_account_id, model_identifier) [type: btree, name: "idx_llm_model_pricing_model"]
+  }
+}
+
+Table "llm_provider_accounts" {
+  "id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "installation_id" uuid [not null]
+  "provider_kind" "character varying" [not null]
+  "display_name" "character varying" [not null]
+  "status" "character varying" [not null, default: `'active'::charactervarying`]
+  "health_status" "character varying" [not null, default: `'unknown'::charactervarying`]
+  "base_url" text
+  "encrypted_secret_id" uuid
+  "metadata_json" jsonb [not null, default: `'{}'::jsonb`]
+  "created_at" timestamp [not null, default: `now()`]
+  "updated_at" timestamp [not null, default: `now()`]
+
+  Checks {
+    `((health_status)::text = ANY ((ARRAY['ok'::character varying, 'degraded'::character varying, 'down'::character varying, 'unknown'::character varying])::text[]))` [name: 'ck_llm_provider_accounts_health_status']
+    `((status)::text = ANY ((ARRAY['active'::character varying, 'disabled'::character varying, 'testing'::character varying])::text[]))` [name: 'ck_llm_provider_accounts_status']
+  }
+
+  Indexes {
+    (installation_id, status) [type: btree, name: "idx_llm_provider_accounts_installation"]
+    (installation_id, provider_kind) [type: btree, name: "idx_llm_provider_accounts_kind"]
+  }
+}
+
+Table "llm_tier_assignments" {
+  "id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "installation_id" uuid [not null]
+  "tier" "character varying" [not null]
+  "model_catalog_id" uuid [not null]
+  "priority" integer [not null, default: 1]
+  "is_active" boolean [not null, default: true]
+  "routing_json" jsonb [not null, default: `'{}'::jsonb`]
+  "created_at" timestamp [not null, default: `now()`]
+  "updated_at" timestamp [not null, default: `now()`]
+
+  Checks {
+    `(priority >= 1)` [name: 'ck_llm_tier_assignments_priority']
+    `((tier)::text = ANY ((ARRAY['cheap_fast'::character varying, 'standard'::character varying, 'analysis'::character varying, 'document'::character varying, 'high_reasoning'::character varying, 'humanizer'::character varying])::text[]))` [name: 'ck_llm_tier_assignments_tier']
+  }
+
+  Indexes {
+    (installation_id, tier, priority) [unique, name: "idx_llm_tier_assignment_priority"]
+    (installation_id, tier, is_active) [type: btree, name: "idx_llm_tier_assignments_active"]
+  }
+}
+
+Table "llm_usage" {
+  "id" bigint [pk, not null]
+  "task_id" uuid [not null]
+  "event_id" bigint
+  "provider" llm_provider [not null]
+  "model" "character varying" [not null]
+  "input_tokens" integer [not null, default: 0]
+  "output_tokens" integer [not null, default: 0]
+  "cost_usd" numeric(12,6) [not null, default: 0]
+  "created_at" timestamp [not null, default: `now()`]
+  "model_tier" "character varying"
+  "cache_creation_input_tokens" integer [not null, default: 0]
+  "cache_read_input_tokens" integer [not null, default: 0]
+
+  Indexes {
+    task_id [type: btree, name: "idx_usage_task"]
+    created_at [type: btree, name: "idx_usage_time"]
+  }
+}
+
+Table "mcp_server_tools" {
+  "id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "server_id" uuid [not null]
+  "name" "character varying" [not null]
+  "description" text [not null, default: `''::text`]
+  "input_schema" jsonb [not null, default: `'{}'::jsonb`]
+  "read_only_hint" boolean
+  "destructive_hint" boolean
+  "enabled" boolean [not null, default: true]
+  "created_at" timestamp [not null, default: `now()`]
+  "updated_at" timestamp [not null, default: `now()`]
+  "description_quality_score" numeric(4,3)
+  "enriched_description" text
+  "description_sha256" "character varying(64)"
+
+  Indexes {
+    (server_id, name) [unique, name: "uq_mcp_server_tools_server_name"]
+    (server_id, enabled) [type: btree, name: "idx_mcp_server_tools_enabled_lookup"]
+  }
+}
+
+Table "mcp_servers" {
+  "id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "installation_id" uuid [not null]
+  "name" "character varying" [not null]
+  "transport" "character varying" [not null]
+  "command" "character varying"
+  "args" jsonb [not null, default: `'[]'::jsonb`]
+  "url" "character varying"
+  "env_json" jsonb [not null, default: `'{}'::jsonb`]
+  "headers_json" jsonb [not null, default: `'{}'::jsonb`]
+  "secret_env" bytea
+  "status" "character varying" [not null, default: `'enabled'::charactervarying`]
+  "last_discovery_at" timestamp
+  "last_discovery_error" text
+  "created_by" "character varying" [not null]
+  "created_at" timestamp [not null, default: `now()`]
+  "updated_at" timestamp [not null, default: `now()`]
+  "trust_tier" "character varying" [not null, default: `'untrusted'::charactervarying`]
+
+  Checks {
+    `((status)::text = ANY ((ARRAY['enabled'::character varying, 'disabled'::character varying])::text[]))` [name: 'ck_mcp_servers_status']
+    `((transport)::text = ANY ((ARRAY['stdio'::character varying, 'streamable_http'::character varying, 'sse'::character varying])::text[]))` [name: 'ck_mcp_servers_transport']
+    `((((transport)::text = 'stdio'::text) AND (command IS NOT NULL)) OR (((transport)::text = ANY ((ARRAY['streamable_http'::character varying, 'sse'::character varying])::text[])) AND (url IS NOT NULL)))` [name: 'ck_mcp_servers_transport_target']
+    `((trust_tier)::text = ANY ((ARRAY['trusted'::character varying, 'community'::character varying, 'untrusted'::character varying])::text[]))` [name: 'ck_mcp_servers_trust_tier']
+  }
+
+  Indexes {
+    (installation_id, name) [unique, name: "uq_mcp_servers_installation_name"]
+    (installation_id, status) [type: btree, name: "idx_mcp_servers_enabled_lookup"]
+  }
+}
+
+Table "model_pricing" {
+  "id" bigint [pk, not null]
+  "provider" llm_provider [not null]
+  "model" "character varying" [not null]
+  "input_price_per_mtok" numeric(12,6) [not null]
+  "output_price_per_mtok" numeric(12,6) [not null]
+  "effective_from" timestamp [not null, default: `now()`]
+  "cache_write_multiplier" numeric(6,4) [not null, default: 1.25]
+  "cache_read_multiplier" numeric(6,4) [not null, default: 0.10]
+
+  Indexes {
+    (provider, model, effective_from) [unique, name: "idx_pricing_lookup"]
+  }
+}
+
+Table "observation_events" {
+  "id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "installation_id" uuid [not null]
+  "slack_team_id" "character varying" [not null]
+  "channel_id" "character varying" [not null]
+  "user_id" "character varying"
+  "event_type" "character varying" [not null]
+  "slack_event_id" "character varying"
+  "message_ts" "character varying"
+  "thread_ts" "character varying"
+  "file_id" "character varying"
+  "raw_payload_checksum" "character varying" [not null]
+  "text_preview" text
+  "visibility_metadata" jsonb [not null, default: `'{}'::jsonb`]
+  "observed_at" timestamp [not null, default: `now()`]
+  "purged_at" timestamp
+  "created_at" timestamp [not null, default: `now()`]
+
+  Checks {
+    `((event_type)::text = ANY ((ARRAY['message'::character varying, 'file_share'::character varying, 'channel_join'::character varying, 'channel_onboarding_intro'::character varying])::text[]))` [name: 'ck_observation_events_event_type']
+  }
+
+  Indexes {
+    (installation_id, channel_id, observed_at) [type: btree, name: "idx_observation_events_channel"]
+    (installation_id, slack_event_id) [type: btree, unique, name: "idx_observation_events_event_unique"]
+    purged_at [type: btree, name: "idx_observation_events_purged"]
+    (installation_id, user_id, observed_at) [type: btree, name: "idx_observation_events_user"]
+  }
+}
+
+Table "observe_channel_profiles" {
+  "id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "installation_id" uuid [not null]
+  "channel_id" "character varying" [not null]
+  "profile_status" "character varying" [not null, default: `'active'::charactervarying`]
+  "profile_version" integer [not null, default: 1]
+  "summary" text
+  "profile_json" jsonb [not null, default: `'{}'::jsonb`]
+  "assumptions_json" jsonb [not null, default: `'[]'::jsonb`]
+  "evidence_refs_json" jsonb [not null, default: `'[]'::jsonb`]
+  "confidence_score" numeric(4,3)
+  "confidence_reason" text
+  "fresh_window_days" integer [not null, default: 30]
+  "archive_window_days" integer [not null, default: 365]
+  "observed_range_start_ts" "character varying"
+  "observed_range_end_ts" "character varying"
+  "message_count" integer [not null, default: 0]
+  "file_count" integer [not null, default: 0]
+  "last_scanned_message_ts" "character varying"
+  "last_profiled_at" timestamp
+  "source_task_id" uuid
+  "metadata_json" jsonb [not null, default: `'{}'::jsonb`]
+  "created_at" timestamp [not null, default: `now()`]
+  "updated_at" timestamp [not null, default: `now()`]
+
+  Checks {
+    `(archive_window_days >= fresh_window_days)` [name: 'ck_observe_channel_profiles_archive_window']
+    `(fresh_window_days > 0)` [name: 'ck_observe_channel_profiles_fresh_window']
+    `((profile_status)::text = ANY ((ARRAY['active'::character varying, 'stale'::character varying, 'disabled'::character varying, 'failed'::character varying])::text[]))` [name: 'ck_observe_channel_profiles_status']
+  }
+
+  Indexes {
+    (installation_id, channel_id) [unique, name: "idx_observe_channel_profiles_unique"]
+    (installation_id, last_profiled_at) [type: btree, name: "idx_observe_channel_profiles_last_profiled"]
+    (installation_id, channel_id, profile_status) [type: btree, name: "idx_observe_channel_profiles_lookup"]
+    source_task_id [type: btree, name: "idx_observe_channel_profiles_source_task"]
+  }
+}
+
+Table "observe_policies" {
+  "id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "installation_id" uuid [not null]
+  "scope_type" "character varying" [not null]
+  "scope_id" "character varying"
+  "observation_status" "character varying" [not null]
+  "proactivity_status" "character varying" [not null]
+  "retention_days" integer
+  "quiet_hours_json" jsonb [not null, default: `'{}'::jsonb`]
+  "cooldown_seconds" integer
+  "enabled_by_user_id" "character varying"
+  "enabled_at" timestamp
+  "paused_by_user_id" "character varying"
+  "paused_at" timestamp
+  "pause_reason" text
+  "metadata_json" jsonb [not null, default: `'{}'::jsonb`]
+  "created_at" timestamp [not null, default: `now()`]
+  "updated_at" timestamp [not null, default: `now()`]
+
+  Checks {
+    `((observation_status)::text = ANY ((ARRAY['off'::character varying, 'passive'::character varying, 'active'::character varying])::text[]))` [name: 'ck_observe_policies_observation_status']
+    `((proactivity_status)::text = ANY ((ARRAY['off'::character varying, 'digest_only'::character varying, 'full'::character varying])::text[]))` [name: 'ck_observe_policies_proactivity_status']
+    `((((scope_type)::text = 'workspace'::text) AND (scope_id IS NULL)) OR (((scope_type)::text = ANY ((ARRAY['channel'::character varying, 'user'::character varying])::text[])) AND (scope_id IS NOT NULL)))` [name: 'ck_observe_policies_scope_id']
+    `((scope_type)::text = ANY ((ARRAY['workspace'::character varying, 'channel'::character varying, 'user'::character varying])::text[]))` [name: 'ck_observe_policies_scope_type']
+  }
+
+  Indexes {
+    (installation_id, scope_type, scope_id, observation_status) [type: btree, name: "idx_observe_policies_lookup"]
+    (installation_id, scope_type, `COALESCE(scope_id,''::charactervarying)`) [type: btree, unique, name: "idx_observe_policies_scope_unique"]
+  }
+}
+
+Table "procedural_skill_invocations" {
+  "id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "installation_id" uuid [not null]
+  "task_id" uuid [not null]
+  "skill_id" uuid [not null]
+  "skill_version_id" uuid [not null]
+  "invocation_kind" "character varying" [not null]
+  "response_mode" "character varying"
+  "selected_reason" text
+  "payload" jsonb [not null, default: `'{}'::jsonb`]
+  "created_at" timestamp [not null, default: `now()`]
+
+  Indexes {
+    (installation_id, created_at) [type: btree, name: "idx_procedural_skill_invocations_installation"]
+    (skill_id, skill_version_id, created_at) [type: btree, name: "idx_procedural_skill_invocations_skill"]
+    (task_id, created_at) [type: btree, name: "idx_procedural_skill_invocations_task"]
+  }
+}
+
+Table "procedural_skill_versions" {
+  "id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "skill_id" uuid [not null]
+  "version" "character varying" [not null]
+  "status" "character varying" [not null]
+  "name" "character varying" [not null]
+  "description" text [not null]
+  "instructions_md" text [not null]
+  "intent_tags" jsonb [not null, default: `'[]'::jsonb`]
+  "response_modes" jsonb [not null, default: `'[]'::jsonb`]
+  "trigger_phrases" jsonb [not null, default: `'[]'::jsonb`]
+  "allowed_tools" jsonb [not null, default: `'[]'::jsonb`]
+  "metadata_json" jsonb [not null, default: `'{}'::jsonb`]
+  "content_sha256" "character varying" [not null]
+  "created_by" "character varying" [not null]
+  "approved_by" "character varying"
+  "published_at" timestamp
+  "created_at" timestamp [not null, default: `now()`]
+  "updated_at" timestamp [not null, default: `now()`]
+
+  Checks {
+    `((status)::text = ANY ((ARRAY['draft'::character varying, 'active'::character varying, 'deprecated'::character varying, 'archived'::character varying])::text[]))` [name: 'ck_procedural_skill_versions_status']
+  }
+
+  Indexes {
+    (skill_id, version) [unique, name: "idx_procedural_skill_versions_unique"]
+    (skill_id, status, version) [type: btree, name: "idx_procedural_skill_versions_active"]
+    response_modes [type: gin, name: "idx_procedural_skill_versions_modes"]
+    intent_tags [type: gin, name: "idx_procedural_skill_versions_tags"]
+  }
+}
+
+Table "procedural_skills" {
+  "id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "slug" "character varying" [not null]
+  "owner_type" "character varying" [not null]
+  "owner_id" "character varying"
+  "status" "character varying" [not null]
+  "trust_level" "character varying" [not null]
+  "visibility" "character varying" [not null]
+  "created_at" timestamp [not null, default: `now()`]
+  "updated_at" timestamp [not null, default: `now()`]
+  "provenance" "character varying" [not null, default: `'kortny'::charactervarying`]
+
+  Checks {
+    `((((owner_type)::text = 'system'::text) AND (owner_id IS NULL)) OR (((owner_type)::text = ANY ((ARRAY['workspace'::character varying, 'user'::character varying])::text[])) AND (owner_id IS NOT NULL)))` [name: 'ck_procedural_skills_owner_id']
+    `((owner_type)::text = ANY ((ARRAY['system'::character varying, 'workspace'::character varying, 'user'::character varying])::text[]))` [name: 'ck_procedural_skills_owner_type']
+    `((status)::text = ANY ((ARRAY['draft'::character varying, 'active'::character varying, 'deprecated'::character varying, 'disabled'::character varying, 'archived'::character varying])::text[]))` [name: 'ck_procedural_skills_status']
+    `((trust_level)::text = ANY ((ARRAY['trusted'::character varying, 'community'::character varying, 'untrusted'::character varying, 'quarantined'::character varying])::text[]))` [name: 'ck_procedural_skills_trust_level']
+    `((visibility)::text = ANY ((ARRAY['catalog'::character varying, 'explicit_only'::character varying, 'disabled'::character varying])::text[]))` [name: 'ck_procedural_skills_visibility']
+  }
+
+  Indexes {
+    (owner_type, status, visibility, slug) [type: btree, name: "idx_procedural_skills_catalog"]
+    (owner_type, `COALESCE(owner_id,''::charactervarying)`, slug) [type: btree, unique, name: "idx_procedural_skills_unique_slug"]
+  }
+}
+
+Table "schedules" {
+  "id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "installation_id" uuid [not null]
+  "owner_type" "character varying" [not null]
+  "owner_slack_user_id" "character varying"
+  "title" "character varying" [not null]
+  "spec_kind" "character varying" [not null]
+  "cron_expr" "character varying"
+  "interval_seconds" integer
+  "run_at" timestamp
+  "timezone" "character varying" [not null, default: `'UTC'::charactervarying`]
+  "next_run_at" timestamp
+  "last_run_at" timestamp
+  "catchup_policy" "character varying" [not null, default: `'skip'::charactervarying`]
+  "catchup_window_seconds" integer
+  "overlap_policy" "character varying" [not null, default: `'skip'::charactervarying`]
+  "status" "character varying" [not null, default: `'active'::charactervarying`]
+  "task_template" jsonb [not null, default: `'{}'::jsonb`]
+  "planned_cost_ceiling_usd" numeric(10,4)
+  "idempotency_key_template" "character varying"
+  "created_by_slack_user_id" "character varying"
+  "metadata_json" jsonb [not null, default: `'{}'::jsonb`]
+  "created_at" timestamp [not null, default: `now()`]
+  "updated_at" timestamp [not null, default: `now()`]
+  "delivery_kind" "character varying" [not null, default: `'slack_dm'::charactervarying`]
+  "delivery_slack_user_id" "character varying"
+  "delivery_slack_channel_id" "character varying"
+  "delivery_slack_thread_ts" "character varying"
+  "artifact_delivery_policy" "character varying" [not null, default: `'message_only'::charactervarying`]
+
+  Checks {
+    `((artifact_delivery_policy)::text = ANY ((ARRAY['message_only'::character varying, 'attach_files'::character varying, 'link_artifacts'::character varying])::text[]))` [name: 'ck_schedules_artifact_delivery_policy']
+    `((catchup_policy)::text = ANY ((ARRAY['skip'::character varying, 'run_once'::character varying, 'backfill'::character varying])::text[]))` [name: 'ck_schedules_catchup_policy']
+    `((catchup_window_seconds IS NULL) OR (catchup_window_seconds >= 0))` [name: 'ck_schedules_catchup_window']
+    `((planned_cost_ceiling_usd IS NULL) OR (planned_cost_ceiling_usd > (0)::numeric))` [name: 'ck_schedules_cost_ceiling']
+    `((delivery_kind)::text = ANY ((ARRAY['slack_dm'::character varying, 'slack_channel'::character varying, 'slack_thread'::character varying, 'dashboard_only'::character varying])::text[]))` [name: 'ck_schedules_delivery_kind']
+    `((overlap_policy)::text = ANY ((ARRAY['skip'::character varying, 'allow'::character varying])::text[]))` [name: 'ck_schedules_overlap_policy']
+    `((((owner_type)::text = 'user'::text) AND (owner_slack_user_id IS NOT NULL)) OR ((owner_type)::text = 'system'::text))` [name: 'ck_schedules_owner']
+    `((owner_type)::text = ANY ((ARRAY['user'::character varying, 'system'::character varying])::text[]))` [name: 'ck_schedules_owner_type']
+    `((((spec_kind)::text = 'oneoff'::text) AND (run_at IS NOT NULL)) OR (((spec_kind)::text = 'interval'::text) AND (interval_seconds IS NOT NULL) AND (interval_seconds > 0)) OR (((spec_kind)::text = 'cron'::text) AND (cron_expr IS NOT NULL) AND ((cron_expr)::text <> ''::text)))` [name: 'ck_schedules_spec']
+    `((spec_kind)::text = ANY ((ARRAY['oneoff'::character varying, 'interval'::character varying, 'cron'::character varying])::text[]))` [name: 'ck_schedules_spec_kind']
+    `((status)::text = ANY ((ARRAY['proposed'::character varying, 'active'::character varying, 'paused'::character varying, 'completed'::character varying, 'cancelled'::character varying])::text[]))` [name: 'ck_schedules_status']
+  }
+
+  Indexes {
+    next_run_at [type: btree, name: "idx_schedules_due"]
+    (installation_id, owner_type, owner_slack_user_id, status) [type: btree, name: "idx_schedules_owner"]
+    (installation_id, status, next_run_at) [type: btree, name: "idx_schedules_status"]
+  }
+}
+
+Table "skill_enablements" {
+  "id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "installation_id" uuid [not null]
+  "skill_id" uuid [not null]
+  "scope_type" "character varying" [not null]
+  "scope_id" "character varying"
+  "status" "character varying" [not null, default: `'enabled'::charactervarying`]
+  "added_by" "character varying" [not null]
+  "created_at" timestamp [not null, default: `now()`]
+  "updated_at" timestamp [not null, default: `now()`]
+
+  Checks {
+    `((((scope_type)::text = 'workspace'::text) AND (scope_id IS NULL)) OR (((scope_type)::text = ANY ((ARRAY['channel'::character varying, 'user'::character varying])::text[])) AND (scope_id IS NOT NULL)))` [name: 'ck_skill_enablements_scope_id']
+    `((scope_type)::text = ANY ((ARRAY['workspace'::character varying, 'channel'::character varying, 'user'::character varying])::text[]))` [name: 'ck_skill_enablements_scope_type']
+    `((status)::text = ANY ((ARRAY['enabled'::character varying, 'disabled'::character varying])::text[]))` [name: 'ck_skill_enablements_status']
+  }
+
+  Indexes {
+    (installation_id, scope_type, scope_id, status) [type: btree, name: "idx_skill_enablements_scope"]
+    (installation_id, skill_id, scope_type, `COALESCE(scope_id,''::charactervarying)`) [type: btree, unique, name: "idx_skill_enablements_unique"]
+  }
+}
+
+Table "skill_files" {
+  "id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "skill_version_id" uuid [not null]
+  "path" "character varying" [not null]
+  "kind" "character varying" [not null]
+  "content_text" text
+  "content_bytes" bytea
+  "size_bytes" integer [not null]
+  "sha256" "character varying" [not null]
+  "created_at" timestamp [not null, default: `now()`]
+
+  Checks {
+    `((kind)::text = ANY ((ARRAY['reference'::character varying, 'asset'::character varying, 'script'::character varying])::text[]))` [name: 'ck_skill_files_kind']
+  }
+
+  Indexes {
+    (skill_version_id, path) [unique, name: "uq_skill_files_version_path"]
+    (skill_version_id, kind) [type: btree, name: "idx_skill_files_version"]
+  }
+}
+
+Table "slack_channel_memberships" {
+  "id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "installation_id" uuid [not null]
+  "channel_id" "character varying" [not null]
+  "channel_name" "character varying"
+  "channel_type" "character varying"
+  "membership_status" "character varying" [not null, default: `'active'::charactervarying`]
+  "discovered_via" "character varying" [not null]
+  "added_by_user_id" "character varying"
+  "first_seen_at" timestamp [not null, default: `now()`]
+  "last_seen_at" timestamp [not null, default: `now()`]
+  "onboarding_status" "character varying" [not null, default: `'pending'::charactervarying`]
+  "onboarding_posted_at" timestamp
+  "onboarding_message_ts" "character varying"
+  "last_event_id" "character varying"
+  "metadata_json" jsonb [not null, default: `'{}'::jsonb`]
+  "created_at" timestamp [not null, default: `now()`]
+  "updated_at" timestamp [not null, default: `now()`]
+
+  Checks {
+    `((discovered_via)::text = ANY ((ARRAY['member_joined_channel'::character varying, 'app_mention'::character varying, 'message_observation'::character varying, 'channel_history'::character varying, 'manual_backfill'::character varying])::text[]))` [name: 'ck_slack_channel_memberships_discovered_via']
+    `((onboarding_status)::text = ANY ((ARRAY['pending'::character varying, 'posted'::character varying, 'skipped'::character varying])::text[]))` [name: 'ck_slack_channel_memberships_onboarding_status']
+    `((membership_status)::text = ANY ((ARRAY['active'::character varying, 'left'::character varying, 'unknown'::character varying])::text[]))` [name: 'ck_slack_channel_memberships_status']
+  }
+
+  Indexes {
+    (installation_id, channel_id) [unique, name: "idx_slack_channel_memberships_unique"]
+    (installation_id, channel_id) [type: btree, name: "idx_slack_channel_memberships_lookup"]
+    (installation_id, onboarding_status, last_seen_at) [type: btree, name: "idx_slack_channel_memberships_onboarding"]
+    (installation_id, membership_status, last_seen_at) [type: btree, name: "idx_slack_channel_memberships_status"]
+  }
+}
+
+Table "slack_identities" {
+  "id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "installation_id" uuid [not null]
+  "kind" "character varying" [not null]
+  "slack_id" "character varying" [not null]
+  "display_name" "character varying" [not null]
+  "raw_name" "character varying"
+  "is_deleted" boolean [not null, default: false]
+  "is_bot" boolean [not null, default: false]
+  "is_private" boolean [not null, default: false]
+  "raw_json" jsonb [not null, default: `'{}'::jsonb`]
+  "last_seen_at" timestamp [not null, default: `now()`]
+  "refreshed_at" timestamp
+  "created_at" timestamp [not null, default: `now()`]
+  "updated_at" timestamp [not null, default: `now()`]
+
+  Checks {
+    `((kind)::text = ANY ((ARRAY['user'::character varying, 'channel'::character varying])::text[]))` [name: 'ck_slack_identity_kind']
+  }
+
+  Indexes {
+    (installation_id, kind, slack_id) [unique, name: "idx_slack_identity_unique"]
+    (installation_id, kind, slack_id) [type: btree, name: "idx_slack_identity_lookup"]
+    (installation_id, kind, last_seen_at) [type: btree, name: "idx_slack_identity_seen"]
+  }
+}
+
+Table "slack_inbound_events" {
+  "id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "installation_id" uuid [not null]
+  "slack_team_id" "character varying" [not null]
+  "slack_event_id" "character varying"
+  "event_type" "character varying" [not null]
+  "event_subtype" "character varying"
+  "surface" "character varying" [not null]
+  "channel_id" "character varying"
+  "user_id" "character varying"
+  "message_ts" "character varying"
+  "thread_ts" "character varying"
+  "event_time" timestamp
+  "retry_num" integer
+  "retry_reason" "character varying"
+  "raw_body" jsonb [not null, default: `'{}'::jsonb`]
+  "raw_event" jsonb [not null, default: `'{}'::jsonb`]
+  "processing_status" "character varying" [not null, default: `'received'::charactervarying`]
+  "processing_attempts" integer [not null, default: 0]
+  "task_id" uuid
+  "observation_event_id" uuid
+  "metadata_json" jsonb [not null, default: `'{}'::jsonb`]
+  "last_error" jsonb
+  "received_at" timestamp [not null, default: `now()`]
+  "processed_at" timestamp
+  "created_at" timestamp [not null, default: `now()`]
+  "updated_at" timestamp [not null, default: `now()`]
+
+  Checks {
+    `((processing_status)::text = ANY ((ARRAY['received'::character varying, 'ignored'::character varying, 'task_created'::character varying, 'observed'::character varying, 'failed'::character varying, 'dead_lettered'::character varying, 'replayed'::character varying])::text[]))` [name: 'ck_slack_inbound_events_processing_status']
+  }
+
+  Indexes {
+    (installation_id, channel_id, received_at) [type: btree, name: "idx_slack_inbound_events_channel"]
+    (installation_id, slack_event_id) [type: btree, unique, name: "idx_slack_inbound_events_event_unique"]
+    observation_event_id [type: btree, name: "idx_slack_inbound_events_observation"]
+    (installation_id, processing_status, received_at) [type: btree, name: "idx_slack_inbound_events_status"]
+    task_id [type: btree, name: "idx_slack_inbound_events_task"]
+  }
+}
+
+Table "slack_side_effects" {
+  "id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "installation_id" uuid [not null]
+  "task_id" uuid
+  "idempotency_key" "character varying" [not null]
+  "operation" "character varying" [not null]
+  "purpose" "character varying"
+  "target_channel_id" "character varying"
+  "target_thread_ts" "character varying"
+  "target_message_ts" "character varying"
+  "request_json" jsonb [not null, default: `'{}'::jsonb`]
+  "response_json" jsonb
+  "status" "character varying" [not null, default: `'pending'::charactervarying`]
+  "attempts" integer [not null, default: 0]
+  "last_error" jsonb
+  "available_at" timestamp [not null, default: `now()`]
+  "started_at" timestamp
+  "delivered_at" timestamp
+  "created_at" timestamp [not null, default: `now()`]
+  "updated_at" timestamp [not null, default: `now()`]
+
+  Checks {
+    `((operation)::text = ANY ((ARRAY['chat_postMessage'::character varying, 'files_upload_v2'::character varying, 'reactions_add'::character varying, 'reactions_remove'::character varying, 'pins_add'::character varying, 'bookmarks_add'::character varying, 'conversations_canvases_create'::character varying, 'canvases_edit'::character varying])::text[]))` [name: 'ck_slack_side_effects_operation']
+    `((status)::text = ANY ((ARRAY['pending'::character varying, 'in_progress'::character varying, 'succeeded'::character varying, 'failed'::character varying])::text[]))` [name: 'ck_slack_side_effects_status']
+  }
+
+  Indexes {
+    (installation_id, idempotency_key) [unique, name: "idx_slack_side_effects_idempotency"]
+    (installation_id, status, available_at) [type: btree, name: "idx_slack_side_effects_status"]
+    (installation_id, target_channel_id, target_message_ts) [type: btree, name: "idx_slack_side_effects_target"]
+    (task_id, created_at) [type: btree, name: "idx_slack_side_effects_task"]
+  }
+}
+
+Table "task_events" {
+  "id" bigint [pk, not null]
+  "task_id" uuid [not null]
+  "seq" integer [not null]
+  "type" task_event_type [not null]
+  "payload" jsonb [not null, default: `'{}'::jsonb`]
+  "created_at" timestamp [not null, default: `now()`]
+
+  Indexes {
+    (task_id, seq) [unique, name: "idx_events_task_seq"]
+  }
+}
+
+Table "tasks" {
+  "id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "installation_id" uuid [not null]
+  "parent_task_id" uuid
+  "slack_event_id" "character varying" [unique]
+  "slack_channel_id" "character varying" [not null]
+  "slack_thread_ts" "character varying"
+  "slack_message_ts" "character varying"
+  "slack_user_id" "character varying" [not null]
+  "input" text [not null]
+  "status" task_status [not null, default: `'pending'::public.task_status`]
+  "result_summary" text
+  "error" jsonb
+  "available_at" timestamp [not null, default: `now()`]
+  "locked_by" "character varying"
+  "locked_at" timestamp
+  "lease_expires_at" timestamp
+  "attempts" integer [not null, default: 0]
+  "max_attempts" integer [not null, default: 3]
+  "total_input_tokens" integer [not null, default: 0]
+  "total_output_tokens" integer [not null, default: 0]
+  "total_cost_usd" numeric(12,6) [not null, default: 0]
+  "created_at" timestamp [not null, default: `now()`]
+  "started_at" timestamp
+  "finished_at" timestamp
+  "updated_at" timestamp [not null, default: `now()`]
+  "identity_kind" "character varying"
+  "identity_key" "character varying"
+  "identity_payload" jsonb [not null, default: `'{}'::jsonb`]
+  "identity_fingerprint" "character varying"
+
+  Checks {
+    `((identity_kind IS NULL) OR ((identity_kind)::text = ANY ((ARRAY['slack_message'::character varying, 'slack_event'::character varying, 'synthetic'::character varying, 'scheduled'::character varying, 'manual'::character varying])::text[])))` [name: 'ck_tasks_identity_kind']
+  }
+
+  Indexes {
+    (status, available_at) [type: btree, name: "idx_tasks_claim"]
+    (installation_id, created_at) [type: btree, name: "idx_tasks_history"]
+    (installation_id, identity_key) [type: btree, unique, name: "idx_tasks_identity_unique"]
+    (slack_channel_id, slack_thread_ts) [type: btree, name: "idx_tasks_thread"]
+  }
+}
+
+Table "tool_embeddings" {
+  "id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "kind" text [not null]
+  "ref_key" text [not null]
+  "model" text [not null]
+  "dim" integer [not null]
+  "content_sha256" "character varying(64)" [not null]
+  "embedding" public.vector [not null]
+  "created_at" timestamp [not null, default: `now()`]
+  "updated_at" timestamp [not null, default: `now()`]
+
+  Checks {
+    `(kind = ANY (ARRAY['tool_card'::text, 'skill'::text, 'fact'::text, 'episode'::text, 'kg_entity'::text]))` [name: 'ck_tool_embeddings_kind']
+  }
+
+  Indexes {
+    (kind, ref_key, model) [unique, name: "uq_tool_embeddings_kind_ref_key_model"]
+    (kind, model) [type: btree, name: "idx_tool_embeddings_kind_model"]
+  }
+}
+
+Table "tool_pins" {
+  "id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "installation_id" uuid [not null]
+  "provider" "character varying" [not null]
+  "server_ref" "character varying" [not null]
+  "tool_name" "character varying" [not null]
+  "fingerprint" "character varying(64)" [not null]
+  "prior_description" text
+  "prior_schema_json" jsonb [not null, default: `'{}'::jsonb`]
+  "status" "character varying" [not null, default: `'active'::charactervarying`]
+  "approved_by" "character varying"
+  "approved_at" timestamp
+  "created_at" timestamp [not null, default: `now()`]
+  "updated_at" timestamp [not null, default: `now()`]
+
+  Checks {
+    `((provider)::text = ANY ((ARRAY['mcp'::character varying, 'composio'::character varying])::text[]))` [name: 'ck_tool_pins_provider']
+    `((status)::text = ANY ((ARRAY['active'::character varying, 'drifted'::character varying])::text[]))` [name: 'ck_tool_pins_status']
+  }
+
+  Indexes {
+    (installation_id, provider, server_ref, tool_name) [unique, name: "uq_tool_pins_identity"]
+    (installation_id, provider, server_ref) [type: btree, name: "idx_tool_pins_lookup"]
+  }
+}
+
+Table "witness_delivery_log" {
+  "id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "installation_id" uuid [not null]
+  "slack_user_id" text [not null]
+  "candidate_id" uuid
+  "decision" text [not null]
+  "reason" text
+  "created_at" timestamp [not null, default: `now()`]
+
+  Checks {
+    `(decision = ANY (ARRAY['notify'::text, 'question'::text, 'draft'::text, 'silent'::text, 'digest'::text, 'channel_sent'::text, 'channel_deferred'::text, 'draft_executed'::text, 'ambient_file_brief'::text]))` [name: 'ck_witness_delivery_log_decision']
+  }
+
+  Indexes {
+    candidate_id [type: btree, name: "idx_witness_delivery_log_candidate"]
+    (installation_id, decision, created_at) [type: btree, name: "idx_witness_delivery_log_decision"]
+    (installation_id, slack_user_id, created_at) [type: btree, name: "idx_witness_delivery_log_user_window"]
+  }
+}
+
+Table "witness_opportunity_candidates" {
+  "id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "installation_id" uuid [not null]
+  "channel_id" "character varying"
+  "target_slack_user_id" "character varying"
+  "visibility_scope_type" "character varying" [not null]
+  "visibility_scope_id" "character varying"
+  "candidate_type" "character varying" [not null]
+  "title" "character varying" [not null]
+  "summary" text [not null]
+  "suggested_action" text
+  "suggested_message" text
+  "evidence_json" jsonb [not null, default: `'[]'::jsonb`]
+  "source_type" "character varying" [not null]
+  "source_id" "character varying"
+  "source_task_id" uuid
+  "source_profile_id" uuid
+  "dedupe_key" "character varying" [not null]
+  "confidence_score" numeric(4,3) [not null, default: 0.500]
+  "confidence_reason" text
+  "status" "character varying" [not null, default: `'candidate'::charactervarying`]
+  "cooldown_until" timestamp
+  "last_suggested_at" timestamp
+  "feedback_json" jsonb [not null, default: `'{}'::jsonb`]
+  "metadata_json" jsonb [not null, default: `'{}'::jsonb`]
+  "created_at" timestamp [not null, default: `now()`]
+  "updated_at" timestamp [not null, default: `now()`]
+  "automation_kind" text
+  "cadence_suggestion" text
+  "deliverable" text
+  "automated_schedule_id" uuid
+  "automated_task_id" uuid
+  "reinforcement_count" integer [not null, default: 1]
+  "first_observed_at" timestamp
+  "last_decision" text
+  "receptivity_score" numeric(4,3)
+
+  Checks {
+    `((automation_kind IS NULL) OR (automation_kind = ANY (ARRAY['recurring'::text, 'one_shot'::text, 'watch'::text])))` [name: 'ck_witness_opportunity_candidates_automation_kind']
+    `((confidence_score >= (0)::numeric) AND (confidence_score <= (1)::numeric))` [name: 'ck_witness_opportunity_candidates_confidence']
+    `((last_decision IS NULL) OR (last_decision = ANY (ARRAY['notify'::text, 'question'::text, 'draft'::text, 'silent'::text])))` [name: 'ck_witness_opportunity_candidates_last_decision']
+    `((receptivity_score IS NULL) OR ((receptivity_score >= (0)::numeric) AND (receptivity_score <= (1)::numeric)))` [name: 'ck_witness_opportunity_candidates_receptivity']
+    `(reinforcement_count >= 0)` [name: 'ck_witness_opportunity_candidates_reinforcement_count']
+    `((((visibility_scope_type)::text = 'workspace'::text) AND (visibility_scope_id IS NULL)) OR (((visibility_scope_type)::text = ANY ((ARRAY['channel'::character varying, 'private_channel'::character varying, 'dm'::character varying, 'user'::character varying])::text[])) AND (visibility_scope_id IS NOT NULL)))` [name: 'ck_witness_opportunity_candidates_scope_id']
+    `((visibility_scope_type)::text = ANY ((ARRAY['workspace'::character varying, 'channel'::character varying, 'private_channel'::character varying, 'dm'::character varying, 'user'::character varying])::text[]))` [name: 'ck_witness_opportunity_candidates_scope_type']
+    `((source_type)::text = ANY ((ARRAY['channel_profile'::character varying, 'knowledge_graph'::character varying, 'task_summary'::character varying, 'scheduled_witness'::character varying, 'manual'::character varying])::text[]))` [name: 'ck_witness_opportunity_candidates_source_type']
+    `((status)::text = ANY ((ARRAY['candidate'::character varying, 'sent'::character varying, 'accepted'::character varying, 'automated'::character varying, 'dismissed'::character varying, 'cooldown'::character varying, 'superseded'::character varying, 'archived'::character varying])::text[]))` [name: 'ck_witness_opportunity_candidates_status']
+    `((candidate_type)::text = ANY ((ARRAY['workflow_gap'::character varying, 'artifact_followup'::character varying, 'unresolved_decision'::character varying, 'data_quality_issue'::character varying, 'recurring_check'::character varying, 'project_status_gap'::character varying, 'general_help'::character varying])::text[]))` [name: 'ck_witness_opportunity_candidates_type']
+  }
+
+  Indexes {
+    (installation_id, channel_id, status) [type: btree, name: "idx_witness_opportunity_candidates_channel"]
+    evidence_json [type: gin, name: "idx_witness_opportunity_candidates_evidence"]
+    source_profile_id [type: btree, name: "idx_witness_opportunity_candidates_profile"]
+    (installation_id, visibility_scope_type, visibility_scope_id) [type: btree, name: "idx_witness_opportunity_candidates_scope"]
+    (installation_id, status, cooldown_until) [type: btree, name: "idx_witness_opportunity_candidates_status"]
+    source_task_id [type: btree, name: "idx_witness_opportunity_candidates_task"]
+    (installation_id, visibility_scope_type, `COALESCE(visibility_scope_id,''::charactervarying)`, candidate_type, dedupe_key) [type: btree, unique, name: "idx_witness_opportunity_candidates_unique"]
+  }
+}
+
+Table "workspace_state" {
+  "id" uuid [pk, not null, default: `gen_random_uuid()`]
+  "installation_id" uuid [not null]
+  "scope_type" "character varying" [not null]
+  "scope_id" "character varying"
+  "key" "character varying" [not null]
+  "value_json" jsonb [not null]
+  "value_text" text
+  "status" "character varying" [not null]
+  "source_kind" "character varying" [not null]
+  "source_task_id" uuid
+  "source_event_id" bigint
+  "source_slack_channel_id" "character varying"
+  "source_slack_message_ts" "character varying"
+  "source_slack_file_id" "character varying"
+  "source_url" text
+  "proposed_by" "character varying" [not null]
+  "proposed_reason" text
+  "confidence_score" numeric(4,3)
+  "confidence_reason" text
+  "confirmed_by_user_id" "character varying"
+  "confirmed_at" timestamp
+  "rejected_by_user_id" "character varying"
+  "rejected_at" timestamp
+  "superseded_by_id" uuid
+  "superseded_at" timestamp
+  "forgotten_by_user_id" "character varying"
+  "forgotten_at" timestamp
+  "expires_at" timestamp
+  "created_at" timestamp [not null, default: `now()`]
+  "updated_at" timestamp [not null, default: `now()`]
+
+  Checks {
+    `((((scope_type)::text = 'workspace'::text) AND (scope_id IS NULL)) OR (((scope_type)::text = ANY ((ARRAY['channel'::character varying, 'user'::character varying])::text[])) AND (scope_id IS NOT NULL)))` [name: 'ck_workspace_state_scope_id']
+    `((scope_type)::text = ANY ((ARRAY['workspace'::character varying, 'channel'::character varying, 'user'::character varying])::text[]))` [name: 'ck_workspace_state_scope_type']
+    `((source_kind)::text = ANY ((ARRAY['user_explicit'::character varying, 'agent_proposed'::character varying, 'summarizer_proposed'::character varying, 'observer_proposed'::character varying, 'import'::character varying])::text[]))` [name: 'ck_workspace_state_source_kind']
+    `((status)::text = ANY ((ARRAY['proposed'::character varying, 'active'::character varying, 'rejected'::character varying, 'superseded'::character varying, 'forgotten'::character varying])::text[]))` [name: 'ck_workspace_state_status']
+  }
+
+  Indexes {
+    (installation_id, status, scope_type, scope_id) [type: btree, name: "idx_workspace_state_active_lookup"]
+    (installation_id, scope_type, `COALESCE(scope_id,''::charactervarying)`, key) [type: btree, unique, name: "idx_workspace_state_active_unique"]
+    expires_at [type: btree, name: "idx_workspace_state_expires_at"]
+    (source_task_id, source_event_id) [type: btree, name: "idx_workspace_state_source"]
+  }
+}
+
+Ref "artifacts_task_id_fkey":"tasks"."id" < "artifacts"."task_id"
+
+Ref "autonomy_policies_installation_id_fkey":"installations"."id" < "autonomy_policies"."installation_id" [delete: cascade]
+
+Ref "composio_connections_installation_id_fkey":"installations"."id" < "composio_connections"."installation_id" [delete: cascade]
+
+Ref "composio_tool_cards_installation_id_fkey":"installations"."id" < "composio_tool_cards"."installation_id" [delete: cascade]
+
+Ref "consolidation_runs_installation_id_fkey":"installations"."id" < "consolidation_runs"."installation_id" [delete: cascade]
+
+Ref "dashboard_users_installation_id_fkey":"installations"."id" < "dashboard_users"."installation_id" [delete: cascade]
+
+Ref "encrypted_secrets_installation_id_fkey":"installations"."id" < "encrypted_secrets"."installation_id"
+
+Ref "episodes_installation_id_fkey":"installations"."id" < "episodes"."installation_id" [delete: cascade]
+
+Ref "episodes_task_id_fkey":"tasks"."id" < "episodes"."task_id" [delete: cascade]
+
+Ref "fk_witness_opportunity_candidates_automated_schedule_id":"schedules"."id" < "witness_opportunity_candidates"."automated_schedule_id" [delete: set null]
+
+Ref "fk_witness_opportunity_candidates_automated_task_id":"tasks"."id" < "witness_opportunity_candidates"."automated_task_id" [delete: set null]
+
+Ref "kg_edges_installation_id_fkey":"installations"."id" < "kg_edges"."installation_id" [delete: cascade]
+
+Ref "kg_edges_source_entity_id_fkey":"kg_entities"."id" < "kg_edges"."source_entity_id" [delete: cascade]
+
+Ref "kg_edges_target_entity_id_fkey":"kg_entities"."id" < "kg_edges"."target_entity_id" [delete: cascade]
+
+Ref "kg_entities_installation_id_fkey":"installations"."id" < "kg_entities"."installation_id" [delete: cascade]
+
+Ref "kg_evidence_installation_id_fkey":"installations"."id" < "kg_evidence"."installation_id" [delete: cascade]
+
+Ref "kg_evidence_source_episode_id_fkey":"episodes"."id" < "kg_evidence"."source_episode_id" [delete: set null]
+
+Ref "kg_evidence_source_observation_id_fkey":"observation_events"."id" < "kg_evidence"."source_observation_id" [delete: set null]
+
+Ref "kg_evidence_source_task_event_id_fkey":"task_events"."id" < "kg_evidence"."source_task_event_id" [delete: set null]
+
+Ref "kg_evidence_source_task_id_fkey":"tasks"."id" < "kg_evidence"."source_task_id" [delete: set null]
+
+Ref "llm_budget_policies_installation_id_fkey":"installations"."id" < "llm_budget_policies"."installation_id" [delete: cascade]
+
+Ref "llm_config_audit_installation_id_fkey":"installations"."id" < "llm_config_audit"."installation_id" [delete: cascade]
+
+Ref "llm_model_catalog_provider_account_id_fkey":"llm_provider_accounts"."id" < "llm_model_catalog"."provider_account_id" [delete: cascade]
+
+Ref "llm_model_pricing_provider_account_id_fkey":"llm_provider_accounts"."id" < "llm_model_pricing"."provider_account_id" [delete: cascade]
+
+Ref "llm_provider_accounts_encrypted_secret_id_fkey":"encrypted_secrets"."id" < "llm_provider_accounts"."encrypted_secret_id" [delete: set null]
+
+Ref "llm_provider_accounts_installation_id_fkey":"installations"."id" < "llm_provider_accounts"."installation_id" [delete: cascade]
+
+Ref "llm_tier_assignments_installation_id_fkey":"installations"."id" < "llm_tier_assignments"."installation_id" [delete: cascade]
+
+Ref "llm_tier_assignments_model_catalog_id_fkey":"llm_model_catalog"."id" < "llm_tier_assignments"."model_catalog_id" [delete: cascade]
+
+Ref "llm_usage_event_id_fkey":"task_events"."id" < "llm_usage"."event_id"
+
+Ref "llm_usage_task_id_fkey":"tasks"."id" < "llm_usage"."task_id"
+
+Ref "mcp_server_tools_server_id_fkey":"mcp_servers"."id" < "mcp_server_tools"."server_id" [delete: cascade]
+
+Ref "mcp_servers_installation_id_fkey":"installations"."id" < "mcp_servers"."installation_id" [delete: cascade]
+
+Ref "observation_events_installation_id_fkey":"installations"."id" < "observation_events"."installation_id" [delete: cascade]
+
+Ref "observe_channel_profiles_installation_id_fkey":"installations"."id" < "observe_channel_profiles"."installation_id" [delete: cascade]
+
+Ref "observe_channel_profiles_source_task_id_fkey":"tasks"."id" < "observe_channel_profiles"."source_task_id" [delete: set null]
+
+Ref "observe_policies_installation_id_fkey":"installations"."id" < "observe_policies"."installation_id" [delete: cascade]
+
+Ref "procedural_skill_invocations_installation_id_fkey":"installations"."id" < "procedural_skill_invocations"."installation_id" [delete: cascade]
+
+Ref "procedural_skill_invocations_skill_id_fkey":"procedural_skills"."id" < "procedural_skill_invocations"."skill_id" [delete: cascade]
+
+Ref "procedural_skill_invocations_skill_version_id_fkey":"procedural_skill_versions"."id" < "procedural_skill_invocations"."skill_version_id" [delete: cascade]
+
+Ref "procedural_skill_invocations_task_id_fkey":"tasks"."id" < "procedural_skill_invocations"."task_id" [delete: cascade]
+
+Ref "procedural_skill_versions_skill_id_fkey":"procedural_skills"."id" < "procedural_skill_versions"."skill_id" [delete: cascade]
+
+Ref "schedules_installation_id_fkey":"installations"."id" < "schedules"."installation_id" [delete: cascade]
+
+Ref "skill_enablements_installation_id_fkey":"installations"."id" < "skill_enablements"."installation_id" [delete: cascade]
+
+Ref "skill_enablements_skill_id_fkey":"procedural_skills"."id" < "skill_enablements"."skill_id" [delete: cascade]
+
+Ref "skill_files_skill_version_id_fkey":"procedural_skill_versions"."id" < "skill_files"."skill_version_id" [delete: cascade]
+
+Ref "slack_channel_memberships_installation_id_fkey":"installations"."id" < "slack_channel_memberships"."installation_id" [delete: cascade]
+
+Ref "slack_identities_installation_id_fkey":"installations"."id" < "slack_identities"."installation_id" [delete: cascade]
+
+Ref "slack_inbound_events_installation_id_fkey":"installations"."id" < "slack_inbound_events"."installation_id" [delete: cascade]
+
+Ref "slack_inbound_events_observation_event_id_fkey":"observation_events"."id" < "slack_inbound_events"."observation_event_id" [delete: set null]
+
+Ref "slack_inbound_events_task_id_fkey":"tasks"."id" < "slack_inbound_events"."task_id" [delete: set null]
+
+Ref "slack_side_effects_installation_id_fkey":"installations"."id" < "slack_side_effects"."installation_id" [delete: cascade]
+
+Ref "slack_side_effects_task_id_fkey":"tasks"."id" < "slack_side_effects"."task_id" [delete: set null]
+
+Ref "task_events_task_id_fkey":"tasks"."id" < "task_events"."task_id"
+
+Ref "tasks_installation_id_fkey":"installations"."id" < "tasks"."installation_id"
+
+Ref "tasks_parent_task_id_fkey":"tasks"."id" < "tasks"."parent_task_id"
+
+Ref "tool_pins_installation_id_fkey":"installations"."id" < "tool_pins"."installation_id" [delete: cascade]
+
+Ref "witness_delivery_log_candidate_id_fkey":"witness_opportunity_candidates"."id" < "witness_delivery_log"."candidate_id" [delete: cascade]
+
+Ref "witness_delivery_log_installation_id_fkey":"installations"."id" < "witness_delivery_log"."installation_id" [delete: cascade]
+
+Ref "witness_opportunity_candidates_installation_id_fkey":"installations"."id" < "witness_opportunity_candidates"."installation_id" [delete: cascade]
+
+Ref "witness_opportunity_candidates_source_profile_id_fkey":"observe_channel_profiles"."id" < "witness_opportunity_candidates"."source_profile_id" [delete: set null]
+
+Ref "witness_opportunity_candidates_source_task_id_fkey":"tasks"."id" < "witness_opportunity_candidates"."source_task_id" [delete: set null]
+
+Ref "workspace_state_installation_id_fkey":"installations"."id" < "workspace_state"."installation_id" [delete: cascade]
+
+Ref "workspace_state_source_event_id_fkey":"task_events"."id" < "workspace_state"."source_event_id" [delete: set null]
+
+Ref "workspace_state_source_task_id_fkey":"tasks"."id" < "workspace_state"."source_task_id" [delete: set null]
+
+Ref "workspace_state_superseded_by_id_fkey":"workspace_state"."id" < "workspace_state"."superseded_by_id"

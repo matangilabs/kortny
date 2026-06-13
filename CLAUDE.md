@@ -105,7 +105,7 @@ Approvals: read-only native tools need none; sandbox/code/deploy tools need user
 
 ## Data model
 
-Schema source of truth: `docs/schema.dbml` (manually maintained). Migrations live in `kortny/db/migrations/versions/` (`NNNN_slug.py`). Always create new migrations with Alembic; **never edit applied ones**.
+Schema source of truth: the SQLAlchemy models (`kortny/db/models.py`) + the Alembic migrations in `kortny/db/migrations/versions/` (`NNNN_slug.py`). `docs/schema.dbml` is a generated reference snapshot (regen command in its header) — don't hand-edit it. Always create new migrations with Alembic; **never edit applied ones**.
 
 - **Task identity & dedup** — `Task.identity_key` is unique per installation. Kinds: `slack_message` (`slack-message:{channel}:{thread_ts}:{message_ts}`), `slack_event`, `synthetic` (observe/assessment), `scheduled` (`scheduled:{schedule_id}:{fire_time}`), `manual` (no dedup). Creating a task with an existing key returns the existing row — in tests, give each task a distinct `message_ts` or you'll silently get the same task back.
 - **Task statuses** — pending → running → succeeded/failed/waiting_approval/cancelled/crashed. `TaskEvent` is the append-only audit log (llm_call, tool_call, tool_result, artifact_created, message_posted, error, log, …).
