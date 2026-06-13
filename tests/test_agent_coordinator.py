@@ -497,10 +497,12 @@ def test_coordinator_reports_assistant_status(db_session: Session) -> None:
         ]
     )
     statuses: list[str] = []
+    phases: list[str | None] = []
 
     class Recorder:
-        def report(self, status: str) -> None:
+        def report(self, status: str, *, phase: str | None = None) -> None:
             statuses.append(status)
+            phases.append(phase)
 
     AgentCoordinator(
         session=db_session,
@@ -511,6 +513,10 @@ def test_coordinator_reports_assistant_status(db_session: Session) -> None:
 
     assert "Getting up to speed…" in statuses
     assert "Writing the response…" in statuses
+    # Coarse macro-phases accompany the granular steps so the two assistant-pane
+    # status lines complement rather than mirror each other.
+    assert "is getting started…" in phases
+    assert "is writing the reply…" in phases
 
 
 def test_coordinator_tool_schemas_identical_across_turns(

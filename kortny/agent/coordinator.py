@@ -93,10 +93,13 @@ from kortny.observability import (
     start_span,
 )
 from kortny.slack.assistant_status import (
+    PHASE_STARTING,
+    PHASE_WRITING,
     STATUS_GETTING_STARTED,
     STATUS_WRITING,
     NullStatusReporter,
     StatusReporter,
+    phase_for_tool,
     status_for_tool,
 )
 from kortny.tasks import TaskService
@@ -351,7 +354,7 @@ class AgentCoordinator:
         context_package: ContextPackage | None = None
         run_outcome = "failed"
         try:
-            self.status_reporter.report(STATUS_GETTING_STARTED)
+            self.status_reporter.report(STATUS_GETTING_STARTED, phase=PHASE_STARTING)
             context_package = self._initial_context(task_obj)
             self._record_skill_ranking(task_obj, context_package)
             messages = list(context_package.messages)
@@ -447,7 +450,7 @@ class AgentCoordinator:
                         ChatMessage(role="system", content=EMPTY_RESPONSE_REPAIR_PROMPT)
                     )
                     continue
-                self.status_reporter.report(STATUS_WRITING)
+                self.status_reporter.report(STATUS_WRITING, phase=PHASE_WRITING)
                 result = self._finish_with_text(
                     task_obj,
                     completion.content,
@@ -606,7 +609,10 @@ class AgentCoordinator:
                     "arguments": arguments,
                 },
             )
-            self.status_reporter.report(self._tool_status(tool_call.name))
+            self.status_reporter.report(
+                self._tool_status(tool_call.name),
+                phase=phase_for_tool(tool_call.name),
+            )
             log_observation(
                 logger,
                 "tool_call_started",

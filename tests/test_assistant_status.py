@@ -5,8 +5,11 @@ from __future__ import annotations
 from typing import Any
 
 from kortny.slack.assistant_status import (
+    PHASE_RESEARCHING,
+    PHASE_WORKING,
     AssistantStatusReporter,
     NullStatusReporter,
+    phase_for_tool,
     status_for_tool,
 )
 
@@ -65,36 +68,68 @@ def test_status_for_tool_generic_fallback() -> None:
     assert status_for_tool("totally_unknown") == "Working through it…"
 
 
-def test_reporter_sets_status() -> None:
+def test_reporter_sets_two_level_status() -> None:
     client = RecordingStatusClient()
     reporter = AssistantStatusReporter(
         client=client, channel_id="D1", thread_ts="123.45"
     )
-    reporter.report("Searching the web…")
+    reporter.report("Searching the web…", phase=PHASE_RESEARCHING)
     assert client.calls == [
         {
             "channel_id": "D1",
             "thread_ts": "123.45",
-            "status": "Searching the web…",
-            # Single-item list — Slack rejects an empty loading_messages; the one
-            # item replaces the app's static intro loop with the current step.
+            # Composer line = coarse phase; prominent bubble = granular step.
+            "status": PHASE_RESEARCHING,
             "loading_messages": ["Searching the web…"],
         }
     ]
 
 
-def test_reporter_throttles_repeats() -> None:
+def test_reporter_falls_back_to_step_without_phase() -> None:
     client = RecordingStatusClient()
     reporter = AssistantStatusReporter(
         client=client, channel_id="D1", thread_ts="123.45"
     )
-    reporter.report("Running code…")
-    reporter.report("Running code…")  # identical → no second call
-    reporter.report("Writing the response…")
-    assert [c["status"] for c in client.calls] == [
+    reporter.report("Searching the web…")
+    assert client.calls[0]["status"] == "Searching the web…"
+    assert client.calls[0]["loading_messages"] == ["Searching the web…"]
+
+
+def test_reporter_updates_bubble_when_only_step_changes() -> None:
+    client = RecordingStatusClient()
+    reporter = AssistantStatusReporter(
+        client=client, channel_id="D1", thread_ts="123.45"
+    )
+    # Same phase, different granular step → still re-issued so the bubble updates.
+    reporter.report("Searching the web…", phase=PHASE_RESEARCHING)
+    reporter.report("Loading a skill…", phase=PHASE_RESEARCHING)
+    assert [c["loading_messages"] for c in client.calls] == [
+        ["Searching the web…"],
+        ["Loading a skill…"],
+    ]
+
+
+def test_reporter_throttles_identical_step_and_phase() -> None:
+    client = RecordingStatusClient()
+    reporter = AssistantStatusReporter(
+        client=client, channel_id="D1", thread_ts="123.45"
+    )
+    reporter.report("Running code…", phase=PHASE_WORKING)
+    reporter.report("Running code…", phase=PHASE_WORKING)  # identical → no 2nd call
+    reporter.report("Writing the response…", phase=PHASE_WORKING)
+    assert [c["loading_messages"][0] for c in client.calls] == [
         "Running code…",
         "Writing the response…",
     ]
+
+
+def test_phase_for_tool_research_vs_work() -> None:
+    assert phase_for_tool("web_search") == PHASE_RESEARCHING
+    assert phase_for_tool("load_skill") == PHASE_RESEARCHING
+    assert phase_for_tool("mcp__context7__get_docs") == PHASE_RESEARCHING
+    assert phase_for_tool("code_exec") == PHASE_WORKING
+    assert phase_for_tool("run_skill_script") == PHASE_WORKING
+    assert phase_for_tool("totally_unknown") == PHASE_WORKING
 
 
 def test_reporter_ignores_empty_status() -> None:

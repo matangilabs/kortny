@@ -34,14 +34,14 @@ class AssistantStatusClient(Protocol):
 class StatusReporter(Protocol):
     """Reports a human-readable activity status for the current task."""
 
-    def report(self, status: str) -> None:
+    def report(self, status: str, *, phase: str | None = None) -> None:
         """Surface ``status`` to the user (best-effort, never raises)."""
 
 
 class NullStatusReporter:
     """No-op reporter for non-assistant tasks (the default everywhere)."""
 
-    def report(self, status: str) -> None:  # noqa: D102 - protocol impl
+    def report(self, status: str, *, phase: str | None = None) -> None:  # noqa: D102
         return None
 
 
@@ -63,36 +63,46 @@ class AssistantStatusReporter:
         self._client = client
         self._channel_id = channel_id
         self._thread_ts = thread_ts
-        self._last: str | None = None
+        self._last: tuple[str, str] | None = None
 
-    def report(self, status: str) -> None:
-        cleaned = status.strip()
-        if not cleaned or cleaned == self._last:
+    def report(self, status: str, *, phase: str | None = None) -> None:
+        """Surface the current activity as a two-level status.
+
+        ``status`` is the live, granular step (the tool being run) and drives the
+        prominent ``loading_messages`` bubble below the app name. ``phase`` is the
+        coarse macro-phase ("is researching…", "is putting it together…") and
+        drives the small composer line — it changes only a few times per task, so
+        the two lines complement rather than mirror each other. ``loading_messages``
+        must be a NON-EMPTY list — Slack rejects ``[]`` with invalid_arguments
+        ("must provide at least 1 items") and there is no way to clear it back to
+        nothing — so we always send the single current step (one item = no
+        rotation). The native step-timeline (TaskUpdateChunk) is HIG-252.
+        """
+
+        step = status.strip()
+        if not step:
+            return
+        composer = (phase or "").strip() or step
+        key = (step, composer)
+        if key == self._last:
             return
         setter = getattr(self._client, "assistant_threads_setStatus", None)
         if not callable(setter):
             return
         try:
-            # Drive both the composer status line and the below-app-name line to
-            # the current step. loading_messages must be a NON-EMPTY list — Slack
-            # rejects [] with invalid_arguments ("must provide at least 1 items"),
-            # and there is no way to clear it back to nothing — so we send the
-            # single current step (one item = no rotation, replaces the app's
-            # static intro loop). The native step-timeline (TaskUpdateChunk) that
-            # makes the two lines distinct is HIG-252.
             setter(
                 channel_id=self._channel_id,
                 thread_ts=self._thread_ts,
-                status=cleaned,
-                loading_messages=[cleaned],
+                status=composer,
+                loading_messages=[step],
             )
-            self._last = cleaned
+            self._last = key
         except Exception:
             logger.warning(
                 "failed to set assistant status channel=%s thread_ts=%s status=%s",
                 self._channel_id,
                 self._thread_ts,
-                cleaned,
+                step,
                 exc_info=True,
             )
 
@@ -101,7 +111,52 @@ class AssistantStatusReporter:
 STATUS_GETTING_STARTED = "Getting up to speed…"
 STATUS_WRITING = "Writing the response…"
 
+# Coarse macro-phases for the small composer line. These change only a handful of
+# times per task so they read as complementary to the granular step bubble rather
+# than a duplicate of it. Phrased to follow the bot name ("Kortny is researching…").
+PHASE_STARTING = "is getting started…"
+PHASE_RESEARCHING = "is gathering what it needs…"
+PHASE_WORKING = "is putting it together…"
+PHASE_WRITING = "is writing the reply…"
+
+# Tools whose work is gathering inputs/context rather than producing output.
+_RESEARCH_TOOLS: frozenset[str] = frozenset(
+    {
+        "web_search",
+        "slack_channel_history",
+        "search_observed_slack_history",
+        "query_workspace_graph",
+        "inspect_memory",
+        "recall_fact",
+        "list_schedules",
+        "get_schedule",
+        "describe_tools",
+        "list_integrations",
+        "load_skill",
+        "load_skill_resource",
+        "slack_user_info",
+        "slack_channel_info",
+        "resolve_slack_identity",
+        "slack_file_read",
+    }
+)
+
 _GENERIC_TOOL_STATUS = "Working through it…"
+
+
+def phase_for_tool(tool_name: str) -> str:
+    """Map a tool to a coarse macro-phase for the composer status line.
+
+    Read-only lookups (search, history, skill/memory reads, MCP queries) are the
+    research phase; everything else — code, sandbox, writes, integrations — is the
+    build/work phase. Deliberately coarse so the line stays stable across the many
+    granular tool calls within a phase.
+    """
+
+    if tool_name in _RESEARCH_TOOLS or tool_name.startswith("mcp__"):
+        return PHASE_RESEARCHING
+    return PHASE_WORKING
+
 
 # Explicit, friendly verbs for the native tool surface. Anything not listed
 # falls back to MCP/Composio derivation or the generic phrase below.
