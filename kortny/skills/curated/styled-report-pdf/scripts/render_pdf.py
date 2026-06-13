@@ -213,20 +213,20 @@ BASE_CSS = """
 }
 
 /* ---- PAGE / PRINT ---- */
-/* Global margin 0; content inset via .page-body padding (WeasyPrint-safe approach).
-   Named pages (cover/divider) get full bleed.
-   @page margin boxes provide page numbers + running section name. */
+/* Real @page margins so EVERY page — including continuation pages — gets the
+   content inset (the previous "margin:0 + .page-body padding" stranded
+   continuation pages flush to the top edge). The margin boxes live in the
+   page margin area and carry the running section name + page number. Cover and
+   section dividers override to a full-bleed margin-0 named page below. */
 @page {
   size: A4;
-  margin: 0;
+  margin: 24mm 22mm 22mm 22mm;
   @bottom-right {
     content: counter(page);
     font-family: var(--font-mono);
     font-size: 7pt;
     letter-spacing: 0.08em;
     color: %(--ink-soft)s;
-    margin-right: 22mm;
-    margin-bottom: 14mm;
   }
   @bottom-left {
     content: "KORTNY RESEARCH";
@@ -235,8 +235,6 @@ BASE_CSS = """
     letter-spacing: 0.1em;
     text-transform: uppercase;
     color: %(--ink-soft)s;
-    margin-left: 22mm;
-    margin-bottom: 14mm;
   }
   @top-right {
     content: string(section-title);
@@ -244,8 +242,6 @@ BASE_CSS = """
     font-size: 7pt;
     letter-spacing: 0.08em;
     color: %(--ink-soft)s;
-    margin-right: 22mm;
-    margin-top: 14mm;
   }
 }
 /* Named page for cover + divider — full bleed, no margin-box content */
@@ -275,10 +271,11 @@ a { color: var(--accent); text-decoration: none; }
 p, li { orphans: 3; widows: 3; }
 
 /* ---- CONTENT INSET ---- */
-/* Since @page margin is 0, all normal content must live inside .page-body.
-   Cover and divider elements live OUTSIDE .page-body for true full bleed. */
+/* Content inset now comes from the @page margins (so continuation pages are
+   inset too). .page-body is a plain flow wrapper — no padding. The cover lives
+   outside it; section dividers full-bleed via their margin-0 named page. */
 .page-body {
-  padding: 24mm 22mm 28mm;
+  padding: 0;
   box-sizing: border-box;
 }
 
@@ -422,11 +419,9 @@ li { margin-bottom: 4px; }
   page: cover;
   background: var(--cover-bg);
   color: var(--cover-ink);
-  /* Full-bleed inside the padded .page-body: negative horizontal margins
-     cancel page-body's 22mm side padding so the dark page reaches both edges
-     (a fixed 210mm width only bled right and left a white strip). */
-  margin-left: -22mm;
-  margin-right: -22mm;
+  /* Full bleed: on its margin-0 named page inside the now-unpadded page-body,
+     a full A4 width fills the trim on all four edges. */
+  width: 210mm;
   min-height: 297mm;
   box-sizing: border-box;
   padding: 32mm 24mm;
@@ -534,7 +529,14 @@ li { margin-bottom: 4px; }
   margin: 14px 0;
   font-family: var(--font-body);
   font-size: 9.5pt;
+  /* Keep short report tables whole so the totals row never strands on a
+     separate page from its body. A table taller than a page still splits
+     (rows stay intact via the tr rule); the .data-table--split modifier
+     opts a long table back into mid-table breaking. */
+  break-inside: avoid;
+  page-break-inside: avoid;
 }
+.data-table--split { break-inside: auto; page-break-inside: auto; }
 .data-table caption {
   caption-side: top;
   text-align: left;
