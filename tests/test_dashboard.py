@@ -1,6 +1,7 @@
 import os
 import uuid
 from collections.abc import Iterator
+from typing import cast
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
@@ -4319,10 +4320,13 @@ def test_dashboard_style_card_pin_and_clear_actions(
 
 
 def login(test_client: TestClient) -> Response:
-    return test_client.post(
-        "/login",
-        data={"username": "admin", "password": "secret", "next": "/"},
-        follow_redirects=False,
+    return cast(
+        Response,
+        test_client.post(
+            "/login",
+            data={"username": "admin", "password": "secret", "next": "/"},
+            follow_redirects=False,
+        ),
     )
 
 
