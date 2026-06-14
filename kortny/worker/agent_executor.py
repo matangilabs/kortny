@@ -77,6 +77,7 @@ from kortny.observe.assessment import (
     is_channel_assessment_task,
 )
 from kortny.observe.profiles import ObserveChannelProfileService
+from kortny.persona import personalize
 from kortny.routing import (
     ROUTING_DECISION_RECORDED_MESSAGE,
     SEMANTIC_ROUTER_PROMPT_VERSION,
@@ -1144,6 +1145,7 @@ class AgentTaskExecutor:
             skill_direct_threshold=settings.skill_direct_similarity_threshold,
             trifecta_gate_enabled=settings.trifecta_gate_enabled,
             status_reporter=self._build_status_reporter(settings=settings, task=task),
+            agent_display_name=settings.agent_display_name,
         ).run(task)
 
     def _build_status_reporter(
@@ -1705,10 +1707,13 @@ class AgentTaskExecutor:
         if not external_cards:
             return native_tools
 
-        tool_selection_task_input = _tool_selection_task_input(
-            session=session,
-            task=task,
-            base_input=task.input,
+        tool_selection_task_input = personalize(
+            _tool_selection_task_input(
+                session=session,
+                task=task,
+                base_input=task.input,
+            ),
+            settings.agent_display_name,
         )
         raw_intent = _latest_intent_decision(session, task)
         effective_decision = effective_intent_decision(raw_intent)
@@ -2476,7 +2481,10 @@ class AgentTaskExecutor:
                 messages=(
                     ChatMessage(
                         role="system",
-                        content=_tool_approval_prompt_system_prompt(),
+                        content=personalize(
+                            _tool_approval_prompt_system_prompt(),
+                            settings.agent_display_name,
+                        ),
                     ),
                     ChatMessage(
                         role="user",
@@ -3687,7 +3695,7 @@ def _tool_selection_task_input(
         lines.append(f"- User asked: {_compact_tool_selection_text(prior.input)}")
         if prior.result_summary:
             lines.append(
-                f"  Kortny answered: "
+                f"  __AGENT_NAME__ answered: "
                 f"{_compact_tool_selection_text(prior.result_summary)}"
             )
     return "\n".join(lines)
@@ -3899,8 +3907,8 @@ def _input_words(text: str) -> set[str]:
 
 def _tool_approval_prompt_system_prompt() -> str:
     return (
-        "You write Kortny's Slack approval request before a gated action. "
-        "Return JSON only with a `text` string. Write as Kortny in first person. "
+        "You write __AGENT_NAME__'s Slack approval request before a gated action. "
+        "Return JSON only with a `text` string. Write as __AGENT_NAME__ in first person. "
         "Use the user's request to make the approval note specific and natural. "
         "Keep it under 450 characters before the reaction instruction. "
         "Do not say the action is already done. Do not mention backend, model, "

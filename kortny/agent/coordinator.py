@@ -12,7 +12,7 @@ import re
 import time
 import uuid
 from collections.abc import Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Protocol
@@ -92,6 +92,7 @@ from kortny.observability import (
     set_span_attributes,
     start_span,
 )
+from kortny.persona import AGENT_NAME_TOKEN, personalize
 from kortny.slack.assistant_status import (
     PHASE_STARTING,
     PHASE_WRITING,
@@ -135,7 +136,7 @@ EMPTY_RESPONSE_REPAIR_PROMPT = (
     "answer. Do not return an empty message."
 )
 DEFAULT_SYSTEM_PROMPT = (
-    "You are Kortny, a Slack-native AI coworker. Use the available tools when "
+    "You are __AGENT_NAME__, a Slack-native AI coworker. Use the available tools when "
     "they are needed to complete the user's request. If the user asks for "
     "research and a PDF, search first and then generate the PDF artifact. "
     "If the user asks about an attached Slack file and the task input or prior "
@@ -293,6 +294,7 @@ class AgentCoordinator:
         skill_direct_threshold: float = DEFAULT_SKILL_DIRECT_THRESHOLD,
         trifecta_gate_enabled: bool = True,
         status_reporter: StatusReporter | None = None,
+        agent_display_name: str = "Kortny",
     ) -> None:
         if max_turns < 1:
             raise ValueError("max_turns must be at least 1")
@@ -327,6 +329,7 @@ class AgentCoordinator:
         self._trifecta_states: dict[uuid.UUID, TrifectaGateState] = {}
         self.status_reporter: StatusReporter = status_reporter or NullStatusReporter()
         self.tool_result_prompt_max_chars = tool_result_prompt_max_chars
+        self.agent_display_name = agent_display_name
         if context_engine is not None:
             self.context_engine = context_engine
         else:
@@ -347,6 +350,21 @@ class AgentCoordinator:
             )
             self.context_engine = DefaultContextEngine(self.context_assembler)
 
+    def _personalize(self, message: ChatMessage) -> ChatMessage:
+        """Resolve the agent-name placeholder in an assembled context message.
+
+        The system prompt and context section labels carry ``__AGENT_NAME__`` so
+        self-hosters' installs speak their own name; this runs once on the
+        initial context (tool results appended later never carry the token).
+        """
+
+        if message.content is None or AGENT_NAME_TOKEN not in message.content:
+            return message
+        return replace(
+            message,
+            content=personalize(message.content, self.agent_display_name),
+        )
+
     def run(self, task: Task | uuid.UUID) -> AgentRunResult:
         """Run the coordinator until final text or a produced artifact."""
 
@@ -357,7 +375,9 @@ class AgentCoordinator:
             self.status_reporter.report(STATUS_GETTING_STARTED, phase=PHASE_STARTING)
             context_package = self._initial_context(task_obj)
             self._record_skill_ranking(task_obj, context_package)
-            messages = list(context_package.messages)
+            messages = [
+                self._personalize(message) for message in context_package.messages
+            ]
             result = self._run_with_context(
                 task_obj,
                 messages,

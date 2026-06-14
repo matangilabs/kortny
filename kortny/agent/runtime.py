@@ -63,6 +63,7 @@ class CustomAgentRuntime:
         skill_direct_threshold: float = DEFAULT_SKILL_DIRECT_THRESHOLD,
         trifecta_gate_enabled: bool = True,
         status_reporter: StatusReporter | None = None,
+        agent_display_name: str = "Kortny",
     ) -> None:
         self.coordinator = AgentCoordinator(
             session=session,
@@ -88,6 +89,7 @@ class CustomAgentRuntime:
             skill_direct_threshold=skill_direct_threshold,
             trifecta_gate_enabled=trifecta_gate_enabled,
             status_reporter=status_reporter,
+            agent_display_name=agent_display_name,
         )
 
     def run(self, task: Task | uuid.UUID) -> AgentRunResult:
