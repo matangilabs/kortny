@@ -1467,7 +1467,7 @@ def _context_budget_payload(budget: ContextBudget) -> dict[str, int]:
 def _render_acknowledgement_context(acknowledgement: ContextAcknowledgement) -> str:
     lines = [
         "<visible_acknowledgement>",
-        "Kortny already posted this visible Slack acknowledgement for the current request:",
+        "__AGENT_NAME__ already posted this visible Slack acknowledgement for the current request:",
         f"- text: {_quote(acknowledgement.text)}",
     ]
     if acknowledgement.message_ts:
@@ -1515,7 +1515,7 @@ def _render_known_facts(facts: Sequence[Fact]) -> str:
 def _render_episode_context(episodes: Sequence[RelevantEpisode]) -> str:
     lines = [
         "<recent_episodes>",
-        "Bounded episodic memory from prior Kortny tasks. Use this to resolve "
+        "Bounded episodic memory from prior __AGENT_NAME__ tasks. Use this to resolve "
         "references to prior work, artifacts, sources, failures, or decisions. "
         "Do not treat these as confirmed user/workspace facts; confirmed facts "
         "are supplied separately in known_facts.",

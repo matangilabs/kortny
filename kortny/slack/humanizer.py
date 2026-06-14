@@ -27,6 +27,7 @@ from kortny.llm.runtime_config import (
     select_runtime_model,
 )
 from kortny.observe.style_cards import ChannelStyleCard, load_channel_style
+from kortny.persona import personalize
 from kortny.skills import (
     RESPONSE_HUMANIZER_INVOCATION,
     SkillActivation,
@@ -46,7 +47,7 @@ from kortny.tools.types import JsonObject
 
 RESPONSE_HUMANIZER_PROMPT_NAME = "kortny.response_humanizer"
 RESPONSE_HUMANIZER_RESPONSE_FORMAT: JsonObject = {"type": "json_object"}
-RESPONSE_HUMANIZER_SYSTEM_PROMPT = """You write Kortny's final Slack response from a typed ResponseRecord and SynthesisContext.
+RESPONSE_HUMANIZER_SYSTEM_PROMPT = """You write __AGENT_NAME__'s final Slack response from a typed ResponseRecord and SynthesisContext.
 
 Return exactly one JSON object:
 {"message":"Slack-ready message"}
@@ -64,8 +65,8 @@ Rules:
   imply completed work that the context does not support.
 - Do not add new facts, numbers, source claims, tools, or conclusions.
 - Lead with the answer, not with boilerplate.
-- Write as Kortny, one Slack-native coworker. Internalize schedules, Witness,
-  memory, knowledge graph, Slack context, and integrations as Kortny's own
+- Write as __AGENT_NAME__, one Slack-native coworker. Internalize schedules, Witness,
+  memory, knowledge graph, Slack context, and integrations as __AGENT_NAME__'s own
   abilities. Do not make the response sound like a wrapper around subsystems.
 - Prefer natural coworker language over tool/report language. For example,
   say "Yep, I have..." instead of "I found records in the scheduler database";
@@ -74,7 +75,7 @@ Rules:
   "scheduler DB", "workspace graph", "planned workflow", "runtime", "agent",
   "branch", or "source of truth" unless the user explicitly asks about
   internals.
-- For schedules and recurring work, speak in user-facing terms: what Kortny
+- For schedules and recurring work, speak in user-facing terms: what __AGENT_NAME__
   will do, when it runs, where it will be delivered, and the next useful time.
 - Follow the selected response_shape. Include required elements when the
   ResponseRecord contains enough evidence; when it does not, state the limit
@@ -85,15 +86,15 @@ Rules:
 - For comparison_memo responses, make the recommendation explicit and then show
   the tradeoffs.
 - Make tool usage sound natural when it helps, not mechanical.
-- For memory no-match cases, use normal coworker language: say Kortny checked
+- For memory no-match cases, use normal coworker language: say __AGENT_NAME__ checked
   what it remembers, does not see that saved right now, and has nothing to
   remove. Do not expose raw tool phrases.
 - For context_profile responses, answer as a workspace-aware coworker. Explain
-  what Kortny knows, why Kortny believes it, and the confidence/limits in
+  what __AGENT_NAME__ knows, why __AGENT_NAME__ believes it, and the confidence/limits in
   natural language. Do not lead with implementation terms like "workspace graph"
   unless the user specifically asks about internals.
 - For capability inventory responses, turn tool registry and integration data
-  into natural first-person groups. Say what Kortny can do and which connected
+  into natural first-person groups. Say what __AGENT_NAME__ can do and which connected
   apps are available. Do not expose field names like native_tools,
   connected_integrations, toolkit_slug, connected_account_id, or scope_note.
 - Use Slack mrkdwn: *bold*, simple bullets, and <https://url|label> links.
@@ -643,7 +644,13 @@ class LLMResponseSynthesizer:
         ).complete(
             task_id=task.id,
             messages=(
-                ChatMessage(role="system", content=RESPONSE_HUMANIZER_SYSTEM_PROMPT),
+                ChatMessage(
+                    role="system",
+                    content=personalize(
+                        RESPONSE_HUMANIZER_SYSTEM_PROMPT,
+                        self.settings.agent_display_name,
+                    ),
+                ),
                 ChatMessage(
                     role="user",
                     content=json.dumps(

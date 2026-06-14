@@ -536,6 +536,20 @@ class Settings(BaseSettings):
             raise ValueError("SLACK_APP_NAME cannot be blank")
         return stripped
 
+    @property
+    def agent_display_name(self) -> str:
+        """Human-facing name for the agent in prompts and Slack copy.
+
+        Self-hosters set SLACK_APP_NAME to brand their install; everything the
+        agent says about itself flows from here instead of a hardcoded "Kortny".
+        An all-lowercase value (like the "kortny" default) is title-cased so it
+        reads as a name; a value that already carries casing is left as authored
+        (e.g. "ACME Bot" stays "ACME Bot").
+        """
+
+        name = self.slack_app_name
+        return name.title() if name == name.lower() else name
+
     @field_validator("slack_file_read_max_bytes")
     @classmethod
     def _positive_file_read_limit(cls, value: int) -> int:
