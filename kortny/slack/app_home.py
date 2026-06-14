@@ -323,6 +323,7 @@ def build_home_view(
             session,
             installation_id=installation_id,
             slack_user_id=slack_user_id,
+            app_name=settings.agent_display_name,
             avatar_url=avatar_url,
         )
     )
@@ -339,7 +340,13 @@ def build_home_view(
         )
     )
     blocks.append(blockkit.divider())
-    blocks.extend(_skills_panel(session, installation_id=installation_id))
+    blocks.extend(
+        _skills_panel(
+            session,
+            installation_id=installation_id,
+            app_name=settings.agent_display_name,
+        )
+    )
     blocks.append(blockkit.divider())
     blocks.extend(
         _composio_panel(
@@ -376,6 +383,7 @@ def _usage_panel(
     *,
     installation_id: uuid.UUID,
     slack_user_id: str,
+    app_name: str,
     avatar_url: str | None = None,
 ) -> list[dict]:
     now = datetime.now(UTC)
@@ -413,7 +421,7 @@ def _usage_panel(
         "\n".join(model_lines) if model_lines else "No LLM calls yet"
     )
     return [
-        blockkit.header("Your Kortny console"),
+        blockkit.header(f"Your {app_name} console"),
         greeting,
         blockkit.section(fields=[this_period, top_models]),
     ]
@@ -541,6 +549,7 @@ def _skills_panel(
     session: Session,
     *,
     installation_id: uuid.UUID,
+    app_name: str,
 ) -> list[dict]:
     dashboard = get_skills_dashboard(session, installation_id)
     entries = (*dashboard.curated, *dashboard.custom)
@@ -551,10 +560,10 @@ def _skills_panel(
             accessory=blockkit.button("Add skill", ADD_SKILL_ACTION, style="primary"),
         ),
         blockkit.context(
-            f"{enabled_count} of {len(entries)} enabled — playbooks Kortny "
+            f"{enabled_count} of {len(entries)} enabled — playbooks {app_name} "
             "loads when a request matches."
             if entries
-            else "Playbooks Kortny loads when a request matches."
+            else f"Playbooks {app_name} loads when a request matches."
         ),
     ]
     if not entries:
@@ -919,7 +928,7 @@ def _publish_home(
                 user_id=slack_user_id,
                 view=blockkit.home_view(
                     [
-                        blockkit.header("Your Kortny console"),
+                        blockkit.header(f"Your {settings.agent_display_name} console"),
                         blockkit.section(
                             ":warning: The console failed to render. The "
                             "error is in the app logs — reopen this tab "

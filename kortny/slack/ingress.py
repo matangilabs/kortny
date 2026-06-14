@@ -133,14 +133,14 @@ INTENT_CLASSIFIED_MESSAGE = "intent_classification_completed"
 INTENT_CLASSIFICATION_FAILED_MESSAGE = "intent_classification_failed"
 
 
-def _install_intro_text() -> str:
+def _install_intro_text(agent_name: str) -> str:
     """Coworker-voiced first-run intro DM (HIG-209 Part 2)."""
 
     return (
-        "Hey — I'm Kortny, your new AI coworker. Thanks for setting me up. :wave:\n\n"
+        f"Hey — I'm {agent_name}, your new AI coworker. Thanks for setting me up. :wave:\n\n"
         "Here's a good first thing to try: just DM me something like "
         '*"summarize what happened in #general today"* and I\'ll get to work.\n\n'
-        "When you're ready, invite me into a channel (`/invite @Kortny`) and I'll "
+        f"When you're ready, invite me into a channel (`/invite @{agent_name}`) and I'll "
         "start helping the whole team there."
     )
 
@@ -2033,7 +2033,8 @@ class SlackIngress:
         chat_post = getattr(self.client, "chat_postMessage", None)
         if not callable(chat_post):
             return
-        intro_text = normalize_user_facing_text(_install_intro_text())
+        agent_name = self.settings.agent_display_name if self.settings else "Kortny"
+        intro_text = normalize_user_facing_text(_install_intro_text(agent_name))
         try:
             outbox_result = SlackSideEffectOutbox(self.session).deliver(
                 installation_id=installation.id,
