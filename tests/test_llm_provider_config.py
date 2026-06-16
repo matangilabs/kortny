@@ -116,7 +116,10 @@ def test_env_bootstrap_seeds_provider_models_tiers_and_audit(
         "analysis": "anthropic/claude-sonnet-4.6",
         "document": "openai/gpt-5.1",
         "high_reasoning": "anthropic/claude-opus-4.8",
-        "humanizer": "deepseek/deepseek-v4-pro",
+        # HIG-268: the humanizer tier now falls back to cheap_fast before
+        # standard (it is a stylistic rewrite, the cheapest cognitive task), so
+        # an unset LLM_HUMANIZER_MODEL seeds the cheap model, not standard.
+        "humanizer": "deepseek/deepseek-v4-flash",
     }
     assert audit is not None
     assert audit.action == "bootstrap"

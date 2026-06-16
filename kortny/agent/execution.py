@@ -5,12 +5,26 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from decimal import Decimal
 from enum import StrEnum
 from typing import Any
 
 from kortny.tools.types import JsonObject
+
+# Per-tool-NAME call ceilings (HIG-267). The same-call circuit breaker keys on
+# normalized argument hashes, so a research tool called with a fresh query each
+# turn (web_search) never trips it and can monopolize the whole turn/tool budget
+# — a one-page report task burned 9 of 16 turns on 14 distinct web searches and
+# never reached the deliverable. These caps bound a single tool by name: once a
+# fetch/research tool is over its ceiling, the coordinator feeds back a
+# recoverable nudge ("you have enough — produce the deliverable") instead of
+# letting it search forever. Only research/fetch tools are capped; build/export
+# tools are not (they legitimately repeat).
+_DEFAULT_SOFT_TOOL_CALL_CAPS: Mapping[str, int] = {
+    "web_search": 4,
+}
 
 
 class ExecutionMode(StrEnum):
@@ -49,6 +63,14 @@ class ExecutionGuardrailLimits:
     max_recoverable_failures: int = 4
     max_same_tool_call: int = 2
     max_same_recoverable_error: int = 2
+    soft_tool_call_caps: Mapping[str, int] = field(
+        default_factory=lambda: dict(_DEFAULT_SOFT_TOOL_CALL_CAPS)
+    )
+
+    def soft_cap_for(self, tool_name: str) -> int | None:
+        """Return the per-task call ceiling for ``tool_name``, if any."""
+
+        return self.soft_tool_call_caps.get(tool_name)
 
     @classmethod
     def for_depth(cls, depth: str) -> ExecutionGuardrailLimits:
@@ -67,7 +89,12 @@ class ExecutionGuardrailLimits:
         if depth == "quick_response":
             return cls(max_turns=2, max_tool_calls=3)
         if depth == "deep_workflow":
-            return cls(max_turns=16, max_tool_calls=40)
+            # A research + document task legitimately hits a few recoverable
+            # hiccups (a wrong resource path, one render retry). The per-tool
+            # soft caps now bound runaway research independently, so give the
+            # total recoverable budget headroom rather than hard-failing a task
+            # that is making real progress (HIG-267).
+            return cls(max_turns=16, max_tool_calls=40, max_recoverable_failures=8)
         # standard_tool_task (and any unrecognized depth)
         return cls(max_turns=10, max_tool_calls=20)
 
@@ -114,6 +141,9 @@ class ToolAttemptRecord:
     normalized_args_hash: str
     attempt_no: int
     status: str
+    # Count of calls to this tool NAME so far this task (any arguments). Drives
+    # the per-tool soft cap; attempt_no above is per (name, args) signature.
+    tool_name_attempt_no: int = 0
     recoverable: bool = False
     error_code: str | None = None
     error_category: str | None = None
@@ -171,6 +201,7 @@ class ExecutionBudgetState:
     tool_call_count: int = 0
     recoverable_failure_count: int = 0
     tool_call_signature_counts: dict[str, int] = field(default_factory=dict)
+    tool_name_counts: dict[str, int] = field(default_factory=dict)
     recoverable_error_counts: dict[str, int] = field(default_factory=dict)
 
     def record_tool_attempt(
@@ -190,12 +221,15 @@ class ExecutionBudgetState:
         )
         attempt_no = self.tool_call_signature_counts.get(signature_key, 0) + 1
         self.tool_call_signature_counts[signature_key] = attempt_no
+        tool_name_attempt_no = self.tool_name_counts.get(tool_name, 0) + 1
+        self.tool_name_counts[tool_name] = tool_name_attempt_no
         self.tool_call_count += 1
 
         return ToolAttemptRecord(
             tool_name=tool_name,
             normalized_args_hash=normalized_args_hash,
             attempt_no=attempt_no,
+            tool_name_attempt_no=tool_name_attempt_no,
             status="started",
             idempotency_key=build_idempotency_key(
                 task_id=task_id,

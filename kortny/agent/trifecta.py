@@ -54,14 +54,18 @@ _OUTWARD_NATIVE_NAMESPACES = frozenset(
 # load_skill/load_skill_resource are read-only and never escalate. The real
 # egress for skill output is the export/preview/deploy/post tools below.
 
-# Specific native tools that deliver content out of the sandbox to the user,
-# plus the always-outward deploy tool. ``slack_add_reaction`` is intentionally
-# excluded — an emoji reaction carries no exfiltration payload.
+# Native tools that publish to an EXTERNAL destination (the open internet / a
+# public URL) — genuine egress legs that stay gated once the task is armed.
+# ``sandbox_export_artifact`` is intentionally NOT here (HIG-266): it delivers
+# the task's requested artifact back into the originating Slack thread — to the
+# requester, not a third party — so it is the deliverable, not an exfiltration
+# channel. Gating it just pauses Kortny before showing a user the report they
+# asked for. ``deploy_site`` and ``sandbox_publish_preview`` publish to public
+# URLs and remain gated.
 _OUTWARD_NATIVE_TOOLS = frozenset(
     {
         "deploy_site",
         "sandbox_publish_preview",
-        "sandbox_export_artifact",
     }
 )
 # Sandbox-local compute: destructive to the throwaway container, but network-
@@ -80,6 +84,12 @@ _TRIFECTA_FREE_NATIVE_TOOLS = frozenset(
         # Vetted ('trusted'-tier) skill code in the same network-none sandbox as
         # code_exec — no egress channel, so not the trifecta's egress leg.
         "run_skill_script",
+        # Delivers the task's requested artifact back to the originating Slack
+        # thread (the requester) — the deliverable, not outward egress to a
+        # third party (HIG-266). The real exfiltration legs (deploy_site /
+        # sandbox_publish_preview, external Composio/MCP writes, memory
+        # persistence) stay gated.
+        "sandbox_export_artifact",
     }
 )
 

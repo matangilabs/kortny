@@ -110,27 +110,34 @@ For a full `<!DOCTYPE html>` document (full-document mode), omit `--title` /
 `--subtitle` / `--kicker` — they are already in the document's cover section.
 The script injects the theme CSS into `<head>` automatically.
 
-### 4. Read the PAGINATION REPORT and balance the pages
+### 4. Read the PAGINATION REPORT (advisory — do not loop)
 
-You cannot tell how content paginates until you render it. After every render
-the script prints a `PAGINATION REPORT` with each page's fill level. **If it
-lists WARNINGS (under-filled pages), revise the content and re-render** — do
-not ship an unbalanced document:
+After each render the script prints a `PAGINATION REPORT` with per-page fill
+levels. Treat it as **advisory polish, not a gate**. A slightly under-filled
+last page is normal and completely fine — never re-render just to raise a fill
+percentage. Render once and move on to export.
 
-- **Under-filled body page / sparse last page** → merge a short section into the
-  previous one, expand thin content, condense so a near-empty trailing page
-  disappears, or move/remove a manual `.section-divider` (each divider forces a
-  fresh page, so a short section after one leaves whitespace).
-- **A component split awkwardly** → keep it together or move it.
-- Re-run the render and re-check. Aim for body pages above ~50%. Stop when the
-  report says `OK` or after 3 passes. Cover/divider pages read as full and are
-  fine. (Pass `--no-analyze` only for throwaway drafts.)
+Re-render **at most once**, and only for a genuinely broken layout: a body page
+nearly empty in the *middle* of the document, or a component split badly across
+a page. If you do re-render, edit the body first, then render to a **new output
+filename** (e.g. `report_v2.pdf`) — re-running the exact same command is
+detected as a stuck loop and stopped by a safety circuit breaker before your PDF
+is ever delivered. Cover/divider pages always read as full; that is expected.
+An acceptable render that ships beats a perfect one that loops. (Pass
+`--no-analyze` to skip the report for quick drafts.)
 
-### 5. Upload
+### 5. Export and post (required — the PDF stays in the sandbox until you do)
 
-Upload `report.pdf` to the Slack thread. Add a one-line summary of the
-report's key finding. Offer a slide version (`deck-builder`) or the underlying
-data as a workbook (`spreadsheet-builder`).
+The render writes the PDF inside the sandbox workspace; it does not leave the
+sandbox on its own. After the first acceptable render you MUST:
+
+1. Export it with `sandbox_export_artifact` (pass the rendered path, e.g.
+   `/workspace/report.pdf`) so it becomes a real downloadable artifact.
+2. Post it to the Slack thread with a one-line summary of the key finding.
+
+Do this exactly once — do not re-render after exporting. Optionally offer a
+slide version (`deck-builder`) or the data as a workbook
+(`spreadsheet-builder`).
 
 ## Layout discipline (non-negotiable)
 
@@ -163,5 +170,7 @@ data as a workbook (`spreadsheet-builder`).
 | `--brand TEXT` | no | Org/firm name for cover + footer (use the user's org, not the assistant's name; omit if unknown) |
 | `--accent HEX` | no | Override theme accent color |
 
-Deps: `weasyprint` (pango/cairo baked into sandbox image). No network.
+Deps: `weasyprint` (pango/cairo baked into sandbox image). No network. Display/
+body/mono fonts are bundled in `scripts/fonts/` and embed automatically — no
+font setup needed.
 See `references/authoring.md` for the full component reference with worked examples.

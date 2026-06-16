@@ -2030,6 +2030,13 @@ class SlackIngress:
 
         if not user_id:
             return
+        # Persist the installing user as the workspace's primary admin the first
+        # time we know it. Ambient passes (e.g. the org-profile proposer,
+        # HIG-271) have no originating user and DM this admin to confirm
+        # workspace-level facts. Only set once — never overwrite.
+        if installation.primary_admin_user_id is None:
+            installation.primary_admin_user_id = user_id
+            self.session.flush()
         chat_post = getattr(self.client, "chat_postMessage", None)
         if not callable(chat_post):
             return

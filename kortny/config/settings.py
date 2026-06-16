@@ -61,6 +61,14 @@ class Settings(BaseSettings):
     llm_config_force_env: bool = Field(
         default=False, validation_alias="LLM_CONFIG_FORCE_ENV"
     )
+    # Cap on completion tokens requested per LLM call. Providers (incl.
+    # OpenRouter) reserve credit for the requested max_tokens up front; left
+    # unset, litellm defaults to the model's max output (e.g. 65k on Opus),
+    # which inflates cost-reservation and can hard-fail with a 402 on a
+    # budget-limited key (HIG-265). 16k is ample for any single agent turn.
+    llm_max_output_tokens: int = Field(
+        default=16384, validation_alias="LLM_MAX_OUTPUT_TOKENS", ge=256
+    )
     response_humanizer_enabled: bool = Field(
         default=True, validation_alias="RESPONSE_HUMANIZER_ENABLED"
     )

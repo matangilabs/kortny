@@ -28,32 +28,24 @@ authoring.md were fully rewritten.
 
 ## Bundled assets
 
-**No fonts are currently bundled.** The script uses strong system-font
-fallback stacks:
+**Fonts are bundled (HIG-244)** as variable TTFs in `scripts/fonts/` and wired
+via the `_FONT_FACE_*` `@font-face` blocks in `render_pdf.py`. The render passes
+`base_url=str(scripts_dir)` so relative `fonts/...` paths resolve, and WeasyPrint
+(Pango/HarfBuzz) selects weights from the variable files. The system-font
+fallback stacks in `THEMES` remain as a safety net.
 
-- Display/headings: Fraunces → Source Serif 4 → Georgia → serif
-- Body: Newsreader → Source Serif 4 → Georgia → serif
-- Mono/kickers: IBM Plex Mono → ui-monospace → Menlo → monospace
-
-For full Editorial Mono fidelity, the following OFL/Apache fonts should be
-bundled as static TTF or woff2 files in `scripts/fonts/`:
-
-| Font | License | Source |
+| Font (file) | Used by | License |
 |---|---|---|
-| Fraunces (Regular + Bold) | SIL OFL 1.1 | https://fonts.google.com/specimen/Fraunces |
-| Source Serif 4 (Regular + Bold) | SIL OFL 1.1 | https://fonts.google.com/specimen/Source+Serif+4 |
-| IBM Plex Mono (Regular + SemiBold) | SIL OFL 1.1 | https://fonts.google.com/specimen/IBM+Plex+Mono |
-| Newsreader (Regular + Bold) | SIL OFL 1.1 | https://fonts.google.com/specimen/Newsreader |
-| Space Grotesk (Regular + Medium) | SIL OFL 1.1 | https://fonts.google.com/specimen/Space+Grotesk |
-| Inter (Regular + SemiBold) | SIL OFL 1.1 | https://fonts.google.com/specimen/Inter |
-| JetBrains Mono (Regular) | Apache 2.0 | https://www.jetbrains.com/legalforms/mono-type-license |
+| Fraunces.ttf / Fraunces-Italic.ttf | editorial-mono, editorial-feature (display) | SIL OFL 1.1 |
+| Newsreader.ttf / Newsreader-Italic.ttf | editorial-mono, editorial-feature (body) | SIL OFL 1.1 |
+| IBMPlexMono-Regular.ttf / IBMPlexMono-SemiBold.ttf | editorial-mono (mono) | SIL OFL 1.1 |
+| SpaceGrotesk.ttf | editorial-feature (mono) | SIL OFL 1.1 |
+| Inter.ttf / Inter-Italic.ttf | minimal (display + body) | SIL OFL 1.1 |
+| JetBrainsMono.ttf | minimal (mono) | Apache 2.0 |
 
-If `scripts/fonts/` is populated and `@font-face` src paths are uncommented
-in `render_pdf.py`, pass `base_url=str(scripts_dir)` to WeasyPrint so
-relative `fonts/...` paths resolve. The script already sets this.
-
-If fonts are bundled, update `LICENSE.txt` to list each font with its OFL/
-Apache notice. Until bundled, no additional license entries are needed.
+All sourced from the Google Fonts OFL repository (github.com/google/fonts).
+Per-font notices are recorded in `LICENSE.txt`. Verified: fonts embed (subset)
+in rendered PDFs across all three themes via WeasyPrint with pango/cairo.
 
 ## Chromium/Gotenberg upgrade (HIG-244)
 
