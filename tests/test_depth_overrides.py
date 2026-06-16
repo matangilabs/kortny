@@ -109,6 +109,44 @@ def test_multi_integration_scope_forces_deep_workflow() -> None:
     )
 
 
+def test_lightweight_thread_answer_caps_at_standard_not_deep() -> None:
+    # HIG-268: an explicit "just answer in the thread, no PDF" steer must NOT
+    # trip the planner. The broad-research heuristic would otherwise call this
+    # deep_workflow (funders + latest valuation), spending ~20s on a planner
+    # call that returns invalid JSON. Honor the user: cap at standard_tool_task.
+    override = classify_depth_override(
+        text=(
+            "Who are the main funders behind Anthropic and what's the latest "
+            "valuation? Just answer in the thread, no PDF."
+        ),
+    )
+
+    assert override is not None
+    assert override.depth == "standard_tool_task"
+    assert "lightweight_thread_answer" in override.reason_codes
+
+
+def test_lightweight_thread_answer_recognizes_dont_build_phrasing() -> None:
+    override = classify_depth_override(
+        text="Compare the top 3 vendors but don't build a report, just reply here.",
+    )
+
+    assert override is not None
+    assert override.depth == "standard_tool_task"
+    assert "lightweight_thread_answer" in override.reason_codes
+
+
+def test_research_without_lightweight_steer_still_deep() -> None:
+    # Guard: the lightweight carve-out must not demote a genuine research +
+    # synthesis request that carries no "keep it simple" instruction.
+    override = classify_depth_override(
+        text="Research the best observability tools and compare the options.",
+    )
+
+    assert override is not None
+    assert override.depth == "deep_workflow"
+
+
 def test_simple_bounded_request_has_no_override() -> None:
     override = classify_depth_override(
         text="What is the weather in Tokyo right now?",

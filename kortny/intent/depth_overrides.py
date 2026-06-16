@@ -77,6 +77,15 @@ def classify_depth_override(
     if _is_quick_conversation(normalized):
         return DepthOverride("quick_response", ("quick_conversation",))
 
+    # Honor an explicit steer to keep the response lightweight ("just answer in
+    # the thread", "no PDF", "don't build a report"). Cap at standard_tool_task
+    # so the request still uses tools (web_search etc.) but does NOT invoke the
+    # ExecutionPlanner — which otherwise classified such a request deep_workflow,
+    # spent ~20s on a planner LLM call that returned invalid JSON, and fell back
+    # to inline anyway (HIG-268). The user asked for simple; don't over-plan it.
+    if _is_lightweight_thread_answer(normalized):
+        return DepthOverride("standard_tool_task", ("lightweight_thread_answer",))
+
     # Force deep_workflow when hard planning signals are present.
     deep_reasons = _deep_reason_codes(
         normalized=normalized,
@@ -141,6 +150,19 @@ def _detected_integrations(
     return _dedupe(integrations)
 
 
+def _is_lightweight_thread_answer(normalized: str) -> bool:
+    """True when the user explicitly asked to keep the reply lightweight.
+
+    A plain in-thread answer with no artifact ("just answer", "answer in the
+    thread", "no pdf/deck/report", "don't build a doc"). This is an explicit
+    instruction to keep it simple, so it takes precedence over deep-workflow
+    signals (a factual research question can otherwise trip the broad-research
+    heuristic). It only caps depth at standard_tool_task — tools still run.
+    """
+
+    return bool(_LIGHTWEIGHT_ANSWER_RE.search(normalized))
+
+
 def _is_quick_conversation(normalized: str) -> bool:
     if len(normalized) > 140:
         return False
@@ -194,6 +216,13 @@ CAPABILITY_LOOKUP_TOOL_HINTS = frozenset(
         "tool_metadata_lookup",
         "tool_registry",
     }
+)
+_LIGHTWEIGHT_ANSWER_RE = re.compile(
+    r"\b(?:just|simply|only)\s+(?:answer|reply|respond|tell me|let me know)\b"
+    r"|\banswer (?:me )?(?:right )?in (?:the |this )?thread\b"
+    r"|\bno (?:pdf|docs?|document|deck|slides?|report|spreadsheet|file|artifact)\b"
+    r"|\bdon'?t (?:build|make|create|generate)\b[^.?!]*"
+    r"\b(?:pdf|docs?|document|deck|slides?|report|spreadsheet|file|artifact)\b"
 )
 _SCHEDULE_RE = re.compile(
     r"\b(every|daily|weekly|monthly|schedule|scheduled|recurring|cron|"
