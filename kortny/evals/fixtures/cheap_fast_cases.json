@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "_note": "Hand-authored cheap_fast eval cases. Expected labels reflect the intended classification; the bake-off measures how often a candidate model agrees. Surfaces use IntentSurface values (app_mention|dm|channel_message).",
+  "intent_cases": [
+    {
+      "id": "dm_task_chart_signups",
+      "request": {"text": "Pull the latest signups and chart them by week.", "surface": "dm"},
+      "expected_classification": "task_request"
+    },
+    {
+      "id": "mention_task_draft_announcement",
+      "request": {"text": "<@U123> draft a launch announcement for the new dashboard.", "surface": "app_mention"},
+      "expected_classification": "task_request"
+    },
+    {
+      "id": "mention_task_summarize_doc_with_file",
+      "request": {"text": "<@U123> summarize this doc for me", "surface": "app_mention", "has_files": true},
+      "expected_classification": "task_request"
+    },
+    {
+      "id": "dm_followup_pick_option",
+      "request": {"text": "Yeah, go with the second option.", "surface": "dm", "is_thread_follow_up": true},
+      "expected_classification": "follow_up"
+    },
+    {
+      "id": "dm_memory_fiscal_year",
+      "request": {"text": "Remember that our fiscal year starts in April.", "surface": "dm"},
+      "expected_classification": "memory_candidate"
+    },
+    {
+      "id": "dm_clarification_staging",
+      "request": {"text": "I meant the staging environment, not prod.", "surface": "dm", "is_thread_follow_up": true},
+      "expected_classification": "clarification"
+    },
+    {
+      "id": "dm_cancel_that",
+      "request": {"text": "Actually cancel that, never mind.", "surface": "dm", "is_thread_follow_up": true},
+      "expected_classification": "cancel_or_retry"
+    },
+    {
+      "id": "channel_third_person_about_bot",
+      "request": {"text": "honestly the bot keeps getting these summaries wrong", "surface": "channel_message"},
+      "expected_classification": "third_person_reference"
+    },
+    {
+      "id": "channel_ambient_heads_up",
+      "request": {"text": "Shipping the v2 migration tonight, heads up everyone.", "surface": "channel_message"},
+      "expected_classification": "ambient_observation"
+    },
+    {
+      "id": "channel_ignore_banter",
+      "request": {"text": "lol same, happens to me every monday", "surface": "channel_message"},
+      "expected_classification": "ignore"
+    }
+  ]
+}
