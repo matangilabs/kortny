@@ -73,6 +73,55 @@ def test_model_router_uses_intent_decision_before_text_fallback() -> None:
     assert route.reason == "intent_classifier"
 
 
+def test_model_router_routes_document_generation_intent_to_document() -> None:
+    # HIG-265: a report/document deliverable (signalled via document_generation
+    # in likely_tools/toolkit_affinity) must route to the document tier even
+    # when the classifier rated it "strong" — which otherwise goes to
+    # high_reasoning (Opus). Synthesis belongs on the document model, not Opus.
+    router = ModelRouter(make_settings())
+    task = Task(input="put together an investment research PDF on Nvidia earnings")
+    event = TaskEvent(
+        seq=1,
+        type=TaskEventType.log,
+        payload={
+            "message": "intent_classification_completed",
+            "decision": {
+                "classification": "task_request",
+                "model_tier": "strong",
+                "likely_tools": ["search", "financial_data", "document_generation"],
+                "toolkit_affinity": ["search", "document_generation"],
+            },
+        },
+    )
+
+    route = router.route_for_task(task, events=[event])
+
+    assert route.tier is ModelRouteTier.document
+
+
+def test_model_router_strong_nondocument_intent_still_high_reasoning() -> None:
+    # Guard: non-document "strong" tasks keep routing to high_reasoning so the
+    # document carve-out above doesn't accidentally demote genuine hard reasoning.
+    router = ModelRouter(make_settings())
+    task = Task(input="reason carefully about this hard multi-step strategy call")
+    event = TaskEvent(
+        seq=1,
+        type=TaskEventType.log,
+        payload={
+            "message": "intent_classification_completed",
+            "decision": {
+                "classification": "task_request",
+                "model_tier": "strong",
+                "likely_tools": [],
+            },
+        },
+    )
+
+    route = router.route_for_task(task, events=[event])
+
+    assert route.tier is ModelRouteTier.high_reasoning
+
+
 def test_model_router_routes_file_review_to_analysis() -> None:
     router = ModelRouter(make_settings())
     task = Task(input="Please review the attached file")

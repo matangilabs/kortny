@@ -173,7 +173,14 @@ def _tier_from_intent_decision(
         return None
 
     likely_tools = _string_set(decision.get("likely_tools"))
-    if "pdf_generator" in likely_tools:
+    toolkit_affinity = _string_set(decision.get("toolkit_affinity"))
+    # A document/report deliverable routes to the document tier (Sonnet) even
+    # when the classifier rated the task "strong" — synthesis belongs on the
+    # document model, not high_reasoning (Opus). Match capability hints, not just
+    # the literal pdf_generator name: intents commonly signal "document_generation"
+    # in likely_tools / toolkit_affinity. (HIG-265: a routine report should not
+    # run every turn on Opus.)
+    if (likely_tools | toolkit_affinity) & DOCUMENT_TOOL_HINTS:
         return ModelRouteTier.document
     if "slack_file_read" in likely_tools:
         return ModelRouteTier.analysis
@@ -228,6 +235,22 @@ def _optional_str(value: object) -> str | None:
     return None
 
 
+# Capability / tool hints in an intent decision's likely_tools / toolkit_affinity
+# that mean "produce a document deliverable" → route to the document tier. Covers
+# both the literal native tool name and the capability words the classifier emits.
+DOCUMENT_TOOL_HINTS = frozenset(
+    {
+        "pdf_generator",
+        "document_generation",
+        "report_generation",
+        "styled_report_pdf",
+        "styled-report-pdf",
+        "deck_builder",
+        "deck-builder",
+        "spreadsheet_builder",
+        "spreadsheet-builder",
+    }
+)
 DOCUMENT_KEYWORDS = frozenset(
     {
         "pdf",

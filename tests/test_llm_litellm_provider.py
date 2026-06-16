@@ -364,3 +364,65 @@ def test_usage_extraction_absent_cache_fields() -> None:
     usage = _parse_usage(SimpleNamespace(prompt_tokens=100, completion_tokens=5))
     assert usage.cache_read_input_tokens == 0
     assert usage.cache_creation_input_tokens == 0
+
+
+def _text_response() -> object:
+    return SimpleNamespace(
+        id="chatcmpl-cap",
+        model="anthropic/claude-opus-4.8",
+        choices=[SimpleNamespace(message=SimpleNamespace(content="ok", tool_calls=[]))],
+        usage=SimpleNamespace(prompt_tokens=5, completion_tokens=2),
+    )
+
+
+def test_litellm_provider_caps_max_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # HIG-265: cap requested completion tokens so the provider does not reserve
+    # the model's full max output (e.g. 65k on Opus) per call, which inflates
+    # cost-reservation and can 402 a budget-limited key.
+    captured: dict[str, Any] = {}
+
+    def fake_completion(**kwargs: Any) -> object:
+        captured.update(kwargs)
+        return _text_response()
+
+    monkeypatch.setattr(
+        "kortny.llm.litellm_provider.litellm.completion", fake_completion
+    )
+    monkeypatch.setattr(
+        "kortny.llm.litellm_provider.litellm.completion_cost",
+        lambda completion_response, model: 0.0,
+    )
+
+    provider = LiteLLMProvider(
+        api_key="k",
+        model="anthropic/claude-opus-4.8",
+        max_output_tokens=16384,
+    )
+    provider.complete([ChatMessage(role="user", content="hi")])
+
+    assert captured["max_tokens"] == 16384
+
+
+def test_litellm_provider_omits_max_tokens_when_uncapped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_completion(**kwargs: Any) -> object:
+        captured.update(kwargs)
+        return _text_response()
+
+    monkeypatch.setattr(
+        "kortny.llm.litellm_provider.litellm.completion", fake_completion
+    )
+    monkeypatch.setattr(
+        "kortny.llm.litellm_provider.litellm.completion_cost",
+        lambda completion_response, model: 0.0,
+    )
+
+    provider = LiteLLMProvider(api_key="k", model="m")  # no cap
+    provider.complete([ChatMessage(role="user", content="hi")])
+
+    assert "max_tokens" not in captured
