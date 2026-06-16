@@ -570,6 +570,65 @@ def test_coordinator_tool_schemas_identical_across_turns(
     )
 
 
+def test_coordinator_soft_caps_repeated_web_search(db_session: Session) -> None:
+    """web_search called with a fresh query each turn must be soft-capped.
+
+    Regression (HIG-267): a one-page report task burned 9 of 16 turns on 14
+    distinct web searches and never reached the deliverable. The same-call
+    circuit breaker missed it (each query hashes differently), so a per-tool
+    NAME cap now nudges the model off the tool after the ceiling and the
+    over-cap call is NOT actually invoked.
+    """
+
+    task = create_task(db_session, input_text="research nvidia earnings deeply")
+    search = RecordingSearchTool()
+    # Five distinct-query web_search calls, then a final answer. The 5th call is
+    # over the cap of 4 and must be intercepted before the tool runs.
+    completions = [
+        Completion(
+            content=None,
+            tool_calls=(
+                ToolCall(
+                    id=f"call-{i}",
+                    name="web_search",
+                    arguments={"query": f"nvidia earnings angle {i}"},
+                ),
+            ),
+            usage=TokenUsage(input_tokens=10, output_tokens=3),
+        )
+        for i in range(5)
+    ]
+    completions.append(
+        Completion(
+            content="Here is the earnings summary from what I gathered.",
+            tool_calls=(),
+            usage=TokenUsage(input_tokens=12, output_tokens=6),
+        )
+    )
+    llm = FakeLLM(completions)
+
+    AgentCoordinator(
+        session=db_session,
+        llm=llm,
+        registry=ToolRegistry([search]),
+        execution_planner=NoopExecutionPlanner(),
+        guardrail_limits=ExecutionGuardrailLimits(max_turns=10),
+    ).run(task)
+
+    # Only the first four searches actually ran; the fifth was nudged, not run.
+    assert len(search.calls) == 4
+    # The over-cap call's tool result steered the model to stop and deliver.
+    final_turn_messages = llm.calls[-1][1]
+    nudge = next(
+        message
+        for message in final_turn_messages
+        if message.role == "tool" and message.tool_call_id == "call-4"
+    )
+    nudge_text = (nudge.content or "").lower()
+    assert "web_search" in nudge_text
+    assert "do not call it again" in nudge_text or "enough" in nudge_text
+
+
 def test_coordinator_compacts_large_search_tool_result_for_next_turn(
     db_session: Session,
 ) -> None:
@@ -732,9 +791,50 @@ def test_guardrail_limits_for_depth_scales_by_depth() -> None:
     deep = ExecutionGuardrailLimits.for_depth("deep_workflow")
     assert deep.max_turns == 16
     assert deep.max_tool_calls == 40
+    # HIG-267: deep workflows get extra recoverable-failure headroom now that a
+    # per-tool soft cap bounds runaway research independently.
+    assert deep.max_recoverable_failures == 8
 
     # An unrecognized depth falls back to the standard (not quick) budget.
     assert ExecutionGuardrailLimits.for_depth("???") == standard
+
+
+def test_guardrail_limits_carry_default_web_search_soft_cap() -> None:
+    # HIG-267: web_search is capped per task NAME (regardless of query), so a
+    # fresh-query-each-turn research loop can't monopolize the turn budget.
+    for depth in ("quick_response", "standard_tool_task", "deep_workflow"):
+        limits = ExecutionGuardrailLimits.for_depth(depth)
+        assert limits.soft_cap_for("web_search") == 4
+    # Build/export tools carry no cap (they legitimately repeat).
+    assert (
+        ExecutionGuardrailLimits.for_depth("deep_workflow").soft_cap_for(
+            "sandbox_export_artifact"
+        )
+        is None
+    )
+
+
+def test_execution_budget_counts_tool_calls_by_name() -> None:
+    # The per-name counter (drives the soft cap) increments on every call to a
+    # tool regardless of arguments, unlike attempt_no which is per (name, args).
+    import uuid as _uuid
+
+    from kortny.agent.execution import ExecutionBudgetState
+
+    budget = ExecutionBudgetState()
+    task_id = _uuid.uuid4()
+    first = budget.record_tool_attempt(
+        task_id=task_id, step_id="s1", tool_name="web_search", arguments={"q": "a"}
+    )
+    second = budget.record_tool_attempt(
+        task_id=task_id, step_id="s1", tool_name="web_search", arguments={"q": "b"}
+    )
+    # Distinct args -> attempt_no stays 1 (signature differs) but the name
+    # counter climbs, which is exactly what the same-call breaker misses.
+    assert first.attempt_no == 1
+    assert second.attempt_no == 1
+    assert first.tool_name_attempt_no == 1
+    assert second.tool_name_attempt_no == 2
 
 
 def test_coordinator_gates_sensitive_tool_before_invocation(

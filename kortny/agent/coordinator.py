@@ -665,6 +665,9 @@ class AgentCoordinator:
                     },
                 ):
                     try:
+                        self._enforce_soft_tool_call_cap(
+                            plan=plan, tool_call=tool_call, attempt=attempt
+                        )
                         result = self.registry.invoke(tool_call.name, arguments)
                     except RecoverableToolError as exc:
                         recoverable_error = exc
@@ -1210,6 +1213,38 @@ class AgentCoordinator:
         )
         decision = latest_intent_decision(events)
         return dict(decision) if decision is not None else None
+
+    def _enforce_soft_tool_call_cap(
+        self,
+        *,
+        plan: ExecutionPlan,
+        tool_call: ToolCall,
+        attempt: ToolAttemptRecord,
+    ) -> None:
+        """Nudge the model off a research tool it has overused (HIG-267).
+
+        The same-call circuit breaker keys on argument hashes, so a tool called
+        with a fresh query every turn (web_search) never trips it. A per-tool
+        NAME ceiling bounds that: once the tool is over its cap we raise a
+        recoverable error instead of running the call again, so the model is fed
+        back a "you have enough — produce the deliverable" steer and stops
+        burning the turn budget on research. Build/export tools carry no cap.
+        """
+
+        cap = plan.limits.soft_cap_for(tool_call.name)
+        if cap is None or attempt.tool_name_attempt_no <= cap:
+            return
+        raise RecoverableToolError(
+            code="tool_call_budget_reached",
+            message=(
+                f"You have already called '{tool_call.name}' {cap} times for "
+                "this task. That is enough — do not call it again."
+            ),
+            hint=(
+                "Stop researching. Use the information you have already gathered "
+                "to produce and deliver the final result now."
+            ),
+        )
 
     def _record_tool_attempt(
         self,
