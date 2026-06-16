@@ -53,34 +53,23 @@ from weasyprint import HTML
 
 
 # ---------------------------------------------------------------------------
-# TODO — font bundling for full Editorial Mono fidelity
+# Bundled fonts (HIG-244)
 # ---------------------------------------------------------------------------
-# To match the research spec exactly, bundle these OFL/SIL fonts as static
-# TTF or woff2 files in scripts/fonts/ and update the @font-face src lines:
+# The editorial display/body/mono families are bundled as variable TTFs in
+# scripts/fonts/ and wired via the _FONT_FACE_* @font-face blocks below. This is
+# the difference between Georgia-fallback output and editorial-grade typography.
+# The render passes base_url=scripts_dir so url("fonts/...") resolves; WeasyPrint
+# (Pango/HarfBuzz) selects weights from the variable files.
 #
-#   Fraunces-Regular.ttf / Fraunces-Bold.ttf (or variable font)
-#     → SIL OFL 1.1 — https://fonts.google.com/specimen/Fraunces
-#   SourceSerif4-Regular.ttf / SourceSerif4-Bold.ttf
-#     → SIL OFL 1.1 — https://fonts.google.com/specimen/Source+Serif+4
-#   IBMPlexMono-Regular.ttf / IBMPlexMono-SemiBold.ttf
-#     → SIL OFL 1.1 — https://fonts.google.com/specimen/IBM+Plex+Mono
-#   Newsreader-Regular.ttf / Newsreader-Bold.ttf (for editorial-feature)
-#     → SIL OFL 1.1 — https://fonts.google.com/specimen/Newsreader
-#   SpaceGrotesk-Regular.ttf / SpaceGrotesk-Medium.ttf (for editorial-feature)
-#     → SIL OFL 1.1 — https://fonts.google.com/specimen/Space+Grotesk
-#   Inter-Regular.ttf / Inter-SemiBold.ttf (for minimal)
-#     → SIL OFL 1.1 — https://fonts.google.com/specimen/Inter
-#   JetBrainsMono-Regular.ttf (for minimal)
-#     → Apache 2.0 — https://www.jetbrains.com/legalforms/mono-type-license
+#   Fraunces (display, + italic)            — SIL OFL 1.1
+#   Newsreader (body, + italic)             — SIL OFL 1.1
+#   IBM Plex Mono (mono: Regular, SemiBold) — SIL OFL 1.1
+#   Space Grotesk (editorial-feature mono)  — SIL OFL 1.1
+#   Inter (minimal display/body, + italic)  — SIL OFL 1.1
+#   JetBrains Mono (minimal mono)           — Apache 2.0
 #
-# Until bundled, the strong system-font fallback stacks below produce excellent
-# output: Georgia, serif covers Fraunces/Newsreader; Menlo/Courier covers
-# IBM Plex Mono/JetBrains Mono. The design system (black cover, mono kickers,
-# big display numbers, stat cards, ruled tables) delivers most of the premium
-# look regardless of font.
-#
-# Pass base_url=scripts_dir to WeasyPrint so url("fonts/...") resolves:
-#   HTML(string=doc, base_url=str(scripts_dir)).write_pdf(str(out))
+# The system-font fallback stacks in THEMES remain as a safety net if a file is
+# ever missing. See LICENSE.txt / PROVENANCE.md for per-font notices.
 # ---------------------------------------------------------------------------
 
 
@@ -92,17 +81,34 @@ from weasyprint import HTML
 # The COMPONENT_CSS references only the semantic tokens so themes are
 # interchangeable by swapping :root values.
 
+# Bundled OFL/Apache fonts live in scripts/fonts/ and are resolved relative to
+# the script dir (render passes base_url=scripts_dir). Variable fonts declare a
+# weight range so a single file covers every weight the CSS asks for; WeasyPrint
+# (Pango/HarfBuzz) selects the instance. IBM Plex Mono ships as static Regular +
+# SemiBold. Each theme declares only the families its token stacks name; the
+# system-font fallback stacks in THEMES remain as a safety net.
 _FONT_FACE_EDITORIAL = """
-/* TODO: replace url() paths with bundled TTF/woff2 files for full fidelity */
-/* Fallback stacks below are strong for WeasyPrint with system fonts */
+@font-face { font-family: "Fraunces"; src: url(fonts/Fraunces.ttf); font-weight: 100 900; font-style: normal; }
+@font-face { font-family: "Fraunces"; src: url(fonts/Fraunces-Italic.ttf); font-weight: 100 900; font-style: italic; }
+@font-face { font-family: "Newsreader"; src: url(fonts/Newsreader.ttf); font-weight: 200 800; font-style: normal; }
+@font-face { font-family: "Newsreader"; src: url(fonts/Newsreader-Italic.ttf); font-weight: 200 800; font-style: italic; }
+@font-face { font-family: "IBM Plex Mono"; src: url(fonts/IBMPlexMono-Regular.ttf); font-weight: 400; font-style: normal; }
+@font-face { font-family: "IBM Plex Mono"; src: url(fonts/IBMPlexMono-SemiBold.ttf); font-weight: 600; font-style: normal; }
 """
 
 _FONT_FACE_MINIMAL = """
-/* TODO: bundle Inter + JetBrains Mono for full Minimal SaaS fidelity */
+@font-face { font-family: "Inter"; src: url(fonts/Inter.ttf); font-weight: 100 900; font-style: normal; }
+@font-face { font-family: "Inter"; src: url(fonts/Inter-Italic.ttf); font-weight: 100 900; font-style: italic; }
+@font-face { font-family: "Inter Tight"; src: url(fonts/Inter.ttf); font-weight: 100 900; font-style: normal; }
+@font-face { font-family: "JetBrains Mono"; src: url(fonts/JetBrainsMono.ttf); font-weight: 100 800; font-style: normal; }
 """
 
 _FONT_FACE_FEATURE = """
-/* TODO: bundle Fraunces + Newsreader + Space Grotesk for Editorial Feature fidelity */
+@font-face { font-family: "Fraunces"; src: url(fonts/Fraunces.ttf); font-weight: 100 900; font-style: normal; }
+@font-face { font-family: "Fraunces"; src: url(fonts/Fraunces-Italic.ttf); font-weight: 100 900; font-style: italic; }
+@font-face { font-family: "Newsreader"; src: url(fonts/Newsreader.ttf); font-weight: 200 800; font-style: normal; }
+@font-face { font-family: "Newsreader"; src: url(fonts/Newsreader-Italic.ttf); font-weight: 200 800; font-style: italic; }
+@font-face { font-family: "Space Grotesk"; src: url(fonts/SpaceGrotesk.ttf); font-weight: 300 700; font-style: normal; }
 """
 
 

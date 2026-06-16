@@ -163,5 +163,7 @@ data as a workbook (`spreadsheet-builder`).
 | `--brand TEXT` | no | Org/firm name for cover + footer (use the user's org, not the assistant's name; omit if unknown) |
 | `--accent HEX` | no | Override theme accent color |
 
-Deps: `weasyprint` (pango/cairo baked into sandbox image). No network.
+Deps: `weasyprint` (pango/cairo baked into sandbox image). No network. Display/
+body/mono fonts are bundled in `scripts/fonts/` and embed automatically — no
+font setup needed.
 See `references/authoring.md` for the full component reference with worked examples.

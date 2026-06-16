@@ -7,4 +7,22 @@ style, page-aware layout, cover blocks, page numbering) are unprotectable
 conventions. The SKILL.md and the script (render_pdf.py) were authored
 independently using WeasyPrint.
 
-This file and all files in this directory are subject to the Kortny project license.
+This file and all files in this directory are subject to the Kortny project
+license, EXCEPT the bundled font files in scripts/fonts/, which are third-party
+and remain under their own licenses (redistributed unmodified):
+
+Bundled fonts (scripts/fonts/), all from github.com/google/fonts:
+
+  SIL Open Font License 1.1 (https://openfontlicense.org):
+    Fraunces        © The Undercase Type Company
+    Newsreader      © Production Type
+    IBM Plex Mono   © IBM Corp.
+    Space Grotesk   © Florian Karsten
+    Inter           © The Inter Project Authors (rsms)
+
+  Apache License 2.0 (https://www.apache.org/licenses/LICENSE-2.0):
+    JetBrains Mono  © JetBrains s.r.o.
+
+Each font is "Reserved Font Name"-protected under OFL where applicable; files
+are redistributed unmodified. Full OFL/Apache texts ship with each font upstream
+and are incorporated by reference.
