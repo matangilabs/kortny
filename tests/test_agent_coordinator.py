@@ -570,6 +570,63 @@ def test_coordinator_tool_schemas_identical_across_turns(
     )
 
 
+def test_coordinator_recovers_from_unregistered_tool_call(
+    db_session: Session,
+) -> None:
+    """A tool_call naming a tool not registered for this task must be a
+    recoverable error fed back to the model, not an uncaught crash.
+
+    Regression: the model hallucinated `web_search` (suppressed by per-task
+    selection), `registry.get` raised an uncaught ToolNotFoundError, and the
+    whole task crashed. Now it should recover into a follow-up turn.
+    """
+
+    task = create_task(db_session, input_text="research nvidia earnings")
+    llm = FakeLLM(
+        [
+            Completion(
+                content=None,
+                tool_calls=(
+                    ToolCall(
+                        id="call-unknown",
+                        name="web_search",  # NOT registered below
+                        arguments={"query": "nvidia earnings"},
+                    ),
+                ),
+                usage=TokenUsage(input_tokens=10, output_tokens=5),
+                response_id="gen-1",
+                model="openai/gpt-4o-mini",
+            ),
+            Completion(
+                content="Here is the earnings summary.",
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=12, output_tokens=4),
+                response_id="gen-2",
+                model="openai/gpt-4o-mini",
+            ),
+        ]
+    )
+
+    # Only echo_json is registered; web_search is absent on purpose.
+    AgentCoordinator(
+        session=db_session,
+        llm=llm,
+        registry=ToolRegistry([EchoJsonTool()]),
+    ).run(task)
+
+    # Recovered into a second turn instead of crashing on turn 1.
+    assert len(llm.calls) == 2
+    # The model received a tool result explaining the tool is unavailable.
+    second_turn_messages = llm.calls[1][1]
+    tool_messages = [
+        message
+        for message in second_turn_messages
+        if message.role == "tool" and message.tool_call_id == "call-unknown"
+    ]
+    assert tool_messages, "expected a tool result for the unregistered tool call"
+    assert "not available" in (tool_messages[0].content or "").lower()
+
+
 def test_coordinator_compacts_large_search_tool_result_for_next_turn(
     db_session: Session,
 ) -> None:

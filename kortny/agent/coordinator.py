@@ -106,6 +106,7 @@ from kortny.slack.assistant_status import (
 from kortny.tasks import TaskService
 from kortny.tools import ToolRegistry
 from kortny.tools.catalog import tool_metadata, tool_timeout_seconds
+from kortny.tools.registry import ToolNotFoundError
 from kortny.tools.types import (
     JsonObject,
     JsonSchema,
@@ -666,6 +667,33 @@ class AgentCoordinator:
                 ):
                     try:
                         result = self.registry.invoke(tool_call.name, arguments)
+                    except ToolNotFoundError as exc:
+                        # The model called a tool not registered for this task.
+                        # Feed it back as a recoverable error (counts toward the
+                        # recoverable budget + circuit breaker) so the model
+                        # retries with an available tool instead of the run
+                        # crashing.
+                        recoverable_error = RecoverableToolError(
+                            code="tool_not_available",
+                            message=(
+                                f"Tool '{tool_call.name}' is not available for "
+                                "this task."
+                            ),
+                            hint=(
+                                "Use one of the available tools: "
+                                + ", ".join(sorted(self.registry.names()))
+                                + ". Call describe_tools if you need details."
+                            ),
+                        )
+                        error_classification = classify_recoverable_tool_error(
+                            recoverable_error
+                        )
+                        result = _recoverable_tool_error_result(
+                            arguments=arguments,
+                            error=recoverable_error,
+                            classification=error_classification,
+                        )
+                        record_span_exception(exc)
                     except RecoverableToolError as exc:
                         recoverable_error = exc
                         error_classification = classify_recoverable_tool_error(exc)
@@ -1579,6 +1607,14 @@ class AgentCoordinator:
         turn: int,
         step_id: str,
     ) -> None:
+        if not self.registry.has(tool_call.name):
+            # The model named a tool that is not registered for this task — a
+            # hallucination, or a tool the system prompt / describe_tools /
+            # capability overview advertised but per-task selection suppressed.
+            # Skip the approval check; the invoke path turns this into a
+            # recoverable error the model can correct from, instead of an
+            # uncaught ToolNotFoundError that crashes the whole task.
+            return
         tool = self.registry.get(tool_call.name)
         autonomy_level = self._resolve_autonomy_level(task_obj)
         assessment = assess_tool_risk(tool, arguments)
