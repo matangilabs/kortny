@@ -50,6 +50,31 @@ def test_model_router_resolves_configured_tiers() -> None:
     )
 
 
+def test_model_router_humanizer_falls_back_to_cheap_before_standard() -> None:
+    # HIG-268: with LLM_HUMANIZER_MODEL unset, the humanizer (a stylistic
+    # rewrite on the response critical path) must resolve to the cheap/fast
+    # tier, not the slower standard tier that previously sat on the path.
+    settings = Settings.model_validate(
+        {
+            "SLACK_BOT_TOKEN": "xoxb-test",
+            "SLACK_APP_TOKEN": "xapp-test",
+            "SLACK_SIGNING_SECRET": "signing-secret",
+            "LLM_PROVIDER": SettingsLLMProvider.openrouter,
+            "LLM_API_KEY": "openrouter-key",
+            "LLM_MODEL": "openai/default",
+            "LLM_CHEAP_MODEL": "anthropic/haiku",
+            "LLM_STANDARD_MODEL": "openai/standard",
+            # LLM_HUMANIZER_MODEL intentionally unset.
+            "POSTGRES_URL": "postgresql://kortny:kortny@localhost/kortny",
+        }
+    )
+    router = ModelRouter(settings)
+
+    route = router.route_for_tier(ModelRouteTier.humanizer, reason="test")
+
+    assert route.model == "anthropic/haiku"
+
+
 def test_model_router_uses_intent_decision_before_text_fallback() -> None:
     router = ModelRouter(make_settings())
     task = Task(input="Can you answer this quickly?")

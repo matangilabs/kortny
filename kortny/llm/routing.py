@@ -99,10 +99,16 @@ class ModelRouter:
                 or default
             )
         if tier is ModelRouteTier.humanizer:
+            # The humanizer is a stylistic Slack-formatting rewrite, the cheapest
+            # cognitive task in the system — yet an unset LLM_HUMANIZER_MODEL used
+            # to fall back to the *standard* tier, putting a slow mid/large model
+            # on the response critical path (~40s observed, the single biggest
+            # chunk of a 2-minute reply — HIG-268). Prefer the cheap/fast tier so
+            # the default is fast; deployments can still pin LLM_HUMANIZER_MODEL.
             return (
                 self.settings.llm_humanizer_model
-                or self.settings.llm_standard_model
                 or self.settings.llm_cheap_model
+                or self.settings.llm_standard_model
                 or default
             )
         return (
