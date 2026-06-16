@@ -121,6 +121,11 @@ class ToolRegistry:
         except KeyError as exc:
             raise ToolNotFoundError(f"Tool not registered: {name}") from exc
 
+    def has(self, name: str) -> bool:
+        """Return whether a tool is registered under ``name``."""
+
+        return name in self._tools
+
     def invoke(self, name: str, args: JsonObject) -> ToolResult:
         """Invoke a registered tool under its catalog timeout deadline."""
 

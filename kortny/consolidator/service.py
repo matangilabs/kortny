@@ -13,11 +13,14 @@ import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import cast
 
+from slack_sdk import WebClient
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from kortny.config import Settings
+from kortny.consolidator.org_profile import OrgProfilePass
 from kortny.consolidator.passes import (
     CONSOLIDATOR_EXTRACTOR,
     adjudicate_candidates,
@@ -56,6 +59,9 @@ from kortny.llm.runtime_config import (
     create_provider_for_selection,
     select_runtime_model,
 )
+from kortny.memory.service import ConfirmationPoster
+from kortny.slack import SlackPoster
+from kortny.slack.posting import SlackPostingClient
 from kortny.tasks import TaskService
 from kortny.tasks.identity import TaskIdentity
 
@@ -369,6 +375,18 @@ class ConsolidationService:
                 ),
             ),
             (
+                "org_profile",
+                lambda: (
+                    self._build_org_profile_pass(llm=llm)
+                    .run(
+                        installation_id=installation_id,
+                        task=task,
+                        now=effective_now,
+                    )
+                    .to_payload()
+                ),
+            ),
+            (
                 "backfill",
                 lambda: backfill_embeddings(
                     self.session,
@@ -459,6 +477,35 @@ class ConsolidationService:
             source_surface=CONSOLIDATION_TASK_SOURCE,
         )
 
+    def _build_org_profile_pass(self, *, llm: LLMService | None) -> OrgProfilePass:
+        """Build the org-profile pass with a Slack poster + DM resolver.
+
+        When Slack credentials are absent (some test/headless contexts), the
+        poster/resolver are None and the pass skips gracefully — same pattern as
+        the LLM-gated passes.
+        """
+
+        poster: ConfirmationPoster | None = None
+        dm_resolver: Callable[[str], str | None] | None = None
+        token = self.settings.slack_bot_token if self.settings is not None else None
+        if token:
+            client = WebClient(token=token)
+            poster = SlackPoster(
+                session=self.session,
+                client=cast(SlackPostingClient, client),
+                task_service=TaskService(self.session),
+            )
+
+            def dm_resolver(user_id: str, _client: WebClient = client) -> str | None:
+                return _open_dm_channel(_client, user_id)
+
+        return OrgProfilePass(
+            self.session,
+            llm=llm,
+            poster=poster,
+            dm_channel_for_user=dm_resolver,
+        )
+
     def _llm_service(
         self,
         *,
@@ -541,6 +588,24 @@ def _rollup_counters(counters: dict[str, object]) -> dict[str, object]:
         "embedded": _get("backfill", "embedded"),
         "conflicts": _conflicts(),
     }
+
+
+def _open_dm_channel(client: WebClient, user_id: str) -> str | None:
+    """Resolve a user's DM ("D…") channel id via conversations.open, or None."""
+
+    try:
+        response = client.conversations_open(users=user_id)
+    except Exception as exc:  # noqa: BLE001 — Slack errors must not break the run
+        logger.info(
+            "org profile dm open failed user=%s error_type=%s error=%s",
+            user_id,
+            type(exc).__name__,
+            exc,
+        )
+        return None
+    channel = response.get("channel") if isinstance(response, Mapping) else None
+    channel_id = channel.get("id") if isinstance(channel, Mapping) else None
+    return channel_id if isinstance(channel_id, str) and channel_id else None
 
 
 __all__ = [

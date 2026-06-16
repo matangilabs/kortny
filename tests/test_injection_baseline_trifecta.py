@@ -53,9 +53,13 @@ def test_run_skill_script_is_not_outward() -> None:
     # Pin/reaction carry no new outbound payload — not egress.
     assert is_outward_or_write_tool("slack_add_reaction") is False
     assert is_outward_or_write_tool("slack_pin_message") is False
+    # HIG-266: exporting the requested artifact delivers it to the originating
+    # thread (the requester), not outward to a third party — so it is NOT egress
+    # and must not be gated. (Pausing to "approve" showing a user their own
+    # report is not coworker behavior.)
+    assert is_outward_or_write_tool("sandbox_export_artifact") is False
     # The genuine egress legs stay outward.
     assert is_outward_or_write_tool("deploy_site") is True
-    assert is_outward_or_write_tool("sandbox_export_artifact") is True
     assert is_outward_or_write_tool("sandbox_publish_preview") is True
     assert is_outward_or_write_tool("slack_reply_thread") is True
     assert is_outward_or_write_tool("composio__notion__create_page") is True

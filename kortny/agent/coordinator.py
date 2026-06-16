@@ -106,6 +106,7 @@ from kortny.slack.assistant_status import (
 from kortny.tasks import TaskService
 from kortny.tools import ToolRegistry
 from kortny.tools.catalog import tool_metadata, tool_timeout_seconds
+from kortny.tools.registry import ToolNotFoundError
 from kortny.tools.types import (
     JsonObject,
     JsonSchema,
@@ -665,7 +666,37 @@ class AgentCoordinator:
                     },
                 ):
                     try:
+                        self._enforce_soft_tool_call_cap(
+                            plan=plan, tool_call=tool_call, attempt=attempt
+                        )
                         result = self.registry.invoke(tool_call.name, arguments)
+                    except ToolNotFoundError as exc:
+                        # The model called a tool not registered for this task.
+                        # Feed it back as a recoverable error (counts toward the
+                        # recoverable budget + circuit breaker) so the model
+                        # retries with an available tool instead of the run
+                        # crashing.
+                        recoverable_error = RecoverableToolError(
+                            code="tool_not_available",
+                            message=(
+                                f"Tool '{tool_call.name}' is not available for "
+                                "this task."
+                            ),
+                            hint=(
+                                "Use one of the available tools: "
+                                + ", ".join(sorted(self.registry.names()))
+                                + ". Call describe_tools if you need details."
+                            ),
+                        )
+                        error_classification = classify_recoverable_tool_error(
+                            recoverable_error
+                        )
+                        result = _recoverable_tool_error_result(
+                            arguments=arguments,
+                            error=recoverable_error,
+                            classification=error_classification,
+                        )
+                        record_span_exception(exc)
                     except RecoverableToolError as exc:
                         recoverable_error = exc
                         error_classification = classify_recoverable_tool_error(exc)
@@ -1211,6 +1242,38 @@ class AgentCoordinator:
         decision = latest_intent_decision(events)
         return dict(decision) if decision is not None else None
 
+    def _enforce_soft_tool_call_cap(
+        self,
+        *,
+        plan: ExecutionPlan,
+        tool_call: ToolCall,
+        attempt: ToolAttemptRecord,
+    ) -> None:
+        """Nudge the model off a research tool it has overused (HIG-267).
+
+        The same-call circuit breaker keys on argument hashes, so a tool called
+        with a fresh query every turn (web_search) never trips it. A per-tool
+        NAME ceiling bounds that: once the tool is over its cap we raise a
+        recoverable error instead of running the call again, so the model is fed
+        back a "you have enough — produce the deliverable" steer and stops
+        burning the turn budget on research. Build/export tools carry no cap.
+        """
+
+        cap = plan.limits.soft_cap_for(tool_call.name)
+        if cap is None or attempt.tool_name_attempt_no <= cap:
+            return
+        raise RecoverableToolError(
+            code="tool_call_budget_reached",
+            message=(
+                f"You have already called '{tool_call.name}' {cap} times for "
+                "this task. That is enough — do not call it again."
+            ),
+            hint=(
+                "Stop researching. Use the information you have already gathered "
+                "to produce and deliver the final result now."
+            ),
+        )
+
     def _record_tool_attempt(
         self,
         *,
@@ -1579,6 +1642,14 @@ class AgentCoordinator:
         turn: int,
         step_id: str,
     ) -> None:
+        if not self.registry.has(tool_call.name):
+            # The model named a tool that is not registered for this task — a
+            # hallucination, or a tool the system prompt / describe_tools /
+            # capability overview advertised but per-task selection suppressed.
+            # Skip the approval check; the invoke path turns this into a
+            # recoverable error the model can correct from, instead of an
+            # uncaught ToolNotFoundError that crashes the whole task.
+            return
         tool = self.registry.get(tool_call.name)
         autonomy_level = self._resolve_autonomy_level(task_obj)
         assessment = assess_tool_risk(tool, arguments)

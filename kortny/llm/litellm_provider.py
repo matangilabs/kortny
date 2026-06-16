@@ -27,6 +27,7 @@ class LiteLLMProvider:
         extra_headers: Mapping[str, str] | None = None,
         timeout: float = 60.0,
         prompt_cache_enabled: bool = True,
+        max_output_tokens: int | None = None,
     ) -> None:
         if not api_key.strip():
             raise ValueError("LLM API key is required")
@@ -40,6 +41,7 @@ class LiteLLMProvider:
         self.extra_headers = dict(extra_headers or {})
         self.timeout = timeout
         self.prompt_cache_enabled = prompt_cache_enabled
+        self.max_output_tokens = max_output_tokens
 
     @classmethod
     def from_settings(
@@ -55,6 +57,7 @@ class LiteLLMProvider:
         kwargs.setdefault(
             "prompt_cache_enabled", resolved_settings.prompt_cache_enabled
         )
+        kwargs.setdefault("max_output_tokens", resolved_settings.llm_max_output_tokens)
         provider_model = model or resolved_settings.llm_model
         if resolved_settings.llm_provider.value == "openrouter" and not (
             provider_model.startswith("openrouter/")
@@ -99,6 +102,10 @@ class LiteLLMProvider:
             kwargs["tools"] = payload_tools
         if response_format is not None:
             kwargs["response_format"] = response_format
+        if self.max_output_tokens is not None:
+            # Cap requested completion tokens so the provider doesn't reserve
+            # the model's full max output (e.g. 65k on Opus) per call (HIG-265).
+            kwargs["max_tokens"] = self.max_output_tokens
         if _is_openrouter_route(self.model):
             # Provider-sticky routing + cache accounting on OpenRouter (HIG-196
             # D6). ``usage.include`` returns cache_discount and the cached-token

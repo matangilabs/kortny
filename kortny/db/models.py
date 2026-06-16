@@ -96,6 +96,10 @@ class Installation(Base):
     slack_team_id: Mapped[str] = mapped_column(String, nullable=False, unique=True)
     team_name: Mapped[str | None] = mapped_column(String)
     bot_user_id: Mapped[str | None] = mapped_column(String)
+    # The Slack user who installed Kortny (first captured at the install-intro
+    # DM). Ambient passes — e.g. the org-profile proposer (HIG-271) — have no
+    # originating user, so they DM this admin to confirm workspace-level facts.
+    primary_admin_user_id: Mapped[str | None] = mapped_column(String)
     created_at: Mapped[datetime] = mapped_column(
         TZ, nullable=False, server_default=func.now()
     )
