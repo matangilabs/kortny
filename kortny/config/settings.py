@@ -365,6 +365,15 @@ class Settings(BaseSettings):
         default=45,
         validation_alias="KORTNY_KG_STALE_DAYS",
     )
+    tool_access: Literal["pipeline", "retrieval"] = Field(
+        default="pipeline",
+        validation_alias="KORTNY_TOOL_ACCESS",
+        description=(
+            "Orchestration Spine tool-access mode (HIG-269). 'pipeline' "
+            "(default): pre-flight tool selection. 'retrieval': add the "
+            "find_tools agent-driven retrieval capability."
+        ),
+    )
     embeddings_backend: Literal["local", "disabled"] = Field(
         default="local", validation_alias="KORTNY_EMBEDDINGS_BACKEND"
     )

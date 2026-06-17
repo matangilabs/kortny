@@ -98,6 +98,6 @@ def test_seed_dataset_is_well_formed() -> None:
 def test_seed_dataset_covers_the_live_regressions() -> None:
     by_query = {case.query: case for case in SEED_RETRIEVAL_CASES}
     plate = by_query["what's on my plate today?"]
-    assert plate.expected_tool_slugs == ("LINEAR_LIST_ISSUES",)
+    assert "LINEAR_LIST_LINEAR_ISSUES" in plate.expected_tool_slugs
     notion = by_query["what notes can you see on Notion?"]
     assert "NOTION_SEARCH_NOTION_PAGE" in notion.expected_tool_slugs

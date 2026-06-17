@@ -381,6 +381,58 @@ def test_worker_registry_adds_composio_tool_for_scoped_connection(
     assert event.payload["suppressed_native_tools"] == ["web_search"]
 
 
+def test_retrieval_mode_bypasses_external_pipeline(
+    db_session: Session,
+    tmp_path: Path,
+) -> None:
+    # HIG-269 increment 4: in retrieval mode the pre-flight external selection is
+    # skipped (the agent reaches external tools via find_tools), so the scoped
+    # composio tool must NOT be pre-loaded, and a bypass event is recorded.
+    task = create_task(
+        db_session, slack_channel_id="CResearch", slack_user_id="UAnalyst"
+    )
+    add_connection(
+        db_session,
+        task,
+        connected_account_id="ca_firecrawl",
+        scope_type="user",
+        scope_id="UAnalyst",
+    )
+    db_session.commit()
+    settings = build_settings(composio_api_key="composio-key", tool_access="retrieval")
+
+    registry = AgentTaskExecutor(
+        settings=settings,
+        web_search_tool=StaticWebSearchTool(),
+        composio_client=FakeComposioClient(),
+        tool_selector=StaticToolSelector(
+            ToolSelectionResult(
+                selected_tools=(
+                    ToolSelection(
+                        registry_name="composio_firecrawl_scrape",
+                        confidence=0.9,
+                        reason="would be selected in pipeline mode",
+                    ),
+                ),
+                route_reason="test_selection",
+            )
+        ),
+    )._build_registry(
+        settings=settings,
+        session=db_session,
+        task=task,
+        task_service=TaskService(db_session),
+        working_dir=tmp_path,
+    )
+
+    # Pipeline bypassed: the scoped composio tool was NOT pre-selected.
+    assert "composio_firecrawl_scrape" not in registry.names()
+    messages = {event.payload.get("message") for event in task_events(db_session, task)}
+    assert "external_pipeline_bypassed" in messages
+    # The selector never ran in retrieval mode.
+    assert "tool_selection_completed" not in messages
+
+
 def test_tool_selector_failure_is_internal_fallback_not_task_error(
     db_session: Session,
 ) -> None:
@@ -1520,6 +1572,7 @@ def build_settings(
     brave_search_api_key: str | None = "test-brave-key",
     sandbox_runner_url: str | None = None,
     tool_selector_max_external_candidates: int | None = None,
+    tool_access: str = "pipeline",
 ) -> Settings:
     assert TEST_POSTGRES_URL is not None
     kwargs: dict[str, Any] = {
@@ -1538,6 +1591,7 @@ def build_settings(
         # Tests must never load a real embedding model (HIG-219); the semantic
         # retrieval path is covered with fake backends elsewhere.
         "KORTNY_EMBEDDINGS_BACKEND": "disabled",
+        "KORTNY_TOOL_ACCESS": tool_access,
     }
     if sandbox_runner_url is not None:
         kwargs["KORTNY_SANDBOX_RUNNER_URL"] = sandbox_runner_url

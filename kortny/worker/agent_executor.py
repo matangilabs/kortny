@@ -47,6 +47,7 @@ from kortny.db.models import (
 )
 from kortny.db.models import LLMProvider as DbLLMProvider
 from kortny.embeddings import EmbeddingBackend, EmbeddingIndex, create_embedding_backend
+from kortny.evals.retrieval.catalog_retriever import build_catalog_retrieve_fn
 from kortny.execution import task_workspace
 from kortny.intent import LLMIntentClassifier
 from kortny.intent.models import IntentRequest, IntentSurface
@@ -143,6 +144,7 @@ from kortny.tools.catalog import (
     runtime_native_tool_names,
     tool_descriptor_from_class,
 )
+from kortny.tools.find_tools import FindToolsTool
 from kortny.tools.native_runtime import (
     NativeToolBuildContext,
     build_native_inventory_tools,
@@ -853,6 +855,11 @@ class AgentTaskExecutor:
                 request=IntentRequest(
                     text=task.input,
                     surface=IntentSurface.dm,
+                    # HIG-274: ground the assistant/DM classifier with the
+                    # connected integrations too (the ingress path already does
+                    # this; the DM path classifies here in the worker and was
+                    # missing it, so "my plate" in a DM got no toolkit grounding).
+                    connected_integrations=connected_toolkit_slugs(session, task),
                 ),
             )
         except Exception as exc:
@@ -1526,7 +1533,44 @@ class AgentTaskExecutor:
                 task=task,
                 external_cards=(),
             )
-            return ToolRegistry(native_tools)
+            return self._finalize_registry(
+                ToolRegistry(native_tools),
+                settings=settings,
+                session=session,
+                task=task,
+            )
+
+        if settings.tool_access == "retrieval":
+            # Retrieval mode (HIG-269 increment 4): the agent reaches external
+            # tools only via find_tools, so skip the pre-flight selection
+            # pipeline entirely. Capability overview still comes from the
+            # connection snapshot (HIG-274), so grounding is intact.
+            task_service.append_event(
+                task,
+                TaskEventType.log,
+                {
+                    "message": "external_pipeline_bypassed",
+                    "reason": "tool_access_retrieval",
+                },
+            )
+            log_observation(
+                logger,
+                "external_pipeline_bypassed",
+                task=task,
+                reason="tool_access_retrieval",
+            )
+            self._capability_overview = self._build_capability_overview(
+                settings=settings,
+                session=session,
+                task=task,
+                external_cards=(),
+            )
+            return self._finalize_registry(
+                ToolRegistry(native_tools),
+                settings=settings,
+                session=session,
+                task=task,
+            )
 
         external_providers = self._build_external_tool_providers(
             settings=settings,
@@ -1552,7 +1596,67 @@ class AgentTaskExecutor:
             external_tools=external_tools,
             external_cards=external_cards,
         )
-        return ToolRegistry(tools)
+        return self._finalize_registry(
+            ToolRegistry(tools),
+            settings=settings,
+            session=session,
+            task=task,
+        )
+
+    def _finalize_registry(
+        self,
+        registry: ToolRegistry,
+        *,
+        settings: Settings,
+        session: Session,
+        task: Task,
+    ) -> ToolRegistry:
+        """Add the find_tools retrieval capability in retrieval mode (HIG-269).
+
+        Default 'pipeline' mode is a pure pass-through (zero behavior change).
+        In 'retrieval' mode this adds find_tools so the agent can load external
+        tools on demand; it is additive (the pipeline still runs) until the
+        eval-gated cutover (slice 1 increment 4).
+        """
+
+        if settings.tool_access != "retrieval":
+            return registry
+        if settings.composio_api_key is None or not settings.composio_catalog_enabled:
+            return registry
+        embedding_index = self._embedding_index_for(settings=settings, session=session)
+        if embedding_index is None:
+            return registry
+        toolkits = connected_toolkit_slugs(session, task)
+        if not toolkits:
+            return registry
+        provider = ComposioExternalToolProvider(
+            session=session,
+            task=task,
+            client=self._resolve_composio_connect_client(settings),
+            result_max_chars=settings.tool_result_max_chars,
+            embedding_index=embedding_index,
+            top_k=settings.tool_retrieval_top_k,
+        )
+        retrieve = build_catalog_retrieve_fn(
+            session,
+            toolkit_slugs=toolkits,
+            embedding_index=embedding_index,
+            # Grounding prior (HIG-274): boost the intent-named connected
+            # toolkits so find_tools surfaces them near the top (eval: "my plate"
+            # Linear tool went from rank #92 to #2 with this boost).
+            boost_toolkits=frozenset(_intent_forced_toolkits(session, task)),
+        )
+        registry.register_if_absent(
+            cast(
+                Tool,
+                FindToolsTool(
+                    retrieve=retrieve,
+                    load=provider.load_runtime_tools_for_slugs,
+                    registry=registry,
+                ),
+            )
+        )
+        return registry
 
     def _build_web_search_tool(
         self,

@@ -11,6 +11,7 @@ per-task Composio search, byte-compatible with the pre-HIG-222 behavior.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from sqlalchemy import select
@@ -129,6 +130,63 @@ class ComposioExternalToolProvider:
                 item.tool_slug
             )
             connections.setdefault(item.connection.toolkit_slug, item.connection)
+        tools: list[Tool] = []
+        for toolkit_slug, slugs in slugs_by_toolkit.items():
+            connection = connections[toolkit_slug]
+            try:
+                fetched = self.client.list_tools(
+                    toolkit_slug=toolkit_slug,
+                    tool_slugs=tuple(sorted(slugs)),
+                    limit=len(slugs),
+                )
+            except ComposioCatalogError as exc:
+                log_observation(
+                    logger,
+                    "composio_schema_fetch_failed",
+                    task=self.task,
+                    provider="composio",
+                    toolkit_slug=toolkit_slug,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
+                continue
+            for tool in fetched:
+                if tool.slug in slugs:
+                    tools.append(self._execute_tool(connection, tool))
+        return tuple(tools)
+
+    def load_runtime_tools_for_slugs(
+        self, tool_slugs: Sequence[str]
+    ) -> tuple[Tool, ...]:
+        """Build executable tools for an explicit set of tool slugs.
+
+        The runtime-loading seam for find_tools (HIG-269): resolves each slug's
+        toolkit from the connected set, fetches full schemas in a bounded
+        per-toolkit call, and builds executable tools — the same lazy fetch the
+        ranked path uses, but for a slug set the agent explicitly retrieved.
+        """
+
+        wanted = {slug for slug in tool_slugs if slug}
+        if not wanted:
+            return ()
+        connections = {
+            connection.toolkit_slug: connection
+            for connection in _best_connections_by_toolkit(
+                self.resolver.allowed_connections()
+            )
+        }
+        if not connections:
+            return ()
+        rows = self.session.scalars(
+            select(ComposioToolCard).where(
+                ComposioToolCard.installation_id == self.task.installation_id,
+                ComposioToolCard.tool_slug.in_(sorted(wanted)),
+                ComposioToolCard.toolkit_slug.in_(sorted(connections)),
+            )
+        ).all()
+        slugs_by_toolkit: dict[str, set[str]] = {}
+        for row in rows:
+            slugs_by_toolkit.setdefault(row.toolkit_slug, set()).add(row.tool_slug)
         tools: list[Tool] = []
         for toolkit_slug, slugs in slugs_by_toolkit.items():
             connection = connections[toolkit_slug]

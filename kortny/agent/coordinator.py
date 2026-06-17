@@ -233,11 +233,15 @@ DEFAULT_SYSTEM_PROMPT = (
     "this task. If a toolkit appears there it IS connected even if you were not "
     "handed its tools this turn; call list_integrations to verify live rather "
     "than asserting it is missing. Do not fabricate connection status. "
-    "Never claim an integration, app, or tool is not connected without checking "
-    "the <capabilities> section first: it lists every integration connected for "
-    "this task. If a toolkit appears there it IS connected even if you were not "
-    "handed its tools this turn; call list_integrations to verify live rather "
-    "than asserting it is missing. Do not fabricate connection status. "
+    "When the find_tools tool is available, the connected integrations in "
+    "<capabilities> are reachable by calling find_tools to load their tools and "
+    "then calling those tools. If the request is about data that lives in a "
+    "connected integration (issues/tickets, CRM records, docs/pages, finances, "
+    "analytics), you MUST call find_tools to load it and fetch the live data "
+    "BEFORE answering. Do not answer such requests from channel history, "
+    "observed messages, or memory alone, and never merely offer to fetch it "
+    "later ('I can pull that if you want') - load the tool and pull it now. "
+    "Channel mentions are stale hints; the integration is the source of truth. "
     "When answering with text, format for Slack mrkdwn rather than GitHub "
     "Markdown: use *bold*, <https://example.com|label> links, simple line-break "
     "lists, and avoid Markdown headings. "
@@ -467,6 +471,11 @@ class AgentCoordinator:
 
         for turn in range(1, self.max_turns + 1):
             self.task_service.raise_if_cancelled(task_obj, phase=f"before_turn_{turn}")
+            # Re-read the registry each turn so tools loaded at runtime by
+            # find_tools (HIG-269) become callable on the next turn. In the
+            # default pipeline mode the registry never mutates, so this is a
+            # no-op and behavior is unchanged.
+            schemas = self.registry.schemas()
             completion = self._complete_turn(task_obj, messages, schemas, turn)
             self.task_service.raise_if_cancelled(
                 task_obj, phase=f"after_turn_{turn}_completion"
