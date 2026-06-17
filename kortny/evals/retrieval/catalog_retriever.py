@@ -35,7 +35,7 @@ from kortny.evals.retrieval.scoring import (
     recall_at_k,
     score_retrieval,
 )
-from kortny.tool_selection import tool_card_embedding_text
+from kortny.tool_selection import ToolCard, tool_card_embedding_text
 
 
 def connected_toolkit_slugs_for_installation(
@@ -89,6 +89,7 @@ def build_catalog_retrieve_fn(
     embedding_index: EmbeddingIndex,
     enrich: QueryEnricher | None = None,
     boost_toolkits: frozenset[str] = frozenset(),
+    extra_cards: Sequence[ToolCard] = (),
 ) -> RetrieveFn:
     """Build a retrieve_fn that ranks synced tool cards for a query.
 
@@ -100,6 +101,10 @@ def build_catalog_retrieve_fn(
       score so exact toolkit/verb mentions rank up.
     - ``boost_toolkits``: the grounding prior (intent toolkit_affinity) gives a
       score bonus to those connected toolkits' tools.
+    - ``extra_cards``: non-Composio tool cards (e.g. MCP) ranked in the SAME
+      index so find_tools surfaces every connected provider, not just Composio
+      (HIG-269). Their ``registry_name`` doubles as the returned slug, so the
+      caller's loader dispatches them by name.
     Returns tool slugs (best first) to match the eval's ground truth.
     """
 
@@ -129,6 +134,15 @@ def build_catalog_retrieve_fn(
         text = tool_card_embedding_text(card)
         ref_to_slug[card.registry_name] = row.tool_slug
         ref_to_toolkit[card.registry_name] = row.toolkit_slug.casefold()
+        ref_to_words[card.registry_name] = _words(text)
+        embed_items.append((card.registry_name, text))
+
+    for card in extra_cards:
+        text = tool_card_embedding_text(card)
+        # Non-Composio providers (MCP) are loaded by runtime name, so the slug
+        # the retriever returns IS the registry_name.
+        ref_to_slug[card.registry_name] = card.registry_name
+        ref_to_toolkit[card.registry_name] = (card.toolkit_slug or "").casefold()
         ref_to_words[card.registry_name] = _words(text)
         embed_items.append((card.registry_name, text))
 

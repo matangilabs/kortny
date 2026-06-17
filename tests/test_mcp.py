@@ -651,6 +651,31 @@ class TestMcpProvider:
         names = {card.registry_name for card in provider.tool_cards()}
         assert names == {"mcp__echo__echo"}
 
+    def test_load_runtime_tools_for_slugs_builds_only_requested(
+        self, db_session: Session
+    ) -> None:
+        # The find_tools seam (HIG-269): load only the runtime names the
+        # retriever surfaced, not the whole catalog.
+        installation = _installation(db_session)
+        server = _persisted_server(db_session, installation)
+        _persisted_tool(db_session, server, name="echo", read_only=True)
+        _persisted_tool(db_session, server, name="write_note", read_only=None)
+        task = _task(db_session, installation)
+        db_session.commit()
+
+        provider = McpExternalToolProvider(
+            session=db_session,
+            task=task,
+            encryption_key=ENCRYPTION_KEY,
+            tool_timeout_seconds=30,
+        )
+        loaded = provider.load_runtime_tools_for_slugs(["mcp__echo__write_note"])
+        assert {tool.name for tool in loaded} == {"mcp__echo__write_note"}
+
+        # Unknown / empty slugs load nothing.
+        assert provider.load_runtime_tools_for_slugs([]) == ()
+        assert provider.load_runtime_tools_for_slugs(["mcp__echo__missing"]) == ()
+
     def test_cross_installation_isolation(self, db_session: Session) -> None:
         owner = _installation(db_session)
         other = _installation(db_session)

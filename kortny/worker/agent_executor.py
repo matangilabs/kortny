@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, cast
@@ -68,6 +68,7 @@ from kortny.llm.runtime_config import (
     create_provider_for_selection,
     select_runtime_model,
 )
+from kortny.mcp.provider import McpExternalToolProvider
 from kortny.memory import WorkspaceStateService
 from kortny.observability import log_observation
 from kortny.observe.assessment import (
@@ -125,7 +126,7 @@ from kortny.slack.reactions import (
 from kortny.slack.response_blocks import render_response_blocks
 from kortny.slack.thread_context import SlackThreadTranscriptProvider
 from kortny.tasks import TaskCancelledError, TaskService
-from kortny.tool_selection import ExternalToolProvider
+from kortny.tool_selection import ExternalToolProvider, ToolCard
 from kortny.tools import JsonObject, Tool, ToolRegistry, WebSearchTool
 from kortny.tools.catalog import (
     native_slack_context_hint_names,
@@ -1529,27 +1530,49 @@ class AgentTaskExecutor:
         """Add the find_tools agent-driven retrieval capability (HIG-269).
 
         find_tools is how the agent reaches external tools: it retrieves ranked
-        tool slugs and loads them into this registry on demand. No-op when the
-        Composio catalog is unavailable (no key, catalog disabled, no embedding
-        index, or no connected toolkits) — the agent then runs native-only.
+        tool slugs across every connected provider (Composio + MCP) in one index
+        and loads the matches into this registry on demand. No-op when there is
+        no embedding index, or nothing connected on either provider — the agent
+        then runs native-only.
         """
 
-        if settings.composio_api_key is None or not settings.composio_catalog_enabled:
-            return registry
         embedding_index = self._embedding_index_for(settings=settings, session=session)
         if embedding_index is None:
             return registry
-        toolkits = connected_toolkit_slugs(session, task)
-        if not toolkits:
+
+        composio_provider: ComposioExternalToolProvider | None = None
+        toolkits: tuple[str, ...] = ()
+        if settings.composio_api_key is not None and settings.composio_catalog_enabled:
+            toolkits = connected_toolkit_slugs(session, task)
+            if toolkits:
+                composio_provider = ComposioExternalToolProvider(
+                    session=session,
+                    task=task,
+                    client=self._resolve_composio_connect_client(settings),
+                    result_max_chars=settings.tool_result_max_chars,
+                    embedding_index=embedding_index,
+                    top_k=settings.tool_retrieval_top_k,
+                )
+
+        mcp_provider: McpExternalToolProvider | None = None
+        mcp_cards: tuple[ToolCard, ...] = ()
+        if settings.mcp_enabled:
+            candidate = McpExternalToolProvider(
+                session=session,
+                task=task,
+                encryption_key=settings.encryption_key,
+                tool_timeout_seconds=settings.mcp_tool_timeout_seconds,
+                result_max_chars=settings.tool_result_max_chars,
+            )
+            mcp_cards = candidate.tool_cards()
+            if mcp_cards:
+                mcp_provider = candidate
+                # Track for close() — MCP providers hold per-task sessions.
+                self._active_external_providers.append(candidate)
+
+        if composio_provider is None and mcp_provider is None:
             return registry
-        provider = ComposioExternalToolProvider(
-            session=session,
-            task=task,
-            client=self._resolve_composio_connect_client(settings),
-            result_max_chars=settings.tool_result_max_chars,
-            embedding_index=embedding_index,
-            top_k=settings.tool_retrieval_top_k,
-        )
+
         retrieve = build_catalog_retrieve_fn(
             session,
             toolkit_slugs=toolkits,
@@ -1558,15 +1581,27 @@ class AgentTaskExecutor:
             # toolkits so find_tools surfaces them near the top (eval: "my plate"
             # Linear tool went from rank #92 to #2 with this boost).
             boost_toolkits=frozenset(_intent_forced_toolkits(session, task)),
+            extra_cards=mcp_cards,
         )
+
+        def load(slugs: Sequence[str]) -> tuple[Tool, ...]:
+            # MCP tools are keyed by runtime name (mcp__server__tool); everything
+            # else is a Composio tool_slug. Dispatch each to the right loader.
+            mcp_slugs = [slug for slug in slugs if slug.startswith("mcp__")]
+            composio_slugs = [slug for slug in slugs if not slug.startswith("mcp__")]
+            tools: list[Tool] = []
+            if composio_provider is not None and composio_slugs:
+                tools.extend(
+                    composio_provider.load_runtime_tools_for_slugs(composio_slugs)
+                )
+            if mcp_provider is not None and mcp_slugs:
+                tools.extend(mcp_provider.load_runtime_tools_for_slugs(mcp_slugs))
+            return tuple(tools)
+
         registry.register_if_absent(
             cast(
                 Tool,
-                FindToolsTool(
-                    retrieve=retrieve,
-                    load=provider.load_runtime_tools_for_slugs,
-                    registry=registry,
-                ),
+                FindToolsTool(retrieve=retrieve, load=load, registry=registry),
             )
         )
         return registry
