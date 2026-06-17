@@ -62,6 +62,7 @@ from kortny.knowledge_graph import (
     is_dashboard_graph_refresh_task,
 )
 from kortny.llm import ChatMessage, LLMProvider, LLMService, ModelRoute, ModelRouter
+from kortny.llm.errors import classify_provider_failure
 from kortny.llm.routing import ModelRouteTier, effective_intent_decision
 from kortny.llm.runtime_config import (
     RuntimeModelSelection,
@@ -448,11 +449,21 @@ class AgentTaskExecutor:
             raise
         except Exception as exc:
             logger.exception("agent executor failed task_id=%s", task.id)
+            provider_failure = classify_provider_failure(exc)
+            if provider_failure is not None:
+                logger.warning(
+                    "llm provider failure task_id=%s kind=%s",
+                    task.id,
+                    provider_failure.kind.value,
+                )
             self._post_failure_notice(
                 settings=settings,
                 session=session,
                 task=task,
                 task_service=task_service,
+                failure_text=(
+                    provider_failure.message if provider_failure is not None else None
+                ),
             )
             self._mark_channel_assessment_failed(
                 session=session,
@@ -3208,6 +3219,7 @@ class AgentTaskExecutor:
         session: Session,
         task: Task,
         task_service: TaskService,
+        failure_text: str | None = None,
     ) -> None:
         if _should_suppress_slack_post(session, task):
             task_service.append_event(
@@ -3236,7 +3248,7 @@ class AgentTaskExecutor:
                 task_service=task_service,
             ).post_message(
                 SlackThread.from_task(task),
-                GENERIC_FAILURE_TEXT,
+                failure_text or GENERIC_FAILURE_TEXT,
                 purpose="failure",
             )
             logger.info("posted generic failure notice task_id=%s", task.id)
