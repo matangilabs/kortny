@@ -42,6 +42,9 @@ logger = logging.getLogger(__name__)
 
 # Top-K cap for synced-catalog candidate listing (HIG-222 spec: stays 15).
 DEFAULT_TOOL_RETRIEVAL_TOP_K = 15
+# Per intent-named connected toolkit, how many of its best tools to force past
+# the top_k catalog-ranking cap (HIG-274 reachability floor).
+FORCED_TOOLS_PER_INTENT_TOOLKIT = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +75,7 @@ class ComposioExternalToolProvider:
         result_max_chars: int = DEFAULT_RESULT_MAX_CHARS,
         embedding_index: EmbeddingIndex | None = None,
         top_k: int = DEFAULT_TOOL_RETRIEVAL_TOP_K,
+        forced_toolkits: tuple[str, ...] = (),
     ) -> None:
         self.session = session
         self.task = task
@@ -80,6 +84,9 @@ class ComposioExternalToolProvider:
         self.result_max_chars = result_max_chars
         self.embedding_index = embedding_index
         self.top_k = top_k
+        self.forced_toolkits = tuple(
+            dict.fromkeys(slug.casefold() for slug in forced_toolkits if slug)
+        )
         self.resolver = ComposioConnectionResolver(session, task)
         self._catalog: tuple[_ToolkitCatalog, ...] | None = None
         self._synced_candidates: tuple[_SyncedCandidate, ...] | None = None
@@ -242,7 +249,56 @@ class ComposioExternalToolProvider:
             for ref in forced:
                 if ref not in kept_refs:
                     kept_refs.append(ref)
+        # Intent-grounded reachability floor (HIG-274): the grounded intent
+        # classifier names connected toolkits the user implied (toolkit_affinity,
+        # e.g. "linear" for "what's on my plate"). Embedding rank against the raw
+        # query can bury those toolkits under more lexically-similar ones (a
+        # finance-heavy catalog drowned out Linear for task c65e7b2f). Force a
+        # connected, intent-named toolkit's best tools in when ranking dropped it.
+        if self.forced_toolkits:
+            kept_refs = self._apply_intent_toolkit_floor(kept_refs, candidates)
         return tuple(by_ref[ref] for ref in kept_refs if ref in by_ref)
+
+    def _apply_intent_toolkit_floor(
+        self,
+        kept_refs: list[str],
+        candidates: list[_SyncedCandidate],
+    ) -> list[str]:
+        ref_toolkit = {
+            item.card.registry_name: (item.connection.toolkit_slug or "").casefold()
+            for item in candidates
+        }
+        kept = list(kept_refs)
+        represented = {ref_toolkit.get(ref) for ref in kept}
+        for toolkit in self.forced_toolkits:
+            if toolkit in represented:
+                continue
+            toolkit_refs = [
+                item.card.registry_name
+                for item in candidates
+                if (item.connection.toolkit_slug or "").casefold() == toolkit
+            ]
+            if not toolkit_refs:
+                continue
+            for ref in self._rank_within_toolkit(toolkit_refs):
+                if ref not in kept:
+                    kept.append(ref)
+            represented.add(toolkit)
+        return kept
+
+    def _rank_within_toolkit(self, refs: list[str]) -> list[str]:
+        """Best ``FORCED_TOOLS_PER_INTENT_TOOLKIT`` tools of one toolkit."""
+
+        if self.embedding_index is not None:
+            ranked = self.embedding_index.rank(
+                TOOL_CARD_EMBEDDING_KIND,
+                self.task.input,
+                refs,
+                top_k=FORCED_TOOLS_PER_INTENT_TOOLKIT,
+            )
+            if ranked is not None:
+                return [ref for ref, _ in ranked]
+        return refs[:FORCED_TOOLS_PER_INTENT_TOOLKIT]
 
     def _load_synced_rows(self, toolkit_slugs: set[str]) -> list[ComposioToolCard]:
         if not toolkit_slugs:

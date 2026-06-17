@@ -79,6 +79,7 @@ class IntentRequest(BaseModel):
     app_name: str = Field(default="kortny", min_length=1)
     is_thread_follow_up: bool = False
     has_files: bool = False
+    connected_integrations: tuple[str, ...] = ()
 
     @field_validator("text", "app_name")
     @classmethod

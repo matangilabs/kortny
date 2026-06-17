@@ -300,6 +300,50 @@ def test_provider_forced_includes_explicitly_named_toolkit(
     assert "linear" in toolkits  # forced in despite the crowded alpha_vantage set
 
 
+def test_provider_floors_intent_named_toolkit_not_in_query(
+    db_session: Session,
+) -> None:
+    # HIG-274 / task c65e7b2f: "what's on my plate" never says "linear", so the
+    # verbatim force does nothing and a finance-heavy catalog ranks linear out of
+    # the top-15. The grounded intent (forced_toolkits=("linear",)) must keep it.
+    task = _task(db_session, text="what's on my plate today?")
+    _connect(db_session, task, toolkit_slug="alpha_vantage")
+    _connect(db_session, task, toolkit_slug="linear")
+    alpha = tuple(
+        ComposioTool(
+            slug=f"ALPHA_SEARCH_{index}",
+            name=f"Search market data {index}",
+            description=f"Read-only market and web search tool {index}.",
+            toolkit_slug="alpha_vantage",
+            input_parameters={"type": "object", "properties": {}},
+            tags=("readOnlyHint",),
+            version=None,
+        )
+        for index in range(16)
+    )
+    client = RecordingComposioClient(
+        tools_by_toolkit={"alpha_vantage": alpha, "linear": _issue_tools()}
+    )
+    _sync(db_session, task, client)
+
+    without_floor = ComposioExternalToolProvider(
+        session=db_session,
+        task=task,
+        client=client,
+        embedding_index=_index(db_session),
+    )
+    assert "linear" not in {card.toolkit_slug for card in without_floor.tool_cards()}
+
+    with_floor = ComposioExternalToolProvider(
+        session=db_session,
+        task=task,
+        client=client,
+        embedding_index=_index(db_session),
+        forced_toolkits=("linear",),
+    )
+    assert "linear" in {card.toolkit_slug for card in with_floor.tool_cards()}
+
+
 def test_provider_caps_candidates_at_15(db_session: Session) -> None:
     task = _task(db_session, text="search market data")
     _connect(db_session, task, toolkit_slug="alpha_vantage")

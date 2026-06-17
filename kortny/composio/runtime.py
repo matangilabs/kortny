@@ -98,6 +98,19 @@ class ComposioConnectionResolver:
         return False
 
 
+def connected_toolkit_slugs(session: Session, task: Task) -> tuple[str, ...]:
+    """Deterministic set of active Composio toolkit slugs allowed for this task.
+
+    This is the capability-grounding primitive (HIG-274): a DB-derived fact that
+    does not depend on tool selection or the external-tool skip path, so routing,
+    selection, and agent context can all be told what is actually connected
+    regardless of how the request was classified.
+    """
+
+    connections = ComposioConnectionResolver(session, task).allowed_connections()
+    return tuple(dict.fromkeys(connection.toolkit_slug for connection in connections))
+
+
 def _runtime_connection(row: ComposioConnection) -> RuntimeComposioConnection:
     if row.connected_account_id is None:
         raise ValueError("Composio connection is missing connected_account_id")

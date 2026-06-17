@@ -45,12 +45,20 @@ def compact_tool_cards(
     cards: tuple[ToolCard, ...],
     max_candidates: int,
     semantic_scores: Mapping[str, float] | None = None,
+    protected_toolkits: frozenset[str] = frozenset(),
 ) -> tuple[tuple[ToolCard, ...], ToolCatalogCompaction]:
     """Return a bounded, relevance-ranked selector catalog.
 
     When ``semantic_scores`` (registry_name -> cosine similarity) is provided,
     each card's final score is a hybrid of semantic retrieval and the lexical
     heuristic; when it is None, behavior is exactly the legacy lexical path.
+
+    ``protected_toolkits`` is the capability-grounding reachability floor
+    (HIG-274): cards whose toolkit the intent named (toolkit_affinity /
+    likely_tools) and which are connected for this user are always kept, even if
+    relevance ranking would trim them. This stops the failure where a request
+    that clearly implies a connected tool (e.g. "my open Linear issues") gets
+    ``selected_tools: []`` because the lexical/semantic score fell below the cap.
     """
 
     if max_candidates < 1:
@@ -83,11 +91,30 @@ def compact_tool_cards(
             omitted_candidate_names=(),
             reason="within_budget",
         )
-    selected_ranked = ranked[:max_candidates]
+    protected = {slug.casefold() for slug in protected_toolkits if slug}
+
+    def _is_protected(card: ToolCard) -> bool:
+        slug = card.toolkit_slug
+        return slug is not None and slug.casefold() in protected
+
     # Keep relevance order (most relevant first): the selector prompt fitter
     # trims candidates from the tail, so tail position must mean "least
     # relevant", not "registered last" (which silently dropped MCP tools
-    # because the MCP provider runs after Composio).
+    # because the MCP provider runs after Composio). The reachability floor
+    # (protected toolkits) is always kept; remaining budget goes to the most
+    # relevant non-protected cards.
+    floored = False
+    if protected:
+        protected_ranked = [item for item in ranked if _is_protected(item[2])]
+        other_ranked = [item for item in ranked if not _is_protected(item[2])]
+        budget_for_other = max(0, max_candidates - len(protected_ranked))
+        floored = bool(protected_ranked)
+        selected_ranked = sorted(
+            protected_ranked + other_ranked[:budget_for_other],
+            key=lambda item: (-item[0], item[1]),
+        )
+    else:
+        selected_ranked = ranked[:max_candidates]
     selected = tuple(item[2] for item in selected_ranked)
     selected_names = {card.registry_name for card in selected}
     omitted = tuple(card for card in cards if card.registry_name not in selected_names)
@@ -98,7 +125,7 @@ def compact_tool_cards(
         max_candidates=max_candidates,
         selected_candidate_names=tuple(card.registry_name for card in selected),
         omitted_candidate_names=tuple(card.registry_name for card in omitted),
-        reason="relevance_cap",
+        reason="relevance_cap_floor" if floored else "relevance_cap",
     )
 
 

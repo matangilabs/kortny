@@ -71,6 +71,8 @@ Time sensitivity (time_sensitivity):
 
 Toolkit affinity (toolkit_affinity): lowercase names of integrations, MCP servers, or toolkits the user named or strongly implied, as a deduplicated array. Use the integration name, not the verb. Examples: "create a Linear issue" => ["linear"]; "check GitHub PRs and post to Slack" => ["github", "slack"]; "what's the weather" => [].
 
+Connected integrations (connected_integrations in the request): the integrations actually connected and runnable for this user right now, as ground truth. Use them to route work-surface questions to real surfaces instead of guessing from the literal words. When the user asks about "my work / my plate / my tasks / what should I focus on / what's open", do NOT default to schedule or calendar — resolve it against the connected work trackers and the channel's topic. If an issue tracker (linear, jira, github, asana, notion) is connected, put it in likely_tools and toolkit_affinity; if a calendar/email tool is connected and nothing else fits, use that. Never route to a tool that is not in connected_integrations, and never imply a connected integration is unavailable. If connected_integrations is empty, fall back to literal interpretation.
+
 Important memory-control distinction:
 - "forget/remove/delete/clear my memory/preference/fact/rule" is a task_request with likely_tools ["inspect_memory", "forget_fact"], not cancel_or_retry.
 - cancel_or_retry is only for stopping or retrying a current/prior task execution, not for deleting a stored memory.

@@ -251,6 +251,53 @@ def test_compact_tool_cards_keeps_relevant_candidates_under_budget() -> None:
     assert selected[0].registry_name == "composio_firecrawl_search"
 
 
+def test_compact_tool_cards_floor_keeps_connected_named_toolkit() -> None:
+    # HIG-274: "my open Linear issues" scores low lexically against a generic
+    # Linear card, so relevance trimming would drop it and the selector would
+    # return []. The reachability floor protects the intent-named connected
+    # toolkit so it survives to the selector.
+    cards = tuple(
+        ToolCard(
+            registry_name=f"composio_other_{index}",
+            provider="composio",
+            display_name=f"Other {index}",
+            description="Generic integration tool.",
+            capabilities=("external_tool",),
+            side_effect="read",
+            toolkit_slug="other",
+        )
+        for index in range(6)
+    ) + (
+        ToolCard(
+            registry_name="composio_linear_list_issues",
+            provider="composio",
+            display_name="Linear list issues",
+            description="List issues assigned to a user.",
+            capabilities=("external_tool",),
+            side_effect="read",
+            toolkit_slug="linear",
+        ),
+    )
+
+    unprotected, _ = compact_tool_cards(
+        task_input="what's on my plate today",
+        cards=cards,
+        max_candidates=3,
+    )
+    assert "composio_linear_list_issues" not in {
+        card.registry_name for card in unprotected
+    }
+
+    protected, compaction = compact_tool_cards(
+        task_input="what's on my plate today",
+        cards=cards,
+        max_candidates=3,
+        protected_toolkits=frozenset({"linear"}),
+    )
+    assert "composio_linear_list_issues" in {card.registry_name for card in protected}
+    assert compaction.reason == "relevance_cap_floor"
+
+
 def test_llm_selector_forces_tools_for_explicitly_named_toolkit() -> None:
     # Reproduces the production incident: the cheap selector LLM declined the
     # context7 MCP tools ("native web_search can check the docs") even though
@@ -292,6 +339,49 @@ def test_llm_selector_forces_tools_for_explicitly_named_toolkit() -> None:
         "mcp__context7__resolve_library_id",
     }
     assert "explicit_toolkit_forced" in result.route_reason
+
+
+def test_llm_selector_floors_connected_toolkit_from_grounded_intent() -> None:
+    # HIG-274 / task c65e7b2f: "what's on my plate" never names Linear, but the
+    # capability-grounded classifier infers toolkit_affinity=["linear"] because
+    # Linear is connected. The selector LLM still returned [] and routed native,
+    # so the agent fabricated "Linear isn't wired in". The intent-grounded floor
+    # must force the connected, intent-named toolkit in.
+    linear_cards = tuple(
+        ToolCard(
+            registry_name=f"composio_linear_{slug}",
+            provider="composio",
+            display_name=f"Linear {slug}",
+            description="Work with Linear issues.",
+            capabilities=("external_tool",),
+            side_effect="read",
+            toolkit_slug="linear",
+            tool_slugs=(slug,),
+        )
+        for slug in ("list_issues",)
+    )
+    provider = FakeSelectorLLM(
+        content="""
+        {
+          "selected_tools": [],
+          "suppressed_native_tools": [],
+          "rejected_tools": [],
+          "route_reason": "no specific tool mentioned, use native"
+        }
+        """
+    )
+
+    result = LLMToolSelector(provider).select(
+        task_id=uuid.uuid4(),
+        task_input="what's on my plate today?",
+        native_cards=(native_slack_history_card(),),
+        external_cards=linear_cards,
+        toolkit_affinity=("linear",),
+        likely_tools=("linear",),
+    )
+
+    assert "composio_linear_list_issues" in set(result.selected_names)
+    assert "intent_grounded_floor" in result.route_reason
 
 
 def test_compact_tool_cards_ranks_mcp_tools_above_generic_catalog_cards() -> None:
