@@ -855,6 +855,11 @@ class AgentTaskExecutor:
                 request=IntentRequest(
                     text=task.input,
                     surface=IntentSurface.dm,
+                    # HIG-274: ground the assistant/DM classifier with the
+                    # connected integrations too (the ingress path already does
+                    # this; the DM path classifies here in the worker and was
+                    # missing it, so "my plate" in a DM got no toolkit grounding).
+                    connected_integrations=connected_toolkit_slugs(session, task),
                 ),
             )
         except Exception as exc:
