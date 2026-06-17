@@ -1604,6 +1604,10 @@ class AgentTaskExecutor:
             session,
             toolkit_slugs=toolkits,
             embedding_index=embedding_index,
+            # Grounding prior (HIG-274): boost the intent-named connected
+            # toolkits so find_tools surfaces them near the top (eval: "my plate"
+            # Linear tool went from rank #92 to #2 with this boost).
+            boost_toolkits=frozenset(_intent_forced_toolkits(session, task)),
         )
         registry.register_if_absent(
             cast(
