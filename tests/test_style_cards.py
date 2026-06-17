@@ -685,7 +685,11 @@ def test_response_record_dm_surface_ignores_channel_card(db_session: Session) ->
     )
 
     assert record.slack_surface.kind == "dm"
-    assert record.style_profile == ResponseStyleProfile()
+    # DM ignores the channel card (no channel_voice), but now gets the richer
+    # DM default profile rather than the old terse static default (DM messaging
+    # fix): substantive replies in DMs, not a one-liner.
+    assert record.style_profile.channel_voice == ""
+    assert record.style_profile == ResponseStyleProfile(brevity="thorough but tight")
 
 
 def test_pinned_style_overrides_derived_channel_voice(db_session: Session) -> None:

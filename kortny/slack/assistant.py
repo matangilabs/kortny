@@ -48,14 +48,6 @@ from kortny.tasks import TaskIdentity, TaskService
 
 logger = logging.getLogger(__name__)
 
-# ≤4 prompts (Slack caps suggested prompts at 4). Kortny-voiced entry points.
-SUGGESTED_PROMPTS: tuple[str, ...] = (
-    "What's on my plate today?",
-    "Summarize this channel",
-    "What do you know about this workspace?",
-    "Create a schedule for me",
-)
-
 # ≤10 loading messages (Slack caps setStatus loading_messages at 10).
 LOADING_MESSAGES: tuple[str, ...] = (
     "Reading the thread...",
@@ -205,13 +197,12 @@ def register_assistant(
     @assistant.thread_started
     def handle_thread_started(
         say: Any,
-        set_suggested_prompts: Any,
         save_thread_context: Any,
         payload: dict[str, Any],
         logger: Any = logger,
     ) -> None:
         try:
-            set_suggested_prompts(prompts=list(SUGGESTED_PROMPTS))
+            # No suggested prompts: the "Try these prompts" block was noise.
             # Persist whatever context Slack handed us when the thread opened so
             # later message events (which lack it) can resolve the viewing
             # channel. Mirrors Assistant.default_thread_context_changed.

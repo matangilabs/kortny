@@ -102,6 +102,10 @@ Rules:
 - Avoid repetitive endings like "If you want..." unless a next step is
   genuinely useful and specific.
 - Keep it concise for Slack, but do not omit important recommendations.
+- When tool results contain concrete records the user asked about (issues,
+  tickets, rows, search hits, line items), LIST them as bullets with the
+  identifying detail (title/id/status/owner), do not collapse them to a count.
+  "You have one Linear issue" is wrong when you fetched the issue - show it.
 - Apply human editing principles: remove inflated/promotional language, cut
   chatbot artifacts, vary rhythm naturally, and preserve substance.
 - The style_profile may include channel_voice: match its register (formality,
@@ -254,6 +258,21 @@ class ResponseStyleProfile:
             polish="relaxed" if card.punctuation == "relaxed" else "professional",
             channel_voice=render_channel_voice(card),
         )
+
+
+def _default_style_profile(surface: SlackSurface) -> ResponseStyleProfile:
+    """Default profile when no channel style card applies.
+
+    DM/assistant surfaces have no channel card, but the reply should still be
+    substantive (DM messaging fix): the old static ``concise`` default made DM
+    answers a terse one-liner while the same query in a channel was richly
+    formatted. Give DM a more expansive brevity; leave the channel default
+    byte-identical so the channel path is unchanged.
+    """
+
+    if surface.kind == "channel":
+        return ResponseStyleProfile()
+    return ResponseStyleProfile(brevity="thorough but tight")
 
 
 CHANNEL_VOICE_TONES = {
@@ -951,7 +970,7 @@ def build_response_record(
         response_shape=response_shape,
         task_status=_response_status(failures),
         slack_surface=slack_surface,
-        style_profile=style_profile or ResponseStyleProfile(),
+        style_profile=style_profile or _default_style_profile(slack_surface),
         actions_taken=actions[-10:],
         evidence=evidence[-10:],
         artifacts=artifacts,

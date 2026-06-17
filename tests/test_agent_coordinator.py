@@ -935,6 +935,14 @@ def test_guardrail_limits_carry_default_web_search_soft_cap() -> None:
         )
         is None
     )
+    # HIG-269 follow-up: external runtime tools (Composio/MCP, find_tools-loaded)
+    # are capped by name prefix so a search/fetch tool can't loop the budget away
+    # (observed: notion_search called 8+ times -> max_tool_calls crash).
+    standard_limits = ExecutionGuardrailLimits.for_depth("standard_tool_task")
+    assert standard_limits.soft_cap_for("composio_notion_search_notion_page") == 6
+    assert standard_limits.soft_cap_for("mcp__context7__query_docs") == 6
+    # A native tool without an explicit cap is still uncapped.
+    assert standard_limits.soft_cap_for("slack_channel_history") is None
 
 
 def test_execution_budget_counts_tool_calls_by_name() -> None:
