@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from sqlalchemy import select
@@ -89,6 +90,23 @@ class McpExternalToolProvider:
                         read_only_bypass_allowed=server_trusted and pin_clean,
                     )
                 )
+        return tuple(tools)
+
+    def load_runtime_tools_for_slugs(
+        self, tool_slugs: Sequence[str]
+    ) -> tuple[Tool, ...]:
+        """Build executable tools for an explicit set of runtime names.
+
+        The runtime-loading seam for find_tools (HIG-269): MCP tools are keyed
+        by their runtime name (``mcp__<server>__<tool>``), which is what the
+        retriever returns, so match each enabled tool's runtime name against the
+        requested set and build only those.
+        """
+
+        wanted = {slug for slug in tool_slugs if slug}
+        if not wanted:
+            return ()
+        tools = [tool for tool in self.runtime_tools() if tool.name in wanted]
         return tuple(tools)
 
     def close(self) -> None:

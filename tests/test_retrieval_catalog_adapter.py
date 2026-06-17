@@ -144,3 +144,44 @@ def test_retrieve_fn_maps_ranked_cards_to_tool_slugs(db_session: Session) -> Non
     )
     assert report.case_count == 1
     assert report.scores[0].hit is True
+
+
+def test_retrieve_fn_ranks_mcp_extra_cards_alongside_composio(
+    db_session: Session,
+) -> None:
+    # HIG-269: MCP tools have no synced Composio catalog row; they enter the same
+    # ranked index via extra_cards and are returned by their runtime name so the
+    # caller's loader dispatches them.
+    from kortny.tool_selection import ToolCard
+
+    inst = _install(db_session)
+    db_session.add(
+        _card(inst.id, "linear", "LINEAR_LIST_ISSUES", "List Linear issues.")
+    )
+    db_session.commit()
+
+    mcp_card = ToolCard(
+        registry_name="mcp__docs__search_docs",
+        provider="mcp",
+        display_name="search_docs via docs (MCP)",
+        description="Search the documentation for a topic or page.",
+        capabilities=("external_tool", "mcp_integration"),
+        side_effect="read",
+        toolkit_slug="docs",
+        tool_slugs=("search_docs",),
+        tool_count=1,
+        required_fields=("query",),
+        visibility_scope_type="workspace",
+        visibility_scope_id=None,
+    )
+
+    retrieve_fn = build_catalog_retrieve_fn(
+        db_session,
+        toolkit_slugs=("linear",),
+        embedding_index=EmbeddingIndex(db_session, FakeEmbeddingBackend()),
+        extra_cards=(mcp_card,),
+    )
+    ranked = retrieve_fn("search the docs")
+
+    # Both providers are in the same ranked set; the MCP slug is its runtime name.
+    assert set(ranked) == {"LINEAR_LIST_ISSUES", "mcp__docs__search_docs"}
