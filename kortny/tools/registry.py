@@ -113,6 +113,21 @@ class ToolRegistry:
             raise DuplicateToolError(f"Tool already registered: {tool.name}")
         self._tools[tool.name] = tool
 
+    def register_if_absent(self, tool: Tool) -> bool:
+        """Register a tool unless its name is already present.
+
+        Returns True if newly registered. Runtime tool loading (find_tools,
+        HIG-269) may surface tools an earlier retrieval already loaded, so
+        re-registering must be a no-op rather than a DuplicateToolError.
+        """
+
+        if not tool.name:
+            raise ValueError("Tool name is required")
+        if tool.name in self._tools:
+            return False
+        self._tools[tool.name] = tool
+        return True
+
     def get(self, name: str) -> Tool:
         """Return a registered tool by name."""
 

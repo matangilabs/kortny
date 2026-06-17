@@ -467,6 +467,11 @@ class AgentCoordinator:
 
         for turn in range(1, self.max_turns + 1):
             self.task_service.raise_if_cancelled(task_obj, phase=f"before_turn_{turn}")
+            # Re-read the registry each turn so tools loaded at runtime by
+            # find_tools (HIG-269) become callable on the next turn. In the
+            # default pipeline mode the registry never mutates, so this is a
+            # no-op and behavior is unchanged.
+            schemas = self.registry.schemas()
             completion = self._complete_turn(task_obj, messages, schemas, turn)
             self.task_service.raise_if_cancelled(
                 task_obj, phase=f"after_turn_{turn}_completion"

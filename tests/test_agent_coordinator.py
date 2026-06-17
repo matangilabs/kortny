@@ -1165,6 +1165,83 @@ def test_coordinator_loop_repair_after_call_retries_exhausted(
     assert "agent_empty_response_retry" in messages
 
 
+def test_coordinator_exposes_runtime_loaded_tool_next_turn(
+    db_session: Session,
+) -> None:
+    # HIG-269 core mechanism: a tool registered mid-loop (as find_tools does)
+    # must become visible in the schemas AND callable on the next turn.
+    task = create_task(db_session, input_text="do the thing")
+    registry = ToolRegistry()
+
+    class LateTool:
+        name = "late_tool"
+        description = "added at runtime"
+        parameters: JsonSchema = {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        }
+        invoked = False
+
+        def invoke(self, args: JsonObject) -> ToolResult:
+            LateTool.invoked = True
+            return ToolResult(output={"done": True})
+
+    class LoaderTool:
+        name = "loader"
+        description = "loads late_tool at runtime"
+        parameters: JsonSchema = {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        }
+
+        def __init__(self, reg: ToolRegistry) -> None:
+            self._reg = reg
+
+        def invoke(self, args: JsonObject) -> ToolResult:
+            self._reg.register_if_absent(LateTool())
+            return ToolResult(output={"loaded": "late_tool"})
+
+    registry.register(LoaderTool(registry))
+
+    llm = FakeLLM(
+        [
+            Completion(
+                content=None,
+                tool_calls=(ToolCall(id="c1", name="loader", arguments={}),),
+                usage=TokenUsage(input_tokens=10, output_tokens=2),
+            ),
+            Completion(
+                content=None,
+                tool_calls=(ToolCall(id="c2", name="late_tool", arguments={}),),
+                usage=TokenUsage(input_tokens=10, output_tokens=2),
+            ),
+            Completion(
+                content="All done.",
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=10, output_tokens=2),
+            ),
+        ]
+    )
+
+    result = AgentCoordinator(
+        session=db_session,
+        llm=llm,
+        registry=registry,
+        execution_planner=NoopExecutionPlanner(),
+    ).run(task)
+
+    assert LateTool.invoked is True
+    assert result.result_summary == "All done."
+    # Turn 2's schemas (llm.calls[1][2]) must include the runtime-loaded tool.
+    turn2_tool_names = {schema["name"] for schema in llm.calls[1][2]}
+    assert "late_tool" in turn2_tool_names
+    # Turn 1 did not have it yet.
+    turn1_tool_names = {schema["name"] for schema in llm.calls[0][2]}
+    assert "late_tool" not in turn1_tool_names
+
+
 def test_coordinator_humanizes_memory_no_match_final_text(
     db_session: Session,
 ) -> None:

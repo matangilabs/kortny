@@ -127,6 +127,21 @@ _WORKBENCH_TIMEOUT_SECONDS = (
 )
 
 NATIVE_TOOL_METADATA: dict[str, ToolMetadata] = {
+    "find_tools": ToolMetadata(
+        name="find_tools",
+        namespace="native.meta",
+        category="Runtime",
+        display_name="Find tools",
+        capabilities=("tool_retrieval", "capability_lookup"),
+        side_effect="read",
+        approval="none",
+        # Constructed in the executor with runtime deps (retriever + loader +
+        # the live registry), not via the native factory, so it is excluded
+        # from the factory-registration invariant.
+        runtime_registered=False,
+        result_budget="bounded_results",
+        notes=("Agent-driven tool retrieval; loads external tools on demand.",),
+    ),
     "web_search": ToolMetadata(
         name="web_search",
         namespace="native.research",
