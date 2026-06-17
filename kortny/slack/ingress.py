@@ -17,6 +17,7 @@ from kortny.approvals import (
     TOOL_APPROVAL_PROMPT_PURPOSE,
     TOOL_APPROVAL_REJECTED_PURPOSE,
 )
+from kortny.composio.runtime import connected_toolkit_slugs
 from kortny.config import Settings, SettingsError, load_settings
 from kortny.db.models import (
     AssistantThreadContext,
@@ -1817,6 +1818,9 @@ class SlackIngress:
                         surface=_intent_surface(source),
                         is_thread_follow_up=_is_thread_follow_up(event),
                         has_files=bool(_event_files(event)),
+                        connected_integrations=connected_toolkit_slugs(
+                            self.session, task
+                        ),
                     ),
                 )
                 set_span_attributes(

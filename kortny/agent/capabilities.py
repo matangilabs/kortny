@@ -30,8 +30,17 @@ def build_capability_overview(
     native_descriptors: Sequence[ToolDescriptor],
     external_cards: Sequence[ToolCard],
     mcp_rows: Sequence[McpServer],
+    connected_composio_toolkits: Sequence[str] = (),
 ) -> CapabilityOverview:
-    """Assemble the capability overview from already-loaded sources."""
+    """Assemble the capability overview from already-loaded sources.
+
+    ``connected_composio_toolkits`` is the deterministic, DB-derived set of
+    active Composio toolkits for the task (HIG-274). It is authoritative: when an
+    intent routes a request away from external tools, ``external_cards`` is empty
+    and deriving the connected set from cards would make the agent capability-
+    blind (it then fabricates "not connected"). Unioning the deterministic set in
+    keeps the ``<capabilities>`` block accurate on every path.
+    """
 
     native_categories = tuple(
         dict.fromkeys(
@@ -52,6 +61,7 @@ def build_capability_overview(
                 for card in external_cards
                 if card.provider == "composio" and card.toolkit_slug
             }
+            | {slug for slug in connected_composio_toolkits if slug}
         )
     )
     mcp_servers = tuple((row.name, row.status) for row in mcp_rows)

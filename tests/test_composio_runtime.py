@@ -149,6 +149,53 @@ def test_composio_resolver_filters_to_matching_visibility(
     ]
 
 
+def test_connected_toolkit_slugs_returns_deduped_active_toolkits(
+    db_session: Session,
+) -> None:
+    from kortny.composio.runtime import connected_toolkit_slugs
+
+    task = create_task(db_session, slack_channel_id="CAlpha", slack_user_id="UAneesh")
+    add_connection(
+        db_session,
+        task,
+        connected_account_id="ca_linear",
+        scope_type="user",
+        scope_id="UAneesh",
+        toolkit_slug="linear",
+    )
+    add_connection(
+        db_session,
+        task,
+        connected_account_id="ca_notion",
+        scope_type="user",
+        scope_id="UAneesh",
+        toolkit_slug="notion",
+    )
+    # Disabled and out-of-scope connections must not appear in the snapshot.
+    add_connection(
+        db_session,
+        task,
+        connected_account_id="ca_disabled",
+        scope_type="user",
+        scope_id="UAneesh",
+        toolkit_slug="alpaca",
+        status="disabled",
+    )
+    add_connection(
+        db_session,
+        task,
+        connected_account_id="ca_other_user",
+        scope_type="user",
+        scope_id="USomeoneElse",
+        toolkit_slug="vercel",
+    )
+    db_session.commit()
+
+    slugs = connected_toolkit_slugs(db_session, task)
+
+    assert set(slugs) == {"linear", "notion"}
+
+
 def test_composio_execute_tool_uses_scoped_connection(
     db_session: Session,
 ) -> None:

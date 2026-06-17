@@ -35,6 +35,7 @@ from kortny.composio.connect import (
     park_payload,
 )
 from kortny.composio.provider import ComposioExternalToolProvider
+from kortny.composio.runtime import connected_toolkit_slugs
 from kortny.config import Settings, load_settings
 from kortny.db.models import (
     Artifact,
@@ -1615,6 +1616,7 @@ class AgentTaskExecutor:
                 native_descriptors=native_descriptors,
                 external_cards=external_cards,
                 mcp_rows=mcp_rows,
+                connected_composio_toolkits=connected_toolkit_slugs(session, task),
             )
         except Exception:
             logger.warning(
@@ -1717,6 +1719,30 @@ class AgentTaskExecutor:
         )
         raw_intent = _latest_intent_decision(session, task)
         effective_decision = effective_intent_decision(raw_intent)
+        selector_intent_classification: str | None = None
+        selector_likely_tools: list[str] = []
+        selector_toolkit_affinity: list[str] = []
+        if effective_decision is not None:
+            raw_cls = effective_decision.get("classification")
+            if isinstance(raw_cls, str) and raw_cls:
+                selector_intent_classification = raw_cls
+            raw_lt = effective_decision.get("likely_tools")
+            if isinstance(raw_lt, list):
+                selector_likely_tools = [
+                    item for item in raw_lt if isinstance(item, str) and item
+                ]
+            raw_affinity = effective_decision.get("toolkit_affinity")
+            if isinstance(raw_affinity, list | tuple):
+                selector_toolkit_affinity = [
+                    item for item in raw_affinity if isinstance(item, str) and item
+                ]
+        # Reachability floor (HIG-274): protect connected tools whose toolkit the
+        # intent named so relevance trimming can never strip them to an empty set.
+        protected_toolkits = frozenset(
+            slug.casefold()
+            for slug in (*selector_toolkit_affinity, *selector_likely_tools)
+            if slug
+        )
         semantic_ranked = self._semantic_tool_scores(
             settings=settings,
             session=session,
@@ -1740,6 +1766,7 @@ class AgentTaskExecutor:
             cards=external_cards,
             max_candidates=max_candidates,
             semantic_scores=semantic_scores,
+            protected_toolkits=protected_toolkits,
         )
         if compaction.compacted:
             task_service.append_event(
@@ -1767,23 +1794,6 @@ class AgentTaskExecutor:
             task=task,
             task_service=task_service,
         )
-        selector_intent_classification: str | None = None
-        selector_likely_tools: list[str] = []
-        selector_toolkit_affinity: list[str] = []
-        if effective_decision is not None:
-            raw_cls = effective_decision.get("classification")
-            if isinstance(raw_cls, str) and raw_cls:
-                selector_intent_classification = raw_cls
-            raw_lt = effective_decision.get("likely_tools")
-            if isinstance(raw_lt, list):
-                selector_likely_tools = [
-                    item for item in raw_lt if isinstance(item, str) and item
-                ]
-            raw_affinity = effective_decision.get("toolkit_affinity")
-            if isinstance(raw_affinity, list | tuple):
-                selector_toolkit_affinity = [
-                    item for item in raw_affinity if isinstance(item, str) and item
-                ]
         try:
             selection = selector.select(
                 task_id=task.id,

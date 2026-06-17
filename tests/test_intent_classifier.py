@@ -112,6 +112,28 @@ def test_llm_intent_classifier_returns_typed_decision() -> None:
     assert llm.calls[0][3] == {"type": "json_object"}
 
 
+def test_intent_request_payload_carries_connected_integrations() -> None:
+    # HIG-274: the classifier must see the connected set as ground truth so it can
+    # route "my plate"-style queries to real surfaces instead of guessing.
+    llm = FakeIntentLLM(valid_decision_json())
+
+    LLMIntentClassifier(llm=llm).classify(
+        task_id=uuid.uuid4(),
+        request=IntentRequest(
+            text="what's on my plate today?",
+            surface=IntentSurface.app_mention,
+            connected_integrations=("linear", "notion"),
+        ),
+    )
+
+    payload = "".join(
+        str(message.content) for message in llm.calls[0][1] if message.role == "user"
+    )
+    assert "connected_integrations" in payload
+    assert "linear" in payload
+    assert "notion" in payload
+
+
 def test_llm_intent_classifier_can_run_before_task_creation() -> None:
     provider = FakeIntentProvider(valid_decision_json())
 

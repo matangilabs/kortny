@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from kortny.agent.capabilities import (
     CapabilityOverview,
     build_capability_overview,
+    render_capability_overview,
 )
 from kortny.agent.context import (
     DEFAULT_SKILLS_CONTEXT_MAX_SKILLS,
@@ -352,6 +353,24 @@ def test_build_capability_overview_from_sources(db_session: Session) -> None:
     assert overview.disabled_native == (("web_search", "Missing key"),)
     assert overview.composio_toolkits == ("linear",)
     assert overview.mcp_servers == (("context7", "enabled"),)
+
+
+def test_capability_overview_uses_connected_toolkits_without_cards() -> None:
+    # HIG-274 regression: when intent routes a request away from external tools,
+    # external_cards is empty. The connected set must still be authoritative so
+    # the <capabilities> block does not go blind and the agent does not fabricate
+    # "not connected" (the c65e7b2f failure).
+    overview = build_capability_overview(
+        native_descriptors=(make_descriptor("echo", category="Documents"),),
+        external_cards=(),
+        mcp_rows=(),
+        connected_composio_toolkits=("notion", "linear"),
+    )
+
+    assert overview.composio_toolkits == ("linear", "notion")
+    rendered = render_capability_overview(overview)
+    assert "linear" in rendered
+    assert "notion" in rendered
 
 
 def test_capability_card_is_second_message_after_system_prompt(

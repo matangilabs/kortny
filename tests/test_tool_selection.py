@@ -251,6 +251,53 @@ def test_compact_tool_cards_keeps_relevant_candidates_under_budget() -> None:
     assert selected[0].registry_name == "composio_firecrawl_search"
 
 
+def test_compact_tool_cards_floor_keeps_connected_named_toolkit() -> None:
+    # HIG-274: "my open Linear issues" scores low lexically against a generic
+    # Linear card, so relevance trimming would drop it and the selector would
+    # return []. The reachability floor protects the intent-named connected
+    # toolkit so it survives to the selector.
+    cards = tuple(
+        ToolCard(
+            registry_name=f"composio_other_{index}",
+            provider="composio",
+            display_name=f"Other {index}",
+            description="Generic integration tool.",
+            capabilities=("external_tool",),
+            side_effect="read",
+            toolkit_slug="other",
+        )
+        for index in range(6)
+    ) + (
+        ToolCard(
+            registry_name="composio_linear_list_issues",
+            provider="composio",
+            display_name="Linear list issues",
+            description="List issues assigned to a user.",
+            capabilities=("external_tool",),
+            side_effect="read",
+            toolkit_slug="linear",
+        ),
+    )
+
+    unprotected, _ = compact_tool_cards(
+        task_input="what's on my plate today",
+        cards=cards,
+        max_candidates=3,
+    )
+    assert "composio_linear_list_issues" not in {
+        card.registry_name for card in unprotected
+    }
+
+    protected, compaction = compact_tool_cards(
+        task_input="what's on my plate today",
+        cards=cards,
+        max_candidates=3,
+        protected_toolkits=frozenset({"linear"}),
+    )
+    assert "composio_linear_list_issues" in {card.registry_name for card in protected}
+    assert compaction.reason == "relevance_cap_floor"
+
+
 def test_llm_selector_forces_tools_for_explicitly_named_toolkit() -> None:
     # Reproduces the production incident: the cheap selector LLM declined the
     # context7 MCP tools ("native web_search can check the docs") even though
