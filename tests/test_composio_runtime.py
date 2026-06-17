@@ -193,6 +193,61 @@ def test_connected_toolkit_slugs_returns_deduped_active_toolkits(
     assert set(slugs) == {"linear", "notion"}
 
 
+def test_connected_toolkit_slugs_for_scope_matches_task_path(
+    db_session: Session,
+) -> None:
+    """The pre-task scope primitive grounds identically to the task path.
+
+    The soft channel-mention surface classifies before a Task row exists, so it
+    grounds from an ``IngressConnectionScope`` built from the raw event. That
+    must yield the same toolkits the persisted-task path would (HIG-269).
+    """
+
+    from kortny.composio.runtime import (
+        IngressConnectionScope,
+        connected_toolkit_slugs,
+        connected_toolkit_slugs_for_scope,
+    )
+
+    task = create_task(db_session, slack_channel_id="CAlpha", slack_user_id="UAneesh")
+    add_connection(
+        db_session,
+        task,
+        connected_account_id="ca_linear",
+        scope_type="user",
+        scope_id="UAneesh",
+        toolkit_slug="linear",
+    )
+    add_connection(
+        db_session,
+        task,
+        connected_account_id="ca_channel_notion",
+        scope_type="channel",
+        scope_id="CAlpha",
+        toolkit_slug="notion",
+    )
+    # A user-scoped connection for someone else must stay invisible to this scope.
+    add_connection(
+        db_session,
+        task,
+        connected_account_id="ca_other_user",
+        scope_type="user",
+        scope_id="USomeoneElse",
+        toolkit_slug="vercel",
+    )
+    db_session.commit()
+
+    scope = IngressConnectionScope(
+        installation_id=task.installation_id,
+        slack_channel_id="CAlpha",
+        slack_user_id="UAneesh",
+    )
+    scope_slugs = connected_toolkit_slugs_for_scope(db_session, scope)
+
+    assert set(scope_slugs) == {"linear", "notion"}
+    assert set(scope_slugs) == set(connected_toolkit_slugs(db_session, task))
+
+
 def test_composio_execute_tool_uses_scoped_connection(
     db_session: Session,
 ) -> None:
