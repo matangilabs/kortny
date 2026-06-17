@@ -25,6 +25,7 @@ from kortny.agent import (
     RecoveryAction,
     ToolApprovalRequired,
 )
+from kortny.agent import coordinator as coordinator_module
 from kortny.agent.planner import ExecutionPlanner
 from kortny.agent.thread_context import ThreadTranscriptMessage
 from kortny.approvals import TOOL_APPROVAL_REQUIRED_MESSAGE
@@ -481,6 +482,71 @@ def test_coordinator_finishes_with_final_answer(db_session: Session) -> None:
     assert context_event.payload["context_engine_id"] == "kortny.default_context_engine"
     assert context_event.payload["context_engine_name"] == "Default Context Engine"
     assert context_event.payload["context_budget"]["thread_context_max_chars"] == 12000
+
+
+def _empty_completion(response_id: str) -> Completion:
+    return Completion(
+        content="",
+        tool_calls=(),
+        usage=TokenUsage(input_tokens=8, output_tokens=0),
+        response_id=response_id,
+        model="openrouter/google/gemini-2.5-flash-lite",
+    )
+
+
+def test_coordinator_retries_empty_completion_then_succeeds(
+    db_session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # HIG-270: a transient empty completion (cheap-model blip) must be retried at
+    # the call layer and not consume an agent turn or fail the task.
+    monkeypatch.setattr("kortny.agent.coordinator.EMPTY_COMPLETION_BACKOFF_SECONDS", 0)
+    task = create_task(db_session, input_text="summarize this")
+    llm = FakeLLM(
+        [
+            _empty_completion("gen-empty-1"),
+            Completion(
+                content="Here is the summary.",
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=10, output_tokens=5),
+                response_id="gen-final",
+                model="openai/gpt-4o-mini",
+            ),
+        ]
+    )
+
+    result = AgentCoordinator(
+        session=db_session,
+        llm=llm,
+        registry=ToolRegistry(),
+    ).run(task)
+
+    assert result.result_summary == "Here is the summary."
+    assert result.turns == 1  # the empty retry did NOT consume a turn
+    assert len(llm.calls) == 2  # one empty + one good, both at the call layer
+    events = task_events(db_session, task)
+    assert "agent_empty_completion_retry" in event_messages(events)
+
+
+def test_coordinator_degrades_gracefully_on_persistent_empty(
+    db_session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # HIG-270: persistently empty even after retries -> graceful fallback message,
+    # NOT a hard crash surfaced to the user as "Something went wrong".
+    monkeypatch.setattr("kortny.agent.coordinator.EMPTY_COMPLETION_BACKOFF_SECONDS", 0)
+    task = create_task(db_session, input_text="is notion connected?")
+    llm = FakeLLM([_empty_completion(f"gen-empty-{i}") for i in range(3)])
+
+    result = AgentCoordinator(
+        session=db_session,
+        llm=llm,
+        registry=ToolRegistry(),
+        max_turns=1,
+    ).run(task)
+
+    assert result.result_summary == coordinator_module.EMPTY_FINAL_FALLBACK_MESSAGE
+    assert len(llm.calls) == 3  # EMPTY_COMPLETION_RETRIES + 1 attempts
+    events = task_events(db_session, task)
+    assert "agent_empty_final_fallback" in event_messages(events)
 
 
 def test_coordinator_reports_assistant_status(db_session: Session) -> None:
@@ -1042,17 +1108,61 @@ def test_coordinator_retries_empty_response_after_tool_result(
         execution_planner=NoopExecutionPlanner(),
     ).run(task)
 
+    # HIG-270: the empty completion after the tool result is now absorbed at the
+    # CALL layer (agent_empty_completion_retry) — it is retried with the same
+    # messages without consuming an agent turn, so the loop-level repair prompt
+    # is not injected for a single transient blip. The final answer still lands.
     assert result.result_summary == "I found the memory topic."
     assert len(llm.calls) == 3
-    assert any(
+    assert not any(
         message.role == "system"
         and "previous response was empty" in (message.content or "")
         for message in llm.calls[2][1]
     )
     assert any(
-        event.payload.get("message") == "agent_empty_response_retry"
+        event.payload.get("message") == "agent_empty_completion_retry"
         for event in task_events(db_session, task)
     )
+
+
+def test_coordinator_loop_repair_after_call_retries_exhausted(
+    db_session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # HIG-270 defense-in-depth: when call-level retries are exhausted (3 empties),
+    # the loop-level repair prompt still fires and a later turn recovers.
+    monkeypatch.setattr("kortny.agent.coordinator.EMPTY_COMPLETION_BACKOFF_SECONDS", 0)
+    task = create_task(db_session, input_text="answer this")
+    llm = FakeLLM(
+        [
+            _empty_completion("gen-empty-1"),
+            _empty_completion("gen-empty-2"),
+            _empty_completion("gen-empty-3"),
+            Completion(
+                content="Recovered answer.",
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=12, output_tokens=4),
+                response_id="gen-good",
+                model="openai/gpt-4o-mini",
+            ),
+        ]
+    )
+
+    result = AgentCoordinator(
+        session=db_session,
+        llm=llm,
+        registry=ToolRegistry(),
+    ).run(task)
+
+    assert result.result_summary == "Recovered answer."
+    assert len(llm.calls) == 4  # 3 exhausted call-retries + 1 recovered turn
+    assert any(
+        message.role == "system"
+        and "previous response was empty" in (message.content or "")
+        for message in llm.calls[3][1]
+    )
+    messages = event_messages(task_events(db_session, task))
+    assert "agent_empty_completion_retry" in messages
+    assert "agent_empty_response_retry" in messages
 
 
 def test_coordinator_humanizes_memory_no_match_final_text(

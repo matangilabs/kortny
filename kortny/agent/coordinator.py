@@ -136,6 +136,19 @@ EMPTY_RESPONSE_REPAIR_PROMPT = (
     "results to either call the next required tool or provide a concise final "
     "answer. Do not return an empty message."
 )
+# Cheap models (e.g. gemini-2.5-flash-lite) intermittently return an empty
+# completion (no content, no tool calls; LiteLLM logs finish_reason 'error').
+# Retry the COMPLETION itself a couple times before it reaches the agent loop,
+# so a transient provider blip does not consume the (tight) turn budget and
+# hard-fail the task. See HIG-270 (LLM-call substrate hardening).
+EMPTY_COMPLETION_RETRIES = 2
+EMPTY_COMPLETION_BACKOFF_SECONDS = 0.5
+# Shown when the model returns no usable content even after call-level retries:
+# a graceful, retryable reply beats surfacing a hard failure to the user.
+EMPTY_FINAL_FALLBACK_MESSAGE = (
+    "I hit a hiccup composing a reply just now. Mind trying again, "
+    "or rephrasing the request?"
+)
 DEFAULT_SYSTEM_PROMPT = (
     "You are __AGENT_NAME__, a Slack-native AI coworker. Use the available tools when "
     "they are needed to complete the user's request. If the user asks for "
@@ -538,15 +551,7 @@ class AgentCoordinator:
                 "tool_count": len(schemas),
             },
         )
-        try:
-            completion = self.llm.complete(
-                task_id=task.id,
-                messages=messages,
-                tools=schemas,
-            )
-        except Exception as exc:
-            self._append_error(task, exc, {"turn": turn, "phase": "llm_complete"})
-            raise
+        completion = self._complete_with_empty_retry(task, messages, schemas, turn)
 
         self._append_log(
             task,
@@ -563,6 +568,51 @@ class AgentCoordinator:
             },
         )
         return completion
+
+    def _complete_with_empty_retry(
+        self,
+        task: Task,
+        messages: list[ChatMessage],
+        schemas: Sequence[JsonSchema],
+        turn: int,
+    ) -> Completion:
+        """Call the LLM, retrying transient EMPTY completions at the call layer.
+
+        An empty completion (no content and no tool calls) is the signature of a
+        provider blip on cheap models. Retrying the call here — rather than
+        letting it fall through to the agent loop — means the blip costs a retry,
+        not an agent turn, so it cannot exhaust a tight turn budget and hard-fail
+        the task (HIG-270).
+        """
+
+        last: Completion | None = None
+        for attempt in range(EMPTY_COMPLETION_RETRIES + 1):
+            try:
+                completion = self.llm.complete(
+                    task_id=task.id,
+                    messages=messages,
+                    tools=schemas,
+                )
+            except Exception as exc:
+                self._append_error(task, exc, {"turn": turn, "phase": "llm_complete"})
+                raise
+            last = completion
+            if (completion.content or "").strip() or completion.tool_calls:
+                return completion
+            if attempt < EMPTY_COMPLETION_RETRIES:
+                self._append_log(
+                    task,
+                    "agent_empty_completion_retry",
+                    {
+                        "turn": turn,
+                        "attempt": attempt + 1,
+                        "model": completion.model,
+                    },
+                )
+                if EMPTY_COMPLETION_BACKOFF_SECONDS:
+                    time.sleep(EMPTY_COMPLETION_BACKOFF_SECONDS)
+        assert last is not None
+        return last
 
     def _tool_status(self, tool_name: str) -> str:
         """Human activity status for a tool, enriched with its catalog name."""
@@ -1069,15 +1119,22 @@ class AgentCoordinator:
     ) -> AgentRunResult:
         summary = _humanize_memory_no_match(task.input, content or "").strip()
         if not summary:
-            error = AgentLoopError("Agent returned no final content or tool calls")
-            self._fail_execution_plan(
+            # Persistently empty even after call-level retries (HIG-270): a
+            # transient model blip should degrade to a clear, retryable message,
+            # not a hard crash surfaced to the user as "Something went wrong".
+            self._append_log(
                 task,
-                plan,
-                error,
+                "agent_empty_final_fallback",
                 {"turn": turn, "phase": "final_content"},
             )
-            self._append_error(task, error, {"turn": turn, "phase": "final_content"})
-            raise error
+            return self._finish(
+                task,
+                summary=EMPTY_FINAL_FALLBACK_MESSAGE,
+                turn=turn,
+                artifact_count=0,
+                reason="empty_final_fallback",
+                plan=plan,
+            )
 
         return self._finish(
             task,
