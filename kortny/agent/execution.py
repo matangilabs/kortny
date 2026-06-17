@@ -26,6 +26,16 @@ _DEFAULT_SOFT_TOOL_CALL_CAPS: Mapping[str, int] = {
     "web_search": 4,
 }
 
+# External runtime tools (Composio / MCP, loaded via find_tools) are the loop
+# risk: a search/fetch tool called with a fresh query each turn dodges the
+# identical-call circuit breaker and can burn the whole tool budget (observed:
+# notion_search called 8+ times -> max_tool_calls crash). Cap any external tool
+# by NAME prefix so the agent gets the same "you have enough" recoverable nudge.
+# Native build/export tools (sandbox_*, pdf_generator, ...) are NOT prefixed and
+# stay uncapped — they legitimately repeat. (HIG-269 follow-up.)
+_EXTERNAL_TOOL_PREFIXES: tuple[str, ...] = ("composio_", "mcp__")
+_EXTERNAL_TOOL_SOFT_CAP = 6
+
 
 class ExecutionMode(StrEnum):
     """Coordinator execution modes."""
@@ -67,10 +77,23 @@ class ExecutionGuardrailLimits:
         default_factory=lambda: dict(_DEFAULT_SOFT_TOOL_CALL_CAPS)
     )
 
-    def soft_cap_for(self, tool_name: str) -> int | None:
-        """Return the per-task call ceiling for ``tool_name``, if any."""
+    external_tool_soft_cap: int = _EXTERNAL_TOOL_SOFT_CAP
 
-        return self.soft_tool_call_caps.get(tool_name)
+    def soft_cap_for(self, tool_name: str) -> int | None:
+        """Return the per-task call ceiling for ``tool_name``, if any.
+
+        Explicit per-tool caps win; otherwise any external runtime tool
+        (Composio/MCP, by name prefix) gets the external default so a
+        find_tools-loaded search/fetch tool cannot loop the budget away. Native
+        tools without an explicit cap stay uncapped.
+        """
+
+        explicit = self.soft_tool_call_caps.get(tool_name)
+        if explicit is not None:
+            return explicit
+        if tool_name.startswith(_EXTERNAL_TOOL_PREFIXES):
+            return self.external_tool_soft_cap
+        return None
 
     @classmethod
     def for_depth(cls, depth: str) -> ExecutionGuardrailLimits:
