@@ -2107,6 +2107,7 @@ class AgentTaskExecutor:
                         settings=settings, session=session
                     ),
                     top_k=settings.tool_retrieval_top_k,
+                    forced_toolkits=_intent_forced_toolkits(session, task),
                 )
             )
         if settings.mcp_enabled and self._installation_has_mcp_servers(session, task):
@@ -3551,6 +3552,27 @@ def _should_suppress_slack_post(session: Session, task: Task) -> bool:
     if request_event is None:
         return False
     return request_event.payload.get(CHANNEL_ASSESSMENT_SUPPRESS_SLACK_POST_KEY) is True
+
+
+def _intent_forced_toolkits(session: Session, task: Task) -> tuple[str, ...]:
+    """Connected toolkits the grounded intent named, for the catalog floor.
+
+    HIG-274: the capability-grounded classifier resolves "my work / my plate" to
+    the connected work tracker via ``toolkit_affinity``. The Composio provider
+    must keep those toolkits reachable past its top_k catalog ranking so the
+    agent can actually answer instead of claiming the integration "isn't wired
+    in" (task c65e7b2f).
+    """
+
+    decision = effective_intent_decision(_latest_intent_decision(session, task))
+    if decision is None:
+        return ()
+    slugs: list[str] = []
+    for key in ("toolkit_affinity", "likely_tools"):
+        raw = decision.get(key)
+        if isinstance(raw, list | tuple):
+            slugs.extend(item for item in raw if isinstance(item, str) and item)
+    return tuple(dict.fromkeys(slug.casefold() for slug in slugs if slug))
 
 
 def _external_tool_skip_reason(
