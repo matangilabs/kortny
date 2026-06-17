@@ -341,6 +341,49 @@ def test_llm_selector_forces_tools_for_explicitly_named_toolkit() -> None:
     assert "explicit_toolkit_forced" in result.route_reason
 
 
+def test_llm_selector_floors_connected_toolkit_from_grounded_intent() -> None:
+    # HIG-274 / task c65e7b2f: "what's on my plate" never names Linear, but the
+    # capability-grounded classifier infers toolkit_affinity=["linear"] because
+    # Linear is connected. The selector LLM still returned [] and routed native,
+    # so the agent fabricated "Linear isn't wired in". The intent-grounded floor
+    # must force the connected, intent-named toolkit in.
+    linear_cards = tuple(
+        ToolCard(
+            registry_name=f"composio_linear_{slug}",
+            provider="composio",
+            display_name=f"Linear {slug}",
+            description="Work with Linear issues.",
+            capabilities=("external_tool",),
+            side_effect="read",
+            toolkit_slug="linear",
+            tool_slugs=(slug,),
+        )
+        for slug in ("list_issues",)
+    )
+    provider = FakeSelectorLLM(
+        content="""
+        {
+          "selected_tools": [],
+          "suppressed_native_tools": [],
+          "rejected_tools": [],
+          "route_reason": "no specific tool mentioned, use native"
+        }
+        """
+    )
+
+    result = LLMToolSelector(provider).select(
+        task_id=uuid.uuid4(),
+        task_input="what's on my plate today?",
+        native_cards=(native_slack_history_card(),),
+        external_cards=linear_cards,
+        toolkit_affinity=("linear",),
+        likely_tools=("linear",),
+    )
+
+    assert "composio_linear_list_issues" in set(result.selected_names)
+    assert "intent_grounded_floor" in result.route_reason
+
+
 def test_compact_tool_cards_ranks_mcp_tools_above_generic_catalog_cards() -> None:
     composio_cards = tuple(
         ToolCard(

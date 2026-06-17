@@ -148,6 +148,33 @@ class LLMToolSelector:
                 selected_tools=parsed.selected_tools + forced,
                 route_reason=f"{parsed.route_reason}+explicit_toolkit_forced",
             )
+        # Reachability floor (HIG-274): if the grounded intent named a connected
+        # toolkit but the selector picked nothing from it, force it in so the
+        # agent never claims a connected integration "isn't wired in".
+        selected_toolkits = {
+            (card.toolkit_slug or "").casefold()
+            for selection in parsed.selected_tools
+            for card in external_cards
+            if card.registry_name == selection.registry_name and card.toolkit_slug
+        }
+        unmet_affinity = [
+            slug
+            for slug in toolkit_affinity
+            if slug and slug.casefold() not in selected_toolkits
+        ]
+        grounded = _intent_grounded_selections(
+            external_cards=external_cards,
+            affinity_slugs=unmet_affinity,
+            already_selected={
+                selection.registry_name for selection in parsed.selected_tools
+            },
+        )
+        if grounded:
+            parsed = replace(
+                parsed,
+                selected_tools=parsed.selected_tools + grounded,
+                route_reason=f"{parsed.route_reason}+intent_grounded_floor",
+            )
         return replace(
             parsed,
             route_reason=_budgeted_route_reason(parsed.route_reason, budget),
@@ -458,6 +485,49 @@ def _explicitly_requested_selections(
                 registry_name=card.registry_name,
                 confidence=0.9,
                 reason=f"{EXPLICIT_REQUEST_REASON_PREFIX} {card.toolkit_slug}",
+            )
+        )
+    return tuple(forced)
+
+
+INTENT_GROUNDED_REASON_PREFIX = "intent grounded connected toolkit"
+
+
+def _intent_grounded_selections(
+    *,
+    external_cards: Sequence[ToolCard],
+    affinity_slugs: Sequence[str],
+    already_selected: set[str],
+) -> tuple[ToolSelection, ...]:
+    """Force-include connected tools whose toolkit the grounded intent named.
+
+    The capability-grounded classifier emits ``toolkit_affinity`` from the
+    connected set, so for a query like "what's on my plate" it resolves to the
+    connected work tracker (e.g. ``linear``) without the user typing it. The
+    cheap selector LLM still sometimes returns ``selected_tools: []`` and routes
+    to a native tool, which makes the agent claim the integration "isn't wired
+    in" (task c65e7b2f). When intent names a connected toolkit, reaching it must
+    not be subject to LLM judgment (HIG-274). This is the selection-time analog
+    of the verbatim ``_explicitly_requested_selections`` floor.
+    """
+
+    wanted = {slug.casefold() for slug in affinity_slugs if slug}
+    if not wanted:
+        return ()
+    forced: list[ToolSelection] = []
+    for card in external_cards:
+        if len(forced) >= MAX_FORCED_TOOLKIT_SELECTIONS:
+            break
+        slug = (card.toolkit_slug or "").casefold()
+        if not slug or slug not in wanted:
+            continue
+        if card.registry_name in already_selected:
+            continue
+        forced.append(
+            ToolSelection(
+                registry_name=card.registry_name,
+                confidence=0.85,
+                reason=f"{INTENT_GROUNDED_REASON_PREFIX} {card.toolkit_slug}",
             )
         )
     return tuple(forced)
