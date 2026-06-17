@@ -17,7 +17,11 @@ from kortny.approvals import (
     TOOL_APPROVAL_PROMPT_PURPOSE,
     TOOL_APPROVAL_REJECTED_PURPOSE,
 )
-from kortny.composio.runtime import connected_toolkit_slugs
+from kortny.composio.runtime import (
+    IngressConnectionScope,
+    connected_toolkit_slugs,
+    connected_toolkit_slugs_for_scope,
+)
 from kortny.config import Settings, SettingsError, load_settings
 from kortny.db.models import (
     AssistantThreadContext,
@@ -527,6 +531,9 @@ class SlackIngress:
             event=event,
             input_text=input_text,
             app_name=app_name,
+            installation_id=installation.id,
+            channel_id=channel_id,
+            user_id=user_id,
         )
         if intent_decision is None:
             self.inbound_events.mark_ignored(
@@ -1862,6 +1869,9 @@ class SlackIngress:
         event: Mapping[str, Any],
         input_text: str,
         app_name: str,
+        installation_id: Any,
+        channel_id: str,
+        user_id: str,
     ) -> IntentDecision | None:
         if self.intent_classifier is None:
             logger.info(
@@ -1869,6 +1879,18 @@ class SlackIngress:
                 event.get("channel"),
             )
             return None
+        # Ground the classifier with what is actually connected (HIG-269/274).
+        # This path classifies before a Task row exists, so derive the scope
+        # straight from the event — otherwise soft mentions are the one surface
+        # that routes blind to connected integrations.
+        connected_integrations = connected_toolkit_slugs_for_scope(
+            self.session,
+            IngressConnectionScope(
+                installation_id=installation_id,
+                slack_channel_id=channel_id,
+                slack_user_id=user_id,
+            ),
+        )
         try:
             with start_span(
                 "intent.classify",
@@ -1888,6 +1910,7 @@ class SlackIngress:
                         app_name=app_name,
                         is_thread_follow_up=_is_thread_follow_up(event),
                         has_files=bool(_event_files(event)),
+                        connected_integrations=connected_integrations,
                     ),
                 )
                 set_span_attributes(

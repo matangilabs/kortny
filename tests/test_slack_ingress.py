@@ -17,6 +17,7 @@ from kortny.approvals import (
 )
 from kortny.db.models import (
     Artifact,
+    ComposioConnection,
     EncryptedSecret,
     Installation,
     LLMUsage,
@@ -1665,6 +1666,53 @@ def test_soft_channel_message_creates_task_after_high_confidence_intent(
         and event.payload.get("source") == "channel_message"
         for event in task_events(db_session, result.task)
     )
+
+
+def test_soft_channel_message_grounds_classifier_with_connected_integrations(
+    db_session: Session,
+) -> None:
+    """The soft-mention path must classify with connected integrations.
+
+    It classifies before a Task row exists, so it long routed blind to what was
+    connected — the one ingress surface missing capability grounding (HIG-269).
+    Seed a connection and assert the classifier sees it.
+    """
+
+    installation = create_installation(db_session, slack_team_id="T123")
+    db_session.add(
+        ComposioConnection(
+            installation_id=installation.id,
+            toolkit_slug="notion",
+            auth_config_id="ac_notion",
+            connected_account_id="ca_notion",
+            connection_request_id="ln_notion",
+            composio_user_id="slack:soft:U123",
+            owner_slack_user_id="U123",
+            visibility_scope_type="workspace",
+            visibility_scope_id=None,
+            status="active",
+        )
+    )
+    db_session.commit()
+
+    client = FakeSlackClient()
+    classifier = FakeIntentClassifier(intent_decision(), require_task_id=False)
+
+    SlackIngress(
+        session=db_session,
+        client=client,
+        intent_classifier=classifier,
+    ).handle_channel_message(
+        body=message_body(event_id="EvSoftMentionGrounded"),
+        event=channel_event(text="Kortny what notes can you see on Notion?"),
+        app_name="kortny",
+    )
+    db_session.commit()
+
+    assert classifier.calls
+    request = classifier.calls[0][1]
+    assert request.surface is IntentSurface.channel_message
+    assert "notion" in request.connected_integrations
 
 
 def test_soft_channel_message_ignores_third_person_reference(
