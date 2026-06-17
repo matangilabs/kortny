@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 import logging
 import time
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, cast
 
@@ -43,7 +43,6 @@ from kortny.db.models import (
     Task,
     TaskEvent,
     TaskEventType,
-    TaskStatus,
 )
 from kortny.db.models import LLMProvider as DbLLMProvider
 from kortny.embeddings import EmbeddingBackend, EmbeddingIndex, create_embedding_backend
@@ -69,7 +68,6 @@ from kortny.llm.runtime_config import (
     create_provider_for_selection,
     select_runtime_model,
 )
-from kortny.mcp.provider import McpExternalToolProvider
 from kortny.memory import WorkspaceStateService
 from kortny.observability import log_observation
 from kortny.observe.assessment import (
@@ -127,18 +125,7 @@ from kortny.slack.reactions import (
 from kortny.slack.response_blocks import render_response_blocks
 from kortny.slack.thread_context import SlackThreadTranscriptProvider
 from kortny.tasks import TaskCancelledError, TaskService
-from kortny.tool_selection import (
-    ExternalToolProvider,
-    HeuristicToolSelector,
-    LLMToolSelector,
-    ToolCatalogService,
-    ToolSelection,
-    ToolSelectionResult,
-    ToolSelector,
-    arbitrate,
-    compact_tool_cards,
-    tool_card_embedding_text,
-)
+from kortny.tool_selection import ExternalToolProvider
 from kortny.tools import JsonObject, Tool, ToolRegistry, WebSearchTool
 from kortny.tools.catalog import (
     native_slack_context_hint_names,
@@ -266,7 +253,6 @@ class AgentTaskExecutor:
         workspace_base_dir: Path | str | None = None,
         system_prompt: str | None = DEFAULT_SYSTEM_PROMPT,
         reaction_provider: ReactionProvider | None = None,
-        tool_selector: ToolSelector | None = None,
         composio_client: Any | None = None,
         response_synthesizer: ResponseSynthesizer | None = None,
     ) -> None:
@@ -280,7 +266,6 @@ class AgentTaskExecutor:
         self.workspace_base_dir = workspace_base_dir
         self.system_prompt = system_prompt
         self.reaction_provider = reaction_provider or LibraryReactionProvider()
-        self.tool_selector = tool_selector
         self.composio_client = composio_client
         self.response_synthesizer = response_synthesizer
         # External tool providers created for the in-flight task; closed in the
@@ -1516,99 +1501,18 @@ class AgentTaskExecutor:
             task_service=task_service,
             decision=raw_intent_decision,
         )
-        skip_external_reason = _external_tool_skip_reason(
-            session,
-            task,
-            decision=raw_intent_decision,
-            native_web_search_available=web_search is not None,
-        )
-        if skip_external_reason is not None:
-            task_service.append_event(
-                task,
-                TaskEventType.log,
-                {
-                    "message": "external_tool_selection_skipped",
-                    **skip_external_reason,
-                },
-            )
-            log_observation(
-                logger,
-                "external_tool_selection_skipped",
-                task=task,
-                reason=skip_external_reason["reason"],
-                classification=skip_external_reason.get("classification"),
-            )
-            self._capability_overview = self._build_capability_overview(
-                settings=settings,
-                session=session,
-                task=task,
-                external_cards=(),
-            )
-            return self._finalize_registry(
-                ToolRegistry(native_tools),
-                settings=settings,
-                session=session,
-                task=task,
-            )
-
-        if settings.tool_access == "retrieval":
-            # Retrieval mode (HIG-269 increment 4): the agent reaches external
-            # tools only via find_tools, so skip the pre-flight selection
-            # pipeline entirely. Capability overview still comes from the
-            # connection snapshot (HIG-274), so grounding is intact.
-            task_service.append_event(
-                task,
-                TaskEventType.log,
-                {
-                    "message": "external_pipeline_bypassed",
-                    "reason": "tool_access_retrieval",
-                },
-            )
-            log_observation(
-                logger,
-                "external_pipeline_bypassed",
-                task=task,
-                reason="tool_access_retrieval",
-            )
-            self._capability_overview = self._build_capability_overview(
-                settings=settings,
-                session=session,
-                task=task,
-                external_cards=(),
-            )
-            return self._finalize_registry(
-                ToolRegistry(native_tools),
-                settings=settings,
-                session=session,
-                task=task,
-            )
-
-        external_providers = self._build_external_tool_providers(
-            settings=settings,
-            session=session,
-            task=task,
-        )
-        external_tools = [
-            tool for provider in external_providers for tool in provider.runtime_tools()
-        ]
-        external_cards = ToolCatalogService().external_cards(external_providers)
+        # Agent-driven tool retrieval (HIG-269): the agent reaches external
+        # tools only via find_tools, so there is no pre-flight selection
+        # pipeline. Capability overview comes from the connection snapshot
+        # (HIG-274), so grounding is intact without enumerating external cards.
         self._capability_overview = self._build_capability_overview(
             settings=settings,
             session=session,
             task=task,
-            external_cards=external_cards,
-        )
-        tools = self._select_runtime_tools(
-            settings=settings,
-            session=session,
-            task=task,
-            task_service=task_service,
-            native_tools=native_tools,
-            external_tools=external_tools,
-            external_cards=external_cards,
+            external_cards=(),
         )
         return self._finalize_registry(
-            ToolRegistry(tools),
+            ToolRegistry(native_tools),
             settings=settings,
             session=session,
             task=task,
@@ -1622,16 +1526,14 @@ class AgentTaskExecutor:
         session: Session,
         task: Task,
     ) -> ToolRegistry:
-        """Add the find_tools retrieval capability in retrieval mode (HIG-269).
+        """Add the find_tools agent-driven retrieval capability (HIG-269).
 
-        Default 'pipeline' mode is a pure pass-through (zero behavior change).
-        In 'retrieval' mode this adds find_tools so the agent can load external
-        tools on demand; it is additive (the pipeline still runs) until the
-        eval-gated cutover (slice 1 increment 4).
+        find_tools is how the agent reaches external tools: it retrieves ranked
+        tool slugs and loads them into this registry on demand. No-op when the
+        Composio catalog is unavailable (no key, catalog disabled, no embedding
+        index, or no connected toolkits) — the agent then runs native-only.
         """
 
-        if settings.tool_access != "retrieval":
-            return registry
         if settings.composio_api_key is None or not settings.composio_catalog_enabled:
             return registry
         embedding_index = self._embedding_index_for(settings=settings, session=session)
@@ -1756,377 +1658,6 @@ class AgentTaskExecutor:
             return None
         return EmbeddingIndex(session, self._embedding_backend)
 
-    def _semantic_tool_scores(
-        self,
-        *,
-        settings: Settings,
-        session: Session,
-        query_texts: Sequence[str],
-        external_cards: tuple[Any, ...],
-    ) -> list[tuple[str, float]] | None:
-        """Rank external cards semantically; None falls back to lexical only.
-
-        Each query (task input + one per intent fragment) is ranked
-        independently and merged by max similarity; every query's top hits are
-        guaranteed a slot so minority intents survive the overall top-K cut.
-        """
-
-        index = self._embedding_index_for(settings=settings, session=session)
-        if index is None or not query_texts:
-            return None
-        index.ensure(
-            "tool_card",
-            [
-                (card.registry_name, tool_card_embedding_text(card))
-                for card in external_cards
-            ],
-        )
-        top_k = settings.tool_retrieval_top_k
-        ref_keys = [card.registry_name for card in external_cards]
-        merged: dict[str, float] = {}
-        guaranteed: set[str] = set()
-        for query_text in query_texts:
-            ranked = index.rank("tool_card", query_text, ref_keys, top_k=top_k)
-            if ranked is None:
-                continue
-            guaranteed.update(name for name, _ in ranked[:3])
-            for name, similarity in ranked:
-                if similarity > merged.get(name, -1.0):
-                    merged[name] = similarity
-        if not merged:
-            return None
-        ordered = sorted(merged.items(), key=lambda item: item[1], reverse=True)
-        kept = [item for item in ordered if item[0] in guaranteed]
-        for item in ordered:
-            if len(kept) >= top_k:
-                break
-            if item[0] not in guaranteed:
-                kept.append(item)
-        kept.sort(key=lambda item: item[1], reverse=True)
-        return kept
-
-    def _select_runtime_tools(
-        self,
-        *,
-        settings: Settings,
-        session: Session,
-        task: Task,
-        task_service: TaskService,
-        native_tools: list[Tool],
-        external_tools: list[Tool],
-        external_cards: tuple[Any, ...],
-    ) -> list[Tool]:
-        if not external_tools:
-            return native_tools
-
-        catalog = ToolCatalogService()
-        native_cards = catalog.native_cards(native_tools)
-        if not external_cards:
-            return native_tools
-
-        tool_selection_task_input = personalize(
-            _tool_selection_task_input(
-                session=session,
-                task=task,
-                base_input=task.input,
-            ),
-            settings.agent_display_name,
-        )
-        raw_intent = _latest_intent_decision(session, task)
-        effective_decision = effective_intent_decision(raw_intent)
-        selector_intent_classification: str | None = None
-        selector_likely_tools: list[str] = []
-        selector_toolkit_affinity: list[str] = []
-        if effective_decision is not None:
-            raw_cls = effective_decision.get("classification")
-            if isinstance(raw_cls, str) and raw_cls:
-                selector_intent_classification = raw_cls
-            raw_lt = effective_decision.get("likely_tools")
-            if isinstance(raw_lt, list):
-                selector_likely_tools = [
-                    item for item in raw_lt if isinstance(item, str) and item
-                ]
-            raw_affinity = effective_decision.get("toolkit_affinity")
-            if isinstance(raw_affinity, list | tuple):
-                selector_toolkit_affinity = [
-                    item for item in raw_affinity if isinstance(item, str) and item
-                ]
-        # Reachability floor (HIG-274): protect connected tools whose toolkit the
-        # intent named so relevance trimming can never strip them to an empty set.
-        protected_toolkits = frozenset(
-            slug.casefold()
-            for slug in (*selector_toolkit_affinity, *selector_likely_tools)
-            if slug
-        )
-        semantic_ranked = self._semantic_tool_scores(
-            settings=settings,
-            session=session,
-            query_texts=_semantic_retrieval_query_texts(
-                decision=effective_decision,
-                base_query=tool_selection_task_input,
-            ),
-            external_cards=external_cards,
-        )
-        semantic_scores = dict(semantic_ranked) if semantic_ranked is not None else None
-        max_candidates = settings.tool_selector_max_external_candidates
-        if semantic_scores is not None:
-            # Fragment-guaranteed hits may exceed top_k; never cut them back out.
-            max_candidates = min(
-                max(settings.tool_retrieval_top_k, len(semantic_scores)),
-                max_candidates,
-            )
-
-        selector_cards, compaction = compact_tool_cards(
-            task_input=tool_selection_task_input,
-            cards=external_cards,
-            max_candidates=max_candidates,
-            semantic_scores=semantic_scores,
-            protected_toolkits=protected_toolkits,
-        )
-        if compaction.compacted:
-            task_service.append_event(
-                task,
-                TaskEventType.log,
-                {
-                    "message": "tool_catalog_compacted",
-                    **compaction.to_payload(),
-                },
-            )
-            log_observation(
-                logger,
-                "tool_catalog_compacted",
-                task=task,
-                original_candidate_count=compaction.original_candidate_count,
-                selected_candidate_count=compaction.selected_candidate_count,
-                omitted_candidate_count=compaction.omitted_candidate_count,
-                max_candidates=compaction.max_candidates,
-                reason=compaction.reason,
-            )
-
-        selector = self.tool_selector or self._build_tool_selector(
-            settings=settings,
-            session=session,
-            task=task,
-            task_service=task_service,
-        )
-        try:
-            selection = selector.select(
-                task_id=task.id,
-                task_input=tool_selection_task_input,
-                native_cards=native_cards,
-                external_cards=selector_cards,
-                intent_classification=selector_intent_classification,
-                likely_tools=selector_likely_tools,
-                toolkit_affinity=selector_toolkit_affinity,
-            )
-        except Exception as exc:
-            logger.exception("tool selector failed task_id=%s", task.id)
-            task_service.append_event(
-                task,
-                TaskEventType.log,
-                {
-                    "message": "tool_selection_failed",
-                    "error_type": type(exc).__name__,
-                    "error": str(exc),
-                    "fallback": "heuristic_tool_selector",
-                },
-            )
-            selection = HeuristicToolSelector().select(
-                task_id=task.id,
-                task_input=tool_selection_task_input,
-                native_cards=native_cards,
-                external_cards=selector_cards,
-                intent_classification=selector_intent_classification,
-                likely_tools=selector_likely_tools,
-                toolkit_affinity=selector_toolkit_affinity,
-            )
-        selection = _expand_related_tool_selection(
-            task_input=task.input,
-            selection=selection,
-            selector_cards=selector_cards,
-        )
-        selection, arbitration_log = arbitrate(selection, selector_cards)
-
-        self._record_tool_selection(
-            task=task,
-            task_service=task_service,
-            selection=selection,
-            candidate_count=len(external_cards),
-            selector_candidate_count=len(selector_cards),
-            intent_classification=selector_intent_classification,
-            intent_likely_tools=selector_likely_tools,
-            intent_toolkit_affinity=selector_toolkit_affinity,
-            semantic_ranked=semantic_ranked,
-            arbitration_log=arbitration_log,
-        )
-        selected_external_names = set(selection.selected_names)
-        suppressed_native_names = set(selection.suppressed_native_tools)
-        return [
-            tool for tool in native_tools if tool.name not in suppressed_native_names
-        ] + [tool for tool in external_tools if tool.name in selected_external_names]
-
-    def _build_tool_selector(
-        self,
-        *,
-        settings: Settings,
-        session: Session,
-        task: Task,
-        task_service: TaskService,
-    ) -> ToolSelector:
-        if self.llm_provider is not None:
-            return HeuristicToolSelector()
-
-        model_route = ModelRouter(settings).route_for_tier(
-            ModelRouteTier.cheap_fast,
-            reason="tool_selection",
-        )
-        selection = self._select_runtime_model(
-            settings=settings,
-            session=session,
-            task=task,
-            model_route=model_route,
-        )
-        return LLMToolSelector(
-            LLMService(
-                session=session,
-                provider=create_provider_for_selection(
-                    settings=settings,
-                    selection=selection,
-                ),
-                provider_name=self.provider_name or selection.provider_name,
-                task_service=task_service,
-                model_route=selection.model_route,
-            ),
-            max_prompt_chars=settings.tool_selector_max_prompt_chars,
-        )
-
-    def _record_tool_selection(
-        self,
-        *,
-        task: Task,
-        task_service: TaskService,
-        selection: ToolSelectionResult,
-        candidate_count: int,
-        selector_candidate_count: int,
-        intent_classification: str | None = None,
-        intent_likely_tools: list[str] | None = None,
-        intent_toolkit_affinity: list[str] | None = None,
-        semantic_ranked: list[tuple[str, float]] | None = None,
-        arbitration_log: list[dict[str, object]] | None = None,
-    ) -> None:
-        payload: JsonObject = {
-            "message": "tool_selection_completed",
-            "candidate_count": candidate_count,
-            "selector_candidate_count": selector_candidate_count,
-            "semantic_retrieval_used": semantic_ranked is not None,
-            **(
-                {
-                    "semantic_top": [
-                        {"registry_name": registry_name, "similarity": similarity}
-                        for registry_name, similarity in semantic_ranked[:5]
-                    ]
-                }
-                if semantic_ranked is not None
-                else {}
-            ),
-            "arbitration": list(arbitration_log or []),
-            "selected_tools": [
-                {
-                    "registry_name": item.registry_name,
-                    "confidence": item.confidence,
-                    "reason": item.reason,
-                }
-                for item in selection.selected_tools
-            ],
-            "suppressed_native_tools": list(selection.suppressed_native_tools),
-            "rejected_tools": [
-                {
-                    "registry_name": item.registry_name,
-                    "confidence": item.confidence,
-                    "reason": item.reason,
-                }
-                for item in selection.rejected_tools
-            ],
-            "route_reason": selection.route_reason,
-            "fallback_used": selection.fallback_used,
-            **(
-                {
-                    "selector_prompt_chars": selection.prompt_chars,
-                    "selector_prompt_char_budget": selection.prompt_char_budget,
-                }
-                if selection.prompt_chars is not None
-                and selection.prompt_char_budget is not None
-                else {}
-            ),
-            **(
-                {
-                    "budget_omitted_candidate_names": list(
-                        selection.budget_omitted_candidate_names
-                    ),
-                    "budget_omitted_candidate_count": len(
-                        selection.budget_omitted_candidate_names
-                    ),
-                }
-                if selection.budget_omitted_candidate_names
-                else {}
-            ),
-            **(
-                {"intent_classification": intent_classification}
-                if intent_classification is not None
-                else {}
-            ),
-            **(
-                {"intent_likely_tools": intent_likely_tools}
-                if intent_likely_tools
-                else {}
-            ),
-            **(
-                {"intent_toolkit_affinity": intent_toolkit_affinity}
-                if intent_toolkit_affinity
-                else {}
-            ),
-        }
-        task_service.append_event(task, TaskEventType.log, payload)
-        task_service.append_event(
-            task,
-            TaskEventType.log,
-            RoutingDecisionTrace(
-                stage="tool_scope_selected",
-                route_tier="tool_scope",
-                source="tool_selector",
-                candidate_tool_count=candidate_count,
-                selector_candidate_count=selector_candidate_count,
-                selected_tool_names=tuple(
-                    item.registry_name for item in selection.selected_tools
-                ),
-                suppressed_tool_names=tuple(selection.suppressed_native_tools),
-                reason=selection.route_reason,
-                metadata={
-                    "fallback_used": selection.fallback_used,
-                    "rejected_tool_count": len(selection.rejected_tools),
-                    "budget_omitted_candidate_count": len(
-                        selection.budget_omitted_candidate_names
-                    ),
-                },
-            ).to_payload(),
-        )
-        log_observation(
-            logger,
-            "tool_selection_completed",
-            task=task,
-            candidate_count=candidate_count,
-            selector_candidate_count=selector_candidate_count,
-            selected_tools=[item.registry_name for item in selection.selected_tools],
-            suppressed_native_tools=list(selection.suppressed_native_tools),
-            route_reason=selection.route_reason,
-            fallback_used=selection.fallback_used,
-            selector_prompt_chars=selection.prompt_chars,
-            selector_prompt_char_budget=selection.prompt_char_budget,
-            budget_omitted_candidate_count=len(
-                selection.budget_omitted_candidate_names
-            ),
-        )
-
     def _record_routing_chain_completed(
         self,
         *,
@@ -2197,64 +1728,6 @@ class AgentTaskExecutor:
                 if isinstance(item, dict)
             ]
         task_service.append_event(task, TaskEventType.log, payload)
-
-    def _build_external_tool_providers(
-        self,
-        *,
-        settings: Settings,
-        session: Session,
-        task: Task,
-    ) -> list[ExternalToolProvider]:
-        providers: list[ExternalToolProvider] = []
-        if settings.composio_api_key is not None and settings.composio_catalog_enabled:
-            providers.append(
-                ComposioExternalToolProvider(
-                    session=session,
-                    task=task,
-                    client=self.composio_client
-                    or ComposioClient(
-                        api_key=settings.composio_api_key,
-                        timeout_seconds=settings.composio_request_timeout_seconds,
-                    ),
-                    per_toolkit_limit=settings.composio_catalog_limit,
-                    result_max_chars=settings.tool_result_max_chars,
-                    embedding_index=self._embedding_index_for(
-                        settings=settings, session=session
-                    ),
-                    top_k=settings.tool_retrieval_top_k,
-                    forced_toolkits=_intent_forced_toolkits(session, task),
-                )
-            )
-        if settings.mcp_enabled and self._installation_has_mcp_servers(session, task):
-            providers.append(
-                McpExternalToolProvider(
-                    session=session,
-                    task=task,
-                    encryption_key=settings.encryption_key,
-                    tool_timeout_seconds=settings.mcp_tool_timeout_seconds,
-                    result_max_chars=settings.tool_result_max_chars,
-                )
-            )
-        # Track providers so ``execute`` can close per-task resources (MCP
-        # sessions/subprocesses) when the task finishes.
-        self._active_external_providers.extend(providers)
-        return providers
-
-    def _installation_has_mcp_servers(
-        self,
-        session: Session,
-        task: Task,
-    ) -> bool:
-        return bool(
-            session.scalar(
-                select(McpServer.id)
-                .where(
-                    McpServer.installation_id == task.installation_id,
-                    McpServer.status == "enabled",
-                )
-                .limit(1)
-            )
-        )
 
     def _build_slack_history_client(self, settings: Settings) -> Any:
         if self.slack_client is not None and hasattr(
@@ -3691,68 +3164,6 @@ def _intent_forced_toolkits(session: Session, task: Task) -> tuple[str, ...]:
     return tuple(dict.fromkeys(slug.casefold() for slug in slugs if slug))
 
 
-def _external_tool_skip_reason(
-    session: Session,
-    task: Task,
-    *,
-    decision: dict[str, Any] | None = None,
-    native_web_search_available: bool = True,
-) -> dict[str, Any] | None:
-    if is_channel_assessment_task(session, task):
-        return {
-            "reason": "system_observe_channel_assessment",
-            "classification": None,
-        }
-
-    raw_decision = (
-        decision if decision is not None else _latest_intent_decision(session, task)
-    )
-    effective_decision = effective_intent_decision(raw_decision)
-    if effective_decision is None:
-        return None
-    decision = dict(effective_decision)
-
-    classification = _payload_str(decision, "classification")
-    should_create_task = decision.get("should_create_task")
-    if (
-        should_create_task is False
-        and classification not in WORKER_TASK_CLASSIFICATIONS
-    ):
-        return {
-            "reason": "intent_should_not_create_task",
-            "classification": classification,
-        }
-
-    if classification in EXTERNAL_TOOL_SKIP_CLASSIFICATIONS:
-        return {
-            "reason": "intent_classification",
-            "classification": classification,
-        }
-
-    if _intent_needs_no_external_tools(decision):
-        return {
-            "reason": "intent_no_external_tools",
-            "classification": classification,
-        }
-
-    if _intent_prefers_native_slack_context(decision):
-        return {
-            "reason": "intent_native_slack_context_only",
-            "classification": classification,
-        }
-
-    if native_web_search_available and _intent_prefers_native_web_search(
-        decision,
-        task.input,
-    ):
-        return {
-            "reason": "intent_native_web_search_only",
-            "classification": classification,
-        }
-
-    return None
-
-
 def _resolve_unified_depth(
     session: Session,
     task: Task,
@@ -3808,107 +3219,6 @@ def _latest_intent_decision(session: Session, task: Task) -> dict[str, Any] | No
     return decision
 
 
-def _tool_selection_task_input(
-    *,
-    session: Session,
-    task: Task,
-    base_input: str,
-) -> str:
-    decision = effective_intent_decision(_latest_intent_decision(session, task))
-    if not _should_include_prior_context_for_tool_selection(decision):
-        return base_input
-    if not task.slack_thread_ts:
-        return base_input
-
-    prior_tasks = tuple(
-        session.scalars(
-            select(Task)
-            .where(
-                Task.installation_id == task.installation_id,
-                Task.slack_channel_id == task.slack_channel_id,
-                Task.slack_thread_ts == task.slack_thread_ts,
-                Task.id != task.id,
-                Task.status == TaskStatus.succeeded,
-                Task.result_summary.is_not(None),
-            )
-            .order_by(Task.created_at.desc(), Task.id.desc())
-            .limit(2)
-        )
-    )
-    if not prior_tasks:
-        return base_input
-
-    lines = [base_input, "", "Prior Slack thread context for tool selection:"]
-    for prior in reversed(prior_tasks):
-        lines.append(f"- User asked: {_compact_tool_selection_text(prior.input)}")
-        if prior.result_summary:
-            lines.append(
-                f"  __AGENT_NAME__ answered: "
-                f"{_compact_tool_selection_text(prior.result_summary)}"
-            )
-    return "\n".join(lines)
-
-
-MAX_SEMANTIC_FRAGMENT_QUERIES = 4
-
-
-def _semantic_retrieval_query_texts(
-    *,
-    decision: Mapping[str, Any] | None,
-    base_query: str,
-) -> list[str]:
-    """Build retrieval queries: base input plus one per actionable intent fragment.
-
-    A single averaged embedding loses minority intents in multi-intent asks
-    ("brief: issue tracker + NVDA + Notion docs" ranked only docs tools), so
-    each fragment objective is retrieved independently and merged upstream.
-    """
-
-    if decision is None:
-        return [base_query]
-    queries = [base_query]
-    objective = decision.get("objective")
-    if isinstance(objective, str) and objective:
-        queries[0] = f"{base_query}\n\nObjective: {objective}"
-
-    fragments: list[Any] = []
-    primary = decision.get("primary_intent")
-    if isinstance(primary, Mapping):
-        fragments.append(primary)
-    secondary = decision.get("secondary_intents")
-    if isinstance(secondary, list):
-        fragments.extend(item for item in secondary if isinstance(item, Mapping))
-    for fragment in fragments[:MAX_SEMANTIC_FRAGMENT_QUERIES]:
-        if fragment.get("should_execute") is False:
-            continue
-        fragment_objective = fragment.get("objective")
-        if (
-            isinstance(fragment_objective, str)
-            and fragment_objective
-            and fragment_objective not in queries
-        ):
-            queries.append(fragment_objective)
-    return queries
-
-
-def _should_include_prior_context_for_tool_selection(
-    decision: Mapping[str, Any] | None,
-) -> bool:
-    if decision is None:
-        return False
-    classification = _payload_str(decision, "classification")
-    if classification == "follow_up":
-        return True
-    return _truthy_bool(decision.get("needs_thread_context"))
-
-
-def _compact_tool_selection_text(value: str, *, max_chars: int = 500) -> str:
-    compact = " ".join(value.split())
-    if len(compact) <= max_chars:
-        return compact
-    return f"{compact[: max_chars - 3].rstrip()}..."
-
-
 def _record_deferred_secondary_intents(
     *,
     session: Session,
@@ -3952,105 +3262,6 @@ def _record_deferred_secondary_intents(
             "reason": "primary_task_execution_first",
         },
     )
-
-
-def _expand_related_tool_selection(
-    *,
-    task_input: str,
-    selection: ToolSelectionResult,
-    selector_cards: tuple[Any, ...],
-) -> ToolSelectionResult:
-    """Add obvious same-toolkit read tools needed for multi-step requests."""
-
-    if not _looks_like_linear_task_lookup(task_input):
-        return selection
-
-    selected_names = set(selection.selected_names)
-    if not any(name.startswith("composio_linear_") for name in selected_names):
-        return selection
-
-    additions: list[ToolSelection] = []
-    max_selected = 3
-    for card in selector_cards:
-        registry_name = getattr(card, "registry_name", "")
-        if registry_name in selected_names:
-            continue
-        if getattr(card, "provider", None) != "composio":
-            continue
-        if getattr(card, "toolkit_slug", None) != "linear":
-            continue
-        if getattr(card, "side_effect", None) != "read":
-            continue
-        if not _linear_issue_lookup_tool(card):
-            continue
-
-        additions.append(
-            ToolSelection(
-                registry_name=registry_name,
-                confidence=0.86,
-                reason=(
-                    "Related Linear read tool needed after project discovery for "
-                    "a task/issue summary request."
-                ),
-            )
-        )
-        selected_names.add(registry_name)
-        if len(selection.selected_tools) + len(additions) >= max_selected:
-            break
-
-    if not additions:
-        return selection
-
-    rejected = tuple(
-        item
-        for item in selection.rejected_tools
-        if item.registry_name not in selected_names
-    )
-    route_reason = selection.route_reason
-    if "related_tool_expansion" not in route_reason:
-        route_reason = f"{route_reason}+related_tool_expansion"
-    return replace(
-        selection,
-        selected_tools=selection.selected_tools + tuple(additions),
-        suppressed_native_tools=selection.suppressed_native_tools,
-        rejected_tools=rejected,
-        route_reason=route_reason,
-        fallback_used=selection.fallback_used,
-    )
-
-
-def _looks_like_linear_task_lookup(text: str) -> bool:
-    words = _input_words(text)
-    if "linear" not in words:
-        return False
-    return bool(words & LINEAR_TASK_LOOKUP_WORDS)
-
-
-def _linear_issue_lookup_tool(card: Any) -> bool:
-    haystack = " ".join(
-        str(part)
-        for part in (
-            getattr(card, "registry_name", ""),
-            getattr(card, "display_name", ""),
-            getattr(card, "description", ""),
-            " ".join(getattr(card, "capabilities", ()) or ()),
-            " ".join(getattr(card, "tool_slugs", ()) or ()),
-        )
-        if part
-    ).casefold()
-    return (
-        ("issue" in haystack or "task" in haystack)
-        and ("list" in haystack or "search" in haystack)
-        and "project" not in haystack
-    )
-
-
-def _input_words(text: str) -> set[str]:
-    return {
-        "".join(char for char in raw.casefold() if char.isalnum())
-        for raw in text.replace("/", " ").replace("-", " ").replace("_", " ").split()
-        if raw.strip()
-    } - {""}
 
 
 def _tool_approval_prompt_system_prompt() -> str:
