@@ -1661,7 +1661,8 @@ class KnowledgeGraphEdge(Base):
         CheckConstraint(
             "relationship_type in "
             "('member_of', 'maps_to', 'works_on', 'owns', 'belongs_to', "
-            "'referenced_in', 'made_in', 'affects', 'relates_to', 'available_for')",
+            "'referenced_in', 'made_in', 'affects', 'relates_to', 'available_for', "
+            "'project_includes_channel')",
             name="ck_kg_edges_relationship_type",
         ),
         CheckConstraint(

@@ -7,6 +7,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Any
 
 from sqlalchemy import Text, and_, cast, exists, func, or_, select
 from sqlalchemy.orm import Session
@@ -29,10 +30,13 @@ from kortny.knowledge_graph.provenance import (
     with_provenance_attrs,
 )
 from kortny.knowledge_graph.scopes import (
+    SCOPE_CHANNEL,
+    SCOPE_WORKSPACE,
     DestinationSurface,
     VisibilityScope,
     compatible_scope_predicate,
     is_scope_compatible,
+    project_scope_predicate,
 )
 
 CURRENT_CONTEXT_STATES = ("active", "confirmed")
@@ -403,6 +407,16 @@ class GraphService:
             edge_ids=tuple(row.id for row in stale_edges),
         )
 
+    def _scope_predicate(
+        self,
+        model: Any,
+        destination: DestinationSurface,
+        additional_scopes: Sequence[VisibilityScope],
+    ) -> ColumnElement[bool]:
+        if additional_scopes:
+            return project_scope_predicate(model, destination, additional_scopes)
+        return compatible_scope_predicate(model, destination)
+
     def retrieve_current_context(
         self,
         *,
@@ -411,8 +425,16 @@ class GraphService:
         anchor_keys: Sequence[str] = (),
         max_hops: int = 1,
         max_items: int = 20,
+        additional_scopes: Sequence[VisibilityScope] = (),
     ) -> GraphContextPack:
-        """Return current graph context allowed for the destination surface."""
+        """Return current graph context allowed for the destination surface.
+
+        ``additional_scopes`` widens the audience for project-aware retrieval
+        (HIG-276): the project's public member-channel scopes, OR-ed onto the
+        destination predicate so a project answer can synthesize across the
+        project's public channels. Private/DM/user scopes passed here are ignored
+        by ``project_scope_predicate`` (audience safety).
+        """
 
         if max_hops < 0:
             raise ValueError("max_hops must be non-negative")
@@ -429,6 +451,7 @@ class GraphService:
                 destination=destination,
                 canonical_keys=anchor_keys,
                 limit=max_items,
+                additional_scopes=additional_scopes,
             )
             if not anchor_rows:
                 return GraphContextPack((), (), (), 0, ("no_anchors_found",))
@@ -443,6 +466,7 @@ class GraphService:
                     destination=destination,
                     frontier_ids=frontier,
                     limit=max_items,
+                    additional_scopes=additional_scopes,
                 )
                 next_frontier: set[uuid.UUID] = set()
                 for edge in hop_edges:
@@ -460,12 +484,14 @@ class GraphService:
                 destination=destination,
                 entity_ids=entity_ids,
                 limit=max_items,
+                additional_scopes=additional_scopes,
             )
             edge_rows = self._select_current_edges_by_id(
                 installation_id=installation_id,
                 destination=destination,
                 edge_ids=edge_ids,
                 limit=max_items,
+                additional_scopes=additional_scopes,
             )
         else:
             entity_rows = self._select_current_entities(
@@ -513,6 +539,7 @@ class GraphService:
         anchor_keys: Sequence[str] = (),
         max_hops: int = 1,
         max_items: int = 20,
+        additional_scopes: Sequence[VisibilityScope] = (),
     ) -> GraphContextPack:
         """Search or traverse current graph context allowed for the destination."""
 
@@ -524,6 +551,7 @@ class GraphService:
                 anchor_keys=anchor_keys,
                 max_hops=max_hops,
                 max_items=max_items,
+                additional_scopes=additional_scopes,
             )
         if max_items <= 0:
             return GraphContextPack((), (), (), 0, ("max_items<=0",))
@@ -549,6 +577,7 @@ class GraphService:
             destination=destination,
             entity_ids=entity_ids,
             limit=max_items,
+            additional_scopes=additional_scopes,
         )
 
         entity_evidence = self._evidence_ids("entity", [row.id for row in entity_rows])
@@ -577,11 +606,23 @@ class GraphService:
     def scope_guard_violations(
         pack: GraphContextPack,
         destination: DestinationSurface,
+        additional_scopes: Sequence[VisibilityScope] = (),
     ) -> tuple[VisibilityScope, ...]:
+        # Project-aware retrieval intentionally widens to the project's PUBLIC
+        # member channels (HIG-276); those are not leaks. Only audience-safe
+        # (channel/workspace) extras are honored, mirroring project_scope_predicate.
+        allowed = {
+            (scope.scope_type, scope.scope_id)
+            for scope in additional_scopes
+            if scope.scope_type in (SCOPE_CHANNEL, SCOPE_WORKSPACE)
+        }
         scopes = [entity.visibility_scope for entity in pack.entities]
         scopes.extend(edge.visibility_scope for edge in pack.edges)
         return tuple(
-            scope for scope in scopes if not is_scope_compatible(scope, destination)
+            scope
+            for scope in scopes
+            if not is_scope_compatible(scope, destination)
+            and (scope.scope_type, scope.scope_id) not in allowed
         )
 
     def _select_current_entities(
@@ -591,11 +632,12 @@ class GraphService:
         destination: DestinationSurface,
         canonical_keys: Sequence[str] = (),
         limit: int,
+        additional_scopes: Sequence[VisibilityScope] = (),
     ) -> list[KnowledgeGraphEntity]:
         predicates = [
             KnowledgeGraphEntity.installation_id == installation_id,
             self._current_entity_predicate(),
-            compatible_scope_predicate(KnowledgeGraphEntity, destination),
+            self._scope_predicate(KnowledgeGraphEntity, destination, additional_scopes),
             self._entity_has_evidence_predicate(),
         ]
         if canonical_keys:
@@ -619,6 +661,7 @@ class GraphService:
         destination: DestinationSurface,
         entity_ids: Iterable[uuid.UUID],
         limit: int,
+        additional_scopes: Sequence[VisibilityScope] = (),
     ) -> list[KnowledgeGraphEntity]:
         ids = tuple(entity_ids)
         if not ids:
@@ -630,7 +673,9 @@ class GraphService:
                     KnowledgeGraphEntity.installation_id == installation_id,
                     KnowledgeGraphEntity.id.in_(ids),
                     self._current_entity_predicate(),
-                    compatible_scope_predicate(KnowledgeGraphEntity, destination),
+                    self._scope_predicate(
+                        KnowledgeGraphEntity, destination, additional_scopes
+                    ),
                     self._entity_has_evidence_predicate(),
                 )
                 .order_by(
@@ -672,6 +717,7 @@ class GraphService:
         destination: DestinationSurface,
         frontier_ids: set[uuid.UUID],
         limit: int,
+        additional_scopes: Sequence[VisibilityScope] = (),
     ) -> list[KnowledgeGraphEdge]:
         if not frontier_ids:
             return []
@@ -685,7 +731,9 @@ class GraphService:
                         KnowledgeGraphEdge.target_entity_id.in_(frontier_ids),
                     ),
                     self._current_edge_predicate(),
-                    compatible_scope_predicate(KnowledgeGraphEdge, destination),
+                    self._scope_predicate(
+                        KnowledgeGraphEdge, destination, additional_scopes
+                    ),
                     self._edge_has_evidence_predicate(),
                 )
                 .order_by(
@@ -703,6 +751,7 @@ class GraphService:
         destination: DestinationSurface,
         edge_ids: Iterable[uuid.UUID],
         limit: int,
+        additional_scopes: Sequence[VisibilityScope] = (),
     ) -> list[KnowledgeGraphEdge]:
         ids = tuple(edge_ids)
         if not ids:
@@ -714,7 +763,9 @@ class GraphService:
                     KnowledgeGraphEdge.installation_id == installation_id,
                     KnowledgeGraphEdge.id.in_(ids),
                     self._current_edge_predicate(),
-                    compatible_scope_predicate(KnowledgeGraphEdge, destination),
+                    self._scope_predicate(
+                        KnowledgeGraphEdge, destination, additional_scopes
+                    ),
                     self._edge_has_evidence_predicate(),
                 )
                 .order_by(
