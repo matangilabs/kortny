@@ -1535,6 +1535,38 @@ class AgentTaskExecutor:
                 task=task,
             )
 
+        if settings.tool_access == "retrieval":
+            # Retrieval mode (HIG-269 increment 4): the agent reaches external
+            # tools only via find_tools, so skip the pre-flight selection
+            # pipeline entirely. Capability overview still comes from the
+            # connection snapshot (HIG-274), so grounding is intact.
+            task_service.append_event(
+                task,
+                TaskEventType.log,
+                {
+                    "message": "external_pipeline_bypassed",
+                    "reason": "tool_access_retrieval",
+                },
+            )
+            log_observation(
+                logger,
+                "external_pipeline_bypassed",
+                task=task,
+                reason="tool_access_retrieval",
+            )
+            self._capability_overview = self._build_capability_overview(
+                settings=settings,
+                session=session,
+                task=task,
+                external_cards=(),
+            )
+            return self._finalize_registry(
+                ToolRegistry(native_tools),
+                settings=settings,
+                session=session,
+                task=task,
+            )
+
         external_providers = self._build_external_tool_providers(
             settings=settings,
             session=session,
