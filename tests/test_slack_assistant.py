@@ -33,7 +33,6 @@ from kortny.db.session import (
     normalize_database_url,
 )
 from kortny.slack.assistant import (
-    SUGGESTED_PROMPTS,
     PostgresAssistantThreadContextStore,
     _handle_user_message_core,
     context_store_has_thread,
@@ -103,14 +102,6 @@ class FakeTitle:
 
     def __call__(self, title: str) -> None:
         self.titles.append(title)
-
-
-class FakeSuggestedPrompts:
-    def __init__(self) -> None:
-        self.calls: list[dict[str, Any]] = []
-
-    def __call__(self, prompts: list[Any], title: str | None = None) -> None:
-        self.calls.append({"prompts": prompts, "title": title})
 
 
 class FakeSaveThreadContext:
@@ -398,11 +389,7 @@ def test_user_message_without_context_omits_hint(
 # --------------------------------------------------------------------------- #
 
 
-def test_suggested_prompts_capped_at_four() -> None:
-    assert len(SUGGESTED_PROMPTS) <= 4
-
-
-def test_thread_started_sets_prompts_and_saves_context() -> None:
+def test_thread_started_saves_context_without_prompts() -> None:
     # Exercise the registered handler closures directly via a recording App.
     from slack_bolt import Assistant
 
@@ -451,18 +438,16 @@ def test_thread_started_sets_prompts_and_saves_context() -> None:
     finally:
         assistant_module.Assistant = original  # type: ignore[misc]
 
-    prompts = FakeSuggestedPrompts()
     save = FakeSaveThreadContext()
+    # The handler no longer accepts/sets suggested prompts ("Try these prompts"
+    # was removed); it still saves thread context.
     captured["thread_started"](
         say=lambda **_: None,
-        set_suggested_prompts=prompts,
         save_thread_context=save,
         payload={"assistant_thread": {"channel_id": "D1", "thread_ts": "t1"}},
         logger=_silent_logger(),
     )
 
-    assert len(prompts.calls) == 1
-    assert len(prompts.calls[0]["prompts"]) <= 4
     assert save.calls == 1
 
     # thread_context_changed saves context too.
