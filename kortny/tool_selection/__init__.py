@@ -1,35 +1,23 @@
-"""Tool catalog and selection helpers."""
+"""Tool card models + the external-tool provider seam.
 
-from kortny.tool_selection.arbitration import arbitrate
-from kortny.tool_selection.budgeting import (
-    ToolCatalogCompaction,
-    compact_tool_cards,
-    tool_card_embedding_text,
-)
-from kortny.tool_selection.catalog import ToolCatalogService
+Agent-driven retrieval (HIG-269) replaced the pre-flight selection pipeline, so
+the selector, arbitration, and budget-compaction modules are gone. What remains
+is the shared vocabulary: the tool-card models, the canonical embedding text,
+and the ``ExternalToolProvider`` protocol that Composio/MCP providers implement.
+"""
+
+from kortny.tool_selection.budgeting import tool_card_embedding_text
 from kortny.tool_selection.models import (
     ToolCard,
     ToolSelection,
     ToolSelectionResult,
 )
 from kortny.tool_selection.providers import ExternalToolProvider
-from kortny.tool_selection.selector import (
-    HeuristicToolSelector,
-    LLMToolSelector,
-    ToolSelector,
-)
 
 __all__ = [
-    "HeuristicToolSelector",
     "ExternalToolProvider",
-    "LLMToolSelector",
-    "ToolCatalogCompaction",
     "ToolCard",
-    "ToolCatalogService",
     "ToolSelection",
     "ToolSelectionResult",
-    "ToolSelector",
-    "arbitrate",
-    "compact_tool_cards",
     "tool_card_embedding_text",
 ]
