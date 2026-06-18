@@ -2,28 +2,30 @@
 
 A consolidator pass that notices when people keep circling the same
 topic/workflow/deadline — a cluster of recurring, co-occurring graph entities —
-and PROPOSES it as a project (never auto-creates; a wrong guess colouring every
-answer is worse than one confirm step). On confirm it becomes a real `project`
-hub via ProjectProposalService.
+and learns it as a project ON ITS OWN. No proposal gate: the brain forms the
+hypothesis, uses it immediately (an inferred `project` hub at modest confidence),
+and self-corrects via reinforcement (re-detection raises confidence/strength)
+and the aging pass (a topic that goes quiet is retired). Occasional human
+confirmation to upgrade/correct is a separate, non-blocking follow-up.
 
-Deterministic vs LLM split (per the reconciled HIG-276 design): deterministic
-code does cluster assembly, scoring, privacy filtering, dedupe, and persistence;
-the LLM only NAMES the cluster and writes the public "why" line. The pass runs
-headless here (creates the proposal row); Slack delivery + reaction-confirm is a
-separate layer.
+Why this is safe without a confirm gate: Increment 1's audience barrier is
+structural — an inferred project can still only ever surface PUBLIC-channel
+facts into a public reply, regardless of confirmation. A wrong grouping degrades
+answer quality (graceful, evidence-cited), it does not leak.
 
-Privacy: the proposal's public_summary / public_evidence are built ONLY from
-workspace/public-channel entities. Private signals are recorded as opaque refs
-(private_evidence) and never described in user-facing text — the recipient may
-not see those surfaces.
+Deterministic vs LLM split: deterministic code does cluster assembly, scoring,
+privacy filtering, identity/dedupe, and persistence; the LLM only NAMES the
+cluster (its display name). Inferred hubs/edges draw ONLY on public entities;
+private entities never widen a hub or get named.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -31,14 +33,10 @@ from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from kortny.db.models import (
-    KnowledgeGraphEntity,
-    KnowledgeGraphEvidence,
-    ProjectProposal,
-)
-from kortny.knowledge_graph.project_proposals import ProjectProposalService
-from kortny.knowledge_graph.projects import project_slug
+from kortny.db.models import KnowledgeGraphEntity, KnowledgeGraphEvidence
+from kortny.knowledge_graph.projects import ProjectGraphService
 from kortny.knowledge_graph.scopes import SCOPE_CHANNEL, SCOPE_WORKSPACE
+from kortny.knowledge_graph.service import EvidenceInput
 from kortny.llm import ChatMessage, LLMService
 
 logger = logging.getLogger(__name__)
@@ -59,28 +57,30 @@ _CURRENT_STATES = ("active", "confirmed")
 DEFAULT_MIN_CLUSTER_SIZE = 3
 DEFAULT_MIN_REINFORCEMENT = 2
 DEFAULT_MIN_CHANNEL_SPREAD = 2
-DEFAULT_MIN_CONFIDENCE = Decimal("0.6")
 DEFAULT_RECENT_WINDOW = timedelta(days=30)
-DEFAULT_REPROPOSE_COOLDOWN = timedelta(days=14)
+# Inferred hubs start modest and earn confidence by re-detection.
+_INFERRED_CONFIDENCE = Decimal("0.600")
+# Number of strongest entities whose identity defines the project (stable across
+# small membership churn, so re-detection reinforces rather than duplicates).
+_IDENTITY_ANCHORS = 3
 _MAX_CANDIDATES = 400
 _NAME_PROMPT = "kortny.project_inference_namer"
-
-# Resolve a user id -> open DM channel id (same seam org_profile uses).
-DmChannelResolver = Callable[[str], str | None]
 
 
 @dataclass(frozen=True)
 class ProjectInferenceCounters:
     candidates: int = 0
     clusters: int = 0
-    proposed: int = 0
+    learned: int = 0
+    reinforced: int = 0
     skipped_reason: str | None = None
 
     def to_payload(self) -> dict[str, object]:
         return {
             "candidates": self.candidates,
             "clusters": self.clusters,
-            "proposed": self.proposed,
+            "learned": self.learned,
+            "reinforced": self.reinforced,
             "skipped_reason": self.skipped_reason,
         }
 
@@ -94,20 +94,12 @@ class _Cluster:
     def public_entities(self) -> list[KnowledgeGraphEntity]:
         return [e for e in self.entities if e.visibility_scope_type in _PUBLIC_SCOPES]
 
-    @property
-    def private_entities(self) -> list[KnowledgeGraphEntity]:
-        return [
-            e for e in self.entities if e.visibility_scope_type not in _PUBLIC_SCOPES
-        ]
-
     def public_channel_ids(self) -> list[str]:
-        ids: list[str] = []
-        for entity in self.public_entities:
-            if (
-                entity.visibility_scope_type == SCOPE_CHANNEL
-                and entity.visibility_scope_id
-            ):
-                ids.append(entity.visibility_scope_id)
+        ids = [
+            e.visibility_scope_id
+            for e in self.public_entities
+            if e.visibility_scope_type == SCOPE_CHANNEL and e.visibility_scope_id
+        ]
         return list(dict.fromkeys(ids))
 
     def has_deadline(self) -> bool:
@@ -118,7 +110,7 @@ class _Cluster:
 
 
 class ProjectInferencePass:
-    """Infer + propose implicit projects from recurring entity clusters."""
+    """Infer + autonomously learn implicit projects from recurring clusters."""
 
     def __init__(
         self,
@@ -128,19 +120,15 @@ class ProjectInferencePass:
         min_cluster_size: int = DEFAULT_MIN_CLUSTER_SIZE,
         min_reinforcement: int = DEFAULT_MIN_REINFORCEMENT,
         min_channel_spread: int = DEFAULT_MIN_CHANNEL_SPREAD,
-        min_confidence: Decimal = DEFAULT_MIN_CONFIDENCE,
         recent_window: timedelta = DEFAULT_RECENT_WINDOW,
-        repropose_cooldown: timedelta = DEFAULT_REPROPOSE_COOLDOWN,
     ) -> None:
         self.session = session
         self.llm = llm
         self.min_cluster_size = min_cluster_size
         self.min_reinforcement = min_reinforcement
         self.min_channel_spread = min_channel_spread
-        self.min_confidence = min_confidence
         self.recent_window = recent_window
-        self.repropose_cooldown = repropose_cooldown
-        self.proposals = ProjectProposalService(session)
+        self.projects = ProjectGraphService(session)
 
     def run(
         self,
@@ -157,30 +145,29 @@ class ProjectInferencePass:
             )
 
         clusters = self._cluster_by_cooccurrence(installation_id, entities)
-        scored = [c for c in clusters if self._qualifies(c)]
-        if not scored:
+        qualifying = [c for c in clusters if self._qualifies(c)]
+        if not qualifying:
             return ProjectInferenceCounters(
                 candidates=len(entities),
                 clusters=len(clusters),
                 skipped_reason="no_qualifying_cluster",
             )
-        scored.sort(key=self._cluster_rank, reverse=True)
 
-        for cluster in scored:
-            proposal = self._propose_cluster(
-                installation_id=installation_id,
-                cluster=cluster,
-                task_id=task_id,
-                now=effective_now,
+        learned = 0
+        reinforced = 0
+        for cluster in qualifying:
+            created = self._learn_cluster(
+                installation_id=installation_id, cluster=cluster, task_id=task_id
             )
-            if proposal is not None:
-                return ProjectInferenceCounters(
-                    candidates=len(entities), clusters=len(clusters), proposed=1
-                )
+            if created:
+                learned += 1
+            else:
+                reinforced += 1
         return ProjectInferenceCounters(
             candidates=len(entities),
             clusters=len(clusters),
-            skipped_reason="all_clusters_filtered",
+            learned=learned,
+            reinforced=reinforced,
         )
 
     # -- candidate assembly -------------------------------------------------
@@ -212,7 +199,6 @@ class ProjectInferencePass:
 
         by_id = {entity.id: entity for entity in entities}
         tasks_by_entity = self._evidence_tasks(installation_id, list(by_id))
-
         parent: dict[uuid.UUID, uuid.UUID] = {eid: eid for eid in by_id}
 
         def find(x: uuid.UUID) -> uuid.UUID:
@@ -226,20 +212,17 @@ class ProjectInferencePass:
             if ra != rb:
                 parent[ra] = rb
 
-        # Two entities co-occur when they share a source task.
         owners_by_task: dict[uuid.UUID, list[uuid.UUID]] = {}
         for eid, task_ids in tasks_by_entity.items():
             for task_id in task_ids:
                 owners_by_task.setdefault(task_id, []).append(eid)
         for owners in owners_by_task.values():
-            first = owners[0]
             for other in owners[1:]:
-                union(first, other)
+                union(owners[0], other)
 
         grouped: dict[uuid.UUID, _Cluster] = {}
         for eid, entity in by_id.items():
-            root = find(eid)
-            cluster = grouped.setdefault(root, _Cluster())
+            cluster = grouped.setdefault(find(eid), _Cluster())
             cluster.entities.append(entity)
             cluster.source_tasks.update(tasks_by_entity.get(eid, set()))
         return list(grouped.values())
@@ -262,87 +245,72 @@ class ProjectInferencePass:
         ).all()
         out: dict[uuid.UUID, set[uuid.UUID]] = {}
         for target_id, source_task_id in rows:
-            if source_task_id is None:
-                continue
-            out.setdefault(target_id, set()).add(source_task_id)
+            if source_task_id is not None:
+                out.setdefault(target_id, set()).add(source_task_id)
         return out
 
     # -- scoring ------------------------------------------------------------
 
     def _qualifies(self, cluster: _Cluster) -> bool:
-        public = cluster.public_entities
-        if len(public) < self.min_cluster_size:
+        if len(cluster.public_entities) < self.min_cluster_size:
             return False
         spread = len(cluster.public_channel_ids())
         return spread >= self.min_channel_spread or cluster.has_deadline()
 
-    def _cluster_rank(self, cluster: _Cluster) -> tuple[int, int, int]:
-        return (
-            cluster.total_reinforcement(),
-            len(cluster.public_channel_ids()),
-            len(cluster.public_entities),
-        )
+    # -- learning -----------------------------------------------------------
 
-    # -- proposal -----------------------------------------------------------
-
-    def _propose_cluster(
+    def _learn_cluster(
         self,
         *,
         installation_id: uuid.UUID,
         cluster: _Cluster,
         task_id: uuid.UUID | None,
-        now: datetime,
-    ) -> ProjectProposal | None:
+    ) -> bool:
+        """Create or reinforce the inferred project hub for a cluster.
+
+        Returns True if a new hub was learned, False if an existing one was
+        reinforced.
+        """
+
         public = cluster.public_entities
-        dedupe_key = _dedupe_key(public)
-        if self.proposals.has_recent_proposal(
-            installation_id=installation_id, dedupe_key=dedupe_key, now=now
-        ):
-            return None
-
-        named = self._name_cluster(public, task_id=task_id)
-        if named is None:
-            return None
-        title, summary, confidence = named
-        if confidence < self.min_confidence:
-            return None
-
-        private = cluster.private_entities
-        public_evidence = [
-            {"entity_id": str(e.id), "label": e.display_name or e.canonical_key}
-            for e in public
-        ]
-        private_evidence = [
-            {"entity_id": str(e.id), "scope_type": e.visibility_scope_type}
-            for e in private
-        ]
-        return self.proposals.create_proposal(
-            installation_id=installation_id,
-            slug=project_slug(title),
-            title=title,
-            public_summary=summary,
-            proposed_channel_ids=cluster.public_channel_ids(),
-            proposed_entity_ids=[e.id for e in public],
-            public_evidence=public_evidence,
-            private_evidence=private_evidence,
-            dedupe_key=dedupe_key,
-            confidence_score=confidence,
-            confidence_reason="Recurring co-occurring work cluster (HIG-276).",
-            cooldown_until=now + self.repropose_cooldown,
+        slug = _cluster_identity_slug(public)
+        title = self._name_cluster(public, task_id=task_id)
+        source_task = next(iter(sorted(cluster.source_tasks)), None)
+        evidence = EvidenceInput(
+            source_type="agent_inferred",
+            extracted_by="project_inference",
+            source_task_id=source_task,
+            raw_snippet=title,
         )
+        result = self.projects.declare_project(
+            installation_id=installation_id,
+            name=title,
+            slug=slug,
+            channel_ids=cluster.public_channel_ids(),
+            evidence=evidence,
+            source_type="agent_inferred",
+            lifecycle_state="active",
+            confidence_score=_INFERRED_CONFIDENCE,
+            confidence_reason="Recurring co-occurring work cluster (HIG-276).",
+            reinforce=True,
+        )
+        self.projects.link_project_entities(
+            installation_id=installation_id,
+            project=result.project,
+            entity_ids=[e.id for e in public],
+            evidence=evidence,
+        )
+        return result.created
 
     def _name_cluster(
         self,
         public: Sequence[KnowledgeGraphEntity],
         *,
         task_id: uuid.UUID | None,
-    ) -> tuple[str, str, Decimal] | None:
+    ) -> str:
         labels = [e.display_name or e.canonical_key for e in public]
         if self.llm is None or task_id is None:
-            # Deterministic fallback: name from the strongest signal.
-            title = labels[0][:60]
-            summary = "Recurring work across this workspace: " + ", ".join(labels[:6])
-            return (title, summary, self.min_confidence)
+            return labels[0][:60]
         try:
             completion = self.llm.complete(
                 task_id=task_id,
@@ -367,46 +335,35 @@ class ProjectInferencePass:
                 type(exc).__name__,
                 exc,
             )
-            return None
-        if not isinstance(parsed, dict):
-            return None
-        title = str(parsed.get("title") or "").strip()
-        summary = str(parsed.get("summary") or "").strip()
-        confidence = _coerce_confidence(parsed.get("confidence"))
-        if not title or not summary or confidence is None:
-            return None
-        return (title[:80], summary, confidence)
+            return labels[0][:60]
+        title = (
+            str(parsed.get("title") or "").strip() if isinstance(parsed, dict) else ""
+        )
+        return title[:80] if title else labels[0][:60]
 
 
-def _dedupe_key(public: Sequence[KnowledgeGraphEntity]) -> str:
-    keys = sorted(e.canonical_key for e in public)
-    return "project_inference:" + "|".join(keys)
+def _cluster_identity_slug(public: Sequence[KnowledgeGraphEntity]) -> str:
+    """Stable slug from the cluster's strongest anchors.
 
+    Keying on the top-N reinforced entities (not the whole set) keeps a project's
+    identity stable as members come and go, so re-detection reinforces the same
+    hub instead of spawning duplicates.
+    """
 
-def _coerce_confidence(value: object) -> Decimal | None:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int | float):
-        candidate = Decimal(str(value))
-    elif isinstance(value, str):
-        try:
-            candidate = Decimal(value)
-        except (ValueError, ArithmeticError):
-            return None
-    else:
-        return None
-    if candidate < 0 or candidate > 1:
-        return None
-    return candidate
+    anchors = sorted(
+        public, key=lambda e: (e.reinforcement_count, e.canonical_key), reverse=True
+    )[:_IDENTITY_ANCHORS]
+    digest = hashlib.sha1(
+        "|".join(sorted(e.canonical_key for e in anchors)).encode()
+    ).hexdigest()[:12]
+    return f"inferred-{digest}"
 
 
 _NAMER_SYSTEM_PROMPT = (
     "You name an emerging project. Given a list of recurring work items a team "
-    'keeps returning to, return strict JSON {"title": str, "summary": str, '
-    '"confidence": number 0-1}. The title is a short human project name. The '
-    "summary is one sentence describing the project, using ONLY the provided "
-    "items (do not invent specifics). Confidence reflects how clearly these "
-    "items form one coherent project."
+    'keeps returning to, return strict JSON {"title": str}. The title is a '
+    "short human project name derived ONLY from the items (do not invent "
+    "specifics)."
 )
 
 _NAMER_RESPONSE_FORMAT = {
@@ -415,12 +372,8 @@ _NAMER_RESPONSE_FORMAT = {
         "name": "project_name",
         "schema": {
             "type": "object",
-            "properties": {
-                "title": {"type": "string"},
-                "summary": {"type": "string"},
-                "confidence": {"type": "number"},
-            },
-            "required": ["title", "summary", "confidence"],
+            "properties": {"title": {"type": "string"}},
+            "required": ["title"],
             "additionalProperties": False,
         },
     },

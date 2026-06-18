@@ -26,6 +26,7 @@ import re
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from decimal import Decimal
 
 from sqlalchemy import select
@@ -62,6 +63,7 @@ class DeclareProjectResult:
     project: KnowledgeGraphEntity
     linked_channel_ids: tuple[str, ...]
     skipped_channel_ids: tuple[str, ...] = field(default=())
+    created: bool = False
 
 
 class ProjectGraphService:
@@ -80,8 +82,21 @@ class ProjectGraphService:
         name: str,
         channel_ids: Sequence[str],
         evidence: EvidenceInput | None = None,
+        slug: str | None = None,
+        source_type: str = "user_explicit",
+        lifecycle_state: str = "confirmed",
+        confidence_score: Decimal = Decimal("1.000"),
+        confidence_reason: str = "Project boundary declared by a user.",
+        reinforce: bool = False,
     ) -> DeclareProjectResult:
         """Create/update a project hub and link the given channels (idempotent).
+
+        Defaults create a human-declared (confirmed) hub. Implicit inference
+        passes ``source_type='agent_inferred'``, ``lifecycle_state='active'``, a
+        cluster-derived ``confidence_score``, a stable ``slug`` (so re-detection
+        finds the same hub), and ``reinforce=True`` (so a re-detected hub gets
+        its reinforcement_count/last_reinforced bumped — the brain learns
+        continuously and self-corrects, no confirmation gate).
 
         Only channels Kortny already knows (a ``channel`` hub entity exists) are
         linked; unknown channels are skipped and reported. Edge visibility
@@ -89,24 +104,29 @@ class ProjectGraphService:
         visible), private → private_channel (gated to that channel).
         """
 
-        slug = project_slug(name)
-        canonical_key = project_canonical_key(slug)
+        resolved_slug = slug or project_slug(name)
+        canonical_key = project_canonical_key(resolved_slug)
         project = self._current_entity(
             installation_id, canonical_key, PROJECT_ENTITY_TYPE
         )
+        created = project is None
         if project is None:
             project = self.graph.create_entity(
                 installation_id=installation_id,
                 entity_type=PROJECT_ENTITY_TYPE,
                 canonical_key=canonical_key,
-                display_name=name.strip() or slug,
+                display_name=name.strip() or resolved_slug,
                 visibility_scope=VisibilityScope.workspace(),
-                source_type="user_explicit",
-                lifecycle_state="confirmed",
-                confidence_score=Decimal("1.000"),
-                confidence_reason="Project boundary declared by a user.",
+                source_type=source_type,
+                lifecycle_state=lifecycle_state,
+                confidence_score=confidence_score,
+                confidence_reason=confidence_reason,
                 evidence=evidence,
             )
+        elif reinforce:
+            project.reinforcement_count += 1
+            project.last_reinforced_at = datetime.now(UTC)
+            self.session.flush()
 
         linked: list[str] = []
         skipped: list[str] = []
@@ -131,6 +151,7 @@ class ProjectGraphService:
             project=project,
             linked_channel_ids=tuple(linked),
             skipped_channel_ids=tuple(skipped),
+            created=created,
         )
 
     def _ensure_includes_edge(

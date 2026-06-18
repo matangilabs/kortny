@@ -17,7 +17,6 @@ from kortny.db.models import (
     KnowledgeGraphEntity,
     KnowledgeGraphEvidence,
     ObservationEvent,
-    ProjectProposal,
     SlackChannelMembership,
     SlackIdentity,
     Task,
@@ -31,7 +30,6 @@ from kortny.knowledge_graph import (
     VisibilityScope,
     is_scope_compatible,
 )
-from kortny.knowledge_graph.project_proposals import ProjectProposalService
 from kortny.knowledge_graph.projects import (
     ProjectGraphService,
     project_anchors_and_scopes,
@@ -1029,51 +1027,68 @@ def test_link_project_entities_adds_edges(db_session: Session) -> None:
     assert again == (topic.id,)
 
 
-def test_project_inference_proposes_recurring_cluster(db_session: Session) -> None:
+def _inferred_project(
+    db_session: Session, installation: Installation
+) -> KnowledgeGraphEntity | None:
+    return db_session.scalars(
+        select(KnowledgeGraphEntity).where(
+            KnowledgeGraphEntity.installation_id == installation.id,
+            KnowledgeGraphEntity.entity_type == "project",
+        )
+    ).first()
+
+
+def test_project_inference_learns_and_reinforces_cluster(db_session: Session) -> None:
     installation = create_installation(db_session)
     graph = GraphService(db_session)
     task = _make_task(db_session, installation, "1")
     # Three reinforced topics sharing one source task, across two public
-    # channels + one with a deadline (commitment) -> one qualifying cluster.
-    _topic_entity(
-        graph,
-        installation,
-        canonical_key="decision:billing_cutover",
-        entity_type="decision",
-        scope=VisibilityScope.channel("C_ENG"),
-        source_task_id=task.id,
-    )
-    _topic_entity(
-        graph,
-        installation,
-        canonical_key="commitment:billing_deadline",
-        entity_type="commitment",
-        scope=VisibilityScope.channel("C_OPS"),
-        source_task_id=task.id,
-    )
-    _topic_entity(
-        graph,
-        installation,
-        canonical_key="open_question:billing_owner",
-        entity_type="open_question",
-        scope=VisibilityScope.channel("C_ENG"),
-        source_task_id=task.id,
-    )
+    # channels + a deadline (commitment) -> one qualifying cluster.
+    for key, etype, chan in (
+        ("decision:billing_cutover", "decision", "C_ENG"),
+        ("commitment:billing_deadline", "commitment", "C_OPS"),
+        ("open_question:billing_owner", "open_question", "C_ENG"),
+    ):
+        _topic_entity(
+            graph,
+            installation,
+            canonical_key=key,
+            entity_type=etype,
+            scope=VisibilityScope.channel(chan),
+            source_task_id=task.id,
+        )
     db_session.commit()
 
+    # Autonomous: the brain learns the project itself, no proposal/confirm.
     counters = ProjectInferencePass(db_session).run(installation_id=installation.id)
     db_session.commit()
-    assert counters.proposed == 1
+    assert counters.learned == 1
+    hub = _inferred_project(db_session, installation)
+    assert hub is not None
+    assert hub.source_type == "agent_inferred"
+    assert hub.lifecycle_state == "active"
+    before = hub.reinforcement_count
 
-    proposals = ProjectProposalService(db_session)
-    # Dedupe: a second run with the same cluster proposes nothing (cooldown).
+    # Re-detection reinforces the SAME hub (no duplicate) — self-correcting.
     again = ProjectInferencePass(db_session).run(installation_id=installation.id)
-    assert again.proposed == 0
-    assert again.skipped_reason in {"no_qualifying_cluster", "all_clusters_filtered"}
-    del proposals
+    db_session.commit()
+    assert again.learned == 0
+    assert again.reinforced == 1
+    assert _inferred_project(db_session, installation).reinforcement_count > before
+    assert (
+        db_session.scalars(
+            select(KnowledgeGraphEntity).where(
+                KnowledgeGraphEntity.installation_id == installation.id,
+                KnowledgeGraphEntity.entity_type == "project",
+            )
+        )
+        .all()
+        .__len__()
+        == 1
+    )
 
 
-def test_project_inference_excludes_private_from_public_evidence(
+def test_project_inference_never_links_private_entities(
     db_session: Session,
 ) -> None:
     installation = create_installation(db_session)
@@ -1106,37 +1121,54 @@ def test_project_inference_excludes_private_from_public_evidence(
     ProjectInferencePass(db_session).run(installation_id=installation.id)
     db_session.commit()
 
-    proposal = db_session.scalars(select(ProjectProposal)).first()
-    assert proposal is not None
-    labels = {item["label"] for item in proposal.public_evidence_json}
-    assert not any("secret" in label.lower() for label in labels)
-    assert proposal.has_private_signal is True
-    assert "G_SECRET" not in proposal.proposed_channel_ids
+    hub = _inferred_project(db_session, installation)
+    assert hub is not None
+    # The private channel is never linked into the inferred hub.
+    edges = db_session.scalars(
+        select(KnowledgeGraphEdge).where(
+            KnowledgeGraphEdge.installation_id == installation.id,
+            KnowledgeGraphEdge.source_entity_id == hub.id,
+        )
+    ).all()
+    target_ids = {edge.target_entity_id for edge in edges}
+    secret = db_session.scalars(
+        select(KnowledgeGraphEntity).where(
+            KnowledgeGraphEntity.canonical_key == "decision:apollo_secret"
+        )
+    ).first()
+    assert secret is not None
+    assert secret.id not in target_ids
+    # No edge carries a private scope.
+    assert all(e.visibility_scope_type != "private_channel" for e in edges)
 
 
-def test_project_proposal_confirm_builds_hub_and_links(db_session: Session) -> None:
+def test_inferred_project_is_usable_for_cross_channel_synthesis(
+    db_session: Session,
+) -> None:
     installation = create_installation(db_session)
     graph = GraphService(db_session)
     task = _make_task(db_session, installation, "3")
-    add_entity(
-        graph,
-        installation,
-        entity_type="channel",
-        canonical_key="slack_channel:C_ENG",
-        display_name="#apollo-eng",
-        visibility_scope=VisibilityScope.channel("C_ENG"),
-    )
-    for key, etype in (
-        ("decision:apollo_a", "decision"),
-        ("commitment:apollo_b", "commitment"),
-        ("open_question:apollo_c", "open_question"),
+    # Channel hubs (so the inferred project links real channels) + facts.
+    for chan in ("C_ENG", "C_DESIGN"):
+        add_entity(
+            graph,
+            installation,
+            entity_type="channel",
+            canonical_key=f"slack_channel:{chan}",
+            display_name=f"#{chan}",
+            visibility_scope=VisibilityScope.channel(chan),
+        )
+    for key, etype, chan in (
+        ("decision:apollo_a", "decision", "C_ENG"),
+        ("commitment:apollo_b", "commitment", "C_DESIGN"),
+        ("open_question:apollo_c", "open_question", "C_ENG"),
     ):
         _topic_entity(
             graph,
             installation,
             canonical_key=key,
             entity_type=etype,
-            scope=VisibilityScope.channel("C_ENG"),
+            scope=VisibilityScope.channel(chan),
             source_task_id=task.id,
         )
     db_session.commit()
@@ -1144,15 +1176,9 @@ def test_project_proposal_confirm_builds_hub_and_links(db_session: Session) -> N
     ProjectInferencePass(db_session).run(installation_id=installation.id)
     db_session.commit()
 
-    proposals = ProjectProposalService(db_session)
-    proposal = db_session.scalars(select(ProjectProposal)).first()
-    assert proposal is not None
-    project = proposals.confirm(proposal, confirmed_by_user_id="U_A")
-    db_session.commit()
-    assert proposal.status == "confirmed"
-    assert proposal.project_entity_id == project.id
-    # The confirmed hub links its entities.
-    linked = ProjectGraphService(db_session)._current_entity(
-        installation.id, project.canonical_key, "project"
+    # The inferred hub is anchored from a member channel and widens to siblings.
+    anchor_keys, scopes = project_anchors_and_scopes(
+        db_session, installation_id=installation.id, channel_id="C_ENG"
     )
-    assert linked is not None
+    assert any(k.startswith("project:inferred-") for k in anchor_keys)
+    assert "C_DESIGN" in {s.scope_id for s in scopes}
