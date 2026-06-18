@@ -125,6 +125,19 @@ class Settings(BaseSettings):
         validation_alias="KORTNY_SANDBOX_DEFAULT_IMAGE",
         min_length=1,
     )
+    # --- Document Studio (HIG-244) -------------------------------------------
+    # Typst is the PDF beauty engine. The binary must be on the worker image;
+    # font dirs (colon-separated) let the image ship the theme fonts so renders
+    # are deterministic rather than relying on whatever system fonts exist.
+    document_typst_bin: str = Field(
+        default="typst",
+        validation_alias="KORTNY_TYPST_BIN",
+        min_length=1,
+    )
+    document_font_paths: str = Field(
+        default="",
+        validation_alias="KORTNY_DOCUMENT_FONT_PATHS",
+    )
     # --- Sandbox container GC (HIG-200) ---------------------------------------
     # Consumed by the sandbox-runner service; declared here so every
     # env-var-backed knob has one authoritative home. The runner reads these

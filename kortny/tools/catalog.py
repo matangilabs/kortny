@@ -421,6 +421,26 @@ NATIVE_TOOL_METADATA: dict[str, ToolMetadata] = {
         result_budget="artifact",
         notes=("Creates local task artifacts only when explicitly useful.",),
     ),
+    "document_studio": ToolMetadata(
+        name="document_studio",
+        namespace="native.documents",
+        category="Documents",
+        display_name="Document Studio",
+        capabilities=(
+            "document_generation",
+            "artifact_generation",
+            "editorial_pdf",
+        ),
+        side_effect="write",
+        approval="none",
+        # Themed multi-page rendering via the Typst engine; allow headroom.
+        timeout_seconds=180,
+        result_budget="artifact",
+        notes=(
+            "Editorial-grade themed PDF from a structured block IR. "
+            "Preferred over pdf_generator for polished deliverables.",
+        ),
+    ),
     "code_exec": ToolMetadata(
         name="code_exec",
         namespace="native.execution",
