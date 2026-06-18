@@ -591,6 +591,7 @@ class ConsolidationService:
 
         pass_ = self._build_user_profile_pass(llm=llm)
         proposed = 0
+        auto_activated = 0
         considered = 0
         for user_id in self._candidate_user_ids(installation_id):
             considered += 1
@@ -601,7 +602,12 @@ class ConsolidationService:
                 now=now,
             )
             proposed += counters.proposed
-        return {"considered": considered, "proposed": proposed}
+            auto_activated += counters.auto_activated
+        return {
+            "considered": considered,
+            "proposed": proposed,
+            "auto_activated": auto_activated,
+        }
 
     def _llm_service(
         self,

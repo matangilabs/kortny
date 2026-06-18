@@ -208,6 +208,38 @@ def test_proposes_user_profile_when_evidence_sufficient(db_session: Session) -> 
     assert proposals[0].payload.get("scope_id") == USER
 
 
+def test_high_confidence_auto_activates_without_prompt(db_session: Session) -> None:
+    installation = _installation(db_session)
+    _observe(db_session, installation, count=6)
+    task = _seed_task(db_session, installation)
+    poster = FakePoster()
+    pass_, _ = _make_pass(
+        db_session,
+        completion=_completion(
+            {
+                "role": "Software Engineer",
+                "work_surfaces": ["issues", "prs"],
+                "confidence": 0.9,  # >= 0.85 -> auto-activate
+            }
+        ),
+        poster=poster,
+    )
+
+    counters = pass_.run(
+        installation_id=installation.id, user_id=USER, task=task, now=NOW
+    )
+
+    assert counters.auto_activated == 1
+    assert counters.proposed == 0
+    assert poster.posts == []  # no confirmation prompt
+    # The fact is active immediately, no confirm step.
+    fact = WorkspaceStateService(db_session).get(
+        installation.id, "user", USER, USER_PROFILE_FACT_KEY
+    )
+    assert fact is not None
+    assert "Software Engineer" in (fact.value_text or "")
+
+
 def test_skips_when_insufficient_observation(db_session: Session) -> None:
     installation = _installation(db_session)
     _observe(db_session, installation, count=2)

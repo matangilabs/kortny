@@ -50,8 +50,10 @@ USER_PROFILE_TASK_SOURCE = "user_profile_proposal"
 USER_PROFILE_PROMPT_NAME = "kortny.user_profile_extractor"
 USER_PROFILE_SOURCE_KIND = "observer_proposed"
 
-# Locked thresholds (HIG-277): propose at >= 0.6; below that is noise.
+# Locked thresholds (HIG-277): propose at >= 0.6; auto-activate at >= 0.85
+# (higher than the scheduler's 0.72 — a wrong persona colours every answer).
 DEFAULT_MIN_CONFIDENCE = Decimal("0.6")
+DEFAULT_AUTO_ACTIVE_CONFIDENCE = Decimal("0.85")
 DEFAULT_MIN_OBSERVED_EVENTS = 5
 DEFAULT_REPROPOSE_COOLDOWN = timedelta(days=14)
 
@@ -98,6 +100,7 @@ class UserProfileCounters:
     """Outcome of one user-profile pass run."""
 
     proposed: int = 0
+    auto_activated: int = 0
     observed_events: int = 0
     skipped_reason: str | None = None
     failed: int = 0
@@ -106,6 +109,7 @@ class UserProfileCounters:
     def to_payload(self) -> JsonObject:
         payload: JsonObject = {
             "proposed": self.proposed,
+            "auto_activated": self.auto_activated,
             "observed_events": self.observed_events,
             "failed": self.failed,
         }
@@ -135,6 +139,7 @@ class UserProfilePass:
         slack_title_for_user: SlackTitleResolver | None = None,
         min_observed_events: int = DEFAULT_MIN_OBSERVED_EVENTS,
         min_confidence: Decimal = DEFAULT_MIN_CONFIDENCE,
+        auto_active_confidence: Decimal = DEFAULT_AUTO_ACTIVE_CONFIDENCE,
         repropose_cooldown: timedelta = DEFAULT_REPROPOSE_COOLDOWN,
     ) -> None:
         self.session = session
@@ -144,6 +149,7 @@ class UserProfilePass:
         self.slack_title_for_user = slack_title_for_user
         self.min_observed_events = min_observed_events
         self.min_confidence = min_confidence
+        self.auto_active_confidence = auto_active_confidence
         self.repropose_cooldown = repropose_cooldown
 
     def run(
@@ -193,6 +199,23 @@ class UserProfilePass:
             )
 
         profile["work_surfaces"] = _clean_surfaces(profile.get("work_surfaces"))
+
+        # Locked trust model (HIG-277): high-confidence personas auto-activate
+        # (no confirmation round-trip); mid-confidence ones propose→confirm.
+        if confidence >= self.auto_active_confidence:
+            self._auto_activate(
+                installation_id=installation_id,
+                user_id=user_id,
+                profile=profile,
+                confidence=confidence,
+                task=task,
+            )
+            return UserProfileCounters(
+                auto_activated=1,
+                observed_events=observed_events,
+                confidence=str(confidence),
+            )
+
         proposed = self._propose(
             installation_id=installation_id,
             user_id=user_id,
@@ -206,6 +229,31 @@ class UserProfilePass:
             proposed=1,
             observed_events=observed_events,
             confidence=str(confidence),
+        )
+
+    def _auto_activate(
+        self,
+        *,
+        installation_id: uuid.UUID,
+        user_id: str,
+        profile: JsonObject,
+        confidence: Decimal,
+        task: Task,
+    ) -> None:
+        memory_service = WorkspaceStateService(
+            self.session, task_service=TaskService(self.session)
+        )
+        memory_service.set_active(
+            installation_id,
+            "user",
+            user_id,
+            USER_PROFILE_FACT_KEY,
+            value=profile,
+            source_task_id=task.id,
+            value_text=_render_profile(profile),
+            confidence_score=confidence,
+            confidence_reason="High-confidence inference over observed activity.",
+            source_kind=USER_PROFILE_SOURCE_KIND,
         )
 
     # -- internals ----------------------------------------------------------
