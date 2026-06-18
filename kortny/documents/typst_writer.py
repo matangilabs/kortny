@@ -164,6 +164,10 @@ def _cover(block: CoverHeader, theme: Theme) -> str:
     margin = f"{theme.page_margin_mm + 4}mm"
     lines = [
         f"#page(fill: {fill}, header: none, footer: none, margin: {margin})[",
+        # Display titles must not hyphenate ("EV Mar-ket Report") or justify
+        # (which spreads a 2-line title); this page is all short display text.
+        "  #set text(hyphenate: false)",
+        "  #set par(justify: false)",
         "  #v(1fr)",
     ]
     if block.eyebrow:
@@ -198,6 +202,8 @@ def _divider(block: SectionDivider, theme: Theme) -> str:
     margin = f"{theme.page_margin_mm + 4}mm"
     lines = [
         f"#page(fill: {fill}, header: none, footer: none, margin: {margin})[",
+        "  #set text(hyphenate: false)",
+        "  #set par(justify: false)",
         "  #v(1fr)",
     ]
     if block.index:

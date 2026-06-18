@@ -72,7 +72,12 @@ _BLOCK_GUIDE = (
     "- cta: label (req), text.\n"
     "- chart: chart_type (bar|line|area|pie|scatter), title, x_label, y_label, "
     "caption, series (req, 1-8) of {name, points:[{x,y}]}. Use for real data "
-    "visualizations; x is a category label or a number, y is numeric."
+    "visualizations; x is a category label or a number, y is numeric.\n"
+    "Composition: a section_divider takes its own full page, so put dividers "
+    "BETWEEN major sections — never immediately after the cover, and never strand "
+    "a single small block (e.g. stat_cards alone) right before a divider, which "
+    "leaves a near-empty page. Open the body with a heading + intro prose and the "
+    "headline stat_cards together."
 )
 
 
