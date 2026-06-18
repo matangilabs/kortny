@@ -30,6 +30,7 @@ from kortny.consolidator.passes import (
     project_confirmed_facts,
     run_hygiene,
 )
+from kortny.consolidator.project_inference import ProjectInferencePass
 from kortny.consolidator.promotion import EpisodePromotionPass
 from kortny.consolidator.style_cards import (
     DEFAULT_STYLE_CARD_MIN_MESSAGES,
@@ -381,6 +382,18 @@ class ConsolidationService:
                     .run(
                         installation_id=installation_id,
                         task=task,
+                        now=effective_now,
+                    )
+                    .to_payload()
+                ),
+            ),
+            (
+                "project_inference",
+                lambda: (
+                    ProjectInferencePass(self.session, llm=llm)
+                    .run(
+                        installation_id=installation_id,
+                        task_id=task.id,
                         now=effective_now,
                     )
                     .to_payload()
