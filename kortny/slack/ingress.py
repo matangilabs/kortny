@@ -17,11 +17,6 @@ from kortny.approvals import (
     TOOL_APPROVAL_PROMPT_PURPOSE,
     TOOL_APPROVAL_REJECTED_PURPOSE,
 )
-from kortny.composio.runtime import (
-    IngressConnectionScope,
-    connected_toolkit_slugs,
-    connected_toolkit_slugs_for_scope,
-)
 from kortny.config import Settings, SettingsError, load_settings
 from kortny.db.models import (
     AssistantThreadContext,
@@ -37,9 +32,11 @@ from kortny.db.models import (
 from kortny.db.models import TaskStatus as DbTaskStatus
 from kortny.intent import (
     IntentClassification,
+    IntentClassificationService,
     IntentClassifier,
     IntentDecision,
     IntentRequest,
+    IntentScope,
     IntentSurface,
     should_classify_channel_message,
     should_create_task_from_soft_mention,
@@ -50,7 +47,6 @@ from kortny.observability import (
     current_traceparent,
     record_span_exception,
     set_span_attributes,
-    start_span,
 )
 from kortny.observe import (
     ChannelJoinObservationResult,
@@ -1809,36 +1805,28 @@ class SlackIngress:
             return None
 
         try:
-            with start_span(
-                "intent.classify",
-                task=task,
-                attributes={
+            decision = IntentClassificationService(
+                self.session, self.intent_classifier
+            ).classify(
+                request=IntentRequest(
+                    text=task.input,
+                    surface=_intent_surface(source),
+                    is_thread_follow_up=_is_thread_follow_up(event),
+                    has_files=bool(_event_files(event)),
+                ),
+                scope=IntentScope(
+                    installation_id=task.installation_id,
+                    channel_id=task.slack_channel_id,
+                    user_id=task.slack_user_id,
+                ),
+                task_id=task.id,
+                span_task=task,
+                span_attributes={
                     "intent.surface": source,
                     "intent.has_files": bool(_event_files(event)),
                     "intent.is_thread_follow_up": _is_thread_follow_up(event),
                 },
-            ):
-                decision = self.intent_classifier.classify(
-                    task_id=task.id,
-                    request=IntentRequest(
-                        text=task.input,
-                        surface=_intent_surface(source),
-                        is_thread_follow_up=_is_thread_follow_up(event),
-                        has_files=bool(_event_files(event)),
-                        connected_integrations=connected_toolkit_slugs(
-                            self.session, task
-                        ),
-                    ),
-                )
-                set_span_attributes(
-                    {
-                        "intent.classification": decision.classification.value,
-                        "intent.confidence": decision.confidence,
-                        "intent.addressed_to_kortny": decision.addressed_to_kortny,
-                        "intent.should_create_task": decision.should_create_task,
-                        "intent.model_tier": decision.model_tier.value,
-                    }
-                )
+            )
         except Exception as exc:
             record_span_exception(exc)
             logger.info(
@@ -1879,49 +1867,31 @@ class SlackIngress:
                 event.get("channel"),
             )
             return None
-        # Ground the classifier with what is actually connected (HIG-269/274).
-        # This path classifies before a Task row exists, so derive the scope
-        # straight from the event — otherwise soft mentions are the one surface
-        # that routes blind to connected integrations.
-        connected_integrations = connected_toolkit_slugs_for_scope(
-            self.session,
-            IngressConnectionScope(
-                installation_id=installation_id,
-                slack_channel_id=channel_id,
-                slack_user_id=user_id,
-            ),
-        )
+        # Grounding (connected integrations) is attached inside the service from
+        # (installation_id, channel_id, user_id) — works here even though this
+        # path classifies before a Task row exists (HIG-187/269/274).
         try:
-            with start_span(
-                "intent.classify",
-                attributes={
-                    "intent.surface": IntentSurface.channel_message.value,
-                    "intent.has_files": bool(_event_files(event)),
-                    "intent.is_thread_follow_up": _is_thread_follow_up(event),
+            decision = IntentClassificationService(
+                self.session, self.intent_classifier
+            ).classify(
+                request=IntentRequest(
+                    text=input_text,
+                    surface=IntentSurface.channel_message,
+                    app_name=app_name,
+                    is_thread_follow_up=_is_thread_follow_up(event),
+                    has_files=bool(_event_files(event)),
+                ),
+                scope=IntentScope(
+                    installation_id=installation_id,
+                    channel_id=channel_id,
+                    user_id=user_id,
+                ),
+                span_attributes={
                     "intent.app_name": app_name,
                     "slack.channel_id": event.get("channel"),
                     "slack.message_ts": event.get("ts"),
                 },
-            ):
-                decision = self.intent_classifier.classify(
-                    request=IntentRequest(
-                        text=input_text,
-                        surface=IntentSurface.channel_message,
-                        app_name=app_name,
-                        is_thread_follow_up=_is_thread_follow_up(event),
-                        has_files=bool(_event_files(event)),
-                        connected_integrations=connected_integrations,
-                    ),
-                )
-                set_span_attributes(
-                    {
-                        "intent.classification": decision.classification.value,
-                        "intent.confidence": decision.confidence,
-                        "intent.addressed_to_kortny": decision.addressed_to_kortny,
-                        "intent.should_create_task": decision.should_create_task,
-                        "intent.model_tier": decision.model_tier.value,
-                    }
-                )
+            )
         except Exception as exc:
             record_span_exception(exc)
             logger.info(
