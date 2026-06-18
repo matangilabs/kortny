@@ -94,12 +94,17 @@ class DocumentStudioTool:
     name = "document_studio"
     description = (
         "Generate a beautiful, themed document from a structured spec, as PDF, "
-        "PowerPoint (pptx), or Word (docx). Use for reports, briefs, decks, and "
-        "pitch documents that should look editorial-grade (cover, section "
-        "dividers, stat cards, tables, callouts, pull quotes). Choose 'pptx' for "
-        "a slide deck, 'docx' for an editable Word doc the user will keep editing, "
-        "'pdf' for a finished deliverable. Prefer this over pdf_generator for any "
-        "polished output."
+        "PowerPoint (pptx), or Word (docx). This is THE tool for any polished "
+        "deliverable — reports, research notes, briefs, one-pagers, decks, "
+        "leave-behinds — with cover, section dividers, stat cards, tables, "
+        "charts, callouts, and pull quotes. Choose 'pptx' for a slide deck, "
+        "'docx' for an editable Word doc the user will keep editing, 'pdf' for a "
+        "finished deliverable (default). Prefer this over pdf_generator for any "
+        "polished output. Exercise judgment about presenting data: when the "
+        "content has comparisons, trends, or proportions, add a chart block "
+        "(bar=compare categories, line/area=trend over time, pie=share with <=6 "
+        "slices, scatter=correlation) instead of burying numbers in prose — the "
+        "user will rarely ask for a chart explicitly; decide for them."
     )
     parameters: JsonSchema = {
         "type": "object",
