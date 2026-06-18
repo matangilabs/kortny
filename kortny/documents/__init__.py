@@ -22,7 +22,6 @@ from kortny.documents.ir import (
     Table,
 )
 from kortny.documents.render import (
-    DEFAULT_TYPST_BIN,
     DocumentRenderError,
     TypstNotAvailableError,
     render_spec_pdf,
@@ -44,7 +43,6 @@ __all__ = [
     "Block",
     "Callout",
     "CoverHeader",
-    "DEFAULT_TYPST_BIN",
     "DocKind",
     "DocumentRenderError",
     "DocumentSpec",

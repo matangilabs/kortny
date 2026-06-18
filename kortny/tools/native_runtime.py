@@ -176,7 +176,6 @@ def _build_document_studio_tool(context: NativeToolBuildContext) -> Tool:
     font_paths = tuple(p for p in raw_paths.split(":") if p)
     return DocumentStudioTool(
         working_dir=context.working_dir,
-        typst_bin=context.settings.document_typst_bin,
         font_paths=font_paths,
         session=context.session,
         task_id=context.task.id,

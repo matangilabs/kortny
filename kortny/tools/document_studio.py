@@ -129,7 +129,6 @@ class DocumentStudioTool:
         self,
         *,
         working_dir: str | Path,
-        typst_bin: str = "typst",
         font_paths: Sequence[str] = (),
         session: Session | None = None,
         task_id: uuid.UUID | None = None,
@@ -138,7 +137,6 @@ class DocumentStudioTool:
         if (session is None) != (task_id is None):
             raise ValueError("session and task_id must be provided together")
         self.working_dir = Path(working_dir)
-        self.typst_bin = typst_bin
         self.font_paths = tuple(font_paths)
         self.session = session
         self.task_id = task_id
@@ -151,9 +149,7 @@ class DocumentStudioTool:
         filename = _safe_pdf_filename(args.get("filename"))
 
         try:
-            pdf = render_spec_pdf(
-                spec, typst_bin=self.typst_bin, font_paths=self.font_paths
-            )
+            pdf = render_spec_pdf(spec, font_paths=self.font_paths)
         except TypstNotAvailableError as exc:
             raise RecoverableToolError(
                 code="typst_unavailable",

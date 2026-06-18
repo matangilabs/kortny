@@ -83,10 +83,12 @@ def test_missing_required_field_raises_recoverable(tmp_path: Path) -> None:
     assert exc.value.code == "invalid_document_spec"
 
 
-def test_typst_unavailable_raises_recoverable(tmp_path: Path) -> None:
-    tool = DocumentStudioTool(
-        working_dir=tmp_path, typst_bin="kortny-no-such-typst-binary"
-    )
+def test_typst_unavailable_raises_recoverable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Simulate the compiler package being absent.
+    monkeypatch.setattr("kortny.documents.render._typst", None)
+    tool = DocumentStudioTool(working_dir=tmp_path)
     with pytest.raises(RecoverableToolError) as exc:
         tool.invoke(_args())
     assert exc.value.code == "typst_unavailable"

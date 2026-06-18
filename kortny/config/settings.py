@@ -126,14 +126,10 @@ class Settings(BaseSettings):
         min_length=1,
     )
     # --- Document Studio (HIG-244) -------------------------------------------
-    # Typst is the PDF beauty engine. The binary must be on the worker image;
-    # font dirs (colon-separated) let the image ship the theme fonts so renders
-    # are deterministic rather than relying on whatever system fonts exist.
-    document_typst_bin: str = Field(
-        default="typst",
-        validation_alias="KORTNY_TYPST_BIN",
-        min_length=1,
-    )
+    # Typst is the PDF beauty engine, vendored via the ``typst`` PyPI wheel (no
+    # system binary). Font dirs (colon-separated) let a deployment ship the
+    # theme fonts so renders are deterministic rather than relying on whatever
+    # system fonts exist.
     document_font_paths: str = Field(
         default="",
         validation_alias="KORTNY_DOCUMENT_FONT_PATHS",
