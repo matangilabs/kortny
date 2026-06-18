@@ -41,6 +41,7 @@ from kortny.knowledge_graph.service import EvidenceInput, GraphService
 
 PROJECT_ENTITY_TYPE = "project"
 PROJECT_INCLUDES_CHANNEL = "project_includes_channel"
+PROJECT_INCLUDES_ENTITY = "project_includes_entity"
 _CHANNEL_ENTITY_TYPE = "channel"
 _CURRENT_STATES = ("active", "confirmed")
 
@@ -172,6 +173,66 @@ class ProjectGraphService:
             confidence_reason="Channel declared part of the project by a user.",
             evidence=evidence,
         )
+
+    def link_project_entities(
+        self,
+        *,
+        installation_id: uuid.UUID,
+        project: KnowledgeGraphEntity,
+        entity_ids: Sequence[uuid.UUID],
+        evidence: EvidenceInput | None = None,
+    ) -> tuple[uuid.UUID, ...]:
+        """Link a project hub to its constituent entities (HIG-276 increment 2).
+
+        Adds ``project_includes_entity`` edges so retrieval reaches the project's
+        topics/decisions/commitments directly. The edge inherits each entity's
+        own visibility scope, so a public-channel topic widens project answers
+        while a private one stays gated — matching the audience-safe model.
+        Idempotent; returns the entity ids actually linked.
+        """
+
+        wanted = tuple(dict.fromkeys(entity_ids))
+        if not wanted:
+            return ()
+        rows = self.session.scalars(
+            select(KnowledgeGraphEntity).where(
+                KnowledgeGraphEntity.installation_id == installation_id,
+                KnowledgeGraphEntity.id.in_(wanted),
+                KnowledgeGraphEntity.lifecycle_state.in_(_CURRENT_STATES),
+            )
+        ).all()
+        linked: list[uuid.UUID] = []
+        for entity in rows:
+            if entity.id == project.id:
+                continue
+            existing = self.session.scalars(
+                select(KnowledgeGraphEdge).where(
+                    KnowledgeGraphEdge.installation_id == installation_id,
+                    KnowledgeGraphEdge.source_entity_id == project.id,
+                    KnowledgeGraphEdge.target_entity_id == entity.id,
+                    KnowledgeGraphEdge.relationship_type == PROJECT_INCLUDES_ENTITY,
+                    KnowledgeGraphEdge.lifecycle_state.in_(_CURRENT_STATES),
+                )
+            ).first()
+            if existing is not None:
+                linked.append(entity.id)
+                continue
+            self.graph.create_edge(
+                installation_id=installation_id,
+                source_entity_id=project.id,
+                target_entity_id=entity.id,
+                relationship_type=PROJECT_INCLUDES_ENTITY,
+                visibility_scope=VisibilityScope(
+                    entity.visibility_scope_type, entity.visibility_scope_id
+                ),
+                source_type="user_explicit",
+                lifecycle_state="confirmed",
+                confidence_score=Decimal("1.000"),
+                confidence_reason="Entity confirmed part of the project.",
+                evidence=evidence,
+            )
+            linked.append(entity.id)
+        return tuple(linked)
 
     # -- lookups (anchoring + authorization) ------------------------------
 

@@ -1662,7 +1662,7 @@ class KnowledgeGraphEdge(Base):
             "relationship_type in "
             "('member_of', 'maps_to', 'works_on', 'owns', 'belongs_to', "
             "'referenced_in', 'made_in', 'affects', 'relates_to', 'available_for', "
-            "'project_includes_channel')",
+            "'project_includes_channel', 'project_includes_entity')",
             name="ck_kg_edges_relationship_type",
         ),
         CheckConstraint(
@@ -2727,5 +2727,83 @@ class AssistantThreadContext(Base):
             "channel_id",
             "thread_ts",
             name="uq_assistant_thread_context_channel_thread",
+        ),
+    )
+
+
+class ProjectProposal(Base):
+    """An inferred project boundary awaiting confirmation (HIG-276 increment 2).
+
+    Implicit project inference clusters recurring co-occurring entities into a
+    candidate project and proposes it to a user, who confirms (then it becomes a
+    real `project` graph hub) or rejects it. A graph mutation, not a memory fact,
+    so it gets its own lifecycle rather than reusing WorkspaceState proposals.
+
+    Privacy: only `public_summary` + `public_evidence_json` are safe to render in
+    Slack. `private_evidence_json` is stored for later governance and MUST NOT be
+    surfaced in the proposal DM (the proposed_to_user may not see those private
+    surfaces).
+    """
+
+    __tablename__ = "project_proposals"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    installation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("installations.id", ondelete="CASCADE"), nullable=False
+    )
+    slug: Mapped[str] = mapped_column(String, nullable=False)
+    title: Mapped[str] = mapped_column(String, nullable=False)
+    public_summary: Mapped[str] = mapped_column(Text, nullable=False)
+    proposed_channel_ids: Mapped[list] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    proposed_entity_ids: Mapped[list] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    public_evidence_json: Mapped[list] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    private_evidence_json: Mapped[list] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    has_private_signal: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    status: Mapped[str] = mapped_column(
+        String, nullable=False, server_default=text("'proposed'")
+    )
+    proposed_to_user_id: Mapped[str | None] = mapped_column(String)
+    prompt_channel_id: Mapped[str | None] = mapped_column(String)
+    prompt_message_ts: Mapped[str | None] = mapped_column(String)
+    dedupe_key: Mapped[str] = mapped_column(String, nullable=False)
+    confidence_score: Mapped[Decimal] = mapped_column(
+        Numeric(4, 3), nullable=False, server_default=text("0.500")
+    )
+    confidence_reason: Mapped[str | None] = mapped_column(Text)
+    cooldown_until: Mapped[datetime | None] = mapped_column(TZ)
+    confirmed_by_user_id: Mapped[str | None] = mapped_column(String)
+    confirmed_at: Mapped[datetime | None] = mapped_column(TZ)
+    project_entity_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("kg_entities.id", ondelete="SET NULL")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "status in ('proposed', 'confirmed', 'rejected', 'expired', 'superseded')",
+            name="ck_project_proposals_status",
+        ),
+        Index("idx_project_proposals_installation", "installation_id"),
+        Index(
+            "idx_project_proposals_dedupe",
+            "installation_id",
+            "dedupe_key",
         ),
     )
