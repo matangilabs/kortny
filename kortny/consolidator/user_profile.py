@@ -32,7 +32,13 @@ from decimal import Decimal
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from kortny.db.models import ObservationEvent, Task, TaskEvent, TaskEventType
+from kortny.db.models import (
+    ObservationEvent,
+    ObserveChannelProfile,
+    Task,
+    TaskEvent,
+    TaskEventType,
+)
 from kortny.llm import ChatMessage, LLMService
 from kortny.memory.service import (
     PENDING_PROPOSAL_MESSAGE,
@@ -59,6 +65,9 @@ DEFAULT_REPROPOSE_COOLDOWN = timedelta(days=14)
 
 _MAX_CHANNELS = 12
 _MAX_TOOLS = 15
+# Channel summaries are the strongest engagement signal (a raw channel id carries
+# none), but they're prose — clip each so the evidence stays token-bounded.
+_MAX_CHANNEL_SUMMARY_CHARS = 240
 
 # Fixed work-surface vocabulary (HIG-277 locked) the persona maps to so intent /
 # tool selection can use it deterministically.
@@ -91,6 +100,12 @@ the surfaces this user's work actually lives in, most important first.
 - confidence: a number 0..1, your honest confidence this persona is correct for \
 THIS user. Be conservative; if the evidence is thin, return confidence below \
 0.4 and leave fields empty. Do NOT fabricate a role.
+
+The evidence: slack_title is this user's self-declared title (strongest signal \
+when present). active_channels lists the channels they engage in most, each \
+with an "about" summary of what that channel is for when one is known — lean on \
+those summaries, not the opaque channel ids, to read what their work is. \
+tools_used lists integrations they've invoked.
 
 Output ONLY the JSON object, no prose."""
 
@@ -292,17 +307,35 @@ class UserProfilePass:
     def _top_channels(
         self, installation_id: uuid.UUID, user_id: str
     ) -> list[dict[str, object]]:
+        # Join the channel's observed profile summary: a raw channel id is opaque
+        # ("C0AB12") so the model can't tell eng from sales, but the summary
+        # ("trading-operations channel…") is the real role signal.
         rows = self.session.execute(
-            select(ObservationEvent.channel_id, func.count().label("n"))
+            select(
+                ObservationEvent.channel_id,
+                func.count().label("n"),
+                ObserveChannelProfile.summary,
+            )
+            .outerjoin(
+                ObserveChannelProfile,
+                (ObserveChannelProfile.installation_id == installation_id)
+                & (ObserveChannelProfile.channel_id == ObservationEvent.channel_id),
+            )
             .where(
                 ObservationEvent.installation_id == installation_id,
                 ObservationEvent.user_id == user_id,
             )
-            .group_by(ObservationEvent.channel_id)
+            .group_by(ObservationEvent.channel_id, ObserveChannelProfile.summary)
             .order_by(func.count().desc())
             .limit(_MAX_CHANNELS)
         ).all()
-        return [{"channel_id": cid, "events": n} for cid, n in rows]
+        channels: list[dict[str, object]] = []
+        for cid, n, summary in rows:
+            entry: dict[str, object] = {"channel_id": cid, "events": n}
+            if summary and summary.strip():
+                entry["about"] = summary.strip()[:_MAX_CHANNEL_SUMMARY_CHARS]
+            channels.append(entry)
+        return channels
 
     def _tools_used(self, installation_id: uuid.UUID, user_id: str) -> list[str]:
         # Bind the JSON-path expression once and reuse it in SELECT and GROUP BY;

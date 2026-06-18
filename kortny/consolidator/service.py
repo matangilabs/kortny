@@ -13,7 +13,7 @@ import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import cast
+from typing import Any, cast
 
 from slack_sdk import WebClient
 from sqlalchemy import func, select
@@ -593,6 +593,8 @@ class ConsolidationService:
         proposed = 0
         auto_activated = 0
         considered = 0
+        failed = 0
+        skipped: dict[str, int] = {}
         for user_id in self._candidate_user_ids(installation_id):
             considered += 1
             counters = pass_.run(
@@ -603,11 +605,22 @@ class ConsolidationService:
             )
             proposed += counters.proposed
             auto_activated += counters.auto_activated
-        return {
+            failed += counters.failed
+            if counters.skipped_reason is not None:
+                skipped[counters.skipped_reason] = (
+                    skipped.get(counters.skipped_reason, 0) + 1
+                )
+        payload: JsonObject = {
             "considered": considered,
             "proposed": proposed,
             "auto_activated": auto_activated,
+            "failed": failed,
         }
+        if skipped:
+            # Surface why nothing landed (low_confidence vs profile_exists vs a
+            # silent propose failure) so an empty run is diagnosable.
+            payload["skipped"] = cast(Any, skipped)
+        return payload
 
     def _llm_service(
         self,
@@ -693,6 +706,20 @@ def _rollup_counters(counters: dict[str, object]) -> dict[str, object]:
     }
 
 
+def _slack_payload(response: object) -> Mapping[str, Any] | None:
+    """Extract the dict body of a Slack response.
+
+    slack_sdk's ``SlackResponse`` is NOT a ``Mapping`` (it only delegates
+    ``.get``/``__getitem__`` to its ``.data``), so an ``isinstance(response,
+    Mapping)`` guard silently fails every lookup — which made DM open and title
+    resolution always return None and the org/user-profile DM proposals never
+    fire. Read ``.data`` (the real dict) instead.
+    """
+
+    data = getattr(response, "data", response)
+    return data if isinstance(data, Mapping) else None
+
+
 def _open_dm_channel(client: WebClient, user_id: str) -> str | None:
     """Resolve a user's DM ("D…") channel id via conversations.open, or None."""
 
@@ -706,7 +733,8 @@ def _open_dm_channel(client: WebClient, user_id: str) -> str | None:
             exc,
         )
         return None
-    channel = response.get("channel") if isinstance(response, Mapping) else None
+    payload = _slack_payload(response)
+    channel = payload.get("channel") if payload else None
     channel_id = channel.get("id") if isinstance(channel, Mapping) else None
     return channel_id if isinstance(channel_id, str) and channel_id else None
 
@@ -724,7 +752,8 @@ def _slack_user_title(client: WebClient, user_id: str) -> str | None:
             exc,
         )
         return None
-    user = response.get("user") if isinstance(response, Mapping) else None
+    payload = _slack_payload(response)
+    user = payload.get("user") if payload else None
     profile = user.get("profile") if isinstance(user, Mapping) else None
     title = profile.get("title") if isinstance(profile, Mapping) else None
     return title if isinstance(title, str) and title.strip() else None
