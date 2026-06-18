@@ -20,14 +20,17 @@ from kortny.intent.policy import (
     should_create_task_from_soft_mention,
     should_react_to_rejected_soft_mention,
 )
+from kortny.intent.service import IntentClassificationService, IntentScope
 
 __all__ = [
     "IntentClassification",
     "IntentClassificationError",
     "IntentClassifier",
+    "IntentClassificationService",
     "IntentDecision",
     "IntentFragment",
     "IntentRequest",
+    "IntentScope",
     "IntentSurface",
     "LLMIntentClassifier",
     "ModelTier",

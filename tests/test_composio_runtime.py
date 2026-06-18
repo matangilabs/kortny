@@ -821,3 +821,65 @@ class StaticWebSearchTool:
     def invoke(self, args: JsonObject) -> ToolResult:
         del args
         return ToolResult(output={"results": []})
+
+
+def test_intent_service_grounds_request_from_scope(db_session: Session) -> None:
+    # HIG-187: the chokepoint attaches connected integrations itself, so a caller
+    # that passes an ungrounded request still gets a grounded classification.
+    from kortny.intent import (
+        IntentClassification,
+        IntentClassificationService,
+        IntentDecision,
+        IntentRequest,
+        IntentScope,
+        IntentSurface,
+        ModelTier,
+    )
+    from kortny.intent.classifier import IntentClassifier
+
+    task = create_task(db_session, slack_channel_id="CAlpha", slack_user_id="UAneesh")
+    add_connection(
+        db_session,
+        task,
+        connected_account_id="ca_linear",
+        scope_type="user",
+        scope_id="UAneesh",
+        toolkit_slug="linear",
+    )
+    db_session.commit()
+
+    seen: list[IntentRequest] = []
+
+    class _Fake(IntentClassifier):
+        def classify(
+            self, *, request: IntentRequest, task_id: uuid.UUID | None = None
+        ) -> IntentDecision:
+            seen.append(request)
+            return IntentDecision(
+                addressed_to_kortny=True,
+                classification=IntentClassification.task_request,
+                confidence=0.9,
+                should_create_task=True,
+                should_ack_with_reaction=False,
+                suggested_reaction=None,
+                needs_channel_context=False,
+                needs_thread_context=False,
+                needs_file_context=False,
+                likely_tools=[],
+                model_tier=ModelTier.cheap,
+                reason="ok",
+            )
+
+    decision = IntentClassificationService(db_session, _Fake()).classify(
+        request=IntentRequest(text="what's on my plate", surface=IntentSurface.dm),
+        scope=IntentScope(
+            installation_id=task.installation_id,
+            channel_id="CAlpha",
+            user_id="UAneesh",
+        ),
+        task_id=task.id,
+    )
+
+    assert decision.classification.value == "task_request"
+    # The caller passed no grounding; the service attached it from the scope.
+    assert seen[0].connected_integrations == ("linear",)
