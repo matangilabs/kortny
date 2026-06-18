@@ -6,6 +6,7 @@ writer renders it to a concrete format. Phase 1 ships the Typst PDF path.
 
 from __future__ import annotations
 
+from kortny.documents.docx_writer import render_docx
 from kortny.documents.ir import (
     CTA,
     Block,
@@ -21,6 +22,7 @@ from kortny.documents.ir import (
     StatCards,
     Table,
 )
+from kortny.documents.pptx_writer import render_pptx
 from kortny.documents.render import (
     DocumentRenderError,
     TypstNotAvailableError,
@@ -58,7 +60,9 @@ __all__ = [
     "Theme",
     "ThemeColors",
     "TypstNotAvailableError",
+    "render_docx",
     "render_document",
+    "render_pptx",
     "render_spec_pdf",
     "render_typst_pdf",
     "resolve_theme",
