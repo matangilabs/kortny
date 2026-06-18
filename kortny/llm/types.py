@@ -75,5 +75,11 @@ class LLMProvider(Protocol):
         tools: Sequence[JsonSchema] = (),
         *,
         response_format: JsonObject | None = None,
+        max_output_tokens: int | None = None,
     ) -> Completion:
-        """Complete a chat turn with optional tool declarations."""
+        """Complete a chat turn with optional tool declarations.
+
+        ``max_output_tokens`` overrides the provider's default completion-token
+        cap for this one call (HIG-220 effort steering) — e.g. a utility prompt
+        clamps verbosity without changing the global setting.
+        """

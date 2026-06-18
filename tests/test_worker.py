@@ -4636,6 +4636,7 @@ class FakeAgentProvider:
         tools: Sequence[JsonSchema] = (),
         *,
         response_format: JsonObject | None = None,
+        max_output_tokens: int | None = None,
     ) -> Completion:
         self.calls.append((tuple(messages), tuple(tools), response_format))
         if not self.completions:

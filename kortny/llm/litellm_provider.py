@@ -75,6 +75,7 @@ class LiteLLMProvider:
         tools: Sequence[JsonSchema] = (),
         *,
         response_format: JsonObject | None = None,
+        max_output_tokens: int | None = None,
     ) -> Completion:
         payload_messages = [_message_to_payload(message) for message in messages]
         payload_tools = (
@@ -102,10 +103,16 @@ class LiteLLMProvider:
             kwargs["tools"] = payload_tools
         if response_format is not None:
             kwargs["response_format"] = response_format
-        if self.max_output_tokens is not None:
+        effective_max_tokens = (
+            max_output_tokens
+            if max_output_tokens is not None
+            else self.max_output_tokens
+        )
+        if effective_max_tokens is not None:
             # Cap requested completion tokens so the provider doesn't reserve
             # the model's full max output (e.g. 65k on Opus) per call (HIG-265).
-            kwargs["max_tokens"] = self.max_output_tokens
+            # A per-call override clamps utility prompts (HIG-220 effort steering).
+            kwargs["max_tokens"] = effective_max_tokens
         if _is_openrouter_route(self.model):
             # Provider-sticky routing + cache accounting on OpenRouter (HIG-196
             # D6). ``usage.include`` returns cache_discount and the cached-token

@@ -44,6 +44,7 @@ class FakeProvider:
     def __init__(self, completion: Completion) -> None:
         self.completion = completion
         self.calls: list[tuple[Sequence[ChatMessage], Sequence[JsonSchema]]] = []
+        self.max_output_tokens: list[int | None] = []
 
     def complete(
         self,
@@ -51,9 +52,11 @@ class FakeProvider:
         tools: Sequence[JsonSchema] = (),
         *,
         response_format: JsonObject | None = None,
+        max_output_tokens: int | None = None,
     ) -> Completion:
         del response_format
         self.calls.append((messages, tools))
+        self.max_output_tokens.append(max_output_tokens)
         return self.completion
 
 
@@ -240,6 +243,57 @@ def test_llm_service_records_usage_and_rolls_up_cost(
     assert span_attributes[-1]["llm.token_count.prompt"] == 1000
     assert span_attributes[-1]["llm.token_count.completion"] == 2000
     assert span_attributes[-1]["llm.token_count.total"] == 3000
+
+
+def _usage_pricing() -> ModelPricing:
+    return ModelPricing(
+        provider=LLMProvider.openrouter,
+        model="openai/gpt-4o-mini",
+        input_price_per_mtok=Decimal("10.000000"),
+        output_price_per_mtok=Decimal("30.000000"),
+        effective_from=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+
+
+def test_llm_service_clamps_utility_prompt_output(db_session: Session) -> None:
+    # HIG-220: a utility prompt is clamped by name; a normal prompt is not.
+    task = create_task(db_session)
+    db_session.add(_usage_pricing())
+    db_session.flush()
+
+    def _provider() -> FakeProvider:
+        return FakeProvider(
+            Completion(
+                content="{}",
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=10, output_tokens=10),
+                model="openai/gpt-4o-mini",
+            )
+        )
+
+    clamped = _provider()
+    LLMService(
+        session=db_session,
+        provider=clamped,
+        provider_name=LLMProvider.openrouter,
+    ).complete(
+        task_id=task.id,
+        messages=[ChatMessage(role="user", content="hi")],
+        prompt_name="kortny.intent_classifier",
+    )
+    assert clamped.max_output_tokens[0] == 1024
+
+    unclamped = _provider()
+    LLMService(
+        session=db_session,
+        provider=unclamped,
+        provider_name=LLMProvider.openrouter,
+    ).complete(
+        task_id=task.id,
+        messages=[ChatMessage(role="user", content="hi")],
+        prompt_name="kortny.some_long_synthesis",
+    )
+    assert unclamped.max_output_tokens[0] is None
 
 
 def test_llm_service_records_cache_token_split(

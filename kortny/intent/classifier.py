@@ -28,6 +28,9 @@ class IntentClassificationError(RuntimeError):
     """Raised when intent classification cannot produce a valid decision."""
 
 
+INTENT_CLASSIFIER_PROMPT_NAME = "kortny.intent_classifier"
+
+
 class IntentTrackedLLMClient(Protocol):
     """Subset of LLMService used by the intent classifier."""
 
@@ -38,6 +41,7 @@ class IntentTrackedLLMClient(Protocol):
         messages: Sequence[ChatMessage],
         tools: Sequence[JsonSchema] = (),
         response_format: JsonObject | None = None,
+        prompt_name: str | None = None,
     ) -> Completion:
         """Complete one intent classification turn."""
 
@@ -102,6 +106,7 @@ class LLMIntentClassifier:
                 task_id=task_id,
                 messages=messages,
                 response_format=INTENT_RESPONSE_FORMAT,
+                prompt_name=INTENT_CLASSIFIER_PROMPT_NAME,
             )
         else:
             if self.provider is None:

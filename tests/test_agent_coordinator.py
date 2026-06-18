@@ -14,7 +14,6 @@ from sqlalchemy.orm import Session
 from kortny.agent import (
     AgentCoordinator,
     AgentExecutionGuardrailError,
-    AgentTurnLimitError,
     ContextAssembler,
     ContextBudget,
     ContextEngineInfo,
@@ -3276,7 +3275,9 @@ def test_coordinator_stops_when_tool_returns_artifact(db_session: Session) -> No
     assert events[-1].payload["reason"] == "artifact"
 
 
-def test_coordinator_raises_after_turn_limit(db_session: Session) -> None:
+def test_coordinator_returns_partial_after_turn_limit(db_session: Session) -> None:
+    # HIG-220: a task that runs out of turns mid-work closes with a partial
+    # answer (synthesized from what it gathered), not a hard failure.
     task = create_task(db_session, input_text="loop")
     llm = FakeLLM(
         [
@@ -3290,21 +3291,63 @@ def test_coordinator_raises_after_turn_limit(db_session: Session) -> None:
                     ),
                 ),
                 usage=TokenUsage(input_tokens=1, output_tokens=1),
-            )
+            ),
+            Completion(
+                content="Here is what I found so far; I still need more time.",
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=1, output_tokens=1),
+            ),
         ]
     )
 
-    with pytest.raises(AgentTurnLimitError):
-        AgentCoordinator(
-            session=db_session,
-            llm=llm,
-            registry=ToolRegistry([EchoJsonTool()]),
-            max_turns=1,
-        ).run(task)
+    result = AgentCoordinator(
+        session=db_session,
+        llm=llm,
+        registry=ToolRegistry([EchoJsonTool()]),
+        max_turns=1,
+    ).run(task)
 
+    assert result.partial is True
+    assert "found so far" in result.result_summary
     events = task_events(db_session, task)
-    assert events[-1].type is TaskEventType.error
-    assert events[-1].payload["type"] == "AgentTurnLimitError"
+    assert events[-1].type is not TaskEventType.error
+    completed = [e for e in events if e.payload.get("message") == "agent_completed"]
+    assert completed and completed[-1].payload["partial"] is True
+
+
+def test_coordinator_returns_partial_after_tool_budget(db_session: Session) -> None:
+    # HIG-220: exhausting the tool-call budget mid-task yields a partial answer.
+    task = create_task(db_session, input_text="research")
+    llm = FakeLLM(
+        [
+            Completion(
+                content=None,
+                tool_calls=(
+                    ToolCall(id="c1", name="echo_json", arguments={"message": "a"}),
+                    ToolCall(id="c2", name="echo_json", arguments={"message": "b"}),
+                ),
+                usage=TokenUsage(input_tokens=1, output_tokens=1),
+            ),
+            Completion(
+                content="Partial: found A, still need B.",
+                tool_calls=(),
+                usage=TokenUsage(input_tokens=1, output_tokens=1),
+            ),
+        ]
+    )
+
+    result = AgentCoordinator(
+        session=db_session,
+        llm=llm,
+        registry=ToolRegistry([EchoJsonTool()]),
+        guardrail_limits=ExecutionGuardrailLimits(max_tool_calls=1, max_turns=6),
+    ).run(task)
+
+    assert result.partial is True
+    events = task_events(db_session, task)
+    assert any(e.payload.get("message") == "execution_budget_exceeded" for e in events)
+    completed = [e for e in events if e.payload.get("message") == "agent_completed"]
+    assert completed and completed[-1].payload["partial"] is True
 
 
 def cleanup_database(session: Session) -> None:
