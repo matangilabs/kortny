@@ -217,6 +217,7 @@ class FakeStyleLLMProvider:
         tools: Sequence[JsonSchema] = (),
         *,
         response_format: JsonObject | None = None,
+        max_output_tokens: int | None = None,
     ) -> Completion:
         del tools
         self.calls.append((tuple(messages), response_format))

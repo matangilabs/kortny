@@ -149,6 +149,19 @@ EMPTY_FINAL_FALLBACK_MESSAGE = (
     "I hit a hiccup composing a reply just now. Mind trying again, "
     "or rephrasing the request?"
 )
+# When a task exhausts its execution budget (depth-scaled turn/tool limits,
+# HIG-220), close gracefully with what was gathered instead of hard-failing.
+PARTIAL_SYNTHESIS_PROMPT = (
+    "You have reached this task's execution budget and cannot take any more "
+    "steps or call any tools. Using ONLY what you have already gathered above, "
+    "write the most useful answer you can right now: give the partial findings, "
+    "state briefly what is still missing, and offer to continue if the user "
+    "wants. Do not ask to call tools; just summarize what you have."
+)
+PARTIAL_FALLBACK_MESSAGE = (
+    "I ran out of room to finish this one. I made progress but couldn't wrap it "
+    "up — want me to keep going?"
+)
 DEFAULT_SYSTEM_PROMPT = (
     "You are __AGENT_NAME__, a Slack-native AI coworker. Use the available tools when "
     "they are needed to complete the user's request. If the user asks for "
@@ -283,6 +296,20 @@ class AgentExecutionGuardrailError(AgentLoopError):
     """Raised when execution guardrails stop a task."""
 
 
+class _ExecutionBudgetExhausted(Exception):
+    """Internal signal: a depth-scaled budget ran out (HIG-220).
+
+    Distinct from AgentExecutionGuardrailError (circuit breaker / recoverable
+    failures), which mark a genuine malfunction and still hard-fail. Budget
+    exhaustion means useful work happened but ran out of room, so the loop
+    converts it to a graceful partial answer instead of a failure.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
 @dataclass(frozen=True, slots=True)
 class AgentRunResult:
     """Final coordinator result."""
@@ -291,6 +318,7 @@ class AgentRunResult:
     result_summary: str
     turns: int
     artifact_count: int
+    partial: bool = False
 
 
 class AgentCoordinator:
@@ -512,14 +540,21 @@ class AgentCoordinator:
                 )
                 return result
 
-            turn_artifacts = self._invoke_tool_calls(
-                task_obj=task_obj,
-                messages=messages,
-                completion=completion,
-                schemas=schemas,
-                turn=turn,
-                plan=plan,
-            )
+            try:
+                turn_artifacts = self._invoke_tool_calls(
+                    task_obj=task_obj,
+                    messages=messages,
+                    completion=completion,
+                    schemas=schemas,
+                    turn=turn,
+                    plan=plan,
+                )
+            except _ExecutionBudgetExhausted as exhausted:
+                # Ran out of tool-call budget mid-work: close with a partial
+                # answer from what was gathered, not a failure notice (HIG-220).
+                return self._finish_with_partial(
+                    task_obj, messages, turn, plan=plan, reason=exhausted.reason
+                )
             artifact_count += turn_artifacts
             if turn_artifacts:
                 return self._finish_with_artifacts(
@@ -529,20 +564,11 @@ class AgentCoordinator:
                     plan=plan,
                 )
 
-        error = AgentTurnLimitError(
-            f"Agent exceeded max_turns={self.max_turns} for task {task_obj.id}"
+        # Turn budget exhausted: synthesize a partial answer rather than
+        # hard-failing the task (HIG-220).
+        return self._finish_with_partial(
+            task_obj, messages, self.max_turns, plan=plan, reason="max_turns_exceeded"
         )
-        self._fail_execution_plan(
-            task_obj,
-            plan,
-            error,
-            {
-                "reason": "max_turns_exceeded",
-                "max_turns": self.max_turns,
-            },
-        )
-        self._append_error(task_obj, error, {"max_turns": self.max_turns})
-        raise error
 
     def _complete_turn(
         self,
@@ -1154,6 +1180,55 @@ class AgentCoordinator:
             plan=plan,
         )
 
+    def _finish_with_partial(
+        self,
+        task: Task,
+        messages: list[ChatMessage],
+        turn: int,
+        *,
+        plan: ExecutionPlan,
+        reason: str,
+    ) -> AgentRunResult:
+        """Close a budget-exhausted task with a partial answer (HIG-220).
+
+        One final, tool-less completion synthesizes what was gathered into
+        "here's what I have + what's missing + offer to continue", so the task
+        ends ``succeeded`` (with a ``partial`` marker) instead of posting a
+        failure notice. Falls back to a fixed message if synthesis is empty.
+        """
+
+        self._append_log(
+            task,
+            "agent_partial_synthesis_started",
+            {"turn": turn, "reason": reason},
+        )
+        summary = ""
+        try:
+            completion = self.llm.complete(
+                task_id=task.id,
+                messages=[
+                    *messages,
+                    ChatMessage(role="system", content=PARTIAL_SYNTHESIS_PROMPT),
+                ],
+                tools=(),
+            )
+            summary = _humanize_memory_no_match(
+                task.input, completion.content or ""
+            ).strip()
+        except Exception as exc:
+            self._append_error(task, exc, {"turn": turn, "phase": "partial_synthesis"})
+        if not summary:
+            summary = PARTIAL_FALLBACK_MESSAGE
+        return self._finish(
+            task,
+            summary=summary,
+            turn=turn,
+            artifact_count=0,
+            reason=f"partial_{reason}",
+            plan=plan,
+            partial=True,
+        )
+
     def _finish_with_artifacts(
         self,
         task: Task,
@@ -1181,6 +1256,7 @@ class AgentCoordinator:
         artifact_count: int,
         reason: str,
         plan: ExecutionPlan,
+        partial: bool = False,
     ) -> AgentRunResult:
         task.result_summary = summary
         self.session.flush()
@@ -1194,6 +1270,7 @@ class AgentCoordinator:
                 "turns": turn,
                 "reason": reason,
                 "artifact_count": artifact_count,
+                "partial": partial,
                 "budget_remaining": plan.budget.remaining(plan.limits),
             },
         )
@@ -1204,6 +1281,7 @@ class AgentCoordinator:
                 "turns": turn,
                 "reason": reason,
                 "artifact_count": artifact_count,
+                "partial": partial,
             },
         )
         return AgentRunResult(
@@ -1211,6 +1289,7 @@ class AgentCoordinator:
             result_summary=summary,
             turns=turn,
             artifact_count=artifact_count,
+            partial=partial,
         )
 
     def _record_skill_ranking(
@@ -1381,9 +1460,10 @@ class AgentCoordinator:
             },
         )
         if plan.budget.tool_call_count > plan.limits.max_tool_calls:
-            error = AgentExecutionGuardrailError(
-                f"Execution exceeded max_tool_calls={plan.limits.max_tool_calls}"
-            )
+            # Budget exhausted (depth-scaled, HIG-220): signal the loop to close
+            # with a partial answer. Not a failure — useful work happened, it
+            # just ran out of room. The circuit breaker below still hard-fails a
+            # genuine stuck loop.
             self._append_execution_log(
                 task_obj,
                 "execution_budget_exceeded",
@@ -1398,26 +1478,7 @@ class AgentCoordinator:
                     "budget_remaining": plan.budget.remaining(plan.limits),
                 },
             )
-            self._fail_execution_plan(
-                task_obj,
-                plan,
-                error,
-                {
-                    "reason": "max_tool_calls_exceeded",
-                    "tool": tool_call.name,
-                    "tool_call_id": tool_call.id,
-                },
-            )
-            self._append_error(
-                task_obj,
-                error,
-                {
-                    "phase": "tool_attempt",
-                    "tool": tool_call.name,
-                    "tool_call_id": tool_call.id,
-                },
-            )
-            raise error
+            raise _ExecutionBudgetExhausted("max_tool_calls_exceeded")
         if attempt.attempt_no > plan.limits.max_same_tool_call:
             error = AgentExecutionGuardrailError(
                 "Execution circuit breaker tripped for repeated tool call "

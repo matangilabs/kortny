@@ -425,6 +425,10 @@ class Task(Base):
     )
     result_summary: Mapped[str | None] = mapped_column(Text)
     error: Mapped[dict | None] = mapped_column(JSONB)
+    # Routing outcome label computed at completion (HIG-221 learning loop):
+    # clean | recovered | partial | failed | cancelled, + a 0..1 score.
+    routing_quality: Mapped[str | None] = mapped_column(String)
+    routing_quality_score: Mapped[Decimal | None] = mapped_column(Numeric(4, 3))
 
     # Queue / lease
     available_at: Mapped[datetime] = mapped_column(

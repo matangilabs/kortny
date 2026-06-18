@@ -39,6 +39,18 @@ DEFAULT_CACHE_WRITE_MULTIPLIER = Decimal("1.25")
 DEFAULT_CACHE_READ_MULTIPLIER = Decimal("0.10")
 logger = logging.getLogger(__name__)
 
+# HIG-220 effort steering: one-shot utility prompts get a per-call completion-
+# token cap so they cannot burn hundreds of reasoning tokens for a tiny
+# structured/short output. Caps are deliberately GENEROUS — comfortably larger
+# than the expected output — so they bound verbosity without ever truncating the
+# answer. Aggressive per-prompt tuning (and Anthropic thinking-effort config) is
+# a live-validated follow-up; this is the safe floor.
+UTILITY_PROMPT_OUTPUT_CLAMP: dict[str, int] = {
+    "kortny.intent_classifier": 1024,
+    "kortny.project_inference_namer": 256,
+    "kortny.ack_generator": 256,
+}
+
 
 class ModelPricingNotFoundError(LookupError):
     """Raised when no model pricing row can price an LLM call."""
@@ -73,13 +85,23 @@ class LLMService:
         prompt_source: str = "code",
         prompt_label: str | None = None,
         prompt_version: str | None = None,
+        max_output_tokens: int | None = None,
     ) -> Completion:
-        """Complete a turn, price it, and persist the usage rollup."""
+        """Complete a turn, price it, and persist the usage rollup.
+
+        ``max_output_tokens`` caps this call's completion tokens; when not given,
+        a small utility prompt (intent, project namer, ack) is clamped by name
+        from ``UTILITY_PROMPT_OUTPUT_CLAMP`` (HIG-220 effort steering). Caps are
+        generous enough never to truncate the structured output — they only
+        bound runaway verbosity/reasoning on one-shot utility calls.
+        """
 
         prompt_name = prompt_name or _default_prompt_name(
             tools=tools,
             response_format=response_format,
         )
+        if max_output_tokens is None and prompt_name:
+            max_output_tokens = UTILITY_PROMPT_OUTPUT_CLAMP.get(prompt_name)
         # Stamp the registered prompt version (HIG-203) so usage rows correlate
         # quality with prompt changes; explicit caller version wins.
         if prompt_version is None:
@@ -119,10 +141,16 @@ class LLMService:
             )
 
             try:
+                # Only forward the clamp when set, so providers that don't take
+                # the kwarg are unaffected on the common (unclamped) path.
+                provider_kwargs: dict[str, object] = {}
+                if max_output_tokens is not None:
+                    provider_kwargs["max_output_tokens"] = max_output_tokens
                 completion = self.provider.complete(
                     messages,
                     tools,
                     response_format=response_format,
+                    **provider_kwargs,  # type: ignore[arg-type]
                 )
             except Exception as exc:
                 record_span_exception(exc)

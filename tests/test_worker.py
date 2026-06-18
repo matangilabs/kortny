@@ -182,6 +182,7 @@ def test_worker_run_once_processes_pending_task(
         (TaskEventType.log, None),
         (TaskEventType.status_changed, TaskStatus.succeeded.value),
         (TaskEventType.log, None),
+        (TaskEventType.log, None),
     ]
     assert events[2].payload == {
         "message": "task_executor_started",
@@ -191,8 +192,12 @@ def test_worker_run_once_processes_pending_task(
         "message": "task_executor_completed",
         "worker_id": "worker-test",
     }
-    assert events[5].payload["message"] == "episode_recorded"
-    assert events[5].payload["outcome"] == TaskStatus.succeeded.value
+    # HIG-221: routing quality recorded after the terminal transition.
+    assert events[5].payload["message"] == "routing_quality_recorded"
+    assert events[5].payload["routing_quality"] == "clean"
+    assert task.routing_quality == "clean"
+    assert events[6].payload["message"] == "episode_recorded"
+    assert events[6].payload["outcome"] == TaskStatus.succeeded.value
     episode = db_session.scalar(select(Episode).where(Episode.task_id == task.id))
     assert episode is not None
     assert episode.outcome == TaskStatus.succeeded.value
@@ -294,10 +299,13 @@ def test_worker_marks_task_failed_when_handler_raises(
     }
 
     events = task_events(db_session, task)
-    assert events[-3].type is TaskEventType.error
-    assert events[-3].payload["message"] == "task_executor_failed"
-    assert events[-2].type is TaskEventType.status_changed
-    assert events[-2].payload["to"] == TaskStatus.failed.value
+    assert events[-4].type is TaskEventType.error
+    assert events[-4].payload["message"] == "task_executor_failed"
+    assert events[-3].type is TaskEventType.status_changed
+    assert events[-3].payload["to"] == TaskStatus.failed.value
+    assert events[-2].payload["message"] == "routing_quality_recorded"
+    assert events[-2].payload["routing_quality"] == "failed"
+    assert task.routing_quality == "failed"
     assert events[-1].type is TaskEventType.log
     assert events[-1].payload["message"] == "episode_recorded"
     assert events[-1].payload["outcome"] == TaskStatus.failed.value
@@ -4636,6 +4644,7 @@ class FakeAgentProvider:
         tools: Sequence[JsonSchema] = (),
         *,
         response_format: JsonObject | None = None,
+        max_output_tokens: int | None = None,
     ) -> Completion:
         self.calls.append((tuple(messages), tuple(tools), response_format))
         if not self.completions:

@@ -48,7 +48,11 @@ from kortny.db.models import LLMProvider as DbLLMProvider
 from kortny.embeddings import EmbeddingBackend, EmbeddingIndex, create_embedding_backend
 from kortny.evals.retrieval.catalog_retriever import build_catalog_retrieve_fn
 from kortny.execution import task_workspace
-from kortny.intent import LLMIntentClassifier
+from kortny.intent import (
+    IntentClassificationService,
+    IntentScope,
+    LLMIntentClassifier,
+)
 from kortny.intent.models import IntentRequest, IntentSurface
 from kortny.knowledge_graph import (
     KG_CHANNEL_PROFILE_PROJECTED_MESSAGE,
@@ -847,17 +851,17 @@ class AgentTaskExecutor:
                     model_route=selection.model_route,
                 )
             )
-            decision = classifier.classify(
-                task_id=task.id,
-                request=IntentRequest(
-                    text=task.input,
-                    surface=IntentSurface.dm,
-                    # HIG-274: ground the assistant/DM classifier with the
-                    # connected integrations too (the ingress path already does
-                    # this; the DM path classifies here in the worker and was
-                    # missing it, so "my plate" in a DM got no toolkit grounding).
-                    connected_integrations=connected_toolkit_slugs(session, task),
+            # Ground + classify through the shared chokepoint (HIG-187): the DM
+            # path used to attach grounding here separately and drifted; now the
+            # service derives connected integrations from the task's scope.
+            decision = IntentClassificationService(session, classifier).classify(
+                request=IntentRequest(text=task.input, surface=IntentSurface.dm),
+                scope=IntentScope(
+                    installation_id=task.installation_id,
+                    channel_id=task.slack_channel_id,
+                    user_id=task.slack_user_id,
                 ),
+                task_id=task.id,
             )
         except Exception as exc:
             log_observation(

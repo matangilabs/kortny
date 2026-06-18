@@ -39,7 +39,9 @@ class FakeIntentLLM:
         messages: Sequence[ChatMessage],
         tools: Sequence[JsonSchema] = (),
         response_format: JsonObject | None = None,
+        prompt_name: str | None = None,
     ) -> Completion:
+        del prompt_name
         self.calls.append((task_id, tuple(messages), tuple(tools), response_format))
         return Completion(
             content=self.content,
