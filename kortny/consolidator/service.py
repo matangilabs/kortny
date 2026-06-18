@@ -36,6 +36,10 @@ from kortny.consolidator.style_cards import (
     DEFAULT_STYLE_CARD_MIN_MESSAGES,
     StyleCardPass,
 )
+from kortny.consolidator.user_profile import (
+    DEFAULT_MIN_OBSERVED_EVENTS,
+    UserProfilePass,
+)
 from kortny.db.models import (
     ConsolidationRun,
     Episode,
@@ -65,6 +69,7 @@ from kortny.slack import SlackPoster
 from kortny.slack.posting import SlackPostingClient
 from kortny.tasks import TaskService
 from kortny.tasks.identity import TaskIdentity
+from kortny.tools.types import JsonObject
 
 logger = logging.getLogger(__name__)
 
@@ -400,6 +405,15 @@ class ConsolidationService:
                 ),
             ),
             (
+                "user_profile",
+                lambda: self._run_user_profiles(
+                    llm=llm,
+                    installation_id=installation_id,
+                    task=task,
+                    now=effective_now,
+                ),
+            ),
+            (
                 "backfill",
                 lambda: backfill_embeddings(
                     self.session,
@@ -519,6 +533,76 @@ class ConsolidationService:
             dm_channel_for_user=dm_resolver,
         )
 
+    # Cap users processed per consolidation run so the loop stays bounded.
+    _MAX_USER_PROFILES_PER_RUN = 20
+
+    def _candidate_user_ids(self, installation_id: uuid.UUID) -> list[str]:
+        """Users with enough observed activity to attempt a persona inference."""
+
+        rows = self.session.execute(
+            select(ObservationEvent.user_id)
+            .where(
+                ObservationEvent.installation_id == installation_id,
+                ObservationEvent.user_id.is_not(None),
+            )
+            .group_by(ObservationEvent.user_id)
+            .having(func.count() >= DEFAULT_MIN_OBSERVED_EVENTS)
+            .order_by(func.count().desc())
+            .limit(self._MAX_USER_PROFILES_PER_RUN)
+        ).all()
+        return [user_id for (user_id,) in rows if user_id]
+
+    def _build_user_profile_pass(self, *, llm: LLMService | None) -> UserProfilePass:
+        poster: ConfirmationPoster | None = None
+        dm_resolver: Callable[[str], str | None] | None = None
+        title_resolver: Callable[[str], str | None] | None = None
+        token = self.settings.slack_bot_token if self.settings is not None else None
+        if token:
+            client = WebClient(token=token)
+            poster = SlackPoster(
+                session=self.session,
+                client=cast(SlackPostingClient, client),
+                task_service=TaskService(self.session),
+            )
+
+            def dm_resolver(user_id: str, _client: WebClient = client) -> str | None:
+                return _open_dm_channel(_client, user_id)
+
+            def title_resolver(user_id: str, _client: WebClient = client) -> str | None:
+                return _slack_user_title(_client, user_id)
+
+        return UserProfilePass(
+            self.session,
+            llm=llm,
+            poster=poster,
+            dm_channel_for_user=dm_resolver,
+            slack_title_for_user=title_resolver,
+        )
+
+    def _run_user_profiles(
+        self,
+        *,
+        llm: LLMService | None,
+        installation_id: uuid.UUID,
+        task: Task,
+        now: datetime,
+    ) -> JsonObject:
+        """Run the user-profile pass for each candidate user; aggregate counters."""
+
+        pass_ = self._build_user_profile_pass(llm=llm)
+        proposed = 0
+        considered = 0
+        for user_id in self._candidate_user_ids(installation_id):
+            considered += 1
+            counters = pass_.run(
+                installation_id=installation_id,
+                user_id=user_id,
+                task=task,
+                now=now,
+            )
+            proposed += counters.proposed
+        return {"considered": considered, "proposed": proposed}
+
     def _llm_service(
         self,
         *,
@@ -619,6 +703,25 @@ def _open_dm_channel(client: WebClient, user_id: str) -> str | None:
     channel = response.get("channel") if isinstance(response, Mapping) else None
     channel_id = channel.get("id") if isinstance(channel, Mapping) else None
     return channel_id if isinstance(channel_id, str) and channel_id else None
+
+
+def _slack_user_title(client: WebClient, user_id: str) -> str | None:
+    """Resolve a user's Slack profile title via users.info, or None."""
+
+    try:
+        response = client.users_info(user=user_id)
+    except Exception as exc:  # noqa: BLE001 — Slack errors must not break the run
+        logger.info(
+            "user profile title lookup failed user=%s error_type=%s error=%s",
+            user_id,
+            type(exc).__name__,
+            exc,
+        )
+        return None
+    user = response.get("user") if isinstance(response, Mapping) else None
+    profile = user.get("profile") if isinstance(user, Mapping) else None
+    title = profile.get("title") if isinstance(profile, Mapping) else None
+    return title if isinstance(title, str) and title.strip() else None
 
 
 __all__ = [
