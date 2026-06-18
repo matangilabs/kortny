@@ -190,6 +190,14 @@ def _tier_from_intent_decision(
         return ModelRouteTier.document
     if "slack_file_read" in likely_tools:
         return ModelRouteTier.analysis
+    # The classifier's likely_tools are unreliable (it can hallucinate tool
+    # names that aren't Kortny's), so a document deliverable can slip past the
+    # tool-hint check above and fall through to "strong" → Opus. The objective
+    # text the classifier wrote is far more reliable: if it describes producing a
+    # document/report, route to the document tier (Sonnet) per HIG-265 — a
+    # routine report should not run every turn on Opus.
+    if _objective_signals_document(decision):
+        return ModelRouteTier.document
     if "web_search" in likely_tools:
         return ModelRouteTier.analysis
 
@@ -223,6 +231,29 @@ def _tier_from_task_input(input_text: str) -> ModelRouteTier:
     return ModelRouteTier.analysis
 
 
+def _objective_signals_document(decision: Mapping[str, Any]) -> bool:
+    """Whether the intent's objective/reason text describes a document deliverable.
+
+    Reads the free-text objective the classifier wrote (``reason`` /
+    ``objective`` / the primary intent's objective) rather than its unreliable
+    ``likely_tools`` list, matching the same document keywords the task-input
+    fallback uses.
+    """
+
+    parts: list[str] = []
+    for key in ("reason", "objective"):
+        value = decision.get(key)
+        if isinstance(value, str):
+            parts.append(value)
+    primary = decision.get("primary_intent")
+    if isinstance(primary, Mapping):
+        objective = primary.get("objective")
+        if isinstance(objective, str):
+            parts.append(objective)
+    blob = " ".join(parts).casefold()
+    return any(keyword in blob for keyword in DOCUMENT_KEYWORDS)
+
+
 def _string_set(value: object) -> set[str]:
     if not isinstance(value, Iterable) or isinstance(value, str | bytes):
         return set()
@@ -246,6 +277,7 @@ def _optional_str(value: object) -> str | None:
 # both the literal native tool name and the capability words the classifier emits.
 DOCUMENT_TOOL_HINTS = frozenset(
     {
+        "document_studio",
         "pdf_generator",
         "document_generation",
         "report_generation",

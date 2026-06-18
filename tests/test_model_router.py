@@ -124,6 +124,33 @@ def test_model_router_routes_document_generation_intent_to_document() -> None:
     assert route.tier is ModelRouteTier.document
 
 
+def test_model_router_routes_document_from_objective_when_tools_hallucinated() -> None:
+    # Real-world regression: the classifier rated a report "strong" and emitted
+    # hallucinated likely_tools (firecrawl/serpapi/exa — not Kortny tools), so the
+    # tool-hint carve-out missed and it fell through to high_reasoning (Opus). The
+    # objective text it wrote still clearly describes a document, so we route to
+    # the document tier from that.
+    router = ModelRouter(make_settings())
+    task = Task(input="make a polished PDF report on open-source AI coding agents")
+    event = TaskEvent(
+        seq=1,
+        type=TaskEventType.log,
+        payload={
+            "message": "intent_classification_completed",
+            "decision": {
+                "classification": "task_request",
+                "model_tier": "strong",
+                "likely_tools": ["firecrawl", "serpapi", "exa"],
+                "reason": "Produce a polished PDF report on AI coding agents.",
+            },
+        },
+    )
+
+    route = router.route_for_task(task, events=[event])
+
+    assert route.tier is ModelRouteTier.document
+
+
 def test_model_router_strong_nondocument_intent_still_high_reasoning() -> None:
     # Guard: non-document "strong" tasks keep routing to high_reasoning so the
     # document carve-out above doesn't accidentally demote genuine hard reasoning.

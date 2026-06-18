@@ -20,6 +20,7 @@ from kortny.tasks import TaskService
 from kortny.tools.catalog import dashboard_native_tool_names, runtime_native_tool_names
 from kortny.tools.code_exec import CodeExecTool
 from kortny.tools.deploy_site import DeploySiteTool
+from kortny.tools.document_studio import DocumentStudioTool
 from kortny.tools.list_integrations import DescribeToolsTool, ListIntegrationsTool
 from kortny.tools.pdf_generator import PdfGeneratorTool
 from kortny.tools.resolve_slack_identity import ResolveSlackIdentityTool
@@ -164,6 +165,18 @@ def _build_web_search_tool(context: NativeToolBuildContext) -> Tool | None:
 def _build_pdf_generator_tool(context: NativeToolBuildContext) -> Tool:
     return PdfGeneratorTool(
         working_dir=context.working_dir,
+        session=context.session,
+        task_id=context.task.id,
+        task_service=context.task_service,
+    )
+
+
+def _build_document_studio_tool(context: NativeToolBuildContext) -> Tool:
+    raw_paths = context.settings.document_font_paths
+    font_paths = tuple(p for p in raw_paths.split(":") if p)
+    return DocumentStudioTool(
+        working_dir=context.working_dir,
+        font_paths=font_paths,
         session=context.session,
         task_id=context.task.id,
         task_service=context.task_service,
@@ -398,6 +411,9 @@ NATIVE_TOOL_REGISTRATIONS: tuple[NativeToolRegistration, ...] = (
     NativeToolRegistration("web_search", WebSearchTool, _build_web_search_tool),
     NativeToolRegistration(
         "pdf_generator", PdfGeneratorTool, _build_pdf_generator_tool
+    ),
+    NativeToolRegistration(
+        "document_studio", DocumentStudioTool, _build_document_studio_tool
     ),
     NativeToolRegistration("code_exec", CodeExecTool, _build_code_exec_tool),
     NativeToolRegistration("sandbox_bash", SandboxBashTool, _build_sandbox_bash_tool),

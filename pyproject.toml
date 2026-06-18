@@ -32,6 +32,7 @@ dependencies = [
     "slack-bolt>=1.20",
     "sqlalchemy>=2.0",
     "temporalio>=1.10",
+    "typst>=0.15.0",
     "uvicorn>=0.47",
 ]
 
