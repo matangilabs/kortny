@@ -27,6 +27,8 @@ from kortny.documents import (
     DocumentRenderError,
     DocumentSpec,
     TypstNotAvailableError,
+    render_docx,
+    render_pptx,
     render_spec_pdf,
     theme_names,
 )
@@ -38,8 +40,20 @@ from kortny.tools.types import (
     ToolResult,
 )
 
-PDF_MIME_TYPE = "application/pdf"
-DEFAULT_FILENAME = "document.pdf"
+# format -> (mime, extension)
+_FORMATS: dict[str, tuple[str, str]] = {
+    "pdf": ("application/pdf", "pdf"),
+    "pptx": (
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "pptx",
+    ),
+    "docx": (
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "docx",
+    ),
+}
+DEFAULT_FORMAT = "pdf"
+DEFAULT_STEM = "document"
 SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
 _BLOCK_GUIDE = (
@@ -72,14 +86,17 @@ class TaskEventSink(Protocol):
 
 
 class DocumentStudioTool:
-    """Render a structured document spec to an editorial-grade PDF."""
+    """Render a structured document spec to an editorial-grade PDF/PPTX/DOCX."""
 
     name = "document_studio"
     description = (
-        "Generate a beautiful, themed, multi-page PDF from a structured document "
-        "spec. Use for reports, briefs, and pitch documents that should look "
-        "editorial-grade (cover, section dividers, stat cards, tables, callouts, "
-        "pull quotes). Prefer this over pdf_generator for any polished deliverable."
+        "Generate a beautiful, themed document from a structured spec, as PDF, "
+        "PowerPoint (pptx), or Word (docx). Use for reports, briefs, decks, and "
+        "pitch documents that should look editorial-grade (cover, section "
+        "dividers, stat cards, tables, callouts, pull quotes). Choose 'pptx' for "
+        "a slide deck, 'docx' for an editable Word doc the user will keep editing, "
+        "'pdf' for a finished deliverable. Prefer this over pdf_generator for any "
+        "polished output."
     )
     parameters: JsonSchema = {
         "type": "object",
@@ -115,10 +132,20 @@ class DocumentStudioTool:
                 },
                 "minItems": 1,
             },
+            "format": {
+                "type": "string",
+                "enum": ["pdf", "pptx", "docx"],
+                "description": (
+                    "Output format. 'pdf' = finished deliverable (default), "
+                    "'pptx' = slide deck, 'docx' = editable Word document."
+                ),
+            },
             "filename": {
                 "type": "string",
-                "description": "Optional output filename; the .pdf suffix is enforced.",
-                "default": DEFAULT_FILENAME,
+                "description": (
+                    "Optional output filename; the correct extension for the "
+                    "chosen format is enforced."
+                ),
             },
         },
         "required": ["title", "blocks"],
@@ -143,13 +170,15 @@ class DocumentStudioTool:
         self.task_service = task_service
 
     def invoke(self, args: JsonObject) -> ToolResult:
-        """Validate the spec, render the PDF, and record the artifact."""
+        """Validate the spec, render the chosen format, record the artifact."""
 
         spec = _parse_spec(args)
-        filename = _safe_pdf_filename(args.get("filename"))
+        fmt = _parse_format(args.get("format"))
+        mime_type, extension = _FORMATS[fmt]
+        filename = _safe_filename(args.get("filename"), extension)
 
         try:
-            pdf = render_spec_pdf(spec, font_paths=self.font_paths)
+            data = self._render(spec, fmt)
         except TypstNotAvailableError as exc:
             raise RecoverableToolError(
                 code="typst_unavailable",
@@ -169,13 +198,13 @@ class DocumentStudioTool:
 
         self.working_dir.mkdir(parents=True, exist_ok=True)
         output_path = self.working_dir / filename
-        output_path.write_bytes(pdf)
-        size_bytes = len(pdf)
+        output_path.write_bytes(data)
+        size_bytes = len(data)
 
         artifact = ToolArtifact(
             filename=filename,
             path=str(output_path),
-            mime_type=PDF_MIME_TYPE,
+            mime_type=mime_type,
             size_bytes=size_bytes,
         )
 
@@ -183,7 +212,10 @@ class DocumentStudioTool:
         if self.session is not None and self.task_id is not None:
             artifact_id = str(
                 self._record_artifact(
-                    filename=filename, path=output_path, size_bytes=size_bytes
+                    filename=filename,
+                    path=output_path,
+                    size_bytes=size_bytes,
+                    mime_type=mime_type,
                 ).id
             )
 
@@ -191,7 +223,8 @@ class DocumentStudioTool:
             output={
                 "filename": filename,
                 "path": str(output_path),
-                "mime_type": PDF_MIME_TYPE,
+                "mime_type": mime_type,
+                "format": fmt,
                 "size_bytes": size_bytes,
                 "doc_kind": spec.doc_kind.value,
                 "block_count": len(spec.blocks),
@@ -200,8 +233,15 @@ class DocumentStudioTool:
             artifacts=(artifact,),
         )
 
+    def _render(self, spec: DocumentSpec, fmt: str) -> bytes:
+        if fmt == "pptx":
+            return render_pptx(spec)
+        if fmt == "docx":
+            return render_docx(spec)
+        return render_spec_pdf(spec, font_paths=self.font_paths)
+
     def _record_artifact(
-        self, *, filename: str, path: Path, size_bytes: int
+        self, *, filename: str, path: Path, size_bytes: int, mime_type: str
     ) -> Artifact:
         assert self.session is not None
         assert self.task_id is not None
@@ -209,7 +249,7 @@ class DocumentStudioTool:
         artifact = Artifact(
             task_id=self.task_id,
             filename=filename,
-            mime_type=PDF_MIME_TYPE,
+            mime_type=mime_type,
             size_bytes=size_bytes,
             storage_path=str(path),
         )
@@ -223,7 +263,7 @@ class DocumentStudioTool:
                 {
                     "artifact_id": str(artifact.id),
                     "filename": filename,
-                    "mime_type": PDF_MIME_TYPE,
+                    "mime_type": mime_type,
                     "size_bytes": size_bytes,
                     "storage_path": str(path),
                 },
@@ -231,8 +271,13 @@ class DocumentStudioTool:
         return artifact
 
 
+# The IR fields live alongside the tool-only knobs in args; strip the knobs
+# before validating the spec.
+_NON_SPEC_KEYS = frozenset({"filename", "format"})
+
+
 def _parse_spec(args: JsonObject) -> DocumentSpec:
-    payload = {k: v for k, v in args.items() if k != "filename"}
+    payload = {k: v for k, v in args.items() if k not in _NON_SPEC_KEYS}
     try:
         return DocumentSpec.model_validate(payload)
     except ValidationError as exc:
@@ -244,11 +289,23 @@ def _parse_spec(args: JsonObject) -> DocumentSpec:
         ) from exc
 
 
-def _safe_pdf_filename(raw_filename: object) -> str:
-    filename = raw_filename if isinstance(raw_filename, str) else DEFAULT_FILENAME
-    safe_name = SAFE_FILENAME_RE.sub("_", Path(filename).name.strip())
+def _parse_format(raw_format: object) -> str:
+    if raw_format is None:
+        return DEFAULT_FORMAT
+    if isinstance(raw_format, str) and raw_format in _FORMATS:
+        return raw_format
+    raise RecoverableToolError(
+        code="invalid_document_format",
+        message=f"Unsupported document format {raw_format!r}.",
+        hint=f"Use one of: {', '.join(_FORMATS)}.",
+    )
+
+
+def _safe_filename(raw_filename: object, extension: str) -> str:
+    stem_source = raw_filename if isinstance(raw_filename, str) else DEFAULT_STEM
+    safe_name = SAFE_FILENAME_RE.sub("_", Path(stem_source).name.strip())
     if safe_name in ("", ".", ".."):
-        safe_name = DEFAULT_FILENAME
-    if not safe_name.lower().endswith(".pdf"):
-        safe_name = f"{safe_name}.pdf"
-    return safe_name
+        safe_name = DEFAULT_STEM
+    # Strip any user-supplied extension, then enforce the format's extension.
+    stem = Path(safe_name).stem if "." in safe_name else safe_name
+    return f"{stem}.{extension}"

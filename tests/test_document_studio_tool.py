@@ -120,6 +120,37 @@ def test_renders_pdf_and_returns_artifact(tmp_path: Path) -> None:
     assert len(PdfReader(str(output_path)).pages) >= 1
 
 
+def test_renders_pptx_format(tmp_path: Path) -> None:
+    result = DocumentStudioTool(working_dir=tmp_path).invoke(
+        _args(format="pptx", filename="deck")
+    )
+    output_path = Path(result.output["path"])
+    assert output_path.exists()
+    assert output_path.read_bytes()[:2] == b"PK"
+    assert result.output["filename"] == "deck.pptx"
+    assert result.output["format"] == "pptx"
+    assert "presentationml" in result.output["mime_type"]
+
+
+def test_renders_docx_format(tmp_path: Path) -> None:
+    result = DocumentStudioTool(working_dir=tmp_path).invoke(
+        _args(format="docx", filename="brief.pdf")  # wrong ext -> corrected
+    )
+    output_path = Path(result.output["path"])
+    assert output_path.exists()
+    assert output_path.read_bytes()[:2] == b"PK"
+    # User-supplied .pdf extension is stripped and the docx extension enforced.
+    assert result.output["filename"] == "brief.docx"
+    assert result.output["format"] == "docx"
+    assert "wordprocessingml" in result.output["mime_type"]
+
+
+def test_invalid_format_raises_recoverable(tmp_path: Path) -> None:
+    with pytest.raises(RecoverableToolError) as exc:
+        DocumentStudioTool(working_dir=tmp_path).invoke(_args(format="xlsx"))
+    assert exc.value.code == "invalid_document_format"
+
+
 # --------------------------------------------------------------------------- #
 # DB-backed artifact recording
 # --------------------------------------------------------------------------- #

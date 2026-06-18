@@ -200,3 +200,48 @@ def test_render_spec_pdf_both_themes() -> None:
     for theme in theme_names():
         pdf = render_spec_pdf(_spec(theme=theme))
         assert pdf.startswith(b"%PDF")
+
+
+# --------------------------------------------------------------------------- #
+# PPTX / DOCX writers (pure-Python, no binary)
+# --------------------------------------------------------------------------- #
+
+
+def test_render_pptx_produces_valid_deck() -> None:
+    from pptx import Presentation
+
+    from kortny.documents import render_pptx
+
+    data = render_pptx(_spec())
+    assert data[:2] == b"PK"  # OOXML zip
+    prs = Presentation(io.BytesIO(data))
+    # cover -> title slide; section_divider -> section slide; at least one
+    # content slide for the heading group => 3+ slides.
+    assert len(list(prs.slides)) >= 3
+
+
+def test_render_pptx_both_themes() -> None:
+    from kortny.documents import render_pptx
+
+    for theme in theme_names():
+        assert render_pptx(_spec(theme=theme))[:2] == b"PK"
+
+
+def test_render_docx_produces_valid_document() -> None:
+    from docx import Document
+
+    from kortny.documents import render_docx
+
+    data = render_docx(_spec())
+    assert data[:2] == b"PK"
+    doc = Document(io.BytesIO(data))
+    # stat_cards + table + callout each render as a table.
+    assert len(doc.tables) >= 3
+    assert any("SpaceX" in p.text for p in doc.paragraphs)
+
+
+def test_render_docx_both_themes() -> None:
+    from kortny.documents import render_docx
+
+    for theme in theme_names():
+        assert render_docx(_spec(theme=theme))[:2] == b"PK"

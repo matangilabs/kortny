@@ -430,15 +430,18 @@ NATIVE_TOOL_METADATA: dict[str, ToolMetadata] = {
             "document_generation",
             "artifact_generation",
             "editorial_pdf",
+            "presentation_generation",
+            "word_document_generation",
         ),
         side_effect="write",
         approval="none",
-        # Themed multi-page rendering via the Typst engine; allow headroom.
+        # Themed multi-page rendering (Typst PDF / python-pptx / python-docx);
+        # allow headroom.
         timeout_seconds=180,
         result_budget="artifact",
         notes=(
-            "Editorial-grade themed PDF from a structured block IR. "
-            "Preferred over pdf_generator for polished deliverables.",
+            "Editorial-grade themed PDF, PowerPoint, or Word from one structured "
+            "block IR. Preferred over pdf_generator for polished deliverables.",
         ),
     ),
     "code_exec": ToolMetadata(
