@@ -1074,18 +1074,16 @@ def test_project_inference_learns_and_reinforces_cluster(db_session: Session) ->
     db_session.commit()
     assert again.learned == 0
     assert again.reinforced == 1
-    assert _inferred_project(db_session, installation).reinforcement_count > before
-    assert (
-        db_session.scalars(
-            select(KnowledgeGraphEntity).where(
-                KnowledgeGraphEntity.installation_id == installation.id,
-                KnowledgeGraphEntity.entity_type == "project",
-            )
+    reinforced_hub = _inferred_project(db_session, installation)
+    assert reinforced_hub is not None
+    assert reinforced_hub.reinforcement_count > before
+    hubs = db_session.scalars(
+        select(KnowledgeGraphEntity).where(
+            KnowledgeGraphEntity.installation_id == installation.id,
+            KnowledgeGraphEntity.entity_type == "project",
         )
-        .all()
-        .__len__()
-        == 1
-    )
+    ).all()
+    assert len(hubs) == 1
 
 
 def test_project_inference_never_links_private_entities(
