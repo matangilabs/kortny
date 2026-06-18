@@ -24,6 +24,7 @@ from pptx import Presentation as new_presentation
 from pptx.dml.color import RGBColor
 from pptx.enum.shapes import MSO_SHAPE
 from pptx.enum.text import MSO_ANCHOR, PP_ALIGN
+from pptx.oxml.ns import qn
 from pptx.presentation import Presentation
 from pptx.slide import Slide
 from pptx.text.text import _Paragraph
@@ -116,6 +117,7 @@ class _DeckBuilder:
             rule.fill.solid()
             rule.fill.fore_color.rgb = _rgb(self.theme.colors.accent)
             rule.line.fill.background()
+            _no_shadow(rule)
 
     def _space(self, needed: int) -> None:
         """Ensure ``needed`` EMU of vertical room, spilling to a new slide."""
@@ -157,44 +159,37 @@ class _DeckBuilder:
         slide = self._new_slide(dark=self.theme.dark_dividers)
         fg = c.on_dark if self.theme.dark_dividers else c.ink
         fg_muted = c.on_dark_muted if self.theme.dark_dividers else c.muted
-        top: Length = Inches(2.6)
+        # Stack eyebrow + title + subtitle in one anchored textbox so spacing is
+        # natural and a short (1-line) title never leaves a dead gap.
+        box = slide.shapes.add_textbox(_MARGIN, Inches(2.3), _BODY_W, Inches(3.6))
+        tf = box.text_frame
+        tf.word_wrap = True
+        first = True
+
+        def _para() -> _Paragraph:
+            nonlocal first
+            if first:
+                first = False
+                return cast(_Paragraph, tf.paragraphs[0])
+            return cast(_Paragraph, tf.add_paragraph())
+
         if block.eyebrow:
-            self._add_text(
-                slide,
+            p = _para()
+            _set_run(
+                p,
                 block.eyebrow.upper(),
-                left=_MARGIN,
-                top=top,
-                width=_BODY_W,
-                height=Inches(0.4),
                 size=12,
                 font=self.theme.mono_font,
                 color=c.accent,
             )
-            top = Emu(int(top) + int(Inches(0.5)))
-        self._add_text(
-            slide,
-            block.title,
-            left=_MARGIN,
-            top=top,
-            width=_BODY_W,
-            height=Inches(1.6),
-            size=46,
-            bold=True,
-            font=self.theme.display_font,
-            color=fg,
-        )
-        top = Emu(int(top) + int(Inches(1.7)))
+            p.space_after = Pt(12)
+        title_p = _para()
+        self._title_runs(title_p, block.title, block.accent_tail, fg)
+        title_p.space_after = Pt(16)
         if block.subtitle:
-            self._add_text(
-                slide,
-                block.subtitle,
-                left=_MARGIN,
-                top=top,
-                width=Inches(8.5),
-                height=Inches(1.0),
-                size=18,
-                font=self.theme.body_font,
-                color=fg_muted,
+            p = _para()
+            _set_run(
+                p, block.subtitle, size=18, font=self.theme.body_font, color=fg_muted
             )
         if block.meta:
             self._add_text(
@@ -211,51 +206,86 @@ class _DeckBuilder:
         # reset content flow so the next heading opens a fresh slide
         self._content = None
 
+    def _title_runs(
+        self, paragraph: _Paragraph, title: str, accent_tail: str | None, fg: str
+    ) -> None:
+        """Big display title, optionally accent-colouring a trailing fragment."""
+
+        if accent_tail and accent_tail != title and title.endswith(accent_tail):
+            head = title[: -len(accent_tail)]
+            _set_run(
+                paragraph,
+                head,
+                size=46,
+                bold=True,
+                font=self.theme.display_font,
+                color=fg,
+            )
+            _set_run(
+                paragraph,
+                accent_tail,
+                size=46,
+                bold=True,
+                font=self.theme.display_font,
+                color=self.theme.colors.accent,
+            )
+        else:
+            _set_run(
+                paragraph,
+                title,
+                size=46,
+                bold=True,
+                font=self.theme.display_font,
+                color=fg,
+            )
+
     def _section_slide(self, block: SectionDivider) -> None:
         c = self.theme.colors
         dark = self.theme.dark_dividers
         slide = self._new_slide(dark=dark)
         fg = c.on_dark if dark else c.ink
         fg_muted = c.on_dark_muted if dark else c.muted
-        top: Length = Inches(2.8)
+        box = slide.shapes.add_textbox(_MARGIN, Inches(2.7), _BODY_W, Inches(2.6))
+        tf = box.text_frame
+        tf.word_wrap = True
+        first = True
+
+        def _para() -> _Paragraph:
+            nonlocal first
+            if first:
+                first = False
+                return cast(_Paragraph, tf.paragraphs[0])
+            return cast(_Paragraph, tf.add_paragraph())
+
         if block.index:
-            self._add_text(
-                slide,
-                block.index,
-                left=_MARGIN,
-                top=top,
-                width=_BODY_W,
-                height=Inches(0.6),
-                size=20,
-                font=self.theme.mono_font,
-                color=c.accent,
-            )
-            top = Emu(int(top) + int(Inches(0.6)))
+            p = _para()
+            _set_run(p, block.index, size=20, font=self.theme.mono_font, color=c.accent)
+            p.space_after = Pt(8)
         if block.label:
-            self._add_text(
-                slide,
+            p = _para()
+            _set_run(
+                p,
                 block.label.upper(),
-                left=_MARGIN,
-                top=top,
-                width=_BODY_W,
-                height=Inches(0.4),
                 size=12,
                 font=self.theme.mono_font,
                 color=fg_muted,
             )
-            top = Emu(int(top) + int(Inches(0.5)))
-        self._add_text(
-            slide,
+            p.space_after = Pt(10)
+        title_p = _para()
+        _set_run(
+            title_p,
             block.title,
-            left=_MARGIN,
-            top=top,
-            width=_BODY_W,
-            height=Inches(1.2),
             size=34,
             bold=True,
             font=self.theme.display_font,
             color=fg,
         )
+        if block.subtitle:
+            title_p.space_after = Pt(14)
+            p = _para()
+            _set_run(
+                p, block.subtitle, size=14, font=self.theme.body_font, color=fg_muted
+            )
         self._content = None
 
     # -- content blocks ---------------------------------------------------- #
@@ -298,14 +328,18 @@ class _DeckBuilder:
             box.fill.solid()
             box.fill.fore_color.rgb = _rgb(c.card)
             box.line.fill.background()
+            _no_shadow(box)
             tf = box.text_frame
             tf.word_wrap = True
-            tf.margin_left = Inches(0.15)
+            tf.vertical_anchor = MSO_ANCHOR.MIDDLE
+            tf.margin_left = Inches(0.2)
             tf.margin_right = Inches(0.15)
+            tf.margin_top = Inches(0.1)
+            tf.margin_bottom = Inches(0.1)
             _set_run(
                 tf.paragraphs[0],
                 card.value,
-                size=24,
+                size=26,
                 bold=True,
                 font=self.theme.display_font,
                 color=c.accent,
@@ -338,6 +372,10 @@ class _DeckBuilder:
             rows, cols, _MARGIN, Emu(self._y), _BODY_W, Emu(total_h)
         )
         table = shape.table
+        # The default table style paints a banded blue Office theme that fights
+        # our explicit cell fills; turn the styled bands off.
+        table.first_row = False
+        table.horz_banding = False
         for j, col in enumerate(block.columns):
             cell = table.cell(0, j)
             cell.fill.solid()
@@ -367,8 +405,9 @@ class _DeckBuilder:
 
     def _callout(self, block: Callout) -> None:
         text = block.text.strip()
-        body_h = _estimate_text_height(text, chars_per_line=85, line_h=0.3)
-        total = body_h + int(Inches(0.7))
+        label_h = int(Inches(0.32)) if block.label else 0
+        body_h = _estimate_text_height(text, chars_per_line=80, line_h=0.3)
+        total = body_h + label_h + int(Inches(0.4))
         self._space(total + int(Inches(0.2)))
         assert self._content is not None
         c = self.theme.colors
@@ -378,10 +417,13 @@ class _DeckBuilder:
         box.fill.solid()
         box.fill.fore_color.rgb = _rgb(self.theme.panel_tint)
         box.line.color.rgb = _rgb(c.accent)
+        _no_shadow(box)
         tf = box.text_frame
         tf.word_wrap = True
         tf.margin_left = Inches(0.25)
-        tf.vertical_anchor = MSO_ANCHOR.TOP
+        tf.margin_right = Inches(0.25)
+        tf.margin_top = Inches(0.15)
+        tf.vertical_anchor = MSO_ANCHOR.MIDDLE
         if block.label:
             _set_run(
                 tf.paragraphs[0],
@@ -410,6 +452,7 @@ class _DeckBuilder:
         bar.fill.solid()
         bar.fill.fore_color.rgb = _rgb(c.accent)
         bar.line.fill.background()
+        _no_shadow(bar)
         tf_left = int(_MARGIN) + int(Inches(0.25))
         box = self._content.shapes.add_textbox(
             Emu(tf_left),
@@ -465,6 +508,8 @@ class _DeckBuilder:
         pill.fill.solid()
         pill.fill.fore_color.rgb = _rgb(c.ink)
         pill.line.fill.background()
+        _no_shadow(pill)
+        pill.text_frame.vertical_anchor = MSO_ANCHOR.MIDDLE
         _set_run(
             pill.text_frame.paragraphs[0],
             block.label.upper(),
@@ -472,6 +517,7 @@ class _DeckBuilder:
             bold=True,
             font=self.theme.mono_font,
             color="#FFFFFF",
+            align=PP_ALIGN.CENTER,
         )
         self._y += int(Inches(0.7))
 
@@ -498,10 +544,15 @@ class _DeckBuilder:
         )
         tf = box.text_frame
         tf.word_wrap = True
-        para = tf.paragraphs[0]
-        para.alignment = align
         _set_run(
-            para, text, size=size, bold=bold, italic=italic, font=font, color=color
+            tf.paragraphs[0],
+            text,
+            size=size,
+            bold=bold,
+            italic=italic,
+            font=font,
+            color=color,
+            align=align,
         )
 
 
@@ -514,7 +565,11 @@ def _set_run(
     color: str,
     bold: bool = False,
     italic: bool = False,
+    align: PP_ALIGN = PP_ALIGN.LEFT,
 ) -> None:
+    # Auto-shapes default to centred text; force alignment so card/callout/pill
+    # copy reads left like the PDF rather than centred-and-cramped.
+    paragraph.alignment = align
     run = paragraph.add_run()
     run.text = text
     run.font.size = Pt(size)
@@ -522,6 +577,21 @@ def _set_run(
     run.font.italic = italic
     run.font.name = font
     run.font.color.rgb = _rgb(color)
+
+
+def _no_shadow(shape: object) -> None:
+    """Drop the default auto-shape drop shadow (looks dated/heavy).
+
+    ``shadow.inherit = False`` adds an empty effect list, but the shape's
+    ``<p:style>`` still carries a theme ``effectRef`` that renderers honour, so
+    we also strip the style element to fully clear the inherited shadow.
+    """
+
+    shape.shadow.inherit = False  # type: ignore[attr-defined]
+    element = shape._element  # type: ignore[attr-defined]
+    style = element.find(qn("p:style"))
+    if style is not None:
+        element.remove(style)
 
 
 def _estimate_text_height(text: str, *, chars_per_line: int, line_h: float) -> int:
