@@ -514,3 +514,46 @@ def create_task(session: Session) -> Task:
         slack_user_id="U123",
         input="hello",
     )
+
+
+def test_llm_service_stamps_registered_prompt_version(db_session: Session) -> None:
+    # HIG-203: a registered prompt's version lands in the usage event payload.
+    task = create_task(db_session)
+    db_session.add(
+        ModelPricing(
+            provider=LLMProvider.openrouter,
+            model="openai/gpt-4o-mini",
+            input_price_per_mtok=Decimal("10.000000"),
+            output_price_per_mtok=Decimal("30.000000"),
+            effective_from=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+    )
+    db_session.flush()
+    provider = FakeProvider(
+        Completion(
+            content="{}",
+            tool_calls=(),
+            usage=TokenUsage(input_tokens=5, output_tokens=5),
+            model="openai/gpt-4o-mini",
+        )
+    )
+    LLMService(
+        session=db_session,
+        provider=provider,
+        provider_name=LLMProvider.openrouter,
+    ).complete(
+        task_id=task.id,
+        messages=[ChatMessage(role="user", content="hi")],
+        prompt_name="kortny.intent_classifier",
+    )
+    events = list(
+        db_session.scalars(
+            select(TaskEvent)
+            .where(TaskEvent.task_id == task.id)
+            .order_by(TaskEvent.seq)
+        )
+    )
+    completed = [e for e in events if e.payload.get("message") == "llm_call_completed"]
+    assert completed
+    assert completed[-1].payload["prompt_name"] == "kortny.intent_classifier"
+    assert completed[-1].payload["prompt_version"] == "1"

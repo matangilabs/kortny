@@ -29,6 +29,7 @@ from kortny.observability.content import (
     render_chat_messages,
     render_completion,
 )
+from kortny.prompts.registry import prompt_version as registered_prompt_version
 from kortny.tasks import TaskService
 from kortny.tools.types import JsonObject, JsonSchema
 
@@ -101,6 +102,10 @@ class LLMService:
         )
         if max_output_tokens is None and prompt_name:
             max_output_tokens = UTILITY_PROMPT_OUTPUT_CLAMP.get(prompt_name)
+        # Stamp the registered prompt version (HIG-203) so usage rows correlate
+        # quality with prompt changes; explicit caller version wins.
+        if prompt_version is None:
+            prompt_version = registered_prompt_version(prompt_name)
         started = time.perf_counter()
         capture_mode = capture_content_mode()
         request_messages = render_chat_messages(messages, capture_mode)
