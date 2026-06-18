@@ -12,6 +12,7 @@ import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
@@ -24,6 +25,7 @@ from kortny.memory import EpisodeService
 from kortny.observability import configure_tracing, start_span
 from kortny.queue import TaskQueue
 from kortny.queue.service import DEFAULT_LEASE_SECONDS
+from kortny.routing.quality import compute_routing_quality
 from kortny.skills.bootstrap import seed_skills_at_startup
 from kortny.slack.outbox import SlackSideEffectOutbox
 from kortny.tasks import TaskCancelledError, TaskService
@@ -194,6 +196,7 @@ class TaskWorker:
                     },
                 )
                 task_service.transition(task, TaskStatus.succeeded)
+                self._record_routing_quality(session, task_service, task)
                 self._record_episode(session, task)
                 logger.info(
                     "worker succeeded task_id=%s worker_id=%s",
@@ -228,6 +231,7 @@ class TaskWorker:
                     task_service.cancel_task(task, reason="worker_cancelled")
                 else:
                     session.commit()
+                self._record_routing_quality(session, task_service, task)
                 self._record_episode(session, task)
                 logger.info(
                     "worker cancelled task_id=%s worker_id=%s",
@@ -265,6 +269,7 @@ class TaskWorker:
                     },
                 )
                 task_service.transition(task, TaskStatus.failed)
+                self._record_routing_quality(session, task_service, task)
                 self._record_episode(session, task)
                 logger.exception(
                     "worker failed task_id=%s worker_id=%s",
@@ -300,6 +305,44 @@ class TaskWorker:
             EpisodeService(session, commit_after_write=True).record_task(task)
         except Exception:
             logger.exception("failed to record task episode task_id=%s", task.id)
+
+    def _record_routing_quality(
+        self, session: Session, task_service: TaskService, task: Task
+    ) -> None:
+        """Score the terminal task's routing outcome (HIG-221). Best-effort."""
+
+        try:
+            payloads = list(
+                session.scalars(
+                    select(TaskEvent.payload).where(TaskEvent.task_id == task.id)
+                )
+            )
+            result = compute_routing_quality(
+                status=str(
+                    task.status.value if hasattr(task.status, "value") else task.status
+                ),
+                event_payloads=[p for p in payloads if isinstance(p, dict)],
+                attempts=task.attempts,
+            )
+            task.routing_quality = result.quality.value
+            task.routing_quality_score = (
+                Decimal(str(result.score)) if result.score is not None else None
+            )
+            task_service.append_event(
+                task,
+                TaskEventType.log,
+                {
+                    "message": "routing_quality_recorded",
+                    "routing_quality": result.quality.value,
+                    "routing_quality_score": (
+                        str(result.score) if result.score is not None else None
+                    ),
+                    "reason_codes": list(result.reason_codes),
+                },
+            )
+            session.commit()
+        except Exception:
+            logger.exception("failed to record routing quality task_id=%s", task.id)
 
 
 class _LeaseHeartbeat:
