@@ -8,6 +8,7 @@ from kortny.slack.assistant_status import (
     PHASE_RESEARCHING,
     PHASE_WORKING,
     AssistantStatusReporter,
+    ChannelProgressReporter,
     NullStatusReporter,
     phase_for_tool,
     status_for_tool,
@@ -152,3 +153,115 @@ def test_reporter_swallows_client_errors() -> None:
 
 def test_null_reporter_is_noop() -> None:
     NullStatusReporter().report("anything")  # no error, no effect
+
+
+class RecordingUpdateClient:
+    def __init__(self, *, fail: bool = False) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self._fail = fail
+
+    def chat_update(self, *, channel: str, ts: str, text: str) -> dict[str, Any]:
+        if self._fail:
+            raise RuntimeError("slack down")
+        self.calls.append({"channel": channel, "ts": ts, "text": text})
+        return {"ok": True}
+
+
+class FakeClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def test_channel_reporter_edits_ack_with_progress_line() -> None:
+    client = RecordingUpdateClient()
+    reporter = ChannelProgressReporter(
+        client=client,
+        channel_id="C1",
+        message_ts="111.22",
+        base_text="On it.",
+        clock=FakeClock(),
+    )
+    reporter.report("Searching the web…", phase=PHASE_RESEARCHING)
+    assert client.calls == [
+        {"channel": "C1", "ts": "111.22", "text": "On it.\n_Searching the web…_"}
+    ]
+
+
+def test_channel_reporter_without_base_text() -> None:
+    client = RecordingUpdateClient()
+    reporter = ChannelProgressReporter(
+        client=client,
+        channel_id="C1",
+        message_ts="111.22",
+        base_text="",
+        clock=FakeClock(),
+    )
+    reporter.report("Reading the channel…")
+    assert client.calls[0]["text"] == "_Reading the channel…_"
+
+
+def test_channel_reporter_throttles_within_interval() -> None:
+    clock = FakeClock()
+    client = RecordingUpdateClient()
+    reporter = ChannelProgressReporter(
+        client=client,
+        channel_id="C1",
+        message_ts="111.22",
+        base_text="On it.",
+        min_interval_seconds=5.0,
+        clock=clock,
+    )
+    reporter.report("Searching the web…")  # t=0, posts
+    clock.now = 2.0
+    reporter.report("Reading the channel…")  # within 5s → throttled
+    clock.now = 6.0
+    reporter.report("Writing the response…")  # past interval → posts
+    assert [c["text"] for c in client.calls] == [
+        "On it.\n_Searching the web…_",
+        "On it.\n_Writing the response…_",
+    ]
+
+
+def test_channel_reporter_dedupes_identical_line() -> None:
+    clock = FakeClock()
+    client = RecordingUpdateClient()
+    reporter = ChannelProgressReporter(
+        client=client,
+        channel_id="C1",
+        message_ts="111.22",
+        base_text="On it.",
+        clock=clock,
+    )
+    reporter.report("Reading the channel…")
+    clock.now = 100.0  # past any throttle window
+    reporter.report("Reading the channel…")  # identical content → no 2nd edit
+    assert len(client.calls) == 1
+
+
+def test_channel_reporter_ignores_empty_status() -> None:
+    client = RecordingUpdateClient()
+    reporter = ChannelProgressReporter(
+        client=client,
+        channel_id="C1",
+        message_ts="111.22",
+        base_text="On it.",
+        clock=FakeClock(),
+    )
+    reporter.report("   ")
+    assert client.calls == []
+
+
+def test_channel_reporter_swallows_client_errors() -> None:
+    client = RecordingUpdateClient(fail=True)
+    reporter = ChannelProgressReporter(
+        client=client,
+        channel_id="C1",
+        message_ts="111.22",
+        base_text="On it.",
+        clock=FakeClock(),
+    )
+    # Must not raise — a progress edit cannot fail the task.
+    reporter.report("Running code…")

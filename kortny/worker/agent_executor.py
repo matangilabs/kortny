@@ -100,6 +100,8 @@ from kortny.slack import SlackPoster, SlackThread
 from kortny.slack.assistant_status import (
     AssistantStatusClient,
     AssistantStatusReporter,
+    ChannelProgressReporter,
+    MessageUpdateClient,
     StatusReporter,
 )
 from kortny.slack.comments import (
@@ -1153,7 +1155,9 @@ class AgentTaskExecutor:
             ),
             skill_direct_threshold=settings.skill_direct_similarity_threshold,
             trifecta_gate_enabled=settings.trifecta_gate_enabled,
-            status_reporter=self._build_status_reporter(settings=settings, task=task),
+            status_reporter=self._build_status_reporter(
+                settings=settings, task=task, session=session
+            ),
             agent_display_name=settings.agent_display_name,
         ).run(task)
 
@@ -1162,29 +1166,80 @@ class AgentTaskExecutor:
         *,
         settings: Settings,
         task: Task,
+        session: Session,
     ) -> StatusReporter | None:
-        """Live assistant-pane status reporter for assistant-surface tasks.
+        """Live status reporter for the task's Slack surface.
 
-        Returns None for every other surface so the coordinator falls back to
-        its no-op reporter (HIG-247 follow-up).
+        Two surfaces narrate progress; everything else returns None so the
+        coordinator falls back to its no-op reporter.
+
+        - Assistant pane (HIG-247): a native loading indicator driven by
+          ``assistant.threads.setStatus``.
+        - Channel / app-mention (HIG-220, default off): no native indicator
+          exists, so we edit the posted acknowledgement in place as the task
+          moves through phases. Requires an ack message to have been posted —
+          there is nothing to edit otherwise.
         """
 
         payload = (
             task.identity_payload if isinstance(task.identity_payload, dict) else {}
         )
-        if payload.get("source_surface") != "assistant":
-            return None
         thread_ts = task.slack_thread_ts or task.slack_message_ts
-        if not (task.slack_channel_id and thread_ts):
-            return None
         client = self.slack_client or cast(
             SlackPostingClient, WebClient(token=settings.slack_bot_token)
         )
-        return AssistantStatusReporter(
-            client=cast(AssistantStatusClient, client),
+        if payload.get("source_surface") == "assistant":
+            if not (task.slack_channel_id and thread_ts):
+                return None
+            return AssistantStatusReporter(
+                client=cast(AssistantStatusClient, client),
+                channel_id=task.slack_channel_id,
+                thread_ts=thread_ts,
+            )
+        if not settings.channel_progress_enabled:
+            return None
+        if not task.slack_channel_id:
+            return None
+        ack = self._acknowledgement_message(session=session, task=task)
+        if ack is None:
+            return None
+        message_ts, base_text = ack
+        return ChannelProgressReporter(
+            client=cast(MessageUpdateClient, client),
             channel_id=task.slack_channel_id,
-            thread_ts=thread_ts,
+            message_ts=message_ts,
+            base_text=base_text,
         )
+
+    def _acknowledgement_message(
+        self,
+        *,
+        session: Session,
+        task: Task,
+    ) -> tuple[str, str] | None:
+        """Return ``(message_ts, text)`` of this task's posted acknowledgement.
+
+        The channel progress reporter edits that message in place; without an
+        ack there is nothing to narrate into.
+        """
+
+        row = session.scalar(
+            select(TaskEvent)
+            .where(
+                TaskEvent.task_id == task.id,
+                TaskEvent.type == TaskEventType.message_posted,
+                TaskEvent.payload["purpose"].as_string() == "acknowledgement",
+            )
+            .order_by(TaskEvent.created_at.desc())
+            .limit(1)
+        )
+        if row is None or not isinstance(row.payload, dict):
+            return None
+        message_ts = row.payload.get("message_ts")
+        text = row.payload.get("text")
+        if not isinstance(message_ts, str) or not message_ts:
+            return None
+        return message_ts, text if isinstance(text, str) else ""
 
     def _record_semantic_router_shadow(
         self,

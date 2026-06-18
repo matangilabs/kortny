@@ -78,6 +78,9 @@ class Settings(BaseSettings):
     assistant_streaming_enabled: bool = Field(
         default=True, validation_alias="KORTNY_ASSISTANT_STREAMING_ENABLED"
     )
+    channel_progress_enabled: bool = Field(
+        default=False, validation_alias="KORTNY_CHANNEL_PROGRESS_ENABLED"
+    )
     agent_runtime: Literal["custom", "adk"] = Field(
         default="custom", validation_alias="AGENT_RUNTIME"
     )

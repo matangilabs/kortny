@@ -12,9 +12,15 @@ process, so the worker can drive it directly.
 from __future__ import annotations
 
 import logging
+import time
+from collections.abc import Callable
 from typing import Any, Protocol
 
 logger = logging.getLogger(__name__)
+
+# Minimum seconds between channel ack edits — Slack rate-limits chat.update and
+# rapid edits are noise. Phase transitions are coarse, so this rarely bites.
+DEFAULT_PROGRESS_THROTTLE_SECONDS = 5.0
 
 
 class AssistantStatusClient(Protocol):
@@ -103,6 +109,70 @@ class AssistantStatusReporter:
                 self._channel_id,
                 self._thread_ts,
                 step,
+                exc_info=True,
+            )
+
+
+class MessageUpdateClient(Protocol):
+    """Subset of the Slack WebClient used to edit a posted message."""
+
+    def chat_update(self, *, channel: str, ts: str, text: str) -> Any:
+        """Edit the text of an existing message."""
+
+
+class ChannelProgressReporter:
+    """Narrates progress by editing the channel acknowledgement message.
+
+    Assistant-pane tasks get a native loading indicator (AssistantStatusReporter);
+    channel / app-mention tasks have only the posted ack, so we edit it in place
+    (chat.update) as the task moves through phases — "Checking Linear…",
+    "Writing the reply…" — appended under the original ack text so it is never
+    lost. Throttled to >= ``min_interval_seconds`` between edits and deduped on
+    content; never raises (a progress edit must not fail the task).
+    """
+
+    def __init__(
+        self,
+        *,
+        client: MessageUpdateClient,
+        channel_id: str,
+        message_ts: str,
+        base_text: str,
+        min_interval_seconds: float = DEFAULT_PROGRESS_THROTTLE_SECONDS,
+        clock: Callable[[], float] | None = None,
+    ) -> None:
+        self._client = client
+        self._channel_id = channel_id
+        self._message_ts = message_ts
+        self._base_text = base_text.strip()
+        self._min_interval = min_interval_seconds
+        self._clock = clock or time.monotonic
+        self._last_line: str | None = None
+        self._last_at: float | None = None
+
+    def report(self, status: str, *, phase: str | None = None) -> None:
+        line = (status or "").strip()
+        if not line:
+            return
+        if line == self._last_line:
+            return
+        now = self._clock()
+        if self._last_at is not None and (now - self._last_at) < self._min_interval:
+            return
+        updater = getattr(self._client, "chat_update", None)
+        if not callable(updater):
+            return
+        text = f"{self._base_text}\n_{line}_" if self._base_text else f"_{line}_"
+        try:
+            updater(channel=self._channel_id, ts=self._message_ts, text=text)
+            self._last_line = line
+            self._last_at = now
+        except Exception:
+            logger.warning(
+                "failed to update channel progress channel=%s ts=%s status=%s",
+                self._channel_id,
+                self._message_ts,
+                line,
                 exc_info=True,
             )
 

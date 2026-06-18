@@ -80,6 +80,7 @@ from kortny.observe.assessment import (
     CHANNEL_ASSESSMENT_REQUESTED_MESSAGE,
     CHANNEL_ASSESSMENT_SUPPRESS_SLACK_POST_KEY,
 )
+from kortny.slack.assistant_status import ChannelProgressReporter
 from kortny.slack.comments import ARTIFACT_COMMENT_FALLBACK_TEXT
 from kortny.slack.humanizer import (
     ResponseSynthesisResult,
@@ -87,6 +88,7 @@ from kortny.slack.humanizer import (
     build_response_record,
     build_synthesis_context,
 )
+from kortny.slack.posting import SlackPostingClient
 from kortny.slack.reactions import (
     ACK_REACTION_ADDED_MESSAGE,
     ACK_REACTION_REMOVED_MESSAGE,
@@ -4600,6 +4602,92 @@ def cleanup_database(session: Session) -> None:
         Installation,
     ):
         session.execute(delete(model))
+
+
+def _channel_progress_settings(*, enabled: bool) -> Settings:
+    return Settings.model_validate(
+        {
+            "SLACK_BOT_TOKEN": "xoxb-test",
+            "SLACK_APP_TOKEN": "xapp-test",
+            "SLACK_SIGNING_SECRET": "signing-secret",
+            "LLM_PROVIDER": SettingsLLMProvider.openrouter,
+            "LLM_API_KEY": "openrouter-key",
+            "LLM_MODEL": "anthropic/sonnet-default",
+            "POSTGRES_URL": "postgresql://kortny:kortny@localhost/kortny",
+            "KORTNY_CHANNEL_PROGRESS_ENABLED": enabled,
+        }
+    )
+
+
+def _post_ack_event(session: Session, task: Task) -> None:
+    TaskService(session).append_event(
+        task.id,
+        TaskEventType.message_posted,
+        {
+            "channel": task.slack_channel_id,
+            "message_ts": "999.111",
+            "text": "On it — taking a look.",
+            "purpose": "acknowledgement",
+        },
+    )
+
+
+def test_build_status_reporter_channel_progress_when_enabled(
+    db_session: Session,
+) -> None:
+    task = create_task(db_session, event_id="EvChanProg")
+    _post_ack_event(db_session, task)
+    db_session.commit()
+
+    reporter = AgentTaskExecutor(
+        settings=_channel_progress_settings(enabled=True),
+        slack_client=cast(SlackPostingClient, object()),
+    )._build_status_reporter(
+        settings=_channel_progress_settings(enabled=True),
+        task=task,
+        session=db_session,
+    )
+
+    assert isinstance(reporter, ChannelProgressReporter)
+    assert reporter._message_ts == "999.111"
+    assert reporter._base_text == "On it — taking a look."
+
+
+def test_build_status_reporter_none_when_flag_disabled(
+    db_session: Session,
+) -> None:
+    task = create_task(db_session, event_id="EvChanProgOff")
+    _post_ack_event(db_session, task)
+    db_session.commit()
+
+    reporter = AgentTaskExecutor(
+        settings=_channel_progress_settings(enabled=False),
+        slack_client=cast(SlackPostingClient, object()),
+    )._build_status_reporter(
+        settings=_channel_progress_settings(enabled=False),
+        task=task,
+        session=db_session,
+    )
+
+    assert reporter is None
+
+
+def test_build_status_reporter_none_without_ack(
+    db_session: Session,
+) -> None:
+    task = create_task(db_session, event_id="EvChanProgNoAck")
+    db_session.commit()
+
+    reporter = AgentTaskExecutor(
+        settings=_channel_progress_settings(enabled=True),
+        slack_client=cast(SlackPostingClient, object()),
+    )._build_status_reporter(
+        settings=_channel_progress_settings(enabled=True),
+        task=task,
+        session=db_session,
+    )
+
+    assert reporter is None
 
 
 def create_installation(session: Session) -> Installation:
