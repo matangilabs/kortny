@@ -426,3 +426,18 @@ def test_litellm_provider_omits_max_tokens_when_uncapped(
     provider.complete([ChatMessage(role="user", content="hi")])
 
     assert "max_tokens" not in captured
+
+
+def test_per_call_max_output_tokens_overrides_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # HIG-220: a per-call clamp wins over the provider's configured default.
+    captured = _capture_completion(monkeypatch)
+    provider = LiteLLMProvider(api_key="k", model="gpt", max_output_tokens=16384)
+
+    provider.complete(
+        [ChatMessage(role="user", content="hi")],
+        max_output_tokens=256,
+    )
+
+    assert captured["max_tokens"] == 256

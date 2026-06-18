@@ -45,6 +45,7 @@ class FakeProvider:
         tools: Sequence[JsonSchema] = (),
         *,
         response_format: JsonObject | None = None,
+        max_output_tokens: int | None = None,
     ) -> Completion:
         del response_format
         self.calls.append((messages, tools))
