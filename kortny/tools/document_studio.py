@@ -69,7 +69,10 @@ _BLOCK_GUIDE = (
     "- table: columns (req string list), rows (list of string lists), caption.\n"
     "- callout: text (req), label.\n"
     "- pull_quote: text (req), attribution.\n"
-    "- cta: label (req), text."
+    "- cta: label (req), text.\n"
+    "- chart: chart_type (bar|line|area|pie|scatter), title, x_label, y_label, "
+    "caption, series (req, 1-8) of {name, points:[{x,y}]}. Use for real data "
+    "visualizations; x is a category label or a number, y is numeric."
 )
 
 

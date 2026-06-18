@@ -14,8 +14,12 @@ from pypdf import PdfReader
 from kortny.documents import (
     PITCH_THEME,
     REPORT_THEME,
+    Chart,
     DocKind,
     DocumentSpec,
+    compile_chart_spec,
+    render_chart_png,
+    render_chart_svg,
     render_document,
     render_spec_pdf,
     resolve_theme,
@@ -245,3 +249,102 @@ def test_render_docx_both_themes() -> None:
 
     for theme in theme_names():
         assert render_docx(_spec(theme=theme))[:2] == b"PK"
+
+
+# --------------------------------------------------------------------------- #
+# Charts (vl-convert)
+# --------------------------------------------------------------------------- #
+
+_BAR = Chart.model_validate(
+    {
+        "chart_type": "bar",
+        "title": "Sales",
+        "x_label": "Q",
+        "y_label": "USD",
+        "series": [
+            {"name": "Rev", "points": [{"x": "Q1", "y": 3}, {"x": "Q2", "y": 5}]}
+        ],
+    }
+)
+_MULTI_LINE = Chart.model_validate(
+    {
+        "chart_type": "line",
+        "series": [
+            {"name": "A", "points": [{"x": 2024, "y": 3}, {"x": 2025, "y": 7}]},
+            {"name": "B", "points": [{"x": 2024, "y": 5}, {"x": 2025, "y": 4}]},
+        ],
+    }
+)
+
+
+def test_chart_spec_single_series_uses_accent_no_legend() -> None:
+    spec = compile_chart_spec(_BAR, REPORT_THEME)
+    # Single series -> mark painted with the brand accent, no color encoding.
+    assert spec["mark"] == {"type": "bar", "color": REPORT_THEME.colors.accent}
+    assert "color" not in spec["encoding"]
+    # Author category order preserved (no alphabetical re-sort).
+    assert spec["encoding"]["x"]["sort"] is None
+
+
+def test_chart_spec_multi_series_uses_palette_and_color() -> None:
+    spec = compile_chart_spec(_MULTI_LINE, REPORT_THEME)
+    assert spec["mark"] == "line"
+    assert spec["encoding"]["color"]["field"] == "series"
+    # Numeric x detected as quantitative.
+    assert spec["encoding"]["x"]["type"] == "quantitative"
+    # Brand accent leads the categorical palette; theme font applied.
+    assert spec["config"]["range"]["category"][0] == REPORT_THEME.colors.accent
+    assert spec["config"]["font"] == REPORT_THEME.body_font
+
+
+def test_chart_spec_pie_uses_arc_theta() -> None:
+    pie = Chart.model_validate(
+        {"chart_type": "pie", "series": [{"name": "s", "points": [{"x": "A", "y": 1}]}]}
+    )
+    spec = compile_chart_spec(pie, REPORT_THEME)
+    assert spec["mark"]["type"] == "arc"
+    assert "theta" in spec["encoding"]
+
+
+def test_render_chart_svg_and_png() -> None:
+    svg = render_chart_svg(_BAR, REPORT_THEME)
+    assert svg.lstrip().startswith("<svg")
+    png = render_chart_png(_BAR, REPORT_THEME)
+    assert png[:4] == b"\x89PNG"
+
+
+def test_typst_chart_block_emits_image_and_asset() -> None:
+    from kortny.documents.typst_writer import build_typst
+
+    spec = _spec(blocks=[*_FULL_SPEC["blocks"], _BAR.model_dump()])
+    source, assets = build_typst(spec)
+    # The chart is the 9th block (index 8) -> chart_8.svg.
+    assert any(name.endswith(".svg") for name in assets)
+    asset_name = next(n for n in assets if n.endswith(".svg"))
+    assert f'#image("{asset_name}"' in source
+    assert assets[asset_name].lstrip().startswith(b"<svg")
+
+
+@pytest.mark.skipif(_TYPST_MISSING, reason="typst binary not installed")
+def test_render_spec_pdf_with_chart() -> None:
+    spec = _spec(blocks=[*_FULL_SPEC["blocks"], _BAR.model_dump()])
+    pdf = render_spec_pdf(spec)
+    assert pdf.startswith(b"%PDF")
+
+
+def test_chart_embeds_in_pptx_and_docx() -> None:
+    from docx import Document as DocxDocument
+    from pptx import Presentation
+
+    from kortny.documents import render_docx, render_pptx
+
+    spec = _spec(blocks=[*_FULL_SPEC["blocks"], _BAR.model_dump()])
+    prs = Presentation(io.BytesIO(render_pptx(spec)))
+    # At least one picture shape across the deck.
+    assert any(
+        shape.shape_type is not None and "PICTURE" in str(shape.shape_type)
+        for slide in prs.slides
+        for shape in slide.shapes
+    )
+    doc = DocxDocument(io.BytesIO(render_docx(spec)))
+    assert "graphicData" in doc.element.xml  # an embedded drawing

@@ -36,6 +36,7 @@ dependencies = [
     "temporalio>=1.10",
     "typst>=0.15.0",
     "uvicorn>=0.47",
+    "vl-convert-python>=1.9.0.post1",
 ]
 
 [dependency-groups]

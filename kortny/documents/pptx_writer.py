@@ -30,9 +30,11 @@ from pptx.slide import Slide
 from pptx.text.text import _Paragraph
 from pptx.util import Emu, Inches, Length, Pt
 
+from kortny.documents.charts import render_chart_png
 from kortny.documents.ir import (
     CTA,
     Callout,
+    Chart,
     CoverHeader,
     DocumentSpec,
     Heading,
@@ -151,6 +153,8 @@ class _DeckBuilder:
             self._pull_quote(block)
         elif isinstance(block, CTA):
             self._cta(block)
+        elif isinstance(block, Chart):
+            self._chart(block)
 
     # -- title / section --------------------------------------------------- #
 
@@ -520,6 +524,33 @@ class _DeckBuilder:
             align=PP_ALIGN.CENTER,
         )
         self._y += int(Inches(0.7))
+
+    def _chart(self, block: Chart) -> None:
+        png = render_chart_png(block, self.theme)
+        # Fit the 640x380 chart to a height that fits the content area; width
+        # follows the aspect ratio. add_picture derives width from height.
+        height = int(Inches(3.9))
+        caption_h = int(Inches(0.3)) if block.caption else 0
+        self._space(height + caption_h + int(Inches(0.25)))
+        assert self._content is not None
+        self._content.shapes.add_picture(
+            io.BytesIO(png), _MARGIN, Emu(self._y), height=Emu(height)
+        )
+        self._y += height + int(Inches(0.1))
+        if block.caption:
+            self._add_text(
+                self._content,
+                block.caption.upper(),
+                left=_MARGIN,
+                top=Emu(self._y),
+                width=_BODY_W,
+                height=Inches(0.3),
+                size=8,
+                font=self.theme.mono_font,
+                color=self.theme.colors.muted,
+            )
+            self._y += caption_h
+        self._y += int(Inches(0.15))
 
     # -- helpers ----------------------------------------------------------- #
 
