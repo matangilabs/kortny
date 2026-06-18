@@ -2,58 +2,50 @@
 name: deck-builder
 description: Use when asked to build, generate, or produce a slide deck, PowerPoint, .pptx, presentation, pitch deck, or board/review deck to upload to Slack — when the deliverable is an actual slide file with a consistent theme and layout, not talking points in a message.
 metadata:
-  version: 1.0.0
+  version: 2.0.0
   display_name: Deck Builder
-  tags: deck, slides, presentation, powerpoint, pptx, pitch, board deck, review, python-pptx
+  tags: deck, slides, presentation, powerpoint, pptx, pitch, board deck, review, document-studio
 ---
 
 ## Goal
 
-Produce a `.pptx` deck that reads as one coherent document — one idea per
-slide, a single theme applied throughout, generous margins — and upload it to
-the Slack thread.
+Produce a `.pptx` deck that reads as one coherent document — one idea per slide,
+a single theme throughout, generous margins — and post it to the Slack thread.
 
-## Steps
+You do **not** run a build script. You author a structured document spec and
+call the **`document_studio` tool** with `format: "pptx"`; it renders the themed
+deck (cover → section dividers → content slides) and records the artifact.
 
-1. **Outline the deck before building.** One idea per slide. Write each slide
-   title as a sentence that states the takeaway ("Signups doubled after the
-   referral launch"), not a label ("Signups"). Decide the section breaks.
-2. **Pick the theme once.** Choose a single accent color and stick to it for
-   every slide. If `theme-factory` has produced a palette for this workspace,
-   or known workspace facts describe the brand color, use it — otherwise pick
-   one restrained accent and keep it consistent.
-3. **Choose a layout per slide:** `title` (cover), `section` (divider),
-   `bullets` (max 6 bullets — if you need more, split the slide), `two_col`
-   (two bullet columns), `quote` (pull-quote + attribution).
-4. **Build with the script** (`scripts/build_deck.py`) by passing a JSON spec.
-   It produces a 16:9 deck, applies the theme to every slide, enforces the
-   bullet cap and the margins, and anchors a source line to any data slide.
-5. **Upload the deck to the thread** with a one-line summary of the arc. Offer
-   to render a leave-behind PDF (`styled-report-pdf`) or to drop a chart
-   (`chart-maker`) into a specific slide.
+## How to build the deck
 
-## Layout discipline (non-negotiable)
+Call `document_studio` with `format: "pptx"`, a `title`, `doc_kind: "pitch"`
+(sparse, high-impact) or `"report"` (denser), and an ordered `blocks` array:
 
-- **One idea per slide.** If a slide needs more than six bullets or two
-  distinct topics, it's two slides.
-- **Consistent theme.** Same accent color and the same two font sizes (title
-  vs. body) on every slide. The deck should not look like assembled templates.
-- **Titles are sentences**, not nouns — the title carries the point even if
-  the body is skimmed.
-- **Generous margins.** Body text never runs edge to edge; the script keeps a
-  fixed margin and wraps text.
-- **Cite data slides.** Any slide with numbers carries a source line.
+- `cover_header` — the title slide (eyebrow, title, subtitle, meta).
+- `section_divider` — a section break slide.
+- `heading` → following blocks flow onto that content slide.
+- `prose` — keep it tight; one idea per slide, not a wall of text.
+- `stat_cards` — headline metrics.
+- `table` — comparison data.
+- `chart` — **visualize data; see judgment below.**
+- `pull_quote`, `cta` — a memorable line / a closing ask.
 
-## Pairing
+## Data-display judgment (decide this yourself — the user won't ask)
 
-- `theme-factory` → supplies the palette/aesthetic for the `theme.accent`.
-- `chart-maker` → produces a PNG you can describe as belonging on a slide.
-- `styled-report-pdf` → the prose leave-behind version of the same content.
+A deck is the format where a chart earns its keep most. When a slide is about
+data, make it a `chart` block rather than a list of numbers:
 
-## Script
+- **Compare categories** → `bar`. **Trend over time** → `line`/`area`.
+- **Share of a whole** (≤6 slices) → `pie`. **Correlation** → `scatter`.
 
-- `scripts/build_deck.py` — inputs: `--spec spec.json` (or JSON on stdin),
-  `--out deck.pptx`. Builds a 16:9 deck from a list of slides. Supported
-  layouts: `title`, `section`, `bullets` (capped at 6), `two_col`, `quote`.
-  Theme object: `{accent, title_pt, body_pt}`. Optional per-slide `source`
-  footer. Deps: python-pptx. No network. See `references/spec-format.md`.
+One chart per data slide, with the takeaway in the chart `title`.
+
+## Discipline
+
+- **One idea per slide.** Two topics or a wall of bullets → two slides.
+- **Titles are sentences** that carry the point ("Signups doubled after the
+  referral launch"), not labels ("Signups").
+- **Consistent theme** — pick `doc_kind`/theme once; the renderer applies one
+  accent and font system to every slide.
+- **Brand with the user's org**, not the assistant (cover `meta`).
+- Offer a leave-behind PDF (`format: "pdf"`) of the same spec when useful.

@@ -16,13 +16,15 @@ from docx.document import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from docx.shared import Pt, RGBColor
+from docx.shared import Inches, Pt, RGBColor
 from docx.table import _Cell
 from docx.text.paragraph import Paragraph
 
+from kortny.documents.charts import render_chart_png
 from kortny.documents.ir import (
     CTA,
     Callout,
+    Chart,
     CoverHeader,
     DocumentSpec,
     Heading,
@@ -78,6 +80,24 @@ def _render(doc: Document, block: object, theme: Theme) -> None:
         _pull_quote(doc, block, theme)
     elif isinstance(block, CTA):
         _cta(doc, block, theme)
+    elif isinstance(block, Chart):
+        _chart(doc, block, theme)
+
+
+def _chart(doc: Document, block: Chart, theme: Theme) -> None:
+    png = render_chart_png(block, theme)
+    doc.add_picture(io.BytesIO(png), width=Inches(6.0))
+    if block.caption:
+        p = doc.add_paragraph()
+        _run(
+            p,
+            block.caption,
+            size=9,
+            font=theme.mono_font,
+            color=theme.colors.muted,
+            caps=True,
+        )
+    doc.add_paragraph()
 
 
 def _run(

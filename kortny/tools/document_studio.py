@@ -69,7 +69,15 @@ _BLOCK_GUIDE = (
     "- table: columns (req string list), rows (list of string lists), caption.\n"
     "- callout: text (req), label.\n"
     "- pull_quote: text (req), attribution.\n"
-    "- cta: label (req), text."
+    "- cta: label (req), text.\n"
+    "- chart: chart_type (bar|line|area|pie|scatter), title, x_label, y_label, "
+    "caption, series (req, 1-8) of {name, points:[{x,y}]}. Use for real data "
+    "visualizations; x is a category label or a number, y is numeric.\n"
+    "Composition: a section_divider takes its own full page, so put dividers "
+    "BETWEEN major sections — never immediately after the cover, and never strand "
+    "a single small block (e.g. stat_cards alone) right before a divider, which "
+    "leaves a near-empty page. Open the body with a heading + intro prose and the "
+    "headline stat_cards together."
 )
 
 
@@ -91,12 +99,17 @@ class DocumentStudioTool:
     name = "document_studio"
     description = (
         "Generate a beautiful, themed document from a structured spec, as PDF, "
-        "PowerPoint (pptx), or Word (docx). Use for reports, briefs, decks, and "
-        "pitch documents that should look editorial-grade (cover, section "
-        "dividers, stat cards, tables, callouts, pull quotes). Choose 'pptx' for "
-        "a slide deck, 'docx' for an editable Word doc the user will keep editing, "
-        "'pdf' for a finished deliverable. Prefer this over pdf_generator for any "
-        "polished output."
+        "PowerPoint (pptx), or Word (docx). This is THE tool for any polished "
+        "deliverable — reports, research notes, briefs, one-pagers, decks, "
+        "leave-behinds — with cover, section dividers, stat cards, tables, "
+        "charts, callouts, and pull quotes. Choose 'pptx' for a slide deck, "
+        "'docx' for an editable Word doc the user will keep editing, 'pdf' for a "
+        "finished deliverable (default). Prefer this over pdf_generator for any "
+        "polished output. Exercise judgment about presenting data: when the "
+        "content has comparisons, trends, or proportions, add a chart block "
+        "(bar=compare categories, line/area=trend over time, pie=share with <=6 "
+        "slices, scatter=correlation) instead of burying numbers in prose — the "
+        "user will rarely ask for a chart explicitly; decide for them."
     )
     parameters: JsonSchema = {
         "type": "object",

@@ -17,9 +17,11 @@ it into Typst deterministically.
 
 from __future__ import annotations
 
+from kortny.documents.charts import render_chart_svg
 from kortny.documents.ir import (
     CTA,
     Callout,
+    Chart,
     CoverHeader,
     DocumentSpec,
     Heading,
@@ -49,14 +51,26 @@ def esc(text: str) -> str:
     return text
 
 
-def render_document(spec: DocumentSpec) -> str:
-    """Render ``spec`` to a complete Typst source document."""
+def build_typst(spec: DocumentSpec) -> tuple[str, dict[str, bytes]]:
+    """Render ``spec`` to Typst source plus any side-car assets (chart SVGs).
+
+    Charts compile to a themed Vega-Lite spec rendered to an SVG that the source
+    references by filename; the assets dict maps filename -> bytes so the render
+    layer can drop them next to the source in a compile dir.
+    """
 
     theme = resolve_theme(doc_kind=spec.doc_kind, name=spec.theme)
+    assets: dict[str, bytes] = {}
     parts = [_preamble(spec, theme)]
-    for block in spec.blocks:
-        parts.append(_render_block(block, theme))
-    return "\n".join(parts) + "\n"
+    for index, block in enumerate(spec.blocks):
+        parts.append(_render_block(block, theme, index, assets))
+    return "\n".join(parts) + "\n", assets
+
+
+def render_document(spec: DocumentSpec) -> str:
+    """Render ``spec`` to Typst source (without assets — used by tests)."""
+
+    return build_typst(spec)[0]
 
 
 def _preamble(spec: DocumentSpec, theme: Theme) -> str:
@@ -95,7 +109,9 @@ def _preamble(spec: DocumentSpec, theme: Theme) -> str:
 """
 
 
-def _render_block(block: object, theme: Theme) -> str:
+def _render_block(
+    block: object, theme: Theme, index: int, assets: dict[str, bytes]
+) -> str:
     if isinstance(block, CoverHeader):
         return _cover(block, theme)
     if isinstance(block, SectionDivider):
@@ -114,7 +130,22 @@ def _render_block(block: object, theme: Theme) -> str:
         return _pull_quote(block)
     if isinstance(block, CTA):
         return _cta(block)
+    if isinstance(block, Chart):
+        return _chart(block, theme, index, assets)
     return ""
+
+
+def _chart(block: Chart, theme: Theme, index: int, assets: dict[str, bytes]) -> str:
+    filename = f"chart_{index}.svg"
+    assets[filename] = render_chart_svg(block, theme).encode("utf-8")
+    lines = [f'#image("{filename}", width: 100%)']
+    if block.caption:
+        lines.append(
+            f"#v(4pt)\n#text(font: mono, size: 8pt, fill: muted, "
+            f'tracking: 1pt)[#upper("{esc(block.caption)}")]'
+        )
+    lines.append("#v(14pt)")
+    return "\n".join(lines)
 
 
 def _title_markup(title: str, accent_tail: str | None) -> str:
@@ -133,6 +164,10 @@ def _cover(block: CoverHeader, theme: Theme) -> str:
     margin = f"{theme.page_margin_mm + 4}mm"
     lines = [
         f"#page(fill: {fill}, header: none, footer: none, margin: {margin})[",
+        # Display titles must not hyphenate ("EV Mar-ket Report") or justify
+        # (which spreads a 2-line title); this page is all short display text.
+        "  #set text(hyphenate: false)",
+        "  #set par(justify: false)",
         "  #v(1fr)",
     ]
     if block.eyebrow:
@@ -167,6 +202,8 @@ def _divider(block: SectionDivider, theme: Theme) -> str:
     margin = f"{theme.page_margin_mm + 4}mm"
     lines = [
         f"#page(fill: {fill}, header: none, footer: none, margin: {margin})[",
+        "  #set text(hyphenate: false)",
+        "  #set par(justify: false)",
         "  #v(1fr)",
     ]
     if block.index:

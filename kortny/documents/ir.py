@@ -118,6 +118,40 @@ class CTA(_Block):
     text: str | None = None
 
 
+class ChartPoint(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # Category label or numeric position on the x axis.
+    x: str | float
+    y: float
+
+
+class ChartSeries(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    points: list[ChartPoint] = Field(min_length=1)
+
+
+class Chart(_Block):
+    """A data visualisation.
+
+    The agent emits this compact, constrained shape — never raw Vega-Lite — and
+    the writer compiles it to a themed Vega-Lite spec rendered to an image
+    (vector for PDF, raster for Office). This keeps the agent off the
+    hallucination-prone Vega-Lite surface and lets theming / colour-blind-safe
+    palettes / chart-type curation be applied deterministically.
+    """
+
+    type: Literal["chart"] = "chart"
+    chart_type: Literal["bar", "line", "area", "pie", "scatter"] = "bar"
+    title: str | None = None
+    x_label: str | None = None
+    y_label: str | None = None
+    series: list[ChartSeries] = Field(min_length=1, max_length=8)
+    caption: str | None = None
+
+
 Block = Annotated[
     CoverHeader
     | SectionDivider
@@ -127,7 +161,8 @@ Block = Annotated[
     | Table
     | Callout
     | PullQuote
-    | CTA,
+    | CTA
+    | Chart,
     Field(discriminator="type"),
 ]
 

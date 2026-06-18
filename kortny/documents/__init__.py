@@ -6,11 +6,20 @@ writer renders it to a concrete format. Phase 1 ships the Typst PDF path.
 
 from __future__ import annotations
 
+from kortny.documents.charts import (
+    ChartRenderError,
+    compile_chart_spec,
+    render_chart_png,
+    render_chart_svg,
+)
 from kortny.documents.docx_writer import render_docx
 from kortny.documents.ir import (
     CTA,
     Block,
     Callout,
+    Chart,
+    ChartPoint,
+    ChartSeries,
     CoverHeader,
     DocKind,
     DocumentSpec,
@@ -44,6 +53,10 @@ __all__ = [
     "CTA",
     "Block",
     "Callout",
+    "Chart",
+    "ChartPoint",
+    "ChartRenderError",
+    "ChartSeries",
     "CoverHeader",
     "DocKind",
     "DocumentRenderError",
@@ -60,6 +73,9 @@ __all__ = [
     "Theme",
     "ThemeColors",
     "TypstNotAvailableError",
+    "compile_chart_spec",
+    "render_chart_png",
+    "render_chart_svg",
     "render_docx",
     "render_document",
     "render_pptx",
