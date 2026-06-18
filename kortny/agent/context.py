@@ -43,6 +43,7 @@ from kortny.knowledge_graph import (
     RetrievedGraphEntity,
     VisibilityScope,
 )
+from kortny.knowledge_graph.projects import project_anchors_and_scopes
 from kortny.llm import ChatMessage
 from kortny.memory import EpisodeService, Fact, RelevantEpisode, WorkspaceStateService
 from kortny.observability import observe_task_event, set_span_attributes, start_span
@@ -786,6 +787,18 @@ class ContextAssembler:
 
         destination = _destination_surface_for_task(self.session, task)
         anchor_keys = _graph_anchor_keys(task)
+        # Project layer (HIG-276): if the current channel belongs to a project,
+        # anchor on the project hub and widen the audience to the project's
+        # PUBLIC member channels so retrieval synthesizes across them. Bumps hops
+        # so BFS reaches project hub -> channel hub -> channel facts.
+        project_anchor_keys, additional_scopes = _project_anchors_and_scopes(
+            self.session, task
+        )
+        if project_anchor_keys:
+            anchor_keys = anchor_keys + project_anchor_keys
+        max_hops = self.graph_context_max_hops
+        if project_anchor_keys:
+            max_hops = max(max_hops, _PROJECT_GRAPH_MAX_HOPS)
         self.task_service.append_event(
             task,
             TaskEventType.log,
@@ -795,8 +808,10 @@ class ContextAssembler:
                 "destination_surface_id": destination.surface_id,
                 "destination_user_id": destination.user_id,
                 "anchor_keys": list(anchor_keys),
+                "project_anchor_keys": list(project_anchor_keys),
+                "additional_scope_count": len(additional_scopes),
                 "max_items": self.graph_context_max_items,
-                "max_hops": self.graph_context_max_hops,
+                "max_hops": max_hops,
             },
         )
 
@@ -804,10 +819,13 @@ class ContextAssembler:
             installation_id=task.installation_id,
             destination=destination,
             anchor_keys=anchor_keys,
-            max_hops=self.graph_context_max_hops,
+            max_hops=max_hops,
             max_items=self.graph_context_max_items,
+            additional_scopes=additional_scopes,
         )
-        violations = GraphService.scope_guard_violations(pack, destination)
+        violations = GraphService.scope_guard_violations(
+            pack, destination, additional_scopes
+        )
         if violations:
             self.task_service.append_event(
                 task,
@@ -1435,6 +1453,37 @@ def _graph_anchor_keys(task: Task) -> tuple[str, ...]:
     else:
         keys.insert(0, f"slack_channel:{task.slack_channel_id}")
     return tuple(keys)
+
+
+# BFS depth for project-anchored retrieval: project hub -> channel hub (1) ->
+# channel facts (2). Single-channel retrieval keeps the smaller configured hops.
+_PROJECT_GRAPH_MAX_HOPS = 2
+
+
+def _project_anchors_and_scopes(
+    session: Session, task: Task
+) -> tuple[tuple[str, ...], tuple[VisibilityScope, ...]]:
+    """Project hub anchors + audience-safe extra scopes for the current channel.
+
+    If the task's channel belongs to one or more projects (HIG-276), return the
+    project hubs' canonical keys (to anchor BFS on the hub) and the projects'
+    PUBLIC member-channel scopes (to authorize cross-channel synthesis). Empty
+    when the channel is not part of a project, so non-project tasks are
+    unaffected. Best-effort: never fails context assembly.
+    """
+
+    channel_id = task.slack_channel_id
+    if not channel_id or _is_dm_channel(channel_id):
+        return ((), ())
+    try:
+        return project_anchors_and_scopes(
+            session, installation_id=task.installation_id, channel_id=channel_id
+        )
+    except Exception:
+        logger.warning(
+            "project anchor lookup failed task_id=%s", task.id, exc_info=True
+        )
+        return ((), ())
 
 
 def _scope_payload(scope: VisibilityScope) -> dict[str, str | None]:

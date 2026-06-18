@@ -63,7 +63,7 @@ from kortny.tools.slack_file_read import SlackFileReadTool
 from kortny.tools.slack_identity_info import SlackChannelInfoTool, SlackUserInfoTool
 from kortny.tools.types import Tool
 from kortny.tools.web_search import WebSearchTool
-from kortny.tools.workspace_graph import QueryWorkspaceGraphTool
+from kortny.tools.workspace_graph import DeclareProjectTool, QueryWorkspaceGraphTool
 from kortny.tools.workspace_memory import (
     ForgetFactTool,
     InspectMemoryTool,
@@ -564,6 +564,14 @@ NATIVE_TOOL_REGISTRATIONS: tuple[NativeToolRegistration, ...] = (
         "query_workspace_graph",
         QueryWorkspaceGraphTool,
         lambda context: QueryWorkspaceGraphTool(
+            session=context.session,
+            task=context.task,
+        ),
+    ),
+    NativeToolRegistration(
+        "declare_project",
+        DeclareProjectTool,
+        lambda context: DeclareProjectTool(
             session=context.session,
             task=context.task,
         ),

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -188,4 +189,38 @@ def compatible_scope_predicate(
     else:
         return false()
 
+    return or_(*clauses)
+
+
+def project_scope_predicate(
+    model: Any,
+    destination: DestinationSurface,
+    additional_scopes: Sequence[VisibilityScope],
+) -> ColumnElement[bool]:
+    """Authorization predicate for project-aware retrieval (HIG-276).
+
+    A project answer must draw from more than one channel, but the delivery
+    AUDIENCE still bounds it: a public-channel reply may include the project's
+    other PUBLIC member channels, never private siblings — regardless of who is
+    asking. ``additional_scopes`` is that audience-safe extra set (the project's
+    public member-channel scopes), OR-ed onto the normal destination predicate.
+    Private/DM/user scopes in ``additional_scopes`` are ignored here: surfacing
+    them needs per-user membership + governance (deferred to a later increment),
+    so this function refuses to widen the audience to them.
+    """
+
+    clauses: list[ColumnElement[bool]] = [
+        compatible_scope_predicate(model, destination)
+    ]
+    for scope in additional_scopes:
+        if scope.scope_type not in (SCOPE_CHANNEL, SCOPE_WORKSPACE):
+            # Audience safety: only public channels (and workspace) may widen a
+            # project answer. Never private_channel / dm / user.
+            continue
+        clauses.append(
+            and_(
+                model.visibility_scope_type == scope.scope_type,
+                model.visibility_scope_id == scope.scope_id,
+            )
+        )
     return or_(*clauses)

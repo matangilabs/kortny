@@ -17,13 +17,21 @@ from kortny.db.models import (
     SlackIdentity,
     Task,
 )
-from kortny.knowledge_graph.scopes import DestinationSurface
+from kortny.knowledge_graph.projects import (
+    ProjectGraphService,
+    project_anchors_and_scopes,
+)
+from kortny.knowledge_graph.scopes import DestinationSurface, VisibilityScope
 from kortny.knowledge_graph.service import (
+    EvidenceInput,
     GraphService,
     RetrievedGraphEdge,
     RetrievedGraphEntity,
 )
-from kortny.tools.types import JsonObject, JsonSchema, ToolResult
+from kortny.tools.types import JsonObject, JsonSchema, RecoverableToolError, ToolResult
+
+# BFS depth for project-anchored retrieval (hub -> channel hub -> facts).
+_PROJECT_GRAPH_MAX_HOPS = 2
 
 
 class QueryWorkspaceGraphTool:
@@ -94,6 +102,16 @@ class QueryWorkspaceGraphTool:
         include_evidence = _optional_bool(args.get("include_evidence", True))
 
         destination = _destination_for_task(self.session, self.task)
+        # Project layer (HIG-276): if the current channel belongs to a project,
+        # add the project hub anchor(s) + the project's PUBLIC member-channel
+        # scopes so the tool synthesizes across the project's public channels,
+        # matching the context-assembly path. Audience-safe (no private siblings).
+        project_anchor_keys, additional_scopes = _project_anchors_and_scopes(
+            self.session, self.task
+        )
+        if project_anchor_keys:
+            anchor_keys = tuple(dict.fromkeys((*anchor_keys, *project_anchor_keys)))
+            max_hops = max(max_hops, _PROJECT_GRAPH_MAX_HOPS)
         pack = self.graph.query_current_context(
             installation_id=self.task.installation_id,
             destination=destination,
@@ -101,8 +119,11 @@ class QueryWorkspaceGraphTool:
             anchor_keys=anchor_keys,
             max_hops=max_hops,
             max_items=limit,
+            additional_scopes=additional_scopes,
         )
-        violations = self.graph.scope_guard_violations(pack, destination)
+        violations = self.graph.scope_guard_violations(
+            pack, destination, additional_scopes
+        )
         if violations:
             return ToolResult(
                 output={
@@ -173,6 +194,110 @@ class QueryWorkspaceGraphTool:
                     )
                     for edge in pack.edges
                 ],
+            }
+        )
+
+
+def _project_anchors_and_scopes(
+    session: Session, task: Task
+) -> tuple[tuple[str, ...], tuple[VisibilityScope, ...]]:
+    channel_id = task.slack_channel_id
+    if not channel_id or channel_id.startswith("D"):
+        return ((), ())
+    try:
+        return project_anchors_and_scopes(
+            session, installation_id=task.installation_id, channel_id=channel_id
+        )
+    except Exception:
+        return ((), ())
+
+
+class DeclareProjectTool:
+    """Declare a project boundary: name + the channels that make it up (HIG-276).
+
+    Lets the agent record "Project Apollo includes #apollo-eng and #apollo-design"
+    so Kortny can later synthesize across those channels. Creates/updates a
+    workspace-visible project hub and ``project_includes_channel`` edges; public
+    channels become cross-channel-visible, private channels stay gated. Pass
+    Slack channel IDs (resolve <#C123|name> mentions to the C123 id).
+    """
+
+    name = "declare_project"
+    description = (
+        "Declare or update a project and the Slack channels that belong to it, so "
+        'Kortny can answer project-wide questions ("how is Apollo going?") by '
+        "synthesizing across those channels. Use when a user says some channels "
+        "are part of a named project. Pass the project name and the channel IDs "
+        "(resolve channel mentions to their C... id). Re-declaring is safe and "
+        "merges new channels in."
+    )
+    parameters: JsonSchema = {
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "Human project name, e.g. 'Apollo'.",
+            },
+            "channel_ids": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Slack channel IDs that belong to the project.",
+            },
+        },
+        "required": ["name", "channel_ids"],
+        "additionalProperties": False,
+    }
+
+    def __init__(self, *, session: Session, task: Task) -> None:
+        self.session = session
+        self.task = task
+        self.projects = ProjectGraphService(session)
+
+    def invoke(self, args: JsonObject) -> ToolResult:
+        name = args.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise RecoverableToolError(
+                code="invalid_arguments",
+                message="declare_project requires a non-empty 'name'.",
+                hint="Pass the project's human name, e.g. 'Apollo'.",
+            )
+        channel_ids = _optional_string_list(args.get("channel_ids"))
+        if not channel_ids:
+            raise RecoverableToolError(
+                code="invalid_arguments",
+                message="declare_project requires at least one channel id.",
+                hint="Pass the Slack channel IDs (C...) that belong to the project.",
+            )
+        result = self.projects.declare_project(
+            installation_id=self.task.installation_id,
+            name=name,
+            channel_ids=channel_ids,
+            evidence=EvidenceInput(
+                source_type="user_explicit",
+                extracted_by="declare_project_tool",
+                source_task_id=self.task.id,
+                source_slack_channel_id=self.task.slack_channel_id,
+            ),
+        )
+        return ToolResult(
+            output={
+                "successful": True,
+                "project": result.project.display_name or result.project.canonical_key,
+                "canonical_key": result.project.canonical_key,
+                "linked_channel_ids": list(result.linked_channel_ids),
+                "skipped_channel_ids": list(result.skipped_channel_ids),
+                "message": (
+                    f"Project '{result.project.display_name}' now spans "
+                    f"{len(result.linked_channel_ids)} channel(s). "
+                    + (
+                        f"{len(result.skipped_channel_ids)} channel(s) were skipped "
+                        "because I don't have them in the workspace graph yet "
+                        "(I may need to be a member first)."
+                        if result.skipped_channel_ids
+                        else "Ask me project-wide questions and I'll synthesize "
+                        "across them."
+                    )
+                ),
             }
         )
 

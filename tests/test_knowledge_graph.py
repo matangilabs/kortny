@@ -29,8 +29,13 @@ from kortny.knowledge_graph import (
     VisibilityScope,
     is_scope_compatible,
 )
+from kortny.knowledge_graph.projects import (
+    ProjectGraphService,
+    project_anchors_and_scopes,
+)
 from kortny.knowledge_graph.service import GraphContextPack
 from kortny.tools import QueryWorkspaceGraphTool
+from kortny.tools.workspace_graph import DeclareProjectTool
 
 TEST_POSTGRES_URL = os.environ.get("KORTNY_TEST_POSTGRES_URL")
 
@@ -704,3 +709,227 @@ def evidence(snippet: str) -> EvidenceInput:
 
 def entity_keys(pack: GraphContextPack) -> set[str]:
     return {entity.canonical_key for entity in pack.entities}
+
+
+# --------------------------------------------------------------------------
+# Project layer (HIG-276)
+# --------------------------------------------------------------------------
+
+
+def _seed_channel_with_fact(
+    graph: GraphService,
+    installation: Installation,
+    *,
+    channel_id: str,
+    scope: VisibilityScope,
+    fact_key: str,
+) -> None:
+    """A channel hub + one channel-scoped fact wired by a relates_to edge.
+
+    Mirrors the real graph shape (channel hub --relates_to--> fact) so BFS from
+    a project hub can reach the fact through the channel hub.
+    """
+
+    channel = add_entity(
+        graph,
+        installation,
+        entity_type="channel",
+        canonical_key=f"slack_channel:{channel_id}",
+        display_name=f"#{channel_id}",
+        visibility_scope=scope,
+    )
+    fact = add_entity(
+        graph,
+        installation,
+        entity_type="firm_fact",
+        canonical_key=fact_key,
+        display_name=fact_key,
+        visibility_scope=scope,
+    )
+    graph.create_edge(
+        installation_id=installation.id,
+        source_entity_id=channel.id,
+        target_entity_id=fact.id,
+        relationship_type="relates_to",
+        visibility_scope=scope,
+        source_type="slack_authoritative",
+        lifecycle_state="confirmed",
+        confidence_score=Decimal("0.900"),
+        evidence=evidence(fact_key),
+    )
+
+
+def test_declare_project_links_known_channels_and_is_idempotent(
+    db_session: Session,
+) -> None:
+    installation = create_installation(db_session)
+    graph = GraphService(db_session)
+    add_entity(
+        graph,
+        installation,
+        entity_type="channel",
+        canonical_key="slack_channel:C_ENG",
+        display_name="#apollo-eng",
+        visibility_scope=VisibilityScope.channel("C_ENG"),
+    )
+    db_session.commit()
+
+    service = ProjectGraphService(db_session)
+    result = service.declare_project(
+        installation_id=installation.id,
+        name="Apollo",
+        channel_ids=["C_ENG", "C_UNKNOWN"],
+    )
+    db_session.commit()
+
+    assert result.project.canonical_key == "project:apollo"
+    assert result.linked_channel_ids == ("C_ENG",)
+    assert result.skipped_channel_ids == ("C_UNKNOWN",)
+
+    # Re-declaring is idempotent: same hub, no duplicate edges.
+    again = service.declare_project(
+        installation_id=installation.id,
+        name="Apollo",
+        channel_ids=["C_ENG"],
+    )
+    db_session.commit()
+    assert again.project.id == result.project.id
+    projects = service.projects_for_channel(
+        installation_id=installation.id, channel_id="C_ENG"
+    )
+    assert [p.canonical_key for p in projects] == ["project:apollo"]
+
+
+def test_public_member_scopes_exclude_private_channels(db_session: Session) -> None:
+    installation = create_installation(db_session)
+    graph = GraphService(db_session)
+    for channel_id, scope in (
+        ("C_ENG", VisibilityScope.channel("C_ENG")),
+        ("C_DESIGN", VisibilityScope.channel("C_DESIGN")),
+        ("G_SECRET", VisibilityScope.private_channel("G_SECRET")),
+    ):
+        add_entity(
+            graph,
+            installation,
+            entity_type="channel",
+            canonical_key=f"slack_channel:{channel_id}",
+            display_name=f"#{channel_id}",
+            visibility_scope=scope,
+        )
+    db_session.commit()
+    service = ProjectGraphService(db_session)
+    project = service.declare_project(
+        installation_id=installation.id,
+        name="Apollo",
+        channel_ids=["C_ENG", "C_DESIGN", "G_SECRET"],
+    ).project
+    db_session.commit()
+
+    scopes = service.public_member_channel_scopes(
+        installation_id=installation.id, project_ids=[project.id]
+    )
+    scope_ids = {scope.scope_id for scope in scopes}
+    assert scope_ids == {"C_ENG", "C_DESIGN"}  # private G_SECRET excluded
+    assert all(scope.scope_type == "channel" for scope in scopes)
+
+
+def test_project_retrieval_synthesizes_public_channels_and_blocks_private(
+    db_session: Session,
+) -> None:
+    installation = create_installation(db_session)
+    graph = GraphService(db_session)
+    _seed_channel_with_fact(
+        graph,
+        installation,
+        channel_id="C_ENG",
+        scope=VisibilityScope.channel("C_ENG"),
+        fact_key="apollo:eng_status",
+    )
+    _seed_channel_with_fact(
+        graph,
+        installation,
+        channel_id="C_DESIGN",
+        scope=VisibilityScope.channel("C_DESIGN"),
+        fact_key="apollo:design_status",
+    )
+    _seed_channel_with_fact(
+        graph,
+        installation,
+        channel_id="G_SECRET",
+        scope=VisibilityScope.private_channel("G_SECRET"),
+        fact_key="apollo:secret_status",
+    )
+    service = ProjectGraphService(db_session)
+    service.declare_project(
+        installation_id=installation.id,
+        name="Apollo",
+        channel_ids=["C_ENG", "C_DESIGN", "G_SECRET"],
+        evidence=evidence("declared Project Apollo"),
+    )
+    db_session.commit()
+
+    anchor_keys, additional_scopes = project_anchors_and_scopes(
+        db_session, installation_id=installation.id, channel_id="C_ENG"
+    )
+    assert "project:apollo" in anchor_keys
+    assert {s.scope_id for s in additional_scopes} == {"C_ENG", "C_DESIGN"}
+
+    destination = DestinationSurface.channel("C_ENG")
+    pack = graph.retrieve_current_context(
+        installation_id=installation.id,
+        destination=destination,
+        anchor_keys=("slack_channel:C_ENG", *anchor_keys),
+        max_hops=2,
+        max_items=50,
+        additional_scopes=additional_scopes,
+    )
+    keys = entity_keys(pack)
+    # Magic moment: a sibling PUBLIC channel's fact is synthesized in.
+    assert "apollo:eng_status" in keys
+    assert "apollo:design_status" in keys
+    # Barrier: the PRIVATE channel's fact must never surface in a public reply.
+    assert "apollo:secret_status" not in keys
+    # Widening to public siblings is not a leak.
+    assert graph.scope_guard_violations(pack, destination, additional_scopes) == ()
+
+    # Without the project widening, the sibling fact is unreachable (proves the
+    # authorization change is what unlocks cross-channel synthesis).
+    plain = graph.retrieve_current_context(
+        installation_id=installation.id,
+        destination=destination,
+        anchor_keys=("slack_channel:C_ENG", *anchor_keys),
+        max_hops=2,
+        max_items=50,
+    )
+    assert "apollo:design_status" not in entity_keys(plain)
+
+
+def test_declare_project_tool_declares_and_reports(db_session: Session) -> None:
+    installation = create_installation(db_session)
+    graph = GraphService(db_session)
+    add_entity(
+        graph,
+        installation,
+        entity_type="channel",
+        canonical_key="slack_channel:C_ENG",
+        display_name="#apollo-eng",
+        visibility_scope=VisibilityScope.channel("C_ENG"),
+    )
+    task = Task(
+        installation_id=installation.id,
+        slack_channel_id="C_ENG",
+        slack_thread_ts="1.2",
+        slack_user_id="U_A",
+        input="apollo-eng and apollo-design are Project Apollo",
+    )
+    db_session.add(task)
+    db_session.flush()
+    db_session.commit()
+
+    result = DeclareProjectTool(session=db_session, task=task).invoke(
+        {"name": "Apollo", "channel_ids": ["C_ENG", "C_MISSING"]}
+    )
+    assert result.output["successful"] is True
+    assert result.output["canonical_key"] == "project:apollo"
+    assert result.output["linked_channel_ids"] == ["C_ENG"]
+    assert result.output["skipped_channel_ids"] == ["C_MISSING"]

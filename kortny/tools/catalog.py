@@ -675,6 +675,20 @@ NATIVE_TOOL_METADATA: dict[str, ToolMetadata] = {
         result_budget="context_pack",
         notes=("Returns scope-safe current graph context with evidence.",),
     ),
+    "declare_project": ToolMetadata(
+        name="declare_project",
+        namespace="native.context",
+        category="Workspace context",
+        display_name="Declare project",
+        capabilities=("project_declaration", "workspace_graph"),
+        side_effect="write",
+        approval="none",
+        required_env_vars=("POSTGRES_URL",),
+        notes=(
+            "Records a project boundary (name + channels) as graph hub + edges; "
+            "internal knowledge only, no external egress.",
+        ),
+    ),
     "list_schedules": ToolMetadata(
         name="list_schedules",
         namespace="native.scheduler",
