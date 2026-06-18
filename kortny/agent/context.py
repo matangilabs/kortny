@@ -45,6 +45,7 @@ from kortny.knowledge_graph import (
 )
 from kortny.knowledge_graph.projects import project_anchors_and_scopes
 from kortny.llm import ChatMessage
+from kortny.llm.routing import latest_intent_decision
 from kortny.memory import EpisodeService, Fact, RelevantEpisode, WorkspaceStateService
 from kortny.observability import observe_task_event, set_span_attributes, start_span
 from kortny.skills.embedding import SKILL_EMBEDDING_KIND, skill_embedding_text
@@ -52,6 +53,10 @@ from kortny.tasks import TaskService
 
 if TYPE_CHECKING:
     from kortny.skills.service import EnabledSkill
+
+# HIG-277: the user persona fact key; injected only when the request is
+# persona-relevant. Kept as a literal to avoid importing the consolidator.
+_USER_PROFILE_FACT_KEY = "user_profile"
 
 DEFAULT_THREAD_CONTEXT_MAX_CHARS = 12_000
 DEFAULT_THREAD_CONTEXT_RECENT_TASKS = 3
@@ -640,7 +645,24 @@ class ContextAssembler:
         ):
             facts_by_key[fact.key] = fact
 
+        # HIG-277: the user persona fact is gated — inject it only on
+        # role-relative asks. Always-on personas damage factual answers (PRISM),
+        # so a confirmed persona must not colour every response.
+        if _USER_PROFILE_FACT_KEY in facts_by_key and not self._task_persona_relevant(
+            task
+        ):
+            del facts_by_key[_USER_PROFILE_FACT_KEY]
+
         return list(facts_by_key.values())
+
+    def _task_persona_relevant(self, task: Task) -> bool:
+        """Whether this task's intent decision flagged it persona-relevant."""
+
+        events = list(
+            self.session.scalars(select(TaskEvent).where(TaskEvent.task_id == task.id))
+        )
+        decision = latest_intent_decision(events)
+        return bool(decision and decision.get("persona_relevant"))
 
     def _prior_context(self, task: Task) -> _PriorContext:
         thread_ts = task.slack_thread_ts

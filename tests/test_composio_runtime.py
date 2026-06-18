@@ -883,3 +883,60 @@ def test_intent_service_grounds_request_from_scope(db_session: Session) -> None:
     assert decision.classification.value == "task_request"
     # The caller passed no grounding; the service attached it from the scope.
     assert seen[0].connected_integrations == ("linear",)
+
+
+def test_intent_service_sets_persona_relevant_gate(db_session: Session) -> None:
+    # HIG-277: the chokepoint flags role-relative asks persona-relevant (via the
+    # deterministic heuristic) and leaves factual asks neutral, even when the
+    # classifier itself returns persona_relevant=False.
+    from kortny.intent import (
+        IntentClassification,
+        IntentClassificationService,
+        IntentDecision,
+        IntentRequest,
+        IntentScope,
+        IntentSurface,
+        ModelTier,
+    )
+    from kortny.intent.classifier import IntentClassifier
+
+    task = create_task(db_session, slack_channel_id="CB", slack_user_id="UB")
+    db_session.commit()
+
+    class _Fake(IntentClassifier):
+        def classify(
+            self, *, request: IntentRequest, task_id: uuid.UUID | None = None
+        ) -> IntentDecision:
+            return IntentDecision(
+                addressed_to_kortny=True,
+                classification=IntentClassification.task_request,
+                confidence=0.9,
+                should_create_task=True,
+                should_ack_with_reaction=False,
+                needs_channel_context=False,
+                needs_thread_context=False,
+                needs_file_context=False,
+                model_tier=ModelTier.cheap,
+                reason="ok",
+            )
+
+    service = IntentClassificationService(db_session, _Fake())
+    scope = IntentScope(
+        installation_id=task.installation_id, channel_id="CB", user_id="UB"
+    )
+
+    role_relative = service.classify(
+        request=IntentRequest(text="what's on my plate?", surface=IntentSurface.dm),
+        scope=scope,
+        task_id=task.id,
+    )
+    factual = service.classify(
+        request=IntentRequest(
+            text="what is the capital of France?", surface=IntentSurface.dm
+        ),
+        scope=scope,
+        task_id=task.id,
+    )
+
+    assert role_relative.persona_relevant is True
+    assert factual.persona_relevant is False

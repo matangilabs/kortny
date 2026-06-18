@@ -107,6 +107,10 @@ class IntentDecision(BaseModel):
     likely_tools: list[str] = Field(default_factory=list)
     model_tier: ModelTier
     reason: str = Field(min_length=1, max_length=500)
+    # HIG-277: gate for persona injection. Persona framing only helps
+    # role-relative asks ("my plate") and hurts factual lookups (PRISM), so it
+    # is injected only when this is set. Defaults False — fail safe to neutral.
+    persona_relevant: bool = False
     response_depth: ResponseDepth = "standard_tool_task"
     time_sensitivity: TimeSensitivity = "interactive"
     toolkit_affinity: tuple[str, ...] = ()
