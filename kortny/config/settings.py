@@ -414,7 +414,12 @@ class Settings(BaseSettings):
         default=60, validation_alias="COMPOSIO_CATALOG_LIMIT"
     )
     composio_request_timeout_seconds: float = Field(
-        default=10.0, validation_alias="COMPOSIO_REQUEST_TIMEOUT_SECONDS"
+        # 30s: scrape/fetch-style Composio tools (e.g. firecrawl) routinely take
+        # longer than 10s on heavy pages; a too-short read timeout was the
+        # proximate cause of a hard task failure (the classification fix in
+        # error_policy makes such a timeout recoverable regardless).
+        default=30.0,
+        validation_alias="COMPOSIO_REQUEST_TIMEOUT_SECONDS",
     )
     composio_sync_interval_hours: float = Field(
         default=6.0, validation_alias="KORTNY_COMPOSIO_SYNC_INTERVAL_HOURS"

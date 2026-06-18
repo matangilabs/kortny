@@ -133,7 +133,7 @@ def test_settings_loads_required_environment(monkeypatch: pytest.MonkeyPatch) ->
     assert settings.composio_catalog_enabled is True
     assert settings.prompt_cache_enabled is True
     assert settings.composio_catalog_limit == 60
-    assert settings.composio_request_timeout_seconds == 10.0
+    assert settings.composio_request_timeout_seconds == 30.0
     assert settings.tool_selector_max_external_candidates == 24
     assert settings.tool_selector_max_prompt_chars == 24000
     assert settings.tool_result_prompt_max_chars == 8000

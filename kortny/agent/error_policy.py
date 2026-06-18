@@ -111,14 +111,31 @@ def classify_exception(error: Exception) -> ClassifiedToolError:
     if category is ExecutionErrorCategory.unknown:
         action = RecoveryAction.stop_safely
 
+    # Derive the flags from the chosen action (mirrors the payload classifier)
+    # rather than hardcoding False — a transient transport exception (e.g. a
+    # read timeout) is genuinely retryable and recoverable, so the coordinator
+    # can retry / route around it instead of hard-failing the task.
+    retryable = action is RecoveryAction.retry_with_backoff
+    recoverable = action in {
+        RecoveryAction.retry_with_backoff,
+        RecoveryAction.switch_tool_or_broaden_query,
+        RecoveryAction.patch_arguments,
+        RecoveryAction.resolve_reference,
+    }
+    user_action_required = action in {
+        RecoveryAction.ask_user,
+        RecoveryAction.wait_auth,
+        RecoveryAction.stop_safely,
+    }
+
     return ClassifiedToolError(
         code=code,
         message=message,
         category=category,
         recovery_action=action,
-        recoverable=False,
-        retryable=False,
-        user_action_required=False,
+        recoverable=recoverable,
+        retryable=retryable,
+        user_action_required=user_action_required,
     )
 
 
@@ -191,6 +208,16 @@ def _category_and_action(
             "request_failed",
             "upstream_unavailable",
             "timeout",
+            # "The read operation timed out" normalizes to "..._timed_out", which
+            # does NOT contain "timeout" — a transient read timeout used to slip
+            # through to the unknown -> stop_safely fallback and hard-fail the
+            # task. Match the "timed out" / connection-error wording too.
+            "timed_out",
+            "read_timeout",
+            "connect_timeout",
+            "connectionerror",
+            "connection_error",
+            "connection_reset",
             "temporarily_unavailable",
             "service_unavailable",
             "bad_gateway",
