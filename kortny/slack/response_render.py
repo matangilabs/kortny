@@ -30,7 +30,9 @@ from kortny.slack.presentation import (
     CardItem,
     CardsElement,
     ContextElement,
+    DividerElement,
     FieldsElement,
+    HeaderElement,
     ItemsElement,
     ListItem,
     PresentationElement,
@@ -124,6 +126,10 @@ def _render_element(
             return _render_sources(element, source_index=source_index)
         if isinstance(element, ContextElement):
             return _render_context(element)
+        if isinstance(element, HeaderElement):
+            return [blockkit.header(element.text[: blockkit.MAX_HEADER_CHARS])]
+        if isinstance(element, DividerElement):
+            return [blockkit.divider()]
     except ValueError as exc:
         logger.info(
             "dropping presentation element type=%s reason=%s",

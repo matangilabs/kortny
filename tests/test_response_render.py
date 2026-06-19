@@ -12,8 +12,10 @@ from kortny.slack.presentation import (
     CardItem,
     CardsElement,
     ContextElement,
+    DividerElement,
     FieldItem,
     FieldsElement,
+    HeaderElement,
     ItemsElement,
     ListItem,
     PresentationHint,
@@ -328,6 +330,21 @@ def test_sources_without_index_renders_nothing() -> None:
         elements=[SourcesElement(items=[SourceCardItem(source_ref="source:0")])]
     )
     assert render_blocks("plain answer", hint, source_index=None) is None
+
+
+def test_header_and_divider_compose_a_multi_section_answer() -> None:
+    hint = PresentationHint(
+        elements=[
+            HeaderElement(text="Morning digest"),
+            FieldsElement(items=[FieldItem(label="MRR", value="$182k")]),
+            DividerElement(),
+            ItemsElement(items=[ListItem(title="HIG-255")]),
+        ]
+    )
+    blocks = render_blocks("Here's your morning digest.", hint)
+    assert blocks is not None
+    assert _types(blocks) == ["markdown", "header", "section", "divider", "section"]
+    assert blocks[1]["text"]["text"] == "Morning digest"
 
 
 def test_build_source_index_skips_non_http_and_caps() -> None:

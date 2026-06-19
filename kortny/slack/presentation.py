@@ -92,6 +92,26 @@ class ContextElement(BaseModel):
     items: list[str] = Field(min_length=1)
 
 
+class HeaderElement(BaseModel):
+    """A bold section header (plain_text) to title a part of a longer answer.
+
+    Use sparingly — only to structure a genuinely multi-section answer, never to
+    decorate a one-liner."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["header"] = "header"
+    text: str
+
+
+class DividerElement(BaseModel):
+    """A horizontal rule to separate sections of a longer answer."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["divider"] = "divider"
+
+
 class ListItem(BaseModel):
     """One entity in an ``items`` list (a title + a few facts + a meta line)."""
 
@@ -149,14 +169,25 @@ PresentationElement = Annotated[
     | CardsElement
     | ContextElement
     | ItemsElement
-    | SourcesElement,
+    | SourcesElement
+    | HeaderElement
+    | DividerElement,
     Field(discriminator="type"),
 ]
 
 # The element types this schema understands today. Unknown types in a hint are
 # dropped (forward-compatible with hints authored against a newer vocabulary).
 KNOWN_ELEMENT_TYPES = frozenset(
-    {"fields", "table", "cards", "context", "items", "sources"}
+    {
+        "fields",
+        "table",
+        "cards",
+        "context",
+        "items",
+        "sources",
+        "header",
+        "divider",
+    }
 )
 
 
@@ -219,6 +250,8 @@ _ELEMENT_MODELS: dict[str, type[BaseModel]] = {
     "context": ContextElement,
     "items": ItemsElement,
     "sources": SourcesElement,
+    "header": HeaderElement,
+    "divider": DividerElement,
 }
 
 
@@ -231,8 +264,10 @@ __all__ = [
     "CardItem",
     "CardsElement",
     "ContextElement",
+    "DividerElement",
     "FieldItem",
     "FieldsElement",
+    "HeaderElement",
     "ItemsElement",
     "ListItem",
     "PresentationElement",

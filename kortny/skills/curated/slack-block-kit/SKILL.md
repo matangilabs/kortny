@@ -68,6 +68,19 @@ presentation element.* Plain conversation is not.
   write a URL yourself. Only use this when the answer actually cites sources.
 - **context** — provenance / freshness footnotes ("Checked 2 minutes ago",
   "Partial: web search timed out").
+- **header** / **divider** — structural: a bold `header` to title a section of a
+  longer answer, a `divider` to separate sections. Use only to organize a
+  genuinely multi-part answer, never to decorate a short one.
+
+## Composing richer answers
+
+Elements render in the order you list them, so a richer answer is just the right
+elements in sequence — e.g. a briefing might be `header` → `fields` (headline
+metrics) → `items` (the list) → `context` (provenance). Match the composition to
+what the data is; different scenarios call for different layouts. For a fuller
+gallery of scenario→layout patterns (research answers, entity lists, dashboards,
+comparisons), see `references/gallery.md`. One good composition beats a
+dashboard — when a plain sentence conveys it, send the sentence.
 
 **Skip presentation entirely** for plain conversation, a greeting, an apology,
 an explanation, or a single short fact. Do not turn chit-chat into a dashboard —

@@ -42,6 +42,8 @@ prose-only) so a bad layout never drops the answer.
 | `cards` | `card` blocks (one per item; section+fields fallback if a card overflows) | 2-5 important objects that each deserve a tile (sparingly) |
 | `sources` | carousel of source cards / stacked sections, links only | citations — URLs resolved server-side from evidence, never LLM-authored |
 | `context` | `context` block | provenance, freshness, source footnotes |
+| `header` | `header` block (plain_text) | title a section of a longer answer |
+| `divider` | `divider` block | separate sections of a longer answer |
 
 ### Source binding (the `sources` element)
 
