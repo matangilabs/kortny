@@ -71,6 +71,12 @@ DEFAULT_SKILLS_CONTEXT_MAX_CHARS = 4_000
 # HIG-244: the in-thread document spec injected so the agent revises an existing
 # doc in place instead of regenerating it.
 DEFAULT_DOCUMENT_CONTEXT_MAX_CHARS = 6_000
+_DOCUMENT_MIME_TO_FORMAT = {
+    "application/pdf": "pdf",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": "pptx",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
+}
 # HIG-239: tighten the ranked index from 30 → 15. The curated pack pushes the
 # enabled-skill count up; a smaller, sharper index keeps the L1 block focused
 # and within the 4k char budget. Omissions beyond K are still recorded.
@@ -381,13 +387,16 @@ class ContextAssembler:
         if artifact is None or artifact.spec_json is None:
             return None
         spec_json = json.dumps(artifact.spec_json)[:DEFAULT_DOCUMENT_CONTEXT_MAX_CHARS]
+        fmt = _DOCUMENT_MIME_TO_FORMAT.get(artifact.mime_type or "", "pdf")
         return (
             "A document already exists in this thread (doc_group_id="
-            f"{artifact.doc_group_id}, version {artifact.doc_version}). If the "
-            "user asks to revise, extend, shorten, or otherwise change it, call "
-            f'document_studio with doc_group_id="{artifact.doc_group_id}" and '
-            f"base_version={artifact.doc_version}, editing the spec below and "
-            "preserving untouched blocks — do NOT start a new document.\n\n"
+            f"{artifact.doc_group_id}, version {artifact.doc_version}, current "
+            f"format {fmt}). If the user asks to revise, extend, shorten, or "
+            "otherwise change it, call document_studio with "
+            f'doc_group_id="{artifact.doc_group_id}", base_version='
+            f'{artifact.doc_version}, and format="{fmt}" (keep the same format '
+            "unless they ask to change it), editing the spec below and preserving "
+            "untouched blocks — do NOT start a new document.\n\n"
             f"Current document spec (JSON):\n{spec_json}"
         )
 

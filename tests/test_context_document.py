@@ -131,6 +131,7 @@ def test_thread_doc_spec_injected_for_followup(db_session: Session) -> None:
     assert str(group) in blocks[0]
     assert "base_version=2" in blocks[0]
     assert "Q2 Report" in blocks[0]
+    assert 'format="pdf"' in blocks[0]
 
 
 def test_no_doc_context_without_thread_doc(db_session: Session) -> None:

@@ -51,6 +51,14 @@ _EDIT_INSTRUCTIONS = {
     "lengthen": "expand it with more depth, detail, and supporting context.",
     "regenerate": "regenerate it with a fresh take, keeping the same topic and title.",
 }
+# Recover the current render format from a stored artifact's MIME type so an
+# edit keeps the format the user is looking at (HIG-244).
+_MIME_TO_FORMAT = {
+    "application/pdf": "pdf",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": "pptx",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
+}
 
 
 def render_control_deck(
@@ -192,12 +200,15 @@ def process_document_action(
         instruction = _EDIT_INSTRUCTIONS.get(
             edit_kind, _EDIT_INSTRUCTIONS["regenerate"]
         )
+        fmt = _MIME_TO_FORMAT.get(latest.mime_type or "", "pdf")
         input_text = (
             f"Revise the document below: {instruction} Keep everything else "
-            "intact. Then re-render it with the document_studio tool, passing "
-            f'doc_group_id="{group}" and base_version={latest.doc_version} so it '
-            "stays this document's next version (do not start a new document).\n\n"
-            f"Current document spec (JSON):\n{json.dumps(latest.spec_json)}"
+            f'intact. Then re-render it with the document_studio tool in "{fmt}" '
+            f'format (set format="{fmt}"), passing doc_group_id="{group}" and '
+            f"base_version={latest.doc_version} so it stays this document's next "
+            "version in the SAME format (do not start a new document or change "
+            f"the format).\n\nCurrent document spec (JSON):\n"
+            f"{json.dumps(latest.spec_json)}"
         )
         identity_payload = {
             "kind": "document_edit",

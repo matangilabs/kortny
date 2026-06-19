@@ -325,6 +325,8 @@ def test_process_document_action_edit_embeds_spec_and_lineage(
     assert "Q2 Report" in child.input
     assert str(group) in child.input
     assert "base_version=1" in child.input
+    # The edit must keep the format the user is on (pdf here), not default away.
+    assert 'format="pdf"' in child.input
 
 
 def test_mint_stores_hash_not_raw_key(db_session: Session) -> None:
