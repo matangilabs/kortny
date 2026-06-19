@@ -122,6 +122,7 @@ from kortny.slack.humanizer import (
 from kortny.slack.membership import SlackChannelMembershipService
 from kortny.slack.outbox import SlackSideEffectOutbox, slack_reaction_key
 from kortny.slack.posting import SlackPostingClient
+from kortny.slack.presentation import PresentationHint
 from kortny.slack.reactions import (
     ACK_REACTION_ADDED_MESSAGE,
     ACK_REACTION_REMOVE_FAILED_MESSAGE,
@@ -129,7 +130,7 @@ from kortny.slack.reactions import (
     LibraryReactionProvider,
     ReactionProvider,
 )
-from kortny.slack.response_blocks import render_response_blocks
+from kortny.slack.response_render import render_blocks
 from kortny.slack.thread_context import SlackThreadTranscriptProvider
 from kortny.tasks import TaskCancelledError, TaskService
 from kortny.tool_selection import ExternalToolProvider, ToolCard
@@ -1921,6 +1922,7 @@ class AgentTaskExecutor:
                 task=task,
                 raw_text=response_source,
             )
+            presentation: PresentationHint | None = None
             if skip_humanizer_reason is not None:
                 response_text = response_source
                 task_service.append_event(
@@ -1935,7 +1937,7 @@ class AgentTaskExecutor:
                     },
                 )
             else:
-                response_text = synthesize_response(
+                synthesis = synthesize_response(
                     self._build_response_synthesizer(settings),
                     session=session,
                     task=task,
@@ -1943,7 +1945,9 @@ class AgentTaskExecutor:
                     task_service=task_service,
                     style_resolver=self._build_style_resolver(settings),
                 )
-            blocks = render_response_blocks(response_text)
+                response_text = synthesis.text
+                presentation = synthesis.presentation
+            blocks = render_blocks(response_text, presentation)
             if thread.is_assistant and settings.assistant_streaming_enabled:
                 poster.stream_message(thread, response_text, blocks=blocks)
             else:

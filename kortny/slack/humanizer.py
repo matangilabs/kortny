@@ -33,6 +33,7 @@ from kortny.skills import (
     SkillActivation,
     SkillRegistryService,
 )
+from kortny.slack.presentation import PresentationHint, parse_presentation
 from kortny.slack.synthesis import (
     EvidenceKind,
     EvidenceTrust,
@@ -52,9 +53,32 @@ RESPONSE_HUMANIZER_SYSTEM_PROMPT = """You write __AGENT_NAME__'s final Slack res
 Return exactly one JSON object:
 {"message":"Slack-ready message"}
 
+You MAY add an optional "presentation" object to render structured data as
+Slack Block Kit, e.g.:
+{"message":"...","presentation":{"elements":[ ... ]}}
+
 The message value must contain only the Slack-ready response. Do not include
 notes, reasoning, draft analysis, labels like final_mode, or explanations of
-your rewrite.
+your rewrite. Never put Block Kit JSON, block types, or the presentation object
+inside the message string.
+
+Presentation hints (voice stays in message; data goes in presentation):
+- The message is always the complete answer on its own. The presentation only
+  re-renders structured data already in the message — never put facts ONLY in
+  presentation, and never add facts not in the message.
+- Use it sparingly: most answers need no presentation. Add it only when a native
+  element is clearly clearer than prose. Do not turn answers into dashboards.
+- Element types (omit presentation entirely if none fit):
+  - {"type":"fields","title":"optional","items":[{"label":"Status","value":"Active"}]}
+    for 2-10 short key-value facts/metrics/status. Not for paragraphs.
+  - {"type":"table","title":"optional","columns":["A","B"],"rows":[["1","2"]]}
+    for >=3 rows that share columns. Do NOT also write a markdown table in the
+    message when you emit a table element.
+  - {"type":"cards","items":[{"title":"HIG-255","subtitle":"optional","body":"short","fields":[{"label":"Owner","value":"Ana"}]}]}
+    for a few discrete entities (issues, schedules, accounts). Not for prose bullets.
+  - {"type":"context","items":["Source: Linear, 8 issues","Fresh: 2m ago"]}
+    for provenance/freshness footnotes.
+- Do not include buttons, links with actions, IDs, or any interactive elements.
 
 Rules:
 - Use only facts, actions, artifacts, failures, uncertainties, links, and the raw
@@ -499,6 +523,7 @@ class ResponseSynthesisResult:
     text: str
     changed: bool
     reason: str
+    presentation: PresentationHint | None = None
 
 
 class ChannelStyleResolver(Protocol):
@@ -687,10 +712,12 @@ class LLMResponseSynthesizer:
             completion.content,
             fallback=response_record.raw_answer,
         )
+        presentation = _parse_presentation_hint(completion.content)
         return ResponseSynthesisResult(
             text=text,
             changed=text != response_record.raw_answer,
             reason="llm_humanizer",
+            presentation=presentation,
         )
 
 
@@ -702,8 +729,12 @@ def synthesize_response(
     raw_text: str,
     task_service: TaskService,
     style_resolver: ChannelStyleResolver | None = None,
-) -> str:
-    """Generate Slack-facing response text, failing open to the raw answer."""
+) -> ResponseSynthesisResult:
+    """Generate the Slack-facing response, failing open to the raw answer.
+
+    Returns the full :class:`ResponseSynthesisResult` (text + optional
+    presentation hint); callers that only need the text read ``.text``.
+    """
 
     response_record = build_response_record(
         session=session,
@@ -776,7 +807,11 @@ def synthesize_response(
                 "fallback": "sanitized_raw_answer",
             },
         )
-        return sanitize_humanized_response(None, fallback=raw_text)
+        return ResponseSynthesisResult(
+            text=sanitize_humanized_response(None, fallback=raw_text),
+            changed=False,
+            reason="humanizer_failed",
+        )
 
     task_service.append_event(
         task,
@@ -788,9 +823,14 @@ def synthesize_response(
             "raw_chars": len(raw_text),
             "output_chars": len(result.text),
             "response_mode": response_record.response_mode.value,
+            "presentation_elements": (
+                len(result.presentation.elements)
+                if result.presentation is not None
+                else 0
+            ),
         },
     )
-    return result.text
+    return result
 
 
 def sanitize_humanized_response(text: str | None, *, fallback: str) -> str:
@@ -870,6 +910,24 @@ def _json_message(text: str) -> str | None:
     if isinstance(message, str) and message.strip():
         return message
     return None
+
+
+def _parse_presentation_hint(text: str | None) -> PresentationHint | None:
+    """Extract the optional Block Kit presentation hint from the LLM JSON.
+
+    The hint is structured data consumed by the deterministic renderer; it is
+    never posted as text. Lenient: a missing/garbled hint yields None (prose).
+    """
+
+    if text is None:
+        return None
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return parse_presentation(payload.get("presentation"))
 
 
 def _looks_like_humanizer_leak(text: str) -> bool:
