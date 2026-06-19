@@ -19,12 +19,14 @@ posts a deck, so no button is ever dead.
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import timedelta
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from kortny.db.models import InteractiveAction, Task
+from kortny.db.models import Artifact, InteractiveAction, Task
 from kortny.slack import blockkit
 from kortny.slack.interactions import InteractiveActionService, MintedAction
 from kortny.tasks import TaskService
@@ -44,6 +46,11 @@ EDIT_KINDS = (
     ("➕ Longer", "lengthen"),
     ("🔄 Regenerate", "regenerate"),
 )
+_EDIT_INSTRUCTIONS = {
+    "shorten": "make it noticeably more concise without dropping key points.",
+    "lengthen": "expand it with more depth, detail, and supporting context.",
+    "regenerate": "regenerate it with a fresh take, keeping the same topic and title.",
+}
 
 
 def render_control_deck(
@@ -175,16 +182,28 @@ def process_document_action(
 
     if action.route == ROUTE_DOC_EDIT:
         edit_kind = str(payload.get("value") or "regenerate")
+        latest = session.scalar(
+            select(Artifact)
+            .where(Artifact.doc_group_id == uuid.UUID(group))
+            .order_by(Artifact.doc_version.desc())
+        )
+        if latest is None or latest.spec_json is None:
+            return None
+        instruction = _EDIT_INSTRUCTIONS.get(
+            edit_kind, _EDIT_INSTRUCTIONS["regenerate"]
+        )
         input_text = (
-            f"Refine the document in this thread: {edit_kind} it. Load its latest "
-            "spec, apply only that change (preserve untouched blocks), and "
-            "re-render with document_studio."
+            f"Revise the document below: {instruction} Keep everything else "
+            "intact. Then re-render it with the document_studio tool, passing "
+            f'doc_group_id="{group}" and base_version={latest.doc_version} so it '
+            "stays this document's next version (do not start a new document).\n\n"
+            f"Current document spec (JSON):\n{json.dumps(latest.spec_json)}"
         )
         identity_payload = {
             "kind": "document_edit",
             "doc_group_id": group,
             "edit_kind": edit_kind,
-            "base_version": base_version,
+            "base_version": latest.doc_version,
         }
         source = "document_edit"
     else:

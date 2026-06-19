@@ -176,6 +176,22 @@ class DocumentStudioTool:
                     "chosen format is enforced."
                 ),
             },
+            "doc_group_id": {
+                "type": "string",
+                "description": (
+                    "When REVISING an existing document (e.g. shortening or "
+                    "extending one already in this thread), pass its doc_group_id "
+                    "so the new render is tracked as the next version, not a new "
+                    "document. Omit for a brand-new document."
+                ),
+            },
+            "base_version": {
+                "type": "integer",
+                "description": (
+                    "The version you are revising from (paired with "
+                    "doc_group_id); the render becomes base_version + 1."
+                ),
+            },
         },
         "required": ["title", "blocks"],
         "additionalProperties": False,

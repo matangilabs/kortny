@@ -749,8 +749,7 @@ class AgentTaskExecutor:
             allowed_user_id=task.slack_user_id,
             allowed_channel_id=task.slack_channel_id,
             slack_team_id=_installation_team_id(session, task.installation_id),
-            # Slice 3 wires the deterministic buttons; LLM edit buttons land next.
-            include_edit=False,
+            include_edit=True,
         )
         message_ts = cast(
             str,

@@ -69,9 +69,9 @@ def db_session(engine: Engine) -> Iterator[Session]:
 
 
 def _cleanup(session: Session) -> None:
-    from kortny.db.models import Task, TaskEvent
+    from kortny.db.models import Artifact, Task, TaskEvent
 
-    for model in (InteractiveAction, TaskEvent, Task, Installation):
+    for model in (InteractiveAction, Artifact, TaskEvent, Task, Installation):
         session.execute(delete(model))
 
 
@@ -250,6 +250,81 @@ def test_process_document_action_spawns_rerender_child_in_thread(
     assert child.parent_task_id == parent.id
     # Output lands in the original document's thread.
     assert child.slack_thread_ts == "1781000000.0001"
+
+
+def test_process_document_action_edit_embeds_spec_and_lineage(
+    db_session: Session,
+) -> None:
+    import uuid
+
+    from kortny.db.models import Artifact, Task
+    from kortny.slack.document_decisions import (
+        ROUTE_DOC_EDIT,
+        TARGET_DOCUMENT,
+        process_document_action,
+    )
+    from kortny.tasks import TaskService
+    from kortny.tasks.identity import TaskIdentity
+
+    installation = _installation(db_session)
+    service = _service(db_session)
+    task_service = TaskService(db_session)
+    parent = task_service.create_task(
+        installation_id=installation.id,
+        slack_channel_id=CHANNEL,
+        slack_user_id=OWNER,
+        input="make a report",
+        slack_thread_ts="1781000000.0001",
+        identity=TaskIdentity.manual(
+            channel_id=CHANNEL,
+            thread_ts="1781000000.0001",
+            user_id=OWNER,
+            input_text="make a report",
+        ),
+    )
+    group = uuid.uuid4()
+    db_session.add(
+        Artifact(
+            task_id=parent.id,
+            filename="report.pdf",
+            mime_type="application/pdf",
+            doc_group_id=group,
+            doc_version=1,
+            spec_json={
+                "title": "Q2 Report",
+                "blocks": [{"type": "prose", "text": "hi"}],
+            },
+        )
+    )
+    db_session.flush()
+    minted = service.mint(
+        installation_id=installation.id,
+        action_kind="edit",
+        route=ROUTE_DOC_EDIT,
+        target_type=TARGET_DOCUMENT,
+        target_id=str(group),
+        task_id=parent.id,
+        payload={"doc_group_id": str(group), "base_version": 1, "value": "shorten"},
+        allowed_user_id=OWNER,
+        slack_team_id=TEAM,
+        allowed_channel_id=CHANNEL,
+        now=NOW,
+    )
+
+    child_id = process_document_action(
+        db_session, minted.action, actor_user_id=OWNER, task_service=task_service
+    )
+
+    assert child_id is not None
+    child = db_session.get(Task, child_id)
+    assert child is not None
+    assert child.identity_payload["kind"] == "document_edit"
+    assert child.identity_payload["edit_kind"] == "shorten"
+    # The agent gets the stored spec + explicit lineage so the edit stays the
+    # same document's next version.
+    assert "Q2 Report" in child.input
+    assert str(group) in child.input
+    assert "base_version=1" in child.input
 
 
 def test_mint_stores_hash_not_raw_key(db_session: Session) -> None:
