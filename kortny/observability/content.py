@@ -72,7 +72,12 @@ def render_chat_messages(
     messages: Sequence[ChatMessage],
     mode: str,
 ) -> list[dict[str, Any]] | None:
-    """Render provider-neutral chat messages, or ``None`` in metadata mode."""
+    """Render provider-neutral chat messages, or ``None`` in metadata mode.
+
+    Images are rendered as metadata ONLY (mime/byte_size/sha256_prefix/source/
+    alt) regardless of capture mode. Raw bytes and base64 are NEVER included
+    in any trace or span (HIG-279 privacy/retention).
+    """
 
     if not captures_content(mode):
         return None
@@ -91,6 +96,17 @@ def render_chat_messages(
                     "arguments": _render_arguments(call.arguments, mode),
                 }
                 for call in message.tool_calls
+            ]
+        if message.images:
+            entry["images"] = [
+                {
+                    "mime": img.mime,
+                    "byte_size": img.byte_size,
+                    "sha256_prefix": img.sha256_prefix,
+                    "source": img.source,
+                    "alt": truncate_for_mode(img.alt, mode),
+                }
+                for img in message.images
             ]
         rendered.append(entry)
     return rendered

@@ -10,6 +10,7 @@ from typing import Any
 import litellm
 
 from kortny.config import Settings, load_settings
+from kortny.llm.message_payload import content_payload
 from kortny.llm.types import ChatMessage, Completion, TokenUsage, ToolCall
 from kortny.tools.types import JsonObject, JsonSchema
 
@@ -153,7 +154,7 @@ def create_litellm_provider(
 def _message_to_payload(message: ChatMessage) -> JsonObject:
     payload: JsonObject = {
         "role": message.role,
-        "content": message.content,
+        "content": content_payload(message),
     }
     if message.tool_call_id is not None:
         payload["tool_call_id"] = message.tool_call_id
@@ -249,6 +250,12 @@ def _mark_message_content(message: JsonObject) -> None:
     A string ``content`` is wrapped into a single ``text`` part so the marker
     has somewhere to live. Empty/absent content is left untouched (nothing to
     cache).
+
+    When content is a block list (e.g. text + image_url from HIG-279 vision),
+    we mark the LAST ``text`` block rather than the last block overall.
+    Image blocks are poor cache anchors and some providers reject
+    ``cache_control`` on them, so they are skipped during anchor selection.
+    Falls back to the last block if no text block is found.
     """
 
     content = message.get("content")
@@ -264,9 +271,18 @@ def _mark_message_content(message: JsonObject) -> None:
         ]
         return
     if isinstance(content, list) and content:
-        last = content[-1]
-        if isinstance(last, dict):
-            _mark_block(last)
+        # Prefer the last text block; fall back to the last block of any type.
+        target: JsonObject | None = None
+        for block in reversed(content):
+            if isinstance(block, dict) and block.get("type") == "text":
+                target = block
+                break
+        if target is None:
+            last = content[-1]
+            if isinstance(last, dict):
+                target = last
+        if target is not None:
+            _mark_block(target)
 
 
 def _mark_block(block: JsonObject) -> None:

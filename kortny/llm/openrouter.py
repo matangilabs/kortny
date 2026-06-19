@@ -11,6 +11,7 @@ import httpx
 
 from kortny.config import LLMProvider as SettingsLLMProvider
 from kortny.config import Settings, load_settings
+from kortny.llm.message_payload import content_payload
 from kortny.llm.types import ChatMessage, Completion, TokenUsage, ToolCall
 from kortny.tools.types import JsonObject, JsonSchema
 
@@ -128,7 +129,7 @@ def create_llm_provider(
 def _message_to_payload(message: ChatMessage) -> JsonObject:
     payload: JsonObject = {
         "role": message.role,
-        "content": message.content,
+        "content": content_payload(message),
     }
     if message.tool_call_id is not None:
         payload["tool_call_id"] = message.tool_call_id
