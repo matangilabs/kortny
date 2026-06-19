@@ -27,6 +27,7 @@ class ModelRouteTier(StrEnum):
     document = "document"
     high_reasoning = "high_reasoning"
     humanizer = "humanizer"
+    vision = "vision"
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,7 +64,31 @@ class ModelRouter:
         task: Task,
         events: Sequence[TaskEvent] = (),
     ) -> ModelRoute:
-        """Select a route using intent metadata first, then task text fallback."""
+        """Select a route using intent metadata first, then task text fallback.
+
+        Image-bearing tasks are always routed to the vision tier first,
+        deterministically from the uploaded file types (HIG-279 slice 2C).
+        This check runs before any LLM-based intent decision so image tasks
+        never require every other tier to be vision-capable.
+        """
+
+        # Deterministic vision routing: image attachment → vision tier.
+        # Pure regex over task.input — no LLM, no DB.  Text-only tasks fall
+        # through to the existing intent/depth routing unchanged.
+        # Lazy import avoids an import cycle: kortny.agent.__init__ imports
+        # kortny.agent.context which imports kortny.llm, so a top-level import
+        # of any kortny.agent module from kortny.llm.routing would deadlock on
+        # partial initialisation.  attachment_parsing is a pure leaf; the
+        # lazy import resolves cleanly at call time after all modules are loaded.
+        from kortny.agent.attachment_parsing import (
+            parse_image_attachment_pairs,  # noqa: PLC0415
+        )
+
+        if parse_image_attachment_pairs(task.input):
+            return self.route_for_tier(
+                ModelRouteTier.vision,
+                reason="image attachment -> vision tier (HIG-279)",
+            )
 
         decision = effective_intent_decision(latest_intent_decision(events))
         tier = _tier_from_intent_decision(decision)
@@ -111,6 +136,11 @@ class ModelRouter:
                 or self.settings.llm_standard_model
                 or default
             )
+        if tier is ModelRouteTier.vision:
+            # Image-understanding tasks route here (HIG-279 slice 2C). Falls back
+            # to llm_model when unset; if neither is vision-capable the LLMService
+            # fail-loud assert_vision_capable check fires with a clear message.
+            return self.settings.llm_vision_model or default
         return (
             self.settings.llm_high_reasoning_model
             or self.settings.llm_analysis_model

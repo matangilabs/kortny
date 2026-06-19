@@ -904,6 +904,9 @@ def test_dashboard_admin_bootstrap_backfills_env_model_pricing(
         "anthropic/claude-sonnet-4.6": ("3.000000", "15.000000"),
         "openai/gpt-5.1": ("1.250000", "10.000000"),
         "anthropic/claude-opus-4.8": ("15.000000", "75.000000"),
+        # HIG-279: vision tier falls back to LLM_MODEL ("fallback/model") when
+        # LLM_VISION_MODEL is unset; include it so the pricing mock doesn't KeyError.
+        "fallback/model": ("0.000000", "0.000000"),
     }
 
     def candidate_for_identifier(

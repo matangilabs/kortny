@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from kortny.agent.attachment_parsing import parse_image_attachment_pairs
 from kortny.agent.capabilities import CapabilityOverview, render_capability_overview
 from kortny.agent.image_attachments import ImageAttachmentResolver
 from kortny.agent.thread_context import (
@@ -1932,23 +1933,12 @@ def _slack_file_ids(input_text: str) -> list[str]:
 def _slack_image_file_pairs(input_text: str) -> list[tuple[str, str]]:
     """Parse the ``<slack_files>`` block and return ``(file_id, mime)`` pairs.
 
-    Only entries whose ``mimetype`` starts with ``image/`` are returned.
-    Entries without a ``mimetype`` line are skipped.
+    Delegates to the shared leaf-level parser in ``image_attachments`` so that
+    routing code can call the same logic without importing this module (HIG-279
+    slice 2C).  Only image-mime entries are returned; entries without a
+    ``mimetype`` line are skipped.
     """
-    block = _slack_files_block(input_text)
-    if block is None:
-        return []
-    pairs: list[tuple[str, str]] = []
-    for entry_match in _SLACK_FILE_ENTRY_RE.finditer(block):
-        file_id = entry_match.group(1).strip()
-        entry_body = entry_match.group(2)
-        mime_match = _SLACK_FILE_MIMETYPE_RE.search(entry_body)
-        if mime_match is None:
-            continue
-        mime = mime_match.group(1).strip()
-        if mime.startswith("image/"):
-            pairs.append((file_id, mime))
-    return pairs
+    return parse_image_attachment_pairs(input_text)
 
 
 def _error_summary(error: dict | None) -> str | None:

@@ -4,6 +4,12 @@ Resolves ``(file_id, mime)`` pairs from the ``<slack_files>`` block into
 ``ImagePart`` objects by downloading each image with the bot token.  The
 resolver is intentionally best-effort: individual download failures are logged
 and skipped so a task never crashes because an image cannot be fetched.
+
+``parse_image_attachment_pairs`` is re-exported from the leaf module
+``kortny.agent.attachment_parsing`` so callers that already import this module
+(e.g. ``kortny.agent.context``) can access the shared parser without needing a
+second import.  The leaf module is what ``kortny.llm.routing`` imports directly
+to avoid a package-level import cycle.
 """
 
 from __future__ import annotations
@@ -14,7 +20,14 @@ from typing import Any, Protocol
 
 import httpx
 
+from kortny.agent.attachment_parsing import parse_image_attachment_pairs
 from kortny.llm.types import ImagePart
+
+__all__ = [
+    "parse_image_attachment_pairs",
+    "ImageAttachmentResolver",
+    "SlackImageAttachmentResolver",
+]
 
 logger = logging.getLogger(__name__)
 
