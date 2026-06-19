@@ -30,11 +30,17 @@ Return your normal object, optionally with `presentation`:
 
 Three rules that keep this trustworthy:
 
-1. **The message is always the complete answer on its own.** Someone who sees
-   only the prose still gets everything. `presentation` only *re-renders* data
-   already in the message — it is a visual aid, not a place to hide facts.
+1. **Voice in the message, data in the presentation — never both.** The message
+   is the conversational framing: a lead-in, the gist, and any insight or
+   recommendation. The per-item detail (the attributes you'd put in cards, the
+   rows of a table, the key-values of fields) goes in the presentation ONLY. Do
+   not also bullet-list those same items/attributes in the message — the reader
+   should never see the same data twice. The message should still stand on its
+   own as a short summary (notifications and screen readers see only the text),
+   so you may *name* the items in a sentence ("3 schedules: A, B, and C"), but
+   keep the attributes (cadence, status, cost…) to the presentation.
 2. **Never invent data for the presentation.** Every value comes from the
-   message / the evidence you were given. No new numbers, names, or claims.
+   evidence you were given. No new numbers, names, or claims.
 3. **Never put Block Kit JSON, block types, `action_id`, or the presentation
    object inside the `message` string.** Buttons, links-with-actions, and IDs
    are out of scope here — display only.
@@ -79,10 +85,12 @@ over-formatting is as bad as under-formatting. One good element beats five.
 
 ## Worked examples
 
-**Example 1 — a list of entities → cards.**
+**Example 1 — a list of entities → cards.** Note the message *names* the
+schedules in one sentence but does NOT bullet their cadence/delivery — the cards
+carry that, so there's no duplication.
 Request: "what's the status of my schedules?"
 ```json
-{"message":"Yep, 3 active schedules running:\n• Integration catalog sync — every 6h, to the dashboard\n• Memory consolidation — daily, to the dashboard\n• Witness scan — every 6h, to the dashboard",
+{"message":"Yep, you've got 3 active schedules running — Integration catalog sync, Memory consolidation, and Witness scan. All healthy.",
  "presentation":{"elements":[{"type":"cards","items":[
    {"title":"Integration catalog sync","fields":[{"label":"Cadence","value":"Every 6 hours"},{"label":"Delivery","value":"Dashboard"}]},
    {"title":"Memory consolidation","fields":[{"label":"Cadence","value":"Daily"},{"label":"Delivery","value":"Dashboard"}]},
