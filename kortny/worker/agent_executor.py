@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -39,6 +40,7 @@ from kortny.composio.runtime import connected_toolkit_slugs
 from kortny.config import Settings, load_settings
 from kortny.db.models import (
     Artifact,
+    Installation,
     McpServer,
     Task,
     TaskEvent,
@@ -109,6 +111,7 @@ from kortny.slack.comments import (
     LLMArtifactCommentGenerator,
     generate_artifact_comment,
 )
+from kortny.slack.decisions import approval_decision, render_decision
 from kortny.slack.egress import parse_egress_allowlist
 from kortny.slack.humanizer import (
     ChannelStyleCardResolver,
@@ -119,6 +122,7 @@ from kortny.slack.humanizer import (
     strip_internal_response_preamble,
     synthesize_response,
 )
+from kortny.slack.interactions import InteractiveActionService
 from kortny.slack.membership import SlackChannelMembershipService
 from kortny.slack.outbox import SlackSideEffectOutbox, slack_reaction_key
 from kortny.slack.posting import SlackPostingClient
@@ -2113,7 +2117,39 @@ class AgentTaskExecutor:
                 SlackPostingClient,
                 WebClient(token=settings.slack_bot_token),
             )
-        return cast(
+        statement = self._approval_prompt_text(
+            settings=settings,
+            session=session,
+            task=task,
+            task_service=task_service,
+            approval=approval,
+        )
+        # Render Approve/Reject buttons (HIG-255 s2). The emoji-reaction path
+        # still works as a fallback and calls the same TaskService methods, so
+        # the fallback text keeps the reaction hint.
+        fallback_text = (
+            f"{statement}\n\n_Approve / Reject below, or react "
+            ":white_check_mark: to approve / :no_entry_sign: to reject._"
+        )
+        interactions = InteractiveActionService(
+            session, signing_key=settings.encryption_key
+        )
+        spec = approval_decision(
+            approval_key=approval.request.approval_key,
+            tool_name=approval.request.tool_name,
+            statement=statement,
+            fallback_text=fallback_text,
+        )
+        blocks, minted = render_decision(
+            spec,
+            interactions,
+            installation_id=task.installation_id,
+            task_id=task.id,
+            allowed_user_id=task.slack_user_id,
+            allowed_channel_id=task.slack_channel_id,
+            slack_team_id=_installation_team_id(session, task.installation_id),
+        )
+        message_ts = cast(
             str,
             SlackPoster(
                 session=session,
@@ -2121,13 +2157,8 @@ class AgentTaskExecutor:
                 task_service=task_service,
             ).post_message(
                 SlackThread.from_task(task),
-                self._approval_prompt_text(
-                    settings=settings,
-                    session=session,
-                    task=task,
-                    task_service=task_service,
-                    approval=approval,
-                ),
+                fallback_text,
+                blocks=blocks,
                 purpose=TOOL_APPROVAL_PROMPT_PURPOSE,
                 # Unique per approval so a task needing >1 approval doesn't have
                 # its later prompts deduped away by the outbox (HIG-248).
@@ -2136,6 +2167,15 @@ class AgentTaskExecutor:
                 ),
             ),
         )
+        for action in minted:
+            interactions.mark_sent(
+                action.action,
+                channel_id=task.slack_channel_id or "",
+                message_ts=message_ts,
+                block_id=blocks[-1].get("block_id"),
+                slack_action_id=action.action.route,
+            )
+        return message_ts
 
     def _approval_prompt_text(
         self,
@@ -3569,6 +3609,13 @@ def _intent_prefers_native_slack_context(decision: dict[str, Any]) -> bool:
 
 def _truthy_bool(value: object) -> bool:
     return isinstance(value, bool) and value
+
+
+def _installation_team_id(session: Session, installation_id: uuid.UUID) -> str | None:
+    """The installation's Slack team id, for binding interactive actions."""
+
+    installation = session.get(Installation, installation_id)
+    return installation.slack_team_id if installation is not None else None
 
 
 def _payload_str(payload: Mapping[str, Any], key: str) -> str | None:

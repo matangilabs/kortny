@@ -155,6 +155,7 @@ class InteractiveActionService:
         team_id: str | None,
         channel_id: str | None,
         route: str | None = None,
+        actor_role: str | None = None,
         now: datetime | None = None,
     ) -> ClaimResult:
         """Authorize + lock a clicked action. Does NOT apply the transition.
@@ -181,7 +182,11 @@ class InteractiveActionService:
             self.session.flush()
             return ClaimResult(ClaimStatus.expired, action)
         if not self._actor_allowed(
-            action, actor_user_id=actor_user_id, team_id=team_id, channel_id=channel_id
+            action,
+            actor_user_id=actor_user_id,
+            team_id=team_id,
+            channel_id=channel_id,
+            actor_role=actor_role,
         ) or (route is not None and route != action.route):
             self._record_denial(action, moment)
             return ClaimResult(ClaimStatus.denied, action)
@@ -249,6 +254,7 @@ class InteractiveActionService:
         actor_user_id: str,
         team_id: str | None,
         channel_id: str | None,
+        actor_role: str | None,
     ) -> bool:
         if action.slack_team_id and team_id and action.slack_team_id != team_id:
             return False
@@ -258,10 +264,12 @@ class InteractiveActionService:
             and action.allowed_channel_id != channel_id
         ):
             return False
-        return not (
-            action.allowed_user_id is not None
-            and action.allowed_user_id != actor_user_id
-        )
+        if action.allowed_user_id is not None and action.allowed_user_id != actor_user_id:
+            return False
+        # required_role is fail-closed: if a role is required, the caller must
+        # supply the actor's role and it must match. An action that asks for a
+        # role but gets no role denies, so a role gate can never silently pass.
+        return not (action.required_role is not None and action.required_role != actor_role)
 
     def _record_denial(self, action: InteractiveAction, moment: datetime) -> None:
         action.denied_count = (action.denied_count or 0) + 1

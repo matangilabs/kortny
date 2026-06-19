@@ -35,6 +35,7 @@ from kortny.scheduler import LLMScheduleParser
 from kortny.slack.acknowledgement import LLMAcknowledgementGenerator
 from kortny.slack.app_home import register_app_home
 from kortny.slack.assistant import register_assistant
+from kortny.slack.decisions import register_decision_actions
 from kortny.slack.ingress import SlackIngress, is_bare_app_mention
 from kortny.slack.outbox import SlackSideEffectOutbox
 from kortny.slack.schedule_blocks import SCHEDULE_ACTION_PREFIX
@@ -309,6 +310,9 @@ def create_bolt_app(
             app, settings=resolved_settings, session_factory=surface_session_factory
         )
     register_witness_actions(
+        app, settings=resolved_settings, session_factory=surface_session_factory
+    )
+    register_decision_actions(
         app, settings=resolved_settings, session_factory=surface_session_factory
     )
 

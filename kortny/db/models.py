@@ -2809,4 +2809,11 @@ class InteractiveAction(Base):
     __table_args__ = (
         Index("idx_interactive_actions_installation", "installation_id"),
         Index("idx_interactive_actions_task", "task_id"),
+        Index(
+            "idx_interactive_actions_target",
+            "installation_id",
+            "target_type",
+            "target_id",
+            "status",
+        ),
     )
