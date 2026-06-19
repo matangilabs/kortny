@@ -33,6 +33,12 @@ from kortny.documents import (
     render_spec_pdf,
     render_xlsx,
     theme_names,
+    xlsx_is_poor_fit,
+)
+from kortny.documents.critique import (
+    DocumentIssue,
+    critique_and_fix,
+    validate_render,
 )
 from kortny.tools.types import (
     JsonObject,
@@ -199,6 +205,30 @@ class DocumentStudioTool:
         mime_type, extension = _FORMATS[fmt]
         filename = _safe_filename(args.get("filename"), extension)
 
+        # Deterministic critique: lint + semantics-preserving auto-fix before
+        # render (HIG-244). A doc that lints down to nothing is recoverable.
+        critique = critique_and_fix(spec)
+        if critique.has_errors:
+            raise RecoverableToolError(
+                code="document_spec_needs_revision",
+                message="The document spec has defects that can't be auto-fixed.",
+                hint="Address the reported issues (e.g. add content) and retry.",
+                details={"issues": [i.model_dump() for i in critique.issues]},
+            )
+        spec = critique.spec
+        issues = list(critique.issues)
+        if fmt == "xlsx" and xlsx_is_poor_fit(spec):
+            issues.append(
+                DocumentIssue(
+                    code="xlsx_poor_fit",
+                    severity="warning",
+                    message=(
+                        "This document is mostly prose; a spreadsheet is a weak "
+                        "fit. Consider pdf or docx."
+                    ),
+                )
+            )
+
         try:
             data = self._render(spec, fmt)
         except TypstNotAvailableError as exc:
@@ -227,6 +257,17 @@ class DocumentStudioTool:
                 hint="Check the block fields; simplify content and retry.",
                 details={"stderr": exc.stderr[:2000]},
             ) from exc
+
+        # Post-render validation: the bytes must be a real file of the right kind.
+        render_issues = validate_render(data, fmt)
+        issues.extend(render_issues)
+        if any(issue.severity == "error" for issue in render_issues):
+            raise RecoverableToolError(
+                code="document_render_invalid",
+                message="The rendered document failed validation.",
+                hint="Simplify the content and retry.",
+                details={"issues": [i.model_dump() for i in render_issues]},
+            )
 
         self.working_dir.mkdir(parents=True, exist_ok=True)
         output_path = self.working_dir / filename
@@ -261,6 +302,11 @@ class DocumentStudioTool:
                 "doc_kind": spec.doc_kind.value,
                 "block_count": len(spec.blocks),
                 "artifact_id": artifact_id,
+                "critique": {
+                    "autofixes": sum(1 for i in issues if i.autofix == "applied"),
+                    "warnings": sum(1 for i in issues if i.severity == "warning"),
+                    "codes": sorted({i.code for i in issues}),
+                },
             },
             artifacts=(artifact,),
         )

@@ -182,6 +182,25 @@ def test_invalid_format_raises_recoverable(tmp_path: Path) -> None:
     assert exc.value.code == "invalid_document_format"
 
 
+def test_critique_autofixes_ragged_table_and_reports(tmp_path: Path) -> None:
+    ragged = {"type": "table", "columns": ["A", "B", "C"], "rows": [["1"]]}
+    result = DocumentStudioTool(working_dir=tmp_path).invoke(
+        _args(blocks=[{"type": "prose", "text": "body"}, ragged])
+    )
+    assert Path(result.output["path"]).exists()
+    critique = result.output["critique"]
+    assert critique["autofixes"] >= 1
+    assert "ragged_table_rows" in critique["codes"]
+
+
+def test_empty_document_raises_needs_revision(tmp_path: Path) -> None:
+    with pytest.raises(RecoverableToolError) as exc:
+        DocumentStudioTool(working_dir=tmp_path).invoke(
+            _args(blocks=[{"type": "prose", "text": "   "}])
+        )
+    assert exc.value.code == "document_spec_needs_revision"
+
+
 # --------------------------------------------------------------------------- #
 # DB-backed artifact recording
 # --------------------------------------------------------------------------- #

@@ -382,6 +382,77 @@ def test_xlsx_is_poor_fit_for_prose_good_for_data() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Deterministic critique (lint + auto-fix + post-render validation)
+# --------------------------------------------------------------------------- #
+
+
+def test_critique_pads_ragged_table_rows() -> None:
+    from kortny.documents.critique import critique_and_fix
+
+    spec = _spec(
+        blocks=[
+            {"type": "table", "columns": ["A", "B", "C"], "rows": [["1"], ["2", "3"]]}
+        ]
+    )
+    result = critique_and_fix(spec)
+    table = result.spec.blocks[0]
+    assert all(len(row) == 3 for row in table.rows)  # type: ignore[union-attr]
+    assert any(
+        i.code == "ragged_table_rows" and i.autofix == "applied" for i in result.issues
+    )
+
+
+def test_critique_drops_empty_table_and_blank_blocks() -> None:
+    from kortny.documents.critique import critique_and_fix
+
+    spec = _spec(
+        blocks=[
+            {"type": "heading", "text": "Keep me"},
+            {"type": "prose", "text": "body"},
+            {"type": "table", "columns": ["A"], "rows": []},
+            {"type": "prose", "text": "   "},
+        ]
+    )
+    result = critique_and_fix(spec)
+    kinds = [b.type for b in result.spec.blocks]
+    assert "table" not in kinds
+    assert kinds.count("prose") == 1
+    assert {"empty_table", "empty_prose"} <= {i.code for i in result.issues}
+
+
+def test_critique_dedupes_columns_and_drops_bad_accent_tail() -> None:
+    from kortny.documents.critique import critique_and_fix
+
+    spec = _spec(
+        blocks=[
+            {"type": "cover_header", "title": "Report", "accent_tail": "Nope"},
+            {"type": "table", "columns": ["X", "", "X"], "rows": [["1", "2", "3"]]},
+        ]
+    )
+    result = critique_and_fix(spec)
+    cover, table = result.spec.blocks
+    assert cover.accent_tail is None  # type: ignore[union-attr]
+    assert len(set(table.columns)) == 3  # type: ignore[union-attr]
+
+
+def test_critique_empty_document_is_an_error() -> None:
+    from kortny.documents.critique import critique_and_fix
+
+    result = critique_and_fix(_spec(blocks=[{"type": "prose", "text": "  "}]))
+    assert result.has_errors
+    assert any(i.code == "empty_document" for i in result.issues)
+
+
+def test_validate_render_flags_garbage_and_passes_real_files() -> None:
+    from kortny.documents import render_xlsx
+    from kortny.documents.critique import validate_render
+
+    assert validate_render(b"not a pdf", "pdf")[0].severity == "error"
+    assert validate_render(b"not a zip", "xlsx")[0].severity == "error"
+    assert validate_render(render_xlsx(_spec()), "xlsx") == []
+
+
+# --------------------------------------------------------------------------- #
 # Charts (vl-convert)
 # --------------------------------------------------------------------------- #
 
