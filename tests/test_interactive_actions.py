@@ -1,0 +1,268 @@
+"""DB-backed tests for the interactive-action lifecycle + security (HIG-255 s2).
+
+The security model is the point here: the opaque key is only the lookup; a click
+is honored only when actor + workspace + route match and the action is live,
+under a row lock, idempotently. Wrong-actor/forged/expired clicks must NOT
+consume the action.
+"""
+
+from __future__ import annotations
+
+import os
+from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
+
+import pytest
+from alembic import command
+from alembic.config import Config
+from sqlalchemy import Engine, delete
+from sqlalchemy.orm import Session
+
+from kortny.db.models import Installation, InteractiveAction
+from kortny.db.session import make_engine, make_session_factory, normalize_database_url
+from kortny.slack.interactions import (
+    STATUS_CONSUMED,
+    STATUS_CONSUMING,
+    STATUS_EXPIRED,
+    STATUS_SENT,
+    STATUS_SUPERSEDED,
+    ClaimStatus,
+    InteractiveActionService,
+)
+
+TEST_POSTGRES_URL = os.environ.get("KORTNY_TEST_POSTGRES_URL")
+
+pytestmark = pytest.mark.skipif(
+    TEST_POSTGRES_URL is None,
+    reason="KORTNY_TEST_POSTGRES_URL is required for interactive-action tests",
+)
+
+NOW = datetime(2026, 6, 19, 12, 0, 0, tzinfo=UTC)
+OWNER = "U_OWNER"
+TEAM = "T_ACME"
+CHANNEL = "C_MAIN"
+
+
+@pytest.fixture(scope="session")
+def engine() -> Iterator[Engine]:
+    assert TEST_POSTGRES_URL is not None
+    config = Config("alembic.ini")
+    config.set_main_option("sqlalchemy.url", normalize_database_url(TEST_POSTGRES_URL))
+    command.upgrade(config, "heads")
+    eng = make_engine(TEST_POSTGRES_URL)
+    try:
+        yield eng
+    finally:
+        eng.dispose()
+
+
+@pytest.fixture
+def db_session(engine: Engine) -> Iterator[Session]:
+    session_factory = make_session_factory(engine=engine)
+    with session_factory() as session:
+        _cleanup(session)
+        session.commit()
+        yield session
+        session.rollback()
+        _cleanup(session)
+        session.commit()
+
+
+def _cleanup(session: Session) -> None:
+    for model in (InteractiveAction, Installation):
+        session.execute(delete(model))
+
+
+def _installation(session: Session) -> Installation:
+    installation = Installation(slack_team_id=TEAM, team_name="Acme")
+    session.add(installation)
+    session.flush()
+    return installation
+
+
+def _service(session: Session) -> InteractiveActionService:
+    return InteractiveActionService(session, signing_key="test-signing-key")
+
+
+def _mint_sent(
+    session: Session,
+    service: InteractiveActionService,
+    installation: Installation,
+    *,
+    target_id: str = "approval:abc",
+    allowed_user_id: str | None = OWNER,
+    route: str = "kortny:v1:approval.approve",
+    ttl: timedelta = timedelta(hours=1),
+) -> str:
+    minted = service.mint(
+        installation_id=installation.id,
+        action_kind="approve",
+        route=route,
+        target_type="approval",
+        target_id=target_id,
+        allowed_user_id=allowed_user_id,
+        slack_team_id=TEAM,
+        allowed_channel_id=CHANNEL,
+        ttl=ttl,
+        now=NOW,
+    )
+    service.mark_sent(
+        minted.action,
+        channel_id=CHANNEL,
+        message_ts="1781000000.0001",
+        block_id="b1",
+        slack_action_id=route,
+        now=NOW,
+    )
+    return minted.raw_key
+
+
+def test_mint_stores_hash_not_raw_key(db_session: Session) -> None:
+    installation = _installation(db_session)
+    service = _service(db_session)
+    minted = service.mint(
+        installation_id=installation.id,
+        action_kind="approve",
+        route="kortny:v1:approval.approve",
+        target_type="approval",
+        target_id="approval:abc",
+        now=NOW,
+    )
+    assert minted.raw_key.startswith("iact_v1_")
+    # The DB stores only the HMAC hash, never the bearer token.
+    assert minted.action.action_key_hash != minted.raw_key
+    assert minted.action.status == "pending_send"
+
+
+def test_claim_ok_then_complete(db_session: Session) -> None:
+    installation = _installation(db_session)
+    service = _service(db_session)
+    raw = _mint_sent(db_session, service, installation)
+
+    result = service.claim(
+        raw, actor_user_id=OWNER, team_id=TEAM, channel_id=CHANNEL, now=NOW
+    )
+    assert result.status is ClaimStatus.ok
+    assert result.action is not None
+    assert result.action.status == STATUS_CONSUMING
+
+    service.complete(result.action, consumed_by_user_id=OWNER, now=NOW)
+    assert result.action.status == STATUS_CONSUMED
+    assert result.action.consumed_by_user_id == OWNER
+
+
+def test_second_claim_after_consume_is_already_handled(db_session: Session) -> None:
+    installation = _installation(db_session)
+    service = _service(db_session)
+    raw = _mint_sent(db_session, service, installation)
+
+    first = service.claim(
+        raw, actor_user_id=OWNER, team_id=TEAM, channel_id=CHANNEL, now=NOW
+    )
+    assert first.status is ClaimStatus.ok
+    assert first.action is not None
+    service.complete(first.action, consumed_by_user_id=OWNER, now=NOW)
+
+    second = service.claim(
+        raw, actor_user_id=OWNER, team_id=TEAM, channel_id=CHANNEL, now=NOW
+    )
+    assert second.status is ClaimStatus.already_handled
+
+
+def test_wrong_user_denied_and_action_stays_usable(db_session: Session) -> None:
+    installation = _installation(db_session)
+    service = _service(db_session)
+    raw = _mint_sent(db_session, service, installation)
+
+    denied = service.claim(
+        raw, actor_user_id="U_INTRUDER", team_id=TEAM, channel_id=CHANNEL, now=NOW
+    )
+    assert denied.status is ClaimStatus.denied
+    assert denied.action is not None
+    assert denied.action.denied_count == 1
+    assert denied.action.status == STATUS_SENT  # still usable
+
+    # The legitimate owner can still claim it.
+    ok = service.claim(
+        raw, actor_user_id=OWNER, team_id=TEAM, channel_id=CHANNEL, now=NOW
+    )
+    assert ok.status is ClaimStatus.ok
+
+
+def test_forged_key_is_not_found(db_session: Session) -> None:
+    _installation(db_session)
+    service = _service(db_session)
+    result = service.claim(
+        "iact_v1_totally-made-up", actor_user_id=OWNER, team_id=TEAM, channel_id=CHANNEL
+    )
+    assert result.status is ClaimStatus.not_found
+
+
+def test_expired_action_is_rejected(db_session: Session) -> None:
+    installation = _installation(db_session)
+    service = _service(db_session)
+    raw = _mint_sent(db_session, service, installation, ttl=timedelta(minutes=5))
+    later = NOW + timedelta(hours=1)
+    result = service.claim(
+        raw, actor_user_id=OWNER, team_id=TEAM, channel_id=CHANNEL, now=later
+    )
+    assert result.status is ClaimStatus.expired
+    assert result.action is not None
+    assert result.action.status == STATUS_EXPIRED
+
+
+def test_route_mismatch_denied(db_session: Session) -> None:
+    installation = _installation(db_session)
+    service = _service(db_session)
+    raw = _mint_sent(db_session, service, installation)
+    result = service.claim(
+        raw,
+        actor_user_id=OWNER,
+        team_id=TEAM,
+        channel_id=CHANNEL,
+        route="kortny:v1:task.retry",  # wrong route for an approval action
+        now=NOW,
+    )
+    assert result.status is ClaimStatus.denied
+
+
+def test_cross_workspace_denied(db_session: Session) -> None:
+    installation = _installation(db_session)
+    service = _service(db_session)
+    raw = _mint_sent(db_session, service, installation)
+    result = service.claim(
+        raw, actor_user_id=OWNER, team_id="T_OTHER", channel_id=CHANNEL, now=NOW
+    )
+    assert result.status is ClaimStatus.denied
+
+
+def test_supersede_siblings_retires_the_others(db_session: Session) -> None:
+    installation = _installation(db_session)
+    service = _service(db_session)
+    approve = service.mint(
+        installation_id=installation.id,
+        action_kind="approve",
+        route="kortny:v1:approval.approve",
+        target_type="approval",
+        target_id="approval:abc",
+        now=NOW,
+    )
+    reject = service.mint(
+        installation_id=installation.id,
+        action_kind="reject",
+        route="kortny:v1:approval.reject",
+        target_type="approval",
+        target_id="approval:abc",
+        now=NOW,
+    )
+    superseded = service.supersede_siblings(
+        installation_id=installation.id,
+        target_type="approval",
+        target_id="approval:abc",
+        keep_id=approve.action.id,
+    )
+    assert superseded == 1
+    db_session.refresh(reject.action)
+    db_session.refresh(approve.action)
+    assert reject.action.status == STATUS_SUPERSEDED
+    assert approve.action.status != STATUS_SUPERSEDED

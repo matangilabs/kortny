@@ -34,6 +34,7 @@ def test_mvp_schema_declares_all_core_tables() -> None:
         "mcp_server_tools",
         "tool_pins",
         "tool_embeddings",
+        "interactive_actions",
         "consolidation_runs",
         "episodes",
         "llm_usage",
