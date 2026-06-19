@@ -1840,6 +1840,135 @@ def test_dashboard_admin_can_assign_model_tier_from_provider_catalog(
     assert audit.new_value["model_identifier"] == model.model_identifier
 
 
+# ---------------------------------------------------------------------------
+# MODEL_TIER_VALUES derivation tests (HIG-279 regression guard)
+# ---------------------------------------------------------------------------
+
+
+def test_model_tier_values_includes_vision() -> None:
+    """MODEL_TIER_VALUES must include 'vision' — derived from CONFIG_TIERS, not hardcoded."""
+    from kortny.dashboard.app import MODEL_TIER_VALUES
+    from kortny.llm.provider_config import CONFIG_TIERS
+
+    assert "vision" in MODEL_TIER_VALUES
+    assert frozenset(tier.value for tier in CONFIG_TIERS) == MODEL_TIER_VALUES
+
+
+def test_dashboard_admin_can_assign_vision_tier_via_tier_route(
+    client: tuple[TestClient, Session],
+) -> None:
+    """Saving a vision tier assignment via /admin/models/tiers/vision must succeed."""
+    test_client, session = client
+    installation = Installation(
+        slack_team_id="TVisionTier", team_name="Vision Tier Team"
+    )
+    session.add(installation)
+    session.flush()
+    provider = LLMProviderAccount(
+        installation_id=installation.id,
+        provider_kind="openrouter",
+        display_name="OpenRouter vision provider",
+        status="active",
+        health_status="ok",
+        metadata_json={"credential_source": "env", "source": "env_bootstrap"},
+    )
+    session.add(provider)
+    session.flush()
+    model = LLMModelCatalog(
+        provider_account_id=provider.id,
+        model_identifier="anthropic/claude-sonnet-4.6",
+        display_name="Claude Sonnet (vision)",
+        is_enabled=True,
+        source="manual",
+    )
+    session.add(model)
+    session.commit()
+    login(test_client)
+
+    response = test_client.post(
+        "/admin/models/tiers/vision",
+        data={"model_catalog_id": str(model.id), "next": "/admin/models"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert "notice=" in response.headers["location"]
+    # The notice must not be "Unknown model tier." — that would mean it was rejected.
+    assert "Unknown+model+tier" not in response.headers["location"]
+    assignment = session.scalar(
+        select(LLMTierAssignment).where(
+            LLMTierAssignment.installation_id == installation.id,
+            LLMTierAssignment.tier == "vision",
+        )
+    )
+    assert assignment is not None
+    assert assignment.model_catalog_id == model.id
+
+
+def test_dashboard_admin_can_assign_vision_tier_from_catalog(
+    client: tuple[TestClient, Session],
+) -> None:
+    """Saving a vision tier assignment via /admin/models/catalog/{id}/assign-tier must succeed."""
+    test_client, session = client
+    installation = Installation(
+        slack_team_id="TVisionCatalog", team_name="Vision Catalog Team"
+    )
+    session.add(installation)
+    session.flush()
+    provider = LLMProviderAccount(
+        installation_id=installation.id,
+        provider_kind="openrouter",
+        display_name="OpenRouter vision catalog provider",
+        status="active",
+        health_status="ok",
+        metadata_json={"credential_source": "env", "source": "env_bootstrap"},
+    )
+    session.add(provider)
+    session.flush()
+    model = LLMModelCatalog(
+        provider_account_id=provider.id,
+        model_identifier="anthropic/claude-opus-4.8",
+        display_name="Claude Opus 4.8",
+        is_enabled=True,
+        source="provider_api",
+    )
+    session.add(model)
+    session.commit()
+    login(test_client)
+
+    response = test_client.post(
+        f"/admin/models/catalog/{model.id}/assign-tier",
+        data={
+            "tier": "vision",
+            "priority": "1",
+            "next": f"/admin/models/providers/{provider.id}",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assignment = session.scalar(
+        select(LLMTierAssignment).where(
+            LLMTierAssignment.installation_id == installation.id,
+            LLMTierAssignment.tier == "vision",
+            LLMTierAssignment.priority == 1,
+        )
+    )
+    assert assignment is not None
+    assert assignment.model_catalog_id == model.id
+    audit = session.scalar(
+        select(LLMConfigAudit).where(
+            LLMConfigAudit.installation_id == installation.id,
+            LLMConfigAudit.entity_type == "llm_tier_assignment",
+            LLMConfigAudit.entity_id == str(assignment.id),
+        )
+    )
+    assert audit is not None
+    assert audit.action == "create"
+    assert audit.new_value is not None
+    assert audit.new_value["tier"] == "vision"
+
+
 def test_dashboard_renders_theme_toggle(
     client: tuple[TestClient, Session],
 ) -> None:

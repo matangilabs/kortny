@@ -594,6 +594,16 @@ def create_provider_model_assignment(
     return catalog
 
 
+def test_config_tiers_includes_vision() -> None:
+    """CONFIG_TIERS must include the vision tier — regression guard for HIG-279."""
+    from kortny.llm.provider_config import CONFIG_TIERS
+    from kortny.llm.routing import ModelRouteTier
+
+    tier_values = {tier.value for tier in CONFIG_TIERS}
+    assert "vision" in tier_values
+    assert ModelRouteTier.vision in CONFIG_TIERS
+
+
 def build_settings(**overrides: Any) -> Settings:
     assert TEST_POSTGRES_URL is not None
     values: dict[str, Any] = {
