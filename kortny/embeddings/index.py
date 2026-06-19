@@ -23,7 +23,10 @@ _RANK_SQL = text(
     "SELECT ref_key, 1 - (embedding <=> CAST(:query_vector AS vector)) AS similarity "
     "FROM tool_embeddings "
     "WHERE kind = :kind AND model = :model AND ref_key = ANY(:ref_keys) "
-    "ORDER BY similarity DESC "
+    # ref_key is a deterministic tiebreak: when similarities tie (e.g. degenerate
+    # embeddings), Postgres would otherwise return tied rows in arbitrary order,
+    # making the LIMIT cutoff — and any caller's top-k — flaky.
+    "ORDER BY similarity DESC, ref_key ASC "
     "LIMIT :top_k"
 )
 
