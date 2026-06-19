@@ -38,6 +38,7 @@ SOURCE_KINDS = frozenset(
 )
 PENDING_PROPOSAL_MESSAGE = "workspace_state_proposal_created"
 CONFIRMED_PROPOSAL_MESSAGE = "workspace_state_proposal_confirmed"
+AUTO_ACTIVATED_MESSAGE = "workspace_state_fact_auto_activated"
 REJECTED_PROPOSAL_MESSAGE = "workspace_state_proposal_rejected"
 FORGOTTEN_FACT_MESSAGE = "workspace_state_fact_forgotten"
 FORGET_REQUEST_MESSAGE = "workspace_state_forget_requested"
@@ -443,6 +444,102 @@ class WorkspaceStateService:
                 "prompt_message_ts": prompt_message_ts,
                 "workspace_state_id": str(state.id),
                 "confirmed_by_user_id": confirming_user_id,
+            },
+        )
+        return _fact_from_state(state)
+
+    def set_active(
+        self,
+        installation_id: uuid.UUID,
+        scope_type: str,
+        scope_id: str | None,
+        key: str,
+        value: Mapping[str, Any],
+        source_task_id: uuid.UUID,
+        *,
+        value_text: str | None = None,
+        confidence_score: Decimal | float | str | None = None,
+        confidence_reason: str | None = None,
+        source_kind: str = DEFAULT_SOURCE_KIND,
+        activated_by: str = "system",
+    ) -> Fact:
+        """Write an active fact directly, no Slack prompt (trusted auto-activation).
+
+        For high-confidence inferred facts that the locked policy auto-activates
+        (e.g. a persona at confidence >= 0.85, HIG-277). Mirrors ``confirm``'s
+        activation write — supersede prior actives, insert active, embed — but
+        skips the propose→confirm round-trip. Graph projection still happens via
+        the consolidator's confirmed-facts pass, which scans active rows.
+        """
+
+        _validate_scope(scope_type, scope_id)
+        source_kind = _validate_source_kind(source_kind)
+        normalized_key = _normalize_key(key)
+        value_json = _json_object(value)
+        readable_value = _faithful_value_text(
+            value_text or _value_text(value_json), value_json
+        )
+        now = datetime.now(UTC)
+
+        existing = list(
+            self.session.scalars(
+                select(WorkspaceState)
+                .where(
+                    WorkspaceState.installation_id == installation_id,
+                    WorkspaceState.scope_type == scope_type,
+                    _scope_id_clause(scope_id),
+                    WorkspaceState.key == normalized_key,
+                    WorkspaceState.status == "active",
+                )
+                .order_by(WorkspaceState.created_at)
+                .with_for_update()
+            )
+        )
+        for previous in existing:
+            previous.status = "superseded"
+            previous.superseded_at = now
+            previous.updated_at = now
+        if existing:
+            self.session.flush()
+
+        state = WorkspaceState(
+            installation_id=installation_id,
+            scope_type=scope_type,
+            scope_id=scope_id,
+            key=normalized_key,
+            value_json=value_json,
+            value_text=readable_value,
+            status="active",
+            source_kind=source_kind,
+            source_task_id=source_task_id,
+            proposed_by=activated_by,
+            confidence_score=_optional_confidence_score(confidence_score),
+            confidence_reason=confidence_reason,
+            confirmed_by_user_id=activated_by,
+            confirmed_at=now,
+        )
+        self.session.add(state)
+        self.session.flush()
+        for previous in existing:
+            previous.superseded_by_id = state.id
+
+        if self.embedding_index is not None:
+            self.embedding_index.ensure(
+                FACT_EMBEDDING_KIND,
+                [(str(state.id), fact_embedding_text(state))],
+            )
+
+        self.task_service.append_event(
+            source_task_id,
+            TaskEventType.log,
+            {
+                "message": AUTO_ACTIVATED_MESSAGE,
+                "installation_id": str(installation_id),
+                "scope_type": scope_type,
+                "scope_id": scope_id,
+                "key": normalized_key,
+                "workspace_state_id": str(state.id),
+                "source_kind": source_kind,
             },
         )
         return _fact_from_state(state)

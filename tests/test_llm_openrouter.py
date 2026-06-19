@@ -184,6 +184,60 @@ def test_openrouter_provider_sends_response_format() -> None:
     assert captured_payloads[0]["response_format"] == {"type": "json_object"}
 
 
+def test_openrouter_provider_accepts_and_sends_max_output_tokens() -> None:
+    # Regression: the LLMProvider protocol declares max_output_tokens (HIG-220
+    # effort steering) and LLMService forwards it for clamped utility prompts, so
+    # this impl must accept it (not raise TypeError) and map it to max_tokens.
+    captured_payloads: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_payloads.append(json.loads(request.read().decode()))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "ok"}}],
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        )
+
+    provider = OpenRouterProvider(
+        api_key="openrouter-key",
+        model="openai/gpt-4o-mini",
+        transport=httpx.MockTransport(handler),
+    )
+
+    provider.complete(
+        [ChatMessage(role="user", content="classify")],
+        max_output_tokens=256,
+    )
+
+    assert captured_payloads[0]["max_tokens"] == 256
+
+
+def test_openrouter_provider_omits_max_tokens_when_unset() -> None:
+    captured_payloads: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_payloads.append(json.loads(request.read().decode()))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "ok"}}],
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        )
+
+    provider = OpenRouterProvider(
+        api_key="openrouter-key",
+        model="openai/gpt-4o-mini",
+        transport=httpx.MockTransport(handler),
+    )
+
+    provider.complete([ChatMessage(role="user", content="hi")])
+
+    assert "max_tokens" not in captured_payloads[0]
+
+
 def test_create_llm_provider_uses_openrouter_settings() -> None:
     settings = make_settings(
         SettingsLLMProvider.openrouter,

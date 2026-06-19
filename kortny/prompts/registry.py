@@ -99,6 +99,11 @@ def _seed() -> None:
             "Infer the workspace org profile.",
         ),
         (
+            "kortny.user_profile_extractor",
+            "consolidator",
+            "Infer a user's persona (role + work surfaces).",
+        ),
+        (
             "kortny.style_card_extractor",
             "consolidator",
             "Infer per-surface response style cards.",

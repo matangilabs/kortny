@@ -95,6 +95,25 @@ def test_typst_unavailable_raises_recoverable(
     assert exc.value.hint is not None
 
 
+def test_chart_render_error_raises_recoverable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Regression: a chart that fails to render (bad spec / vl-convert failure)
+    # must surface as a recoverable tool error the model can correct, not bubble
+    # as a raw ChartRenderError that crashes the tool call.
+    from kortny.documents import ChartRenderError
+
+    def _boom(*_args: object, **_kwargs: object) -> bytes:
+        raise ChartRenderError("chart render failed: bad encoding")
+
+    monkeypatch.setattr("kortny.tools.document_studio.render_spec_pdf", _boom)
+    tool = DocumentStudioTool(working_dir=tmp_path)
+    with pytest.raises(RecoverableToolError) as exc:
+        tool.invoke(_args())
+    assert exc.value.code == "chart_render_failed"
+    assert exc.value.hint is not None
+
+
 # --------------------------------------------------------------------------- #
 # Rendering (real typst binary)
 # --------------------------------------------------------------------------- #

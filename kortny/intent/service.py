@@ -29,6 +29,7 @@ from kortny.composio.runtime import (
 from kortny.db.models import Task
 from kortny.intent.classifier import IntentClassifier
 from kortny.intent.models import IntentDecision, IntentRequest
+from kortny.intent.persona_gate import persona_relevant_for_text
 from kortny.observability import set_span_attributes, start_span
 
 
@@ -78,6 +79,17 @@ class IntentClassificationService:
         }
         with start_span("intent.classify", task=span_task, attributes=attributes):
             decision = self.classifier.classify(task_id=task_id, request=grounded)
+            # HIG-277: gate persona injection on request shape. Take the
+            # classifier's signal OR the deterministic heuristic, so a clear
+            # role-relative ask ("my plate") always activates the persona even if
+            # the model didn't flag it; factual lookups stay on the neutral path.
+            persona_relevant = decision.persona_relevant or persona_relevant_for_text(
+                request.text
+            )
+            if persona_relevant != decision.persona_relevant:
+                decision = decision.model_copy(
+                    update={"persona_relevant": persona_relevant}
+                )
             set_span_attributes(
                 {
                     "intent.classification": decision.classification.value,
@@ -85,6 +97,7 @@ class IntentClassificationService:
                     "intent.addressed_to_kortny": decision.addressed_to_kortny,
                     "intent.should_create_task": decision.should_create_task,
                     "intent.model_tier": decision.model_tier.value,
+                    "intent.persona_relevant": decision.persona_relevant,
                 }
             )
         return decision

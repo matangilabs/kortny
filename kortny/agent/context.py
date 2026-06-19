@@ -45,6 +45,7 @@ from kortny.knowledge_graph import (
 )
 from kortny.knowledge_graph.projects import project_anchors_and_scopes
 from kortny.llm import ChatMessage
+from kortny.llm.routing import latest_intent_decision
 from kortny.memory import EpisodeService, Fact, RelevantEpisode, WorkspaceStateService
 from kortny.observability import observe_task_event, set_span_attributes, start_span
 from kortny.skills.embedding import SKILL_EMBEDDING_KIND, skill_embedding_text
@@ -52,6 +53,10 @@ from kortny.tasks import TaskService
 
 if TYPE_CHECKING:
     from kortny.skills.service import EnabledSkill
+
+# HIG-277: the user persona fact key; injected only when the request is
+# persona-relevant. Kept as a literal to avoid importing the consolidator.
+_USER_PROFILE_FACT_KEY = "user_profile"
 
 DEFAULT_THREAD_CONTEXT_MAX_CHARS = 12_000
 DEFAULT_THREAD_CONTEXT_RECENT_TASKS = 3
@@ -383,6 +388,10 @@ class ContextAssembler:
         if known_facts.content:
             messages.append(ChatMessage(role="system", content=known_facts.content))
 
+        persona_block = self._persona_context(task)
+        if persona_block:
+            messages.append(ChatMessage(role="system", content=persona_block))
+
         prior_context = self._prior_context(task)
         if prior_context.content:
             messages.append(ChatMessage(role="system", content=prior_context.content))
@@ -640,7 +649,53 @@ class ContextAssembler:
         ):
             facts_by_key[fact.key] = fact
 
+        # HIG-277: the persona fact never rides in plain known-facts — it is
+        # rendered (gated) by the dedicated "who you're helping" block so it can
+        # carry the resolution directive and so it can't colour factual answers.
+        facts_by_key.pop(_USER_PROFILE_FACT_KEY, None)
+
         return list(facts_by_key.values())
+
+    def _task_persona_relevant(self, task: Task) -> bool:
+        """Whether this task's intent decision flagged it persona-relevant."""
+
+        events = list(
+            self.session.scalars(select(TaskEvent).where(TaskEvent.task_id == task.id))
+        )
+        decision = latest_intent_decision(events)
+        return bool(decision and decision.get("persona_relevant"))
+
+    def _persona_context(self, task: Task) -> str | None:
+        """Render the gated "who you're helping" persona resolution block (HIG-277).
+
+        Only on persona-relevant asks (PRISM): states the user's role + work
+        surfaces and directs the agent to resolve "my work / my plate" against
+        THIS user's own connected tools for those surfaces and their active
+        projects — persona × capability × project, scoped by identity — rather
+        than dumping every connected tool or applying a role stereotype.
+        """
+
+        if not task.slack_user_id or not self._task_persona_relevant(task):
+            return None
+        fact = self.workspace_state_service.get(
+            task.installation_id,
+            scope_type="user",
+            scope_id=task.slack_user_id,
+            key=_USER_PROFILE_FACT_KEY,
+        )
+        if fact is None:
+            return None
+        body = (fact.value_text or "").strip()
+        if not body:
+            return None
+        return (
+            f"Who you're helping — {body}.\n"
+            "This request is about their own work. Resolve it against THIS "
+            "user's own connected tools for those work surfaces and their active "
+            "projects (use find_tools to load them), scoped to what they can "
+            "access. Frame the answer for their role; do not dump every "
+            "connected tool or assume a generic role."
+        )
 
     def _prior_context(self, task: Task) -> _PriorContext:
         thread_ts = task.slack_thread_ts

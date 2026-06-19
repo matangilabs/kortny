@@ -26,7 +26,7 @@ from kortny.documents import (
     theme_names,
     typst_available,
 )
-from kortny.documents.typst_writer import esc
+from kortny.documents.typst_writer import esc, esc_str
 
 _FULL_SPEC = {
     "doc_kind": "report",
@@ -91,6 +91,42 @@ def test_esc_escapes_backslash_first() -> None:
     assert esc("a\\b") == "a\\\\b"
 
 
+def test_esc_str_escapes_quote_and_backslash() -> None:
+    # Inside a Typst string literal only \ and " are special — NOT the markup
+    # sigils. A bare " would terminate the literal and break compilation.
+    assert esc_str('CEO "Q2" Brief') == 'CEO \\"Q2\\" Brief'
+    assert esc_str("a\\b") == "a\\\\b"
+
+
+def test_esc_str_leaves_markup_sigils_literal() -> None:
+    # # and $ are literal text inside a string; markup-escaping them ("\#"/"\$")
+    # would emit an invalid string escape sequence and fail to compile.
+    assert esc_str("#1 grew $15B") == "#1 grew $15B"
+
+
+def test_string_literal_contexts_escape_quotes_not_markup() -> None:
+    # A quoted title/heading/caption must not leak a bare " into the title:,
+    # #upper("…") and #eyebrow("…") string literals.
+    src = render_document(
+        _spec(
+            title='CEO "Q2" Brief',
+            blocks=[
+                {"type": "heading", "text": 'The "Big" One'},
+                {
+                    "type": "table",
+                    "caption": 'Q2 "final"',
+                    "columns": ['Co "X"'],
+                    "rows": [["a"]],
+                },
+            ],
+        )
+    )
+    assert '#set document(title: "CEO \\"Q2\\" Brief")' in src
+    assert '#upper("The \\"Big\\" One")' in src
+    # No bare unescaped quote survives inside a string-literal interpolation.
+    assert 'title: "CEO "Q2"' not in src
+
+
 # --------------------------------------------------------------------------- #
 # Theme resolution
 # --------------------------------------------------------------------------- #
@@ -130,7 +166,10 @@ def test_render_document_emits_theme_tokens() -> None:
     src = render_document(_spec(theme="report"))
     assert f'#let accent = rgb("{REPORT_THEME.colors.accent}")' in src
     assert f'#let display = "{REPORT_THEME.display_font}"' in src
-    assert 'set document(title: "Quarterly \\$15B Review")' in src
+    # The title is a Typst string literal, where $ is literal text (not math
+    # mode), so it must NOT be markup-escaped to \$ — that would be an invalid
+    # string escape and break compilation.
+    assert 'set document(title: "Quarterly $15B Review")' in src
 
 
 def test_cover_uses_full_bleed_dark_page_and_accent_tail() -> None:
@@ -204,6 +243,34 @@ def test_render_spec_pdf_both_themes() -> None:
     for theme in theme_names():
         pdf = render_spec_pdf(_spec(theme=theme))
         assert pdf.startswith(b"%PDF")
+
+
+@pytest.mark.skipif(_TYPST_MISSING, reason="typst binary not installed")
+def test_render_spec_pdf_compiles_with_quotes_and_sigils() -> None:
+    # Regression: ordinary quoted/sigil content in string-literal contexts
+    # (title, headings, captions, eyebrows) must still compile, not crash Typst.
+    pdf = render_spec_pdf(
+        _spec(
+            title='CEO "Q2" Brief — #1',
+            blocks=[
+                {
+                    "type": "cover_header",
+                    "eyebrow": 'Market "Brief"',
+                    "title": "The IPO",
+                    "meta": ['$15B "raise"'],
+                },
+                {"type": "heading", "text": 'The "Big" One'},
+                {
+                    "type": "table",
+                    "caption": 'Q2 "final"',
+                    "columns": ['Co "X"', "Raise"],
+                    "rows": [["Arm", "$4.9B"]],
+                },
+                {"type": "callout", "label": 'Key "note"', "text": "Done."},
+            ],
+        )
+    )
+    assert pdf.startswith(b"%PDF")
 
 
 # --------------------------------------------------------------------------- #

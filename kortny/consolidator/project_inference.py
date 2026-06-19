@@ -255,6 +255,11 @@ class ProjectInferencePass:
         if len(cluster.public_entities) < self.min_cluster_size:
             return False
         spread = len(cluster.public_channel_ids())
+        # Always require at least one public channel anchor: an inferred hub with
+        # no channel is unreachable via projects_for_channel (channel retrieval),
+        # so a deadline-only, channel-less cluster would create a dead project.
+        if spread == 0:
+            return False
         return spread >= self.min_channel_spread or cluster.has_deadline()
 
     # -- learning -----------------------------------------------------------
@@ -299,6 +304,11 @@ class ProjectInferencePass:
             project=result.project,
             entity_ids=[e.id for e in public],
             evidence=evidence,
+            # Inferred membership must not masquerade as user-confirmed (HIG-276).
+            source_type="agent_inferred",
+            lifecycle_state="active",
+            confidence_score=_INFERRED_CONFIDENCE,
+            confidence_reason="Recurring co-occurring work cluster (HIG-276).",
         )
         return result.created
 

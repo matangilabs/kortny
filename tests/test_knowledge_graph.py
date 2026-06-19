@@ -10,7 +10,7 @@ from alembic.config import Config
 from sqlalchemy import Engine, delete, select
 from sqlalchemy.orm import Session
 
-from kortny.consolidator.project_inference import ProjectInferencePass
+from kortny.consolidator.project_inference import ProjectInferencePass, _Cluster
 from kortny.db.models import (
     Installation,
     KnowledgeGraphEdge,
@@ -31,6 +31,7 @@ from kortny.knowledge_graph import (
     is_scope_compatible,
 )
 from kortny.knowledge_graph.projects import (
+    PROJECT_INCLUDES_ENTITY,
     ProjectGraphService,
     project_anchors_and_scopes,
 )
@@ -1020,11 +1021,108 @@ def test_link_project_entities_adds_edges(db_session: Session) -> None:
     )
     db_session.commit()
     assert linked == (topic.id,)
+    # Default provenance is a human-confirmed link.
+    edge = db_session.scalars(
+        select(KnowledgeGraphEdge).where(
+            KnowledgeGraphEdge.installation_id == installation.id,
+            KnowledgeGraphEdge.relationship_type == PROJECT_INCLUDES_ENTITY,
+        )
+    ).one()
+    assert edge.source_type == "user_explicit"
+    assert edge.lifecycle_state == "confirmed"
+    assert edge.confidence_score == Decimal("1.000")
     # Idempotent.
     again = service.link_project_entities(
         installation_id=installation.id, project=project, entity_ids=[topic.id]
     )
     assert again == (topic.id,)
+
+
+def test_link_project_entities_records_inferred_provenance(
+    db_session: Session,
+) -> None:
+    # Regression (HIG-276): caller-supplied provenance must reach the edge so
+    # inferred membership is not written as user-confirmed with 1.0 confidence.
+    installation = create_installation(db_session)
+    graph = GraphService(db_session)
+    project = add_entity(
+        graph,
+        installation,
+        entity_type="project",
+        canonical_key="project:inferred",
+        display_name="Inferred",
+        visibility_scope=VisibilityScope.workspace(),
+    )
+    topic = add_entity(
+        graph,
+        installation,
+        entity_type="decision",
+        canonical_key="decision:x",
+        display_name="X",
+        visibility_scope=VisibilityScope.channel("C_ENG"),
+    )
+    db_session.commit()
+
+    ProjectGraphService(db_session).link_project_entities(
+        installation_id=installation.id,
+        project=project,
+        entity_ids=[topic.id],
+        source_type="agent_inferred",
+        lifecycle_state="active",
+        confidence_score=Decimal("0.600"),
+        confidence_reason="cluster",
+    )
+    db_session.commit()
+    edge = db_session.scalars(
+        select(KnowledgeGraphEdge).where(
+            KnowledgeGraphEdge.installation_id == installation.id,
+            KnowledgeGraphEdge.relationship_type == PROJECT_INCLUDES_ENTITY,
+        )
+    ).one()
+    assert edge.source_type == "agent_inferred"
+    assert edge.lifecycle_state == "active"
+    assert edge.confidence_score == Decimal("0.600")
+
+
+def _entity(
+    scope_type: str, scope_id: str | None, entity_type: str
+) -> KnowledgeGraphEntity:
+    return KnowledgeGraphEntity(
+        visibility_scope_type=scope_type,
+        visibility_scope_id=scope_id,
+        entity_type=entity_type,
+    )
+
+
+def test_qualifies_requires_a_channel_anchor_even_with_deadline() -> None:
+    # Regression (HIG-276): a deadline-only cluster with no channel anchor would
+    # create a project hub that channel retrieval (projects_for_channel) can
+    # never reach. Require at least one public channel.
+    pass_ = ProjectInferencePass.__new__(ProjectInferencePass)
+    pass_.min_cluster_size = 3
+    pass_.min_channel_spread = 2
+
+    channelless_deadline = _Cluster(
+        entities=[
+            _entity("workspace", None, "decision"),
+            _entity("workspace", None, "open_question"),
+            _entity("workspace", None, "commitment"),  # deadline type
+        ]
+    )
+    assert channelless_deadline.has_deadline() is True
+    assert channelless_deadline.public_channel_ids() == []
+    assert pass_._qualifies(channelless_deadline) is False
+
+    # One channel anchor + a deadline qualifies (below the 2-channel spread).
+    anchored_deadline = _Cluster(
+        entities=[
+            _entity("channel", "C_OPS", "commitment"),  # deadline + anchor
+            _entity("workspace", None, "decision"),
+            _entity("workspace", None, "open_question"),
+        ]
+    )
+    assert anchored_deadline.public_channel_ids() == ["C_OPS"]
+    assert pass_._qualifies(anchored_deadline) is True
 
 
 def _inferred_project(
@@ -1067,6 +1165,18 @@ def test_project_inference_learns_and_reinforces_cluster(db_session: Session) ->
     assert hub is not None
     assert hub.source_type == "agent_inferred"
     assert hub.lifecycle_state == "active"
+    # Membership edges must carry the inferred provenance too (HIG-276), not be
+    # silently written as user-confirmed/1.0 like an explicit declaration.
+    member_edges = db_session.scalars(
+        select(KnowledgeGraphEdge).where(
+            KnowledgeGraphEdge.installation_id == installation.id,
+            KnowledgeGraphEdge.relationship_type == PROJECT_INCLUDES_ENTITY,
+        )
+    ).all()
+    assert member_edges
+    assert all(e.source_type == "agent_inferred" for e in member_edges)
+    assert all(e.lifecycle_state == "active" for e in member_edges)
+    assert all(e.confidence_score < Decimal("1.000") for e in member_edges)
     before = hub.reinforcement_count
 
     # Re-detection reinforces the SAME hub (no duplicate) — self-correcting.
