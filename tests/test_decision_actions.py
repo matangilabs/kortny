@@ -164,6 +164,7 @@ def test_approve_button_transitions_task_and_supersedes_reject(
         m.action.id for m in minted if m.action.route == ROUTE_APPROVAL_REJECT
     )
 
+    updates: list[str] = []
     outcome = process_decision_action(
         db_session,
         SETTINGS,
@@ -172,8 +173,12 @@ def test_approve_button_transitions_task_and_supersedes_reject(
         actor_user_id=OWNER,
         team_id=TEAM,
         channel_id=CHANNEL,
+        update_message=updates.append,
     )
     assert outcome is DecisionOutcome.applied
+    # The resolved message shows WHAT was approved + who, not just "Approved".
+    assert updates and "Approved" in updates[0]
+    assert "Approve running code_exec?" in updates[0]
     db_session.expire_all()
     assert _status(db_session, task.id) == DbTaskStatus.pending
     approve_row = db_session.get(InteractiveAction, approve_id)

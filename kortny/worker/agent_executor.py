@@ -2124,13 +2124,11 @@ class AgentTaskExecutor:
             task_service=task_service,
             approval=approval,
         )
-        # Render Approve/Reject buttons (HIG-255 s2). The emoji-reaction path
-        # still works as a fallback and calls the same TaskService methods, so
-        # the fallback text keeps the reaction hint.
-        fallback_text = (
-            f"{statement}\n\n_Approve / Reject below, or react "
-            ":white_check_mark: to approve / :no_entry_sign: to reject._"
-        )
+        # Render Approve/Reject buttons (HIG-255 s2). The statement already ends
+        # with the "buttons below" line; emoji reactions still resolve the same
+        # approval as a silent fallback. The statement is the text fallback when
+        # blocks don't render.
+        fallback_text = statement
         interactions = InteractiveActionService(
             session, signing_key=settings.encryption_key
         )

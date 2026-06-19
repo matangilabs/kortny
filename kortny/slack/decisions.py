@@ -75,7 +75,13 @@ def approval_decision(
         fallback_text=fallback_text,
         target_type=TARGET_APPROVAL,
         target_id=approval_key,
-        payload={"approval_key": approval_key, "tool_name": tool_name},
+        # ``summary`` preserves what was being decided so the resolved message
+        # can show it (not just "Approved by @user").
+        payload={
+            "approval_key": approval_key,
+            "tool_name": tool_name,
+            "summary": statement,
+        },
         options=[
             DecisionOptionSpec(
                 label="Approve",
@@ -151,11 +157,14 @@ class DecisionOutcome(StrEnum):
     error = "error"
 
 
-# route -> (TaskService method name, resolved-message verb)
+# route -> (TaskService method name, resolved-message line)
 _APPROVAL_ROUTES = {
-    ROUTE_APPROVAL_APPROVE: ("approve_tool_approval", "Approved"),
-    ROUTE_APPROVAL_REJECT: ("reject_tool_approval", "Rejected"),
+    ROUTE_APPROVAL_APPROVE: ("approve_tool_approval", ":white_check_mark: *Approved*"),
+    ROUTE_APPROVAL_REJECT: ("reject_tool_approval", ":no_entry_sign: *Rejected*"),
 }
+
+# Keep the resolved message readable; the summary can be a longish prompt.
+_RESOLVED_SUMMARY_CHARS = 1500
 
 
 def process_decision_action(
@@ -224,7 +233,15 @@ def process_decision_action(
     if update_message is not None:
         try:
             who = f"<@{actor_user_id}>"
-            update_message(f"{verb} by {who}.")
+            summary = str(action.payload_json.get("summary") or "").strip()
+            resolution = f"{verb} by {who}."
+            # Keep what was decided visible above the resolution line.
+            text = (
+                f"{summary[:_RESOLVED_SUMMARY_CHARS]}\n\n{resolution}"
+                if summary
+                else (resolution)
+            )
+            update_message(text)
         except Exception:  # noqa: BLE001 — message update must never fail the action
             logger.info("decision action: message update failed", exc_info=True)
     return (

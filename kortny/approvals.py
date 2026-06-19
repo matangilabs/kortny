@@ -53,9 +53,9 @@ TOOL_APPROVAL_DECISION_MESSAGE = "tool_approval_decision"
 TOOL_AUTONOMY_DECISION_MESSAGE = "tool_autonomy_decision"
 TOOL_APPROVAL_PROMPT_PURPOSE = "tool_approval_request"
 TOOL_APPROVAL_REJECTED_PURPOSE = "tool_approval_rejected"
-TOOL_APPROVAL_REACTION_INSTRUCTION = (
-    "React with :white_check_mark: to approve, or :no_entry_sign: to skip it."
-)
+# Buttons are the primary approval UI (HIG-255 s2); emoji reactions still work
+# as a silent fallback, but we no longer advertise them in the prompt.
+TOOL_APPROVAL_REACTION_INSTRUCTION = "Use the *Approve* / *Reject* buttons below."
 
 
 class ApprovalScope(StrEnum):
