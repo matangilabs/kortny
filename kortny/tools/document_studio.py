@@ -31,6 +31,7 @@ from kortny.documents import (
     render_docx,
     render_pptx,
     render_spec_pdf,
+    render_xlsx,
     theme_names,
 )
 from kortny.tools.types import (
@@ -51,6 +52,10 @@ _FORMATS: dict[str, tuple[str, str]] = {
     "docx": (
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         "docx",
+    ),
+    "xlsx": (
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "xlsx",
     ),
 }
 DEFAULT_FORMAT = "pdf"
@@ -148,10 +153,13 @@ class DocumentStudioTool:
             },
             "format": {
                 "type": "string",
-                "enum": ["pdf", "pptx", "docx"],
+                "enum": ["pdf", "pptx", "docx", "xlsx"],
                 "description": (
                     "Output format. 'pdf' = finished deliverable (default), "
-                    "'pptx' = slide deck, 'docx' = editable Word document."
+                    "'pptx' = slide deck, 'docx' = editable Word document, "
+                    "'xlsx' = spreadsheet DATA EXPORT — use only when the answer "
+                    "is mostly tables/metrics/chart data the user will analyze, "
+                    "never for a prose narrative (use pdf/docx for those)."
                 ),
             },
             "filename": {
@@ -262,6 +270,8 @@ class DocumentStudioTool:
             return render_pptx(spec)
         if fmt == "docx":
             return render_docx(spec)
+        if fmt == "xlsx":
+            return render_xlsx(spec)
         return render_spec_pdf(spec, font_paths=self.font_paths)
 
     def _record_artifact(

@@ -48,6 +48,7 @@ from kortny.documents.themes import (
     theme_names,
 )
 from kortny.documents.typst_writer import render_document
+from kortny.documents.xlsx_writer import render_xlsx, xlsx_is_poor_fit
 
 __all__ = [
     "CTA",
@@ -81,6 +82,8 @@ __all__ = [
     "render_pptx",
     "render_spec_pdf",
     "render_typst_pdf",
+    "render_xlsx",
+    "xlsx_is_poor_fit",
     "resolve_theme",
     "theme_names",
     "typst_available",

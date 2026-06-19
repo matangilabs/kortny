@@ -37,6 +37,7 @@ dependencies = [
     "typst>=0.15.0",
     "uvicorn>=0.47",
     "vl-convert-python>=1.9.0.post1",
+    "xlsxwriter>=3.2.9",
 ]
 
 [dependency-groups]
@@ -111,6 +112,11 @@ exclude = [
 [[tool.mypy.overrides]]
 # pgvector ships no py.typed marker; its SQLAlchemy Vector type is Any-typed.
 module = ["pgvector.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# XlsxWriter ships no py.typed marker.
+module = ["xlsxwriter.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

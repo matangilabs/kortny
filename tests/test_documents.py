@@ -319,6 +319,69 @@ def test_render_docx_both_themes() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# XLSX (data export)
+# --------------------------------------------------------------------------- #
+
+
+def _xlsx_sheet_names(data: bytes) -> list[str]:
+    import re as _re
+    import zipfile
+
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        assert "[Content_Types].xml" in zf.namelist()
+        workbook_xml = zf.read("xl/workbook.xml").decode("utf-8")
+    return _re.findall(r'<sheet[^>]*name="([^"]+)"', workbook_xml)
+
+
+def test_render_xlsx_produces_valid_workbook_with_data_sheets() -> None:
+    from kortny.documents import render_xlsx
+
+    data = render_xlsx(_spec())
+    assert data[:2] == b"PK"  # OOXML zip
+    names = _xlsx_sheet_names(data)
+    # The fixture has a table + stat_cards → Summary + Table 1 + Metrics.
+    assert "Summary" in names
+    assert "Table 1" in names
+    assert "Metrics" in names
+
+
+def test_render_xlsx_chart_block_becomes_a_data_sheet() -> None:
+    from kortny.documents import render_xlsx
+
+    spec = _spec(blocks=[*_FULL_SPEC["blocks"], _BAR.model_dump()])
+    names = _xlsx_sheet_names(render_xlsx(spec))
+    assert "Chart 1 Data" in names
+
+
+def test_render_xlsx_dedupes_multiple_table_sheets() -> None:
+    from kortny.documents import render_xlsx
+
+    two_tables = {
+        "type": "table",
+        "columns": ["A", "B"],
+        "rows": [["1", "2"]],
+    }
+    spec = _spec(blocks=[two_tables, dict(two_tables)])
+    names = _xlsx_sheet_names(render_xlsx(spec))
+    assert "Table 1" in names
+    assert "Table 2" in names
+
+
+def test_xlsx_is_poor_fit_for_prose_good_for_data() -> None:
+    from kortny.documents import xlsx_is_poor_fit
+
+    prose_only = _spec(
+        blocks=[
+            {"type": "heading", "text": "Overview"},
+            {"type": "prose", "text": "All narrative, no data."},
+        ]
+    )
+    assert xlsx_is_poor_fit(prose_only) is True
+    # The full fixture (table + stat_cards) is a fine spreadsheet.
+    assert xlsx_is_poor_fit(_spec()) is False
+
+
+# --------------------------------------------------------------------------- #
 # Charts (vl-convert)
 # --------------------------------------------------------------------------- #
 

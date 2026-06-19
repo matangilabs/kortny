@@ -164,9 +164,21 @@ def test_renders_docx_format(tmp_path: Path) -> None:
     assert "wordprocessingml" in result.output["mime_type"]
 
 
+def test_renders_xlsx_format(tmp_path: Path) -> None:
+    result = DocumentStudioTool(working_dir=tmp_path).invoke(
+        _args(format="xlsx", filename="data")
+    )
+    output_path = Path(result.output["path"])
+    assert output_path.exists()
+    assert output_path.read_bytes()[:2] == b"PK"
+    assert result.output["filename"] == "data.xlsx"
+    assert result.output["format"] == "xlsx"
+    assert "spreadsheetml" in result.output["mime_type"]
+
+
 def test_invalid_format_raises_recoverable(tmp_path: Path) -> None:
     with pytest.raises(RecoverableToolError) as exc:
-        DocumentStudioTool(working_dir=tmp_path).invoke(_args(format="xlsx"))
+        DocumentStudioTool(working_dir=tmp_path).invoke(_args(format="rtf"))
     assert exc.value.code == "invalid_document_format"
 
 
