@@ -69,7 +69,9 @@ def db_session(engine: Engine) -> Iterator[Session]:
 
 
 def _cleanup(session: Session) -> None:
-    for model in (InteractiveAction, Installation):
+    from kortny.db.models import Task, TaskEvent
+
+    for model in (InteractiveAction, TaskEvent, Task, Installation):
         session.execute(delete(model))
 
 
@@ -182,6 +184,72 @@ def test_control_deck_omits_revert_for_v1(db_session: Session) -> None:
         slack_team_id=TEAM,
     )
     assert not any(m.action.action_kind == "revert" for m in minted)
+
+
+def test_process_document_action_spawns_rerender_child_in_thread(
+    db_session: Session,
+) -> None:
+    import uuid
+
+    from kortny.slack.document_decisions import (
+        ROUTE_DOC_RERENDER,
+        TARGET_DOCUMENT,
+        process_document_action,
+    )
+    from kortny.tasks import TaskService
+    from kortny.tasks.identity import TaskIdentity
+
+    installation = _installation(db_session)
+    service = _service(db_session)
+    task_service = TaskService(db_session)
+    parent = task_service.create_task(
+        installation_id=installation.id,
+        slack_channel_id=CHANNEL,
+        slack_user_id=OWNER,
+        input="make a report",
+        slack_thread_ts="1781000000.0001",
+        identity=TaskIdentity.manual(
+            channel_id=CHANNEL,
+            thread_ts="1781000000.0001",
+            user_id=OWNER,
+            input_text="make a report",
+        ),
+    )
+    group = uuid.uuid4()
+    minted = service.mint(
+        installation_id=installation.id,
+        action_kind="format",
+        route=ROUTE_DOC_RERENDER,
+        target_type=TARGET_DOCUMENT,
+        target_id=str(group),
+        task_id=parent.id,
+        payload={
+            "doc_group_id": str(group),
+            "base_version": 1,
+            "mode": "format",
+            "value": "pptx",
+        },
+        allowed_user_id=OWNER,
+        slack_team_id=TEAM,
+        allowed_channel_id=CHANNEL,
+        now=NOW,
+    )
+
+    child_id = process_document_action(
+        db_session, minted.action, actor_user_id=OWNER, task_service=task_service
+    )
+
+    assert child_id is not None
+    from kortny.db.models import Task
+
+    child = db_session.get(Task, child_id)
+    assert child is not None
+    assert child.identity_payload["kind"] == "document_rerender"
+    assert child.identity_payload["mode"] == "format"
+    assert child.identity_payload["value"] == "pptx"
+    assert child.parent_task_id == parent.id
+    # Output lands in the original document's thread.
+    assert child.slack_thread_ts == "1781000000.0001"
 
 
 def test_mint_stores_hash_not_raw_key(db_session: Session) -> None:

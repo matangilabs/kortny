@@ -25,7 +25,13 @@ from typing import Any
 from sqlalchemy.orm import Session, sessionmaker
 
 from kortny.config import Settings
+from kortny.db.models import InteractiveAction
 from kortny.slack import blockkit
+from kortny.slack.document_decisions import (
+    ROUTE_DOC_EDIT,
+    ROUTE_DOC_RERENDER,
+    process_document_action,
+)
 from kortny.slack.interactions import (
     ClaimStatus,
     InteractiveActionService,
@@ -166,6 +172,56 @@ _APPROVAL_ROUTES = {
 # Keep the resolved message readable; the summary can be a longish prompt.
 _RESOLVED_SUMMARY_CHARS = 1500
 
+# Routes whose buttons suffix their action_id for in-message uniqueness; the
+# claim still binds against the stored route via the matched prefix.
+_KNOWN_ROUTES = (
+    ROUTE_APPROVAL_APPROVE,
+    ROUTE_APPROVAL_REJECT,
+    ROUTE_DOC_RERENDER,
+    ROUTE_DOC_EDIT,
+)
+
+
+def _canonical_route(action_id: str) -> str:
+    matches = [
+        r for r in _KNOWN_ROUTES if action_id == r or action_id.startswith(r + ".")
+    ]
+    return max(matches, key=len) if matches else action_id
+
+
+def _apply_document_action(
+    session: Session,
+    service: InteractiveActionService,
+    action: InteractiveAction,
+    actor_user_id: str,
+    update_message: Callable[[str], None] | None,
+) -> DecisionOutcome:
+    """Spawn the re-render/edit child task, retire the deck, ack in-thread."""
+
+    task_service = TaskService(session)
+    child_id = process_document_action(
+        session, action, actor_user_id=actor_user_id, task_service=task_service
+    )
+    service.complete(action, consumed_by_user_id=actor_user_id, result_task_id=child_id)
+    service.supersede_siblings(
+        installation_id=action.installation_id,
+        target_type=action.target_type,
+        target_id=action.target_id,
+        keep_id=action.id,
+    )
+    if update_message is not None:
+        try:
+            value = str(
+                action.payload_json.get("value")
+                or action.payload_json.get("mode")
+                or ""
+            )
+            label = f" ({value})" if value else ""
+            update_message(f"Working on a new version{label} — incoming below ↓")
+        except Exception:  # noqa: BLE001 — message update must never fail the action
+            logger.info("decision action: message update failed", exc_info=True)
+    return DecisionOutcome.applied if child_id is not None else DecisionOutcome.error
+
 
 def process_decision_action(
     session: Session,
@@ -187,12 +243,13 @@ def process_decision_action(
     """
 
     service = InteractiveActionService(session, signing_key=settings.encryption_key)
+    route = _canonical_route(action_id)
     result = service.claim(
         raw_key,
         actor_user_id=actor_user_id,
         team_id=team_id,
         channel_id=channel_id,
-        route=action_id,
+        route=route,
     )
     if result.status is ClaimStatus.not_found:
         return DecisionOutcome.not_found
@@ -206,7 +263,12 @@ def process_decision_action(
     if action is None or result.status is not ClaimStatus.ok:
         return DecisionOutcome.error
 
-    method_name, verb = _APPROVAL_ROUTES.get(action_id, ("", ""))
+    if route in (ROUTE_DOC_RERENDER, ROUTE_DOC_EDIT):
+        return _apply_document_action(
+            session, service, action, actor_user_id, update_message
+        )
+
+    method_name, verb = _APPROVAL_ROUTES.get(route, ("", ""))
     if not method_name:
         logger.info("decision action: unknown route %s", action_id)
         return DecisionOutcome.error

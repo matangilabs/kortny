@@ -22,8 +22,13 @@ from __future__ import annotations
 import uuid
 from datetime import timedelta
 
+from sqlalchemy.orm import Session
+
+from kortny.db.models import InteractiveAction, Task
 from kortny.slack import blockkit
 from kortny.slack.interactions import InteractiveActionService, MintedAction
+from kortny.tasks import TaskService
+from kortny.tasks.identity import TaskIdentity
 
 ROUTE_DOC_RERENDER = "kortny:v1:document.rerender"
 ROUTE_DOC_EDIT = "kortny:v1:document.edit"
@@ -53,11 +58,14 @@ def render_control_deck(
     allowed_user_id: str | None,
     allowed_channel_id: str | None,
     slack_team_id: str | None,
+    include_edit: bool = True,
 ) -> tuple[list[dict], list[MintedAction]]:
     """Build the control deck and mint an interactive_action per button.
 
     Returns (blocks, minted). The caller posts the blocks, then ``mark_sent``\\ s
-    each minted action with the resulting message ts.
+    each minted action with the resulting message ts. ``include_edit`` gates the
+    LLM edit buttons (shorten/lengthen/regenerate); the deterministic
+    format/theme/revert buttons are always present.
     """
 
     minted: list[MintedAction] = []
@@ -110,12 +118,17 @@ def render_control_deck(
         mint_button(theme.title(), ROUTE_DOC_RERENDER, "theme", theme)
         for theme in themes[: blockkit.MAX_ACTIONS_ELEMENTS]
     ]
-    edit_buttons = [
-        mint_button(label, ROUTE_DOC_EDIT, "edit", kind) for label, kind in EDIT_KINDS
-    ]
+    # Revert is a deterministic rerender (load an older version's spec); the
+    # edit buttons are LLM and gated by ``include_edit``.
+    extra_buttons: list[dict] = []
     if doc_version > 1:
-        edit_buttons.append(
+        extra_buttons.append(
             mint_button("↩ Revert", ROUTE_DOC_RERENDER, "revert", str(doc_version - 1))
+        )
+    if include_edit:
+        extra_buttons.extend(
+            mint_button(label, ROUTE_DOC_EDIT, "edit", kind)
+            for label, kind in EDIT_KINDS
         )
 
     base = f"kortny:doc:{doc_group_id}"
@@ -125,9 +138,85 @@ def render_control_deck(
         ),
         blockkit.actions(*format_buttons, block_id=f"{base}:format"[:255]),
         blockkit.actions(*theme_buttons, block_id=f"{base}:theme"[:255]),
-        blockkit.actions(*edit_buttons, block_id=f"{base}:edit"[:255]),
     ]
+    if extra_buttons:
+        blocks.append(blockkit.actions(*extra_buttons, block_id=f"{base}:edit"[:255]))
     return blocks, minted
+
+
+def process_document_action(
+    session: Session,
+    action: InteractiveAction,
+    *,
+    actor_user_id: str,
+    task_service: TaskService,
+) -> uuid.UUID | None:
+    """Spawn the child task that re-renders/edits the document for a clicked button.
+
+    The deterministic modes (format/theme/revert) become a ``document_rerender``
+    task the worker fast-path handles with no LLM; edit modes become a
+    ``document_edit`` task that runs the agent loop. Returns the child task id.
+    """
+
+    payload = action.payload_json or {}
+    group = str(payload.get("doc_group_id") or action.target_id or "")
+    base_version = payload.get("base_version")
+    if not group:
+        return None
+
+    # Thread the child's output under the original document's conversation.
+    parent = session.get(Task, action.task_id) if action.task_id else None
+    channel = (parent.slack_channel_id if parent else None) or action.slack_channel_id
+    if not channel:
+        return None
+    thread_ts = None
+    if parent is not None:
+        thread_ts = parent.slack_thread_ts or parent.slack_message_ts
+
+    if action.route == ROUTE_DOC_EDIT:
+        edit_kind = str(payload.get("value") or "regenerate")
+        input_text = (
+            f"Refine the document in this thread: {edit_kind} it. Load its latest "
+            "spec, apply only that change (preserve untouched blocks), and "
+            "re-render with document_studio."
+        )
+        identity_payload = {
+            "kind": "document_edit",
+            "doc_group_id": group,
+            "edit_kind": edit_kind,
+            "base_version": base_version,
+        }
+        source = "document_edit"
+    else:
+        mode = str(payload.get("mode") or "")
+        value = str(payload.get("value") or "")
+        input_text = f"Re-render document ({mode}={value})."
+        identity_payload = {
+            "kind": "document_rerender",
+            "doc_group_id": group,
+            "mode": mode,
+            "value": value,
+            "base_version": base_version,
+        }
+        source = "document_rerender"
+
+    child = task_service.create_task(
+        installation_id=action.installation_id,
+        slack_channel_id=channel,
+        slack_user_id=actor_user_id,
+        slack_thread_ts=thread_ts,
+        input=input_text,
+        parent_task_id=action.task_id,
+        identity=TaskIdentity.synthetic(
+            source=source,
+            # action.id keeps each click's identity unique so a retried handler
+            # doesn't collide with the first attempt.
+            source_id=f"{group}:{action.id}",
+            input_text=input_text,
+            payload=identity_payload,
+        ),
+    )
+    return child.id
 
 
 __all__ = [
@@ -137,5 +226,6 @@ __all__ = [
     "ROUTE_DOC_EDIT",
     "ROUTE_DOC_RERENDER",
     "TARGET_DOCUMENT",
+    "process_document_action",
     "render_control_deck",
 ]

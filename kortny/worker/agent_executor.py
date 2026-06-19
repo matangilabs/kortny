@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Protocol, cast
 
 from slack_sdk import WebClient
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from kortny.agent.capabilities import CapabilityOverview, build_capability_overview
@@ -47,6 +47,7 @@ from kortny.db.models import (
     TaskEventType,
 )
 from kortny.db.models import LLMProvider as DbLLMProvider
+from kortny.documents import theme_names
 from kortny.embeddings import EmbeddingBackend, EmbeddingIndex, create_embedding_backend
 from kortny.evals.retrieval.catalog_retriever import build_catalog_retrieve_fn
 from kortny.execution import task_workspace
@@ -112,6 +113,7 @@ from kortny.slack.comments import (
     generate_artifact_comment,
 )
 from kortny.slack.decisions import approval_decision, render_decision
+from kortny.slack.document_decisions import render_control_deck
 from kortny.slack.egress import parse_egress_allowlist
 from kortny.slack.humanizer import (
     ChannelStyleCardResolver,
@@ -139,12 +141,20 @@ from kortny.slack.source_index import SourceIndex
 from kortny.slack.thread_context import SlackThreadTranscriptProvider
 from kortny.tasks import TaskCancelledError, TaskService
 from kortny.tool_selection import ExternalToolProvider, ToolCard
-from kortny.tools import JsonObject, Tool, ToolRegistry, WebSearchTool
+from kortny.tools import (
+    JsonObject,
+    RecoverableToolError,
+    Tool,
+    ToolRegistry,
+    WebSearchTool,
+)
 from kortny.tools.catalog import (
     native_slack_context_hint_names,
     runtime_native_tool_names,
     tool_descriptor_from_class,
 )
+from kortny.tools.document_studio import _FORMATS as _DOC_STUDIO_FORMATS
+from kortny.tools.document_studio import DocumentStudioTool
 from kortny.tools.find_tools import FindToolsTool
 from kortny.tools.native_runtime import (
     NativeToolBuildContext,
@@ -193,6 +203,10 @@ ADK_QUICK_FINAL_AUTHORS = frozenset(
     }
 )
 logger = logging.getLogger(__name__)
+
+# Reverse of Document Studio's format table, to recover the current format of a
+# stored artifact from its MIME type (HIG-244 living-document re-render).
+_DOC_MIME_TO_FORMAT = {mime: fmt for fmt, (mime, _ext) in _DOC_STUDIO_FORMATS.items()}
 
 
 UNIFIED_DEPTH_DECISION_MESSAGE = "unified_depth_decision"
@@ -306,8 +320,20 @@ class AgentTaskExecutor:
         try:
             logger.info("agent executor started task_id=%s", task.id)
             with task_workspace(task.id, base_dir=self.workspace_base_dir) as workspace:
-                tier0_decision = Tier0Router().route(task)
-                if tier0_decision is not None:
+                identity_payload = (
+                    task.identity_payload
+                    if isinstance(task.identity_payload, dict)
+                    else {}
+                )
+                if identity_payload.get("kind") == "document_rerender":
+                    agent_result = self._run_document_rerender(
+                        settings=settings,
+                        session=session,
+                        task=task,
+                        task_service=task_service,
+                        working_dir=workspace.path,
+                    )
+                elif (tier0_decision := Tier0Router().route(task)) is not None:
                     agent_result = self._run_tier0_route(
                         session=session,
                         task=task,
@@ -579,6 +605,173 @@ class AgentTaskExecutor:
             turns=0,
             artifact_count=result.artifact_count,
         )
+
+    def _run_document_rerender(
+        self,
+        *,
+        settings: Settings,
+        session: Session,
+        task: Task,
+        task_service: TaskService,
+        working_dir: Path,
+    ) -> AgentRunResult:
+        """Re-render a stored document spec into a new version, no LLM (HIG-244).
+
+        Loads the canonical spec off the target Artifact, applies the one
+        changed render param (format / theme, or reverts to an older version's
+        spec), and re-renders through the same Document Studio path. Fail-open:
+        a missing/broken spec returns a plain message rather than crashing.
+        """
+
+        payload = (
+            task.identity_payload if isinstance(task.identity_payload, dict) else {}
+        )
+        mode = str(payload.get("mode") or "")
+        value = str(payload.get("value") or "")
+        try:
+            group = uuid.UUID(str(payload.get("doc_group_id") or ""))
+        except ValueError:
+            return AgentRunResult(
+                task_id=task.id,
+                result_summary="I couldn't identify the document to re-render.",
+                turns=0,
+                artifact_count=0,
+            )
+
+        if mode == "revert":
+            try:
+                target_version = int(value)
+            except ValueError:
+                target_version = 1
+            base = session.scalar(
+                select(Artifact).where(
+                    Artifact.doc_group_id == group,
+                    Artifact.doc_version == target_version,
+                )
+            )
+        else:
+            base = session.scalar(
+                select(Artifact)
+                .where(Artifact.doc_group_id == group)
+                .order_by(Artifact.doc_version.desc())
+            )
+        if base is None or base.spec_json is None:
+            return AgentRunResult(
+                task_id=task.id,
+                result_summary="I couldn't find that document to re-render.",
+                turns=0,
+                artifact_count=0,
+            )
+
+        latest = (
+            session.scalar(
+                select(func.max(Artifact.doc_version)).where(
+                    Artifact.doc_group_id == group
+                )
+            )
+            or 1
+        )
+        spec_args = dict(base.spec_json)
+        current_format = _DOC_MIME_TO_FORMAT.get(base.mime_type or "", "pdf")
+        if mode == "format":
+            target_format = (
+                value if value in _DOC_MIME_TO_FORMAT.values() else current_format
+            )
+        elif mode == "theme":
+            spec_args["theme"] = value
+            target_format = current_format
+        else:  # revert — re-render the older version's spec as-is
+            target_format = current_format
+
+        args: dict[str, Any] = {
+            **spec_args,
+            "format": target_format,
+            "doc_group_id": str(group),
+            "base_version": latest,
+        }
+        font_paths = tuple(
+            p for p in (settings.document_font_paths or "").split(":") if p
+        )
+        tool = DocumentStudioTool(
+            working_dir=working_dir,
+            font_paths=font_paths,
+            session=session,
+            task_id=task.id,
+            task_service=task_service,
+        )
+        try:
+            result = tool.invoke(args)
+        except RecoverableToolError as exc:
+            return AgentRunResult(
+                task_id=task.id,
+                result_summary=f"I couldn't re-render that document: {exc.message}",
+                turns=0,
+                artifact_count=0,
+            )
+        new_version = result.output.get("doc_version")
+        verb = "Reverted" if mode == "revert" else "Re-rendered"
+        return AgentRunResult(
+            task_id=task.id,
+            result_summary=f"{verb} the document as {target_format.upper()} (v{new_version}).",
+            turns=0,
+            artifact_count=1,
+        )
+
+    def _post_document_deck(
+        self,
+        *,
+        settings: Settings,
+        session: Session,
+        task: Task,
+        task_service: TaskService,
+        poster: SlackPoster,
+        thread: SlackThread,
+        artifacts: list[Artifact],
+    ) -> None:
+        """Post the living-document control deck under the newest doc artifact."""
+
+        doc_artifacts = [a for a in artifacts if a.doc_group_id is not None]
+        if not doc_artifacts:
+            return
+        latest = doc_artifacts[0]  # _post_outputs orders newest-first
+        assert latest.doc_group_id is not None
+        interactions = InteractiveActionService(
+            session, signing_key=settings.encryption_key
+        )
+        blocks, minted = render_control_deck(
+            interactions,
+            installation_id=task.installation_id,
+            task_id=task.id,
+            doc_group_id=latest.doc_group_id,
+            doc_version=latest.doc_version or 1,
+            current_format=_DOC_MIME_TO_FORMAT.get(latest.mime_type or "", "pdf"),
+            themes=list(theme_names()),
+            allowed_user_id=task.slack_user_id,
+            allowed_channel_id=task.slack_channel_id,
+            slack_team_id=_installation_team_id(session, task.installation_id),
+            # Slice 3 wires the deterministic buttons; LLM edit buttons land next.
+            include_edit=False,
+        )
+        message_ts = cast(
+            str,
+            poster.post_message(
+                thread,
+                "Refine this document:",
+                blocks=blocks,
+                purpose="document_control_deck",
+                idempotency_purpose=(
+                    f"document_control_deck:{latest.doc_group_id}:{latest.doc_version}"
+                ),
+            ),
+        )
+        for action in minted:
+            interactions.mark_sent(
+                action.action,
+                channel_id=task.slack_channel_id or "",
+                message_ts=message_ts,
+                block_id=blocks[-1].get("block_id"),
+                slack_action_id=action.action.route,
+            )
 
     def _run_tier0_route(
         self,
@@ -1991,6 +2184,15 @@ class AgentTaskExecutor:
                 initial_comment=initial_comment,
                 title=artifact.filename,
             )
+        self._post_document_deck(
+            settings=settings,
+            session=session,
+            task=task,
+            task_service=task_service,
+            poster=poster,
+            thread=thread,
+            artifacts=artifacts,
+        )
         poster.clear_assistant_status(thread)
         return None
 
