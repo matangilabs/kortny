@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import mimetypes
 import re
+import zipfile
 from collections.abc import Mapping
 from html import unescape
 from html.parser import HTMLParser
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import unquote, urlparse
@@ -21,6 +23,11 @@ DEFAULT_MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024
 DEFAULT_EXTRACTED_TEXT_MAX_CHARS = 100_000
 SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 SLACK_FILE_ID_RE = re.compile(r"^F[A-Z0-9]+$")
+
+# Zip-bomb guard constants for Office files (.docx/.xlsx/.pptx are ZIP archives)
+MAX_OFFICE_UNCOMPRESSED_BYTES = 200 * 1024 * 1024  # 200 MB
+MAX_OFFICE_ZIP_ENTRIES = 5000
+MAX_OFFICE_COMPRESSION_RATIO = 200
 
 
 class SlackFileReadError(RuntimeError):
@@ -49,7 +56,7 @@ class SlackFileReadTool:
     description = (
         "Downloads a Slack file by file_id or private Slack file URL, saves it in "
         "the current task workspace, and extracts text for PDFs, plain text, "
-        "Markdown, CSV, and HTML."
+        "Markdown, CSV, HTML, DOCX, XLSX, and PPTX."
     )
     parameters: JsonSchema = {
         "type": "object",
@@ -143,11 +150,14 @@ class SlackFileReadTool:
             "path": str(output_path),
             "size_bytes": len(content),
             "extraction_supported": extraction.supported,
+            "backend": extraction.backend,
         }
         if extraction.text is not None:
             output["extracted_text"] = extraction.text
             output["extracted_text_chars"] = len(extraction.text)
             output["extracted_text_truncated"] = extraction.truncated
+        if extraction.warnings:
+            output["warnings"] = list(extraction.warnings)
 
         return ToolResult(output=output)
 
@@ -246,10 +256,16 @@ class TextExtraction:
         supported: bool,
         text: str | None = None,
         truncated: bool = False,
+        backend: str = "local",
+        warnings: tuple[str, ...] = (),
+        recoverable: bool = False,
     ) -> None:
         self.supported = supported
         self.text = text
         self.truncated = truncated
+        self.backend = backend
+        self.warnings = warnings
+        self.recoverable = recoverable
 
 
 def _file_request(args: Mapping[str, Any]) -> FileRequest:
@@ -360,6 +376,47 @@ def _mime_type(
     )
 
 
+def _check_office_zip_bomb(content: bytes) -> TextExtraction | None:
+    """Inspect Office file ZIP structure for zip-bomb characteristics.
+
+    Returns a TextExtraction (unsupported/recoverable) if the file is unsafe,
+    or None if the file is safe to parse.
+    """
+    try:
+        with zipfile.ZipFile(BytesIO(content)) as zf:
+            entries = zf.infolist()
+    except zipfile.BadZipFile:
+        return TextExtraction(supported=False)
+
+    if len(entries) > MAX_OFFICE_ZIP_ENTRIES:
+        return TextExtraction(
+            supported=False,
+            recoverable=True,
+            warnings=("office_file_exceeds_safe_limits",),
+        )
+
+    total_uncompressed = sum(e.file_size for e in entries)
+    if total_uncompressed > MAX_OFFICE_UNCOMPRESSED_BYTES:
+        return TextExtraction(
+            supported=False,
+            recoverable=True,
+            warnings=("office_file_exceeds_safe_limits",),
+        )
+
+    compressed = sum(e.compress_size for e in entries)
+    if (
+        compressed > 0
+        and total_uncompressed / compressed > MAX_OFFICE_COMPRESSION_RATIO
+    ):
+        return TextExtraction(
+            supported=False,
+            recoverable=True,
+            warnings=("office_file_exceeds_safe_limits",),
+        )
+
+    return None
+
+
 def _extract_text(
     path: Path,
     *,
@@ -368,11 +425,35 @@ def _extract_text(
     max_chars: int,
 ) -> TextExtraction:
     if _is_pdf(path, mime_type):
-        return _bounded_text(_extract_pdf_text(path), max_chars=max_chars)
+        text = _extract_pdf_text(path)
+        result = _bounded_text(text, max_chars=max_chars)
+        result.backend = "pdf_textlayer"
+        return result
     if _is_html(path, mime_type):
-        return _bounded_text(_extract_html_text(content), max_chars=max_chars)
+        text = _extract_html_text(content)
+        result = _bounded_text(text, max_chars=max_chars)
+        result.backend = "html"
+        return result
     if _is_text_like(path, mime_type):
-        return _bounded_text(_decode_text(content), max_chars=max_chars)
+        text = _decode_text(content)
+        result = _bounded_text(text, max_chars=max_chars)
+        result.backend = "text"
+        return result
+    if _is_docx(path, mime_type):
+        bomb = _check_office_zip_bomb(content)
+        if bomb is not None:
+            return bomb
+        return _extract_docx_text(path, max_chars=max_chars)
+    if _is_xlsx(path, mime_type):
+        bomb = _check_office_zip_bomb(content)
+        if bomb is not None:
+            return bomb
+        return _extract_xlsx_text(path, max_chars=max_chars)
+    if _is_pptx(path, mime_type):
+        bomb = _check_office_zip_bomb(content)
+        if bomb is not None:
+            return bomb
+        return _extract_pptx_text(path, max_chars=max_chars)
     return TextExtraction(supported=False)
 
 
@@ -395,6 +476,99 @@ def _decode_text(content: bytes) -> str:
     return content.decode("utf-8", errors="replace")
 
 
+def _extract_docx_text(path: Path, *, max_chars: int) -> TextExtraction:
+    try:
+        import docx
+        from docx.oxml.ns import qn
+        from docx.table import Table
+        from docx.text.paragraph import Paragraph
+
+        doc = docx.Document(str(path))
+        parts: list[str] = []
+        for child in doc.element.body:
+            tag = child.tag
+            if tag == qn("w:p"):
+                para = Paragraph(child, doc)
+                text = para.text
+                if text:
+                    parts.append(text)
+            elif tag == qn("w:tbl"):
+                table = Table(child, doc)
+                for row in table.rows:
+                    row_cells = " | ".join(cell.text for cell in row.cells)
+                    if row_cells.strip():
+                        parts.append(row_cells)
+        text = "\n".join(parts)
+        result = _bounded_text(text, max_chars=max_chars)
+        result.backend = "docx"
+        return result
+    except Exception:
+        return TextExtraction(
+            supported=False,
+            recoverable=True,
+            warnings=("docx_parse_error",),
+        )
+
+
+def _extract_xlsx_text(path: Path, *, max_chars: int) -> TextExtraction:
+    try:
+        import openpyxl
+
+        wb = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
+        parts: list[str] = []
+        for sheet_name in wb.sheetnames:
+            ws = wb[sheet_name]
+            parts.append(f"# Sheet: {sheet_name}")
+            for row in ws.iter_rows():
+                cells = " | ".join(
+                    str(cell.value) for cell in row if cell.value is not None
+                )
+                if cells.strip():
+                    parts.append(cells)
+        wb.close()
+        text = "\n".join(parts)
+        result = _bounded_text(text, max_chars=max_chars)
+        result.backend = "xlsx"
+        return result
+    except Exception:
+        return TextExtraction(
+            supported=False,
+            recoverable=True,
+            warnings=("xlsx_parse_error",),
+        )
+
+
+def _extract_pptx_text(path: Path, *, max_chars: int) -> TextExtraction:
+    try:
+        from pptx import Presentation
+
+        prs = Presentation(str(path))
+        parts: list[str] = []
+        for slide_num, slide in enumerate(prs.slides, start=1):
+            parts.append(f"## Slide {slide_num}")
+            for shape in slide.shapes:
+                if shape.has_text_frame:
+                    for para in shape.text_frame.paragraphs:
+                        text = para.text
+                        if text.strip():
+                            parts.append(text)
+                elif shape.has_table:
+                    for row in shape.table.rows:
+                        row_cells = " | ".join(cell.text for cell in row.cells)
+                        if row_cells.strip():
+                            parts.append(row_cells)
+        text = "\n".join(parts)
+        result = _bounded_text(text, max_chars=max_chars)
+        result.backend = "pptx"
+        return result
+    except Exception:
+        return TextExtraction(
+            supported=False,
+            recoverable=True,
+            warnings=("pptx_parse_error",),
+        )
+
+
 def _bounded_text(text: str, *, max_chars: int) -> TextExtraction:
     if len(text) <= max_chars:
         return TextExtraction(supported=True, text=text, truncated=False)
@@ -413,6 +587,29 @@ def _is_text_like(path: Path, mime_type: str) -> bool:
     if mime_type.startswith("text/"):
         return True
     return path.suffix.lower() in {".txt", ".md", ".markdown", ".csv"}
+
+
+def _is_docx(path: Path, mime_type: str) -> bool:
+    return (
+        mime_type
+        == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        or path.suffix.lower() == ".docx"
+    )
+
+
+def _is_xlsx(path: Path, mime_type: str) -> bool:
+    return (
+        mime_type == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        or path.suffix.lower() == ".xlsx"
+    )
+
+
+def _is_pptx(path: Path, mime_type: str) -> bool:
+    return (
+        mime_type
+        == "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        or path.suffix.lower() == ".pptx"
+    )
 
 
 def _ensure_size_allowed(size_bytes: int, max_file_size_bytes: int) -> None:

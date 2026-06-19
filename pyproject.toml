@@ -17,6 +17,7 @@ dependencies = [
     "jinja2>=3.1",
     "litellm>=1.83",
     "mcp>=1.27.2",
+    "openpyxl>=3.1.5",
     "opentelemetry-api>=1.28",
     "opentelemetry-exporter-otlp-proto-http>=1.28",
     "opentelemetry-sdk>=1.28",
@@ -116,6 +117,21 @@ ignore_missing_imports = true
 [[tool.mypy.overrides]]
 # XlsxWriter ships no py.typed marker.
 module = ["xlsxwriter.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# openpyxl ships no py.typed marker.
+module = ["openpyxl.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# python-docx ships no py.typed marker.
+module = ["docx.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# python-pptx ships no py.typed marker.
+module = ["pptx.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
