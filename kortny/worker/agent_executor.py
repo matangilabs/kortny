@@ -208,6 +208,10 @@ logger = logging.getLogger(__name__)
 # stored artifact from its MIME type (HIG-244 living-document re-render).
 _DOC_MIME_TO_FORMAT = {mime: fmt for fmt, (mime, _ext) in _DOC_STUDIO_FORMATS.items()}
 
+# Let a files_upload_v2 share settle before posting the control deck, so the deck
+# renders under the document, not above it (HIG-244).
+_DOC_DECK_SETTLE_SECONDS = 1.5
+
 
 UNIFIED_DEPTH_DECISION_MESSAGE = "unified_depth_decision"
 
@@ -735,6 +739,11 @@ class AgentTaskExecutor:
             return
         latest = doc_artifacts[0]  # _post_outputs orders newest-first
         assert latest.doc_group_id is not None
+        # files_upload_v2 returns before Slack finalizes the file-share message
+        # ts, so an immediate chat.postMessage (the deck) would render ABOVE the
+        # document. Let the share settle so the deck lands under the file.
+        # ponytail: fixed settle; poll conversations.history if this ever flakes.
+        time.sleep(_DOC_DECK_SETTLE_SECONDS)
         interactions = InteractiveActionService(
             session, signing_key=settings.encryption_key
         )
