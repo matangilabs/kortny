@@ -263,6 +263,24 @@ def test_records_artifact_row_and_event(db_session: Session, tmp_path: Path) -> 
     assert result.output["artifact_id"] == str(artifact.id)
     assert event is not None
     assert event.payload["artifact_id"] == str(artifact.id)
+    # Living-document persistence: the canonical spec rides on the artifact.
+    assert artifact.doc_group_id is not None
+    assert artifact.doc_version == 1
+    assert artifact.spec_json is not None
+    assert artifact.spec_json["title"] == "Test Report"
+    assert result.output["doc_group_id"] == str(artifact.doc_group_id)
+
+
+def test_fresh_render_mints_group_v1_and_rerender_increments(tmp_path: Path) -> None:
+    tool = DocumentStudioTool(working_dir=tmp_path)
+    first = tool.invoke(_args())
+    assert first.output["doc_version"] == 1
+    group = first.output["doc_group_id"]
+
+    # A re-render of the same group at base_version 1 → v2, same group.
+    second = tool.invoke(_args(doc_group_id=group, base_version=1))
+    assert second.output["doc_group_id"] == group
+    assert second.output["doc_version"] == 2
 
 
 def _cleanup(session: Session) -> None:

@@ -12,6 +12,7 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
+from typing import Any
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
@@ -2662,11 +2663,20 @@ class Artifact(Base):
     storage_path: Mapped[str | None] = mapped_column(String)
     slack_file_id: Mapped[str | None] = mapped_column(String)
     posted_at: Mapped[datetime | None] = mapped_column(TZ)
+    # Living-document fields (HIG-244): the canonical post-critique spec is kept
+    # so a doc can be re-rendered/edited from buttons. All versions of one doc
+    # share doc_group_id; doc_version increments per visible revision.
+    doc_group_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    doc_version: Mapped[int | None] = mapped_column(Integer)
+    spec_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(
         TZ, nullable=False, server_default=func.now()
     )
 
-    __table_args__ = (Index("idx_artifacts_task", "task_id"),)
+    __table_args__ = (
+        Index("idx_artifacts_task", "task_id"),
+        Index("idx_artifacts_doc_group", "doc_group_id", "doc_version"),
+    )
 
 
 class ModelPricing(Base):

@@ -1898,7 +1898,9 @@ class AgentTaskExecutor:
                     Artifact.storage_path.is_not(None),
                     Artifact.posted_at.is_(None),
                 )
-                .order_by(Artifact.created_at)
+                # Newest first so a re-render's latest version (and its comment)
+                # leads, not the superseded original (HIG-244).
+                .order_by(Artifact.created_at.desc())
             )
         )
         if not artifacts:

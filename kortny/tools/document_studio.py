@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from pydantic import ValidationError
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from kortny.db.models import Artifact, TaskEventType
@@ -274,6 +275,11 @@ class DocumentStudioTool:
         output_path.write_bytes(data)
         size_bytes = len(data)
 
+        # Living-document identity: a new group for a fresh doc, or the next
+        # version of an existing group on a re-render/edit (HIG-244).
+        doc_group_id, doc_version = self._resolve_doc_identity(args)
+        spec_json = spec.model_dump(mode="json")
+
         artifact = ToolArtifact(
             filename=filename,
             path=str(output_path),
@@ -289,6 +295,9 @@ class DocumentStudioTool:
                     path=output_path,
                     size_bytes=size_bytes,
                     mime_type=mime_type,
+                    doc_group_id=doc_group_id,
+                    doc_version=doc_version,
+                    spec_json=spec_json,
                 ).id
             )
 
@@ -302,6 +311,8 @@ class DocumentStudioTool:
                 "doc_kind": spec.doc_kind.value,
                 "block_count": len(spec.blocks),
                 "artifact_id": artifact_id,
+                "doc_group_id": str(doc_group_id),
+                "doc_version": doc_version,
                 "critique": {
                     "autofixes": sum(1 for i in issues if i.autofix == "applied"),
                     "warnings": sum(1 for i in issues if i.severity == "warning"),
@@ -310,6 +321,30 @@ class DocumentStudioTool:
             },
             artifacts=(artifact,),
         )
+
+    def _resolve_doc_identity(self, args: JsonObject) -> tuple[uuid.UUID, int]:
+        """A fresh group for a new doc, or the next version of an existing one."""
+
+        raw_group = args.get("doc_group_id")
+        if not isinstance(raw_group, str) or not raw_group:
+            return uuid.uuid4(), 1
+        try:
+            group = uuid.UUID(raw_group)
+        except ValueError:
+            return uuid.uuid4(), 1
+        base = args.get("base_version")
+        prior = (
+            base if isinstance(base, int) and base >= 1 else self._latest_version(group)
+        )
+        return group, prior + 1
+
+    def _latest_version(self, group: uuid.UUID) -> int:
+        if self.session is None:
+            return 0
+        value = self.session.scalar(
+            select(func.max(Artifact.doc_version)).where(Artifact.doc_group_id == group)
+        )
+        return value or 0
 
     def _render(self, spec: DocumentSpec, fmt: str) -> bytes:
         if fmt == "pptx":
@@ -321,7 +356,15 @@ class DocumentStudioTool:
         return render_spec_pdf(spec, font_paths=self.font_paths)
 
     def _record_artifact(
-        self, *, filename: str, path: Path, size_bytes: int, mime_type: str
+        self,
+        *,
+        filename: str,
+        path: Path,
+        size_bytes: int,
+        mime_type: str,
+        doc_group_id: uuid.UUID,
+        doc_version: int,
+        spec_json: dict[str, Any],
     ) -> Artifact:
         assert self.session is not None
         assert self.task_id is not None
@@ -332,6 +375,9 @@ class DocumentStudioTool:
             mime_type=mime_type,
             size_bytes=size_bytes,
             storage_path=str(path),
+            doc_group_id=doc_group_id,
+            doc_version=doc_version,
+            spec_json=spec_json,
         )
         self.session.add(artifact)
         self.session.flush()
@@ -353,7 +399,7 @@ class DocumentStudioTool:
 
 # The IR fields live alongside the tool-only knobs in args; strip the knobs
 # before validating the spec.
-_NON_SPEC_KEYS = frozenset({"filename", "format"})
+_NON_SPEC_KEYS = frozenset({"filename", "format", "doc_group_id", "base_version"})
 
 
 def _parse_spec(args: JsonObject) -> DocumentSpec:
