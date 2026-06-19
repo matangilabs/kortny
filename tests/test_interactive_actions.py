@@ -15,7 +15,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import Engine, delete
+from sqlalchemy import Engine, delete, select
 from sqlalchemy.orm import Session
 
 from kortny.db.models import Installation, InteractiveAction
@@ -115,6 +115,73 @@ def _mint_sent(
         now=NOW,
     )
     return minted.raw_key
+
+
+def test_control_deck_mints_buttons_for_every_action(db_session: Session) -> None:
+    import uuid
+
+    from kortny.slack.document_decisions import (
+        RERENDER_FORMATS,
+        ROUTE_DOC_RERENDER,
+        TARGET_DOCUMENT,
+        render_control_deck,
+    )
+
+    installation = _installation(db_session)
+    service = _service(db_session)
+    group = uuid.uuid4()
+    blocks, minted = render_control_deck(
+        service,
+        installation_id=installation.id,
+        task_id=None,
+        doc_group_id=group,
+        doc_version=2,
+        current_format="pdf",
+        themes=["editorial", "minimal"],
+        allowed_user_id=OWNER,
+        allowed_channel_id=CHANNEL,
+        slack_team_id=TEAM,
+    )
+    # 4 formats + 2 themes + 3 edits + 1 revert (v>1).
+    assert len(minted) == len(RERENDER_FORMATS) + 2 + 3 + 1
+    # Every button is a live row scoped to this document group.
+    rows = db_session.scalars(
+        select(InteractiveAction).where(
+            InteractiveAction.target_type == TARGET_DOCUMENT,
+            InteractiveAction.target_id == str(group),
+        )
+    ).all()
+    assert len(rows) == len(minted)
+    assert all(r.payload_json["base_version"] == 2 for r in rows)
+    # Format buttons carry the rerender route + the target format.
+    fmt_rows = [r for r in rows if r.action_kind == "format"]
+    assert {r.payload_json["value"] for r in fmt_rows} == set(RERENDER_FORMATS)
+    assert all(r.route == ROUTE_DOC_RERENDER for r in fmt_rows)
+    # Block Kit shape: a section + three actions rows.
+    assert blocks[0]["type"] == "section"
+    assert [b["type"] for b in blocks[1:]] == ["actions", "actions", "actions"]
+
+
+def test_control_deck_omits_revert_for_v1(db_session: Session) -> None:
+    import uuid
+
+    from kortny.slack.document_decisions import render_control_deck
+
+    installation = _installation(db_session)
+    service = _service(db_session)
+    _, minted = render_control_deck(
+        service,
+        installation_id=installation.id,
+        task_id=None,
+        doc_group_id=uuid.uuid4(),
+        doc_version=1,
+        current_format="pdf",
+        themes=["editorial"],
+        allowed_user_id=OWNER,
+        allowed_channel_id=CHANNEL,
+        slack_team_id=TEAM,
+    )
+    assert not any(m.action.action_kind == "revert" for m in minted)
 
 
 def test_mint_stores_hash_not_raw_key(db_session: Session) -> None:
