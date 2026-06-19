@@ -2493,6 +2493,7 @@ def test_agent_executor_humanizes_final_text_before_posting(
     assert response_record["user_request"] == task.input
     assert [skill["slug"] for skill in response_record["procedural_skills"]] == [
         "slack-humanizer",
+        "slack-block-kit",
         "analyst-grade-synthesis",
     ]
     skill_events = [
@@ -2502,6 +2503,7 @@ def test_agent_executor_humanizes_final_text_before_posting(
     ]
     assert {event.payload["slug"] for event in skill_events} == {
         "slack-humanizer",
+        "slack-block-kit",
         "analyst-grade-synthesis",
     }
     skill_invocations = list(
@@ -2511,7 +2513,7 @@ def test_agent_executor_humanizes_final_text_before_posting(
             )
         )
     )
-    assert len(skill_invocations) == 2
+    assert len(skill_invocations) == 3
 
 
 def test_agent_executor_builds_research_response_record_for_tool_results(
@@ -2638,6 +2640,7 @@ def test_agent_executor_builds_research_response_record_for_tool_results(
     assert "tempfile" in synthesis_context["evidence"][0]["content"]
     assert [skill["slug"] for skill in response_record["procedural_skills"]] == [
         "slack-humanizer",
+        "slack-block-kit",
         "research-synthesis",
     ]
     assert response_record["actions_taken"][0]["tool"] == "web_search"
@@ -2751,6 +2754,7 @@ def test_agent_executor_builds_analyst_audit_response_record(
     ]
     assert [skill["slug"] for skill in response_record["procedural_skills"]] == [
         "slack-humanizer",
+        "slack-block-kit",
         "analyst-grade-synthesis",
     ]
 

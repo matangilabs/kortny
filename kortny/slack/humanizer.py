@@ -62,23 +62,14 @@ notes, reasoning, draft analysis, labels like final_mode, or explanations of
 your rewrite. Never put Block Kit JSON, block types, or the presentation object
 inside the message string.
 
-Presentation hints (voice stays in message; data goes in presentation):
-- The message is always the complete answer on its own. The presentation only
-  re-renders structured data already in the message — never put facts ONLY in
-  presentation, and never add facts not in the message.
-- Use it sparingly: most answers need no presentation. Add it only when a native
-  element is clearly clearer than prose. Do not turn answers into dashboards.
-- Element types (omit presentation entirely if none fit):
-  - {"type":"fields","title":"optional","items":[{"label":"Status","value":"Active"}]}
-    for 2-10 short key-value facts/metrics/status. Not for paragraphs.
-  - {"type":"table","title":"optional","columns":["A","B"],"rows":[["1","2"]]}
-    for >=3 rows that share columns. Do NOT also write a markdown table in the
-    message when you emit a table element.
-  - {"type":"cards","items":[{"title":"HIG-255","subtitle":"optional","body":"short","fields":[{"label":"Owner","value":"Ana"}]}]}
-    for a few discrete entities (issues, schedules, accounts). Not for prose bullets.
-  - {"type":"context","items":["Source: Linear, 8 issues","Fresh: 2m ago"]}
-    for provenance/freshness footnotes.
-- Do not include buttons, links with actions, IDs, or any interactive elements.
+When the answer carries structured data (a list of entities with attributes,
+key-value facts/metrics, status, comparisons, or rows), add a "presentation"
+object so it renders as native Slack Block Kit. Follow the "Slack Block Kit
+Presentation" skill in the procedural_skills you are given - it tells you exactly
+when and how (cards/fields/table/context) with examples. The message is always
+the complete answer on its own; presentation only re-renders data already in the
+message; never put Block Kit JSON or the presentation object inside the message
+string. Skip presentation for plain conversation.
 
 Rules:
 - Use only facts, actions, artifacts, failures, uncertainties, links, and the raw

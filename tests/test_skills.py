@@ -117,9 +117,10 @@ def test_skill_registry_selects_analyst_skill_for_audit_shape(
 
     assert [activation.slug for activation in activations] == [
         "slack-humanizer",
+        "slack-block-kit",
         "analyst-grade-synthesis",
     ]
-    assert len(invocations) == 2
+    assert len(invocations) == 3
     assert all(
         invocation.payload.get("response_shape") == "analyst_audit"
         for invocation in invocations
@@ -165,10 +166,19 @@ def test_skill_registry_selects_and_records_humanizer_skill(
         )
     )
 
-    assert [activation.slug for activation in activations] == ["slack-humanizer"]
-    assert len(invocations) == 1
-    assert invocations[0].invocation_kind == "response_humanizer"
-    assert invocations[0].response_mode == "research_summary"
+    # The humanizer always gets the voice skill plus the Block Kit presentation
+    # skill (HIG-255) so it reliably renders structured data as native blocks.
+    assert [activation.slug for activation in activations] == [
+        "slack-humanizer",
+        "slack-block-kit",
+    ]
+    assert {invocation.invocation_kind for invocation in invocations} == {
+        "response_humanizer"
+    }
+    assert {invocation.response_mode for invocation in invocations} == {
+        "research_summary"
+    }
+    assert any(activation.slug == "slack-block-kit" for activation in activations)
     assert any(
         event.payload.get("message") == SKILL_CATALOG_BUILT_MESSAGE
         and "slack-humanizer" in event.payload.get("candidate_slugs", [])
