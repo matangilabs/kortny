@@ -29,6 +29,4 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_index(
-        "idx_interactive_actions_target", table_name="interactive_actions"
-    )
+    op.drop_index("idx_interactive_actions_target", table_name="interactive_actions")

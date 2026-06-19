@@ -264,12 +264,17 @@ class InteractiveActionService:
             and action.allowed_channel_id != channel_id
         ):
             return False
-        if action.allowed_user_id is not None and action.allowed_user_id != actor_user_id:
+        if (
+            action.allowed_user_id is not None
+            and action.allowed_user_id != actor_user_id
+        ):
             return False
         # required_role is fail-closed: if a role is required, the caller must
         # supply the actor's role and it must match. An action that asks for a
         # role but gets no role denies, so a role gate can never silently pass.
-        return not (action.required_role is not None and action.required_role != actor_role)
+        return not (
+            action.required_role is not None and action.required_role != actor_role
+        )
 
     def _record_denial(self, action: InteractiveAction, moment: datetime) -> None:
         action.denied_count = (action.denied_count or 0) + 1
