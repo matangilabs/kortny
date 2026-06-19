@@ -68,6 +68,9 @@ DEFAULT_GRAPH_CONTEXT_MAX_CHARS = 1_500
 DEFAULT_GRAPH_CONTEXT_MAX_ITEMS = 12
 DEFAULT_GRAPH_CONTEXT_MAX_HOPS = 2
 DEFAULT_SKILLS_CONTEXT_MAX_CHARS = 4_000
+# HIG-244: the in-thread document spec injected so the agent revises an existing
+# doc in place instead of regenerating it.
+DEFAULT_DOCUMENT_CONTEXT_MAX_CHARS = 6_000
 # HIG-239: tighten the ranked index from 30 → 15. The curated pack pushes the
 # enabled-skill count up; a smaller, sharper index keeps the L1 block focused
 # and within the 4k char budget. Omissions beyond K are still recorded.
@@ -352,6 +355,42 @@ class ContextAssembler:
         )
         self.episode_service = EpisodeService(session, task_service=self.task_service)
 
+    def _document_context(self, task: Task) -> str | None:
+        """Surface the latest document already in this thread (HIG-244).
+
+        Lets a conversational "shorten that" / "add a Q3 chart" revise the
+        existing document in place — the agent re-renders the same doc_group's
+        next version — rather than regenerating from scratch (the Viktor gap).
+        """
+
+        thread_ts = task.slack_thread_ts
+        if not thread_ts:
+            return None
+        artifact = self.session.scalar(
+            select(Artifact)
+            .join(Task, Artifact.task_id == Task.id)
+            .where(
+                Task.installation_id == task.installation_id,
+                Task.slack_channel_id == task.slack_channel_id,
+                Task.slack_thread_ts == thread_ts,
+                Artifact.doc_group_id.is_not(None),
+                Artifact.spec_json.is_not(None),
+            )
+            .order_by(Artifact.created_at.desc())
+        )
+        if artifact is None or artifact.spec_json is None:
+            return None
+        spec_json = json.dumps(artifact.spec_json)[:DEFAULT_DOCUMENT_CONTEXT_MAX_CHARS]
+        return (
+            "A document already exists in this thread (doc_group_id="
+            f"{artifact.doc_group_id}, version {artifact.doc_version}). If the "
+            "user asks to revise, extend, shorten, or otherwise change it, call "
+            f'document_studio with doc_group_id="{artifact.doc_group_id}" and '
+            f"base_version={artifact.doc_version}, editing the spec below and "
+            "preserving untouched blocks — do NOT start a new document.\n\n"
+            f"Current document spec (JSON):\n{spec_json}"
+        )
+
     def build_for_task(self, task: Task) -> ContextPackage:
         """Build prompt messages and context-selection metadata."""
 
@@ -407,6 +446,10 @@ class ContextAssembler:
         skills_context = self._skills_context(task)
         if skills_context.content:
             messages.append(ChatMessage(role="system", content=skills_context.content))
+
+        document_context = self._document_context(task)
+        if document_context:
+            messages.append(ChatMessage(role="system", content=document_context))
 
         messages.append(ChatMessage(role="user", content=task.input))
 
