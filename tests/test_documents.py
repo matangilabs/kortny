@@ -453,6 +453,23 @@ def test_validate_render_flags_garbage_and_passes_real_files() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Canvas (markdown delivery)
+# --------------------------------------------------------------------------- #
+
+
+def test_render_canvas_markdown_maps_blocks_and_drops_charts() -> None:
+    from kortny.documents.canvas_writer import render_canvas_markdown
+
+    spec = _spec(blocks=[*_FULL_SPEC["blocks"], _BAR.model_dump()])
+    markdown, omitted = render_canvas_markdown(spec)
+    assert markdown.startswith("# ")  # cover title as H1
+    assert "| " in markdown  # the table became a markdown table
+    # The chart is dropped with a note.
+    assert omitted
+    assert "Charts aren't supported" in markdown
+
+
+# --------------------------------------------------------------------------- #
 # Charts (vl-convert)
 # --------------------------------------------------------------------------- #
 

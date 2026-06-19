@@ -180,6 +180,7 @@ def _build_document_studio_tool(context: NativeToolBuildContext) -> Tool:
         session=context.session,
         task_id=context.task.id,
         task_service=context.task_service,
+        slack_client=context.slack_action_client,
     )
 
 

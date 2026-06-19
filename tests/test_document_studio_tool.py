@@ -176,6 +176,43 @@ def test_renders_xlsx_format(tmp_path: Path) -> None:
     assert "spreadsheetml" in result.output["mime_type"]
 
 
+class _FakeCanvasClient:
+    def __init__(self) -> None:
+        self.created: list[tuple[str, str | None]] = []
+
+    def conversations_canvases_create(
+        self,
+        *,
+        channel_id: str,
+        document_content: dict[str, object],
+        title: str | None = None,
+    ) -> dict[str, object]:
+        self.created.append((channel_id, title))
+        return {"ok": True, "canvas_id": "Fcanvas1"}
+
+
+def test_renders_canvas_delivery(db_session: Session, tmp_path: Path) -> None:
+    task = _create_task(db_session)
+    client = _FakeCanvasClient()
+    result = DocumentStudioTool(
+        working_dir=tmp_path,
+        session=db_session,
+        task_id=task.id,
+        task_service=TaskService(db_session),
+        slack_client=client,
+    ).invoke(_args(format="canvas"))
+    assert result.output["format"] == "canvas"
+    assert result.output["canvas_id"] == "Fcanvas1"
+    assert result.artifacts == ()
+    assert client.created and client.created[0][0] == "C123"
+
+
+def test_canvas_without_slack_client_is_recoverable(tmp_path: Path) -> None:
+    with pytest.raises(RecoverableToolError) as exc:
+        DocumentStudioTool(working_dir=tmp_path).invoke(_args(format="canvas"))
+    assert exc.value.code == "canvas_unavailable"
+
+
 def test_invalid_format_raises_recoverable(tmp_path: Path) -> None:
     with pytest.raises(RecoverableToolError) as exc:
         DocumentStudioTool(working_dir=tmp_path).invoke(_args(format="rtf"))

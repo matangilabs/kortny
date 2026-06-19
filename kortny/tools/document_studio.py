@@ -41,6 +41,7 @@ from kortny.documents.critique import (
     critique_and_fix,
     validate_render,
 )
+from kortny.tasks import TaskService
 from kortny.tools.types import (
     JsonObject,
     JsonSchema,
@@ -160,13 +161,16 @@ class DocumentStudioTool:
             },
             "format": {
                 "type": "string",
-                "enum": ["pdf", "pptx", "docx", "xlsx"],
+                "enum": ["pdf", "pptx", "docx", "xlsx", "canvas"],
                 "description": (
                     "Output format. 'pdf' = finished deliverable (default), "
                     "'pptx' = slide deck, 'docx' = editable Word document, "
                     "'xlsx' = spreadsheet DATA EXPORT — use only when the answer "
                     "is mostly tables/metrics/chart data the user will analyze, "
-                    "never for a prose narrative (use pdf/docx for those)."
+                    "never for a prose narrative (use pdf/docx for those). "
+                    "'canvas' = a living, editable Slack channel canvas — use when "
+                    "the user wants a shared doc the team keeps in the channel "
+                    "(notes, runbook, hub); charts are dropped (no canvas support)."
                 ),
             },
             "filename": {
@@ -205,6 +209,7 @@ class DocumentStudioTool:
         session: Session | None = None,
         task_id: uuid.UUID | None = None,
         task_service: TaskEventSink | None = None,
+        slack_client: Any | None = None,
     ) -> None:
         if (session is None) != (task_id is None):
             raise ValueError("session and task_id must be provided together")
@@ -213,17 +218,15 @@ class DocumentStudioTool:
         self.session = session
         self.task_id = task_id
         self.task_service = task_service
+        self.slack_client = slack_client
 
     def invoke(self, args: JsonObject) -> ToolResult:
         """Validate the spec, render the chosen format, record the artifact."""
 
         spec = _parse_spec(args)
-        fmt = _parse_format(args.get("format"))
-        mime_type, extension = _FORMATS[fmt]
-        filename = _safe_filename(args.get("filename"), extension)
+        raw_format = args.get("format")
 
-        # Deterministic critique: lint + semantics-preserving auto-fix before
-        # render (HIG-244). A doc that lints down to nothing is recoverable.
+        # Lint + auto-fix before any delivery (shared by files and canvas).
         critique = critique_and_fix(spec)
         if critique.has_errors:
             raise RecoverableToolError(
@@ -233,6 +236,14 @@ class DocumentStudioTool:
                 details={"issues": [i.model_dump() for i in critique.issues]},
             )
         spec = critique.spec
+
+        if raw_format == "canvas":
+            return self._deliver_canvas(spec, critique.issues)
+
+        fmt = _parse_format(raw_format)
+        mime_type, extension = _FORMATS[fmt]
+        filename = _safe_filename(args.get("filename"), extension)
+
         issues = list(critique.issues)
         if fmt == "xlsx" and xlsx_is_poor_fit(spec):
             issues.append(
@@ -361,6 +372,52 @@ class DocumentStudioTool:
             select(func.max(Artifact.doc_version)).where(Artifact.doc_group_id == group)
         )
         return value or 0
+
+    def _deliver_canvas(
+        self, spec: DocumentSpec, issues: list[DocumentIssue]
+    ) -> ToolResult:
+        """Deliver the document as an editable Slack channel canvas (HIG-244).
+
+        Reuses the existing channel-canvas tool (idempotent outbox delivery);
+        canvas has no file artifact and no version lineage in the close-out.
+        """
+
+        from kortny.db.models import Task
+        from kortny.documents.canvas_writer import render_canvas_markdown
+        from kortny.tools.slack_actions import SlackCreateChannelCanvasTool
+
+        if self.slack_client is None or self.session is None or self.task_id is None:
+            raise RecoverableToolError(
+                code="canvas_unavailable",
+                message="Canvas delivery needs an active Slack channel.",
+                hint="Render as pdf/pptx/docx instead, or ask from a channel.",
+            )
+        task = self.session.get(Task, self.task_id)
+        if task is None:
+            raise RecoverableToolError(
+                code="canvas_unavailable",
+                message="Canvas delivery needs an active Slack channel.",
+                hint="Render as pdf/pptx/docx instead, or ask from a channel.",
+            )
+        markdown, omitted = render_canvas_markdown(spec)
+        canvas_tool = SlackCreateChannelCanvasTool(
+            client=self.slack_client,
+            session=self.session,
+            task=task,
+            task_service=self.task_service
+            if isinstance(self.task_service, TaskService)
+            else None,
+        )
+        result = canvas_tool.invoke({"title": spec.title, "markdown": markdown})
+        output = dict(result.output)
+        output["format"] = "canvas"
+        output["omitted_blocks"] = omitted
+        output["critique"] = {
+            "autofixes": sum(1 for i in issues if i.autofix == "applied"),
+            "warnings": sum(1 for i in issues if i.severity == "warning"),
+            "codes": sorted({i.code for i in issues}),
+        }
+        return ToolResult(output=output, artifacts=())
 
     def _render(self, spec: DocumentSpec, fmt: str) -> bytes:
         if fmt == "pptx":
