@@ -59,6 +59,7 @@ from kortny.agent.idempotency import (
     PriorAttemptStatus,
     find_prior_attempt,
 )
+from kortny.agent.image_attachments import ImageAttachmentResolver
 from kortny.agent.planner import (
     ExecutionPlanner,
     make_fallback_recovery_plan,
@@ -351,6 +352,7 @@ class AgentCoordinator:
         trifecta_gate_enabled: bool = True,
         status_reporter: StatusReporter | None = None,
         agent_display_name: str = "Kortny",
+        image_resolver: ImageAttachmentResolver | None = None,
     ) -> None:
         if max_turns < 1:
             raise ValueError("max_turns must be at least 1")
@@ -403,6 +405,7 @@ class AgentCoordinator:
                 capability_overview=capability_overview,
                 embedding_index=embedding_index,
                 skill_direct_threshold=skill_direct_threshold,
+                image_resolver=image_resolver,
             )
             self.context_engine = DefaultContextEngine(self.context_assembler)
 

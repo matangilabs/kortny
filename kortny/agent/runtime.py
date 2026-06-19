@@ -17,6 +17,7 @@ from kortny.agent.coordinator import (
     LLMClient,
 )
 from kortny.agent.execution import ExecutionGuardrailLimits
+from kortny.agent.image_attachments import ImageAttachmentResolver
 from kortny.agent.planner import ExecutionPlanner
 from kortny.agent.thread_context import ThreadTranscriptProvider
 from kortny.approvals import ToolApprovalPolicy
@@ -64,6 +65,7 @@ class CustomAgentRuntime:
         trifecta_gate_enabled: bool = True,
         status_reporter: StatusReporter | None = None,
         agent_display_name: str = "Kortny",
+        image_resolver: ImageAttachmentResolver | None = None,
     ) -> None:
         self.coordinator = AgentCoordinator(
             session=session,
@@ -90,6 +92,7 @@ class CustomAgentRuntime:
             trifecta_gate_enabled=trifecta_gate_enabled,
             status_reporter=status_reporter,
             agent_display_name=agent_display_name,
+            image_resolver=image_resolver,
         )
 
     def run(self, task: Task | uuid.UUID) -> AgentRunResult:

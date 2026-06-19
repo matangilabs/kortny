@@ -16,6 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from kortny.agent.capabilities import CapabilityOverview, render_capability_overview
+from kortny.agent.image_attachments import ImageAttachmentResolver
 from kortny.agent.thread_context import (
     ThreadTranscriptMessage,
     ThreadTranscriptProvider,
@@ -44,7 +45,7 @@ from kortny.knowledge_graph import (
     VisibilityScope,
 )
 from kortny.knowledge_graph.projects import project_anchors_and_scopes
-from kortny.llm import ChatMessage
+from kortny.llm import ChatMessage, ImagePart
 from kortny.llm.routing import latest_intent_decision
 from kortny.memory import EpisodeService, Fact, RelevantEpisode, WorkspaceStateService
 from kortny.observability import observe_task_event, set_span_attributes, start_span
@@ -92,6 +93,14 @@ IMMEDIATE_PRIOR_INPUT_MAX_CHARS = 500
 IMMEDIATE_PRIOR_RESULT_MAX_CHARS = 1_800
 SLACK_FILES_BLOCK_RE = re.compile(r"<slack_files>\s*(.*?)\s*</slack_files>", re.S)
 SLACK_FILE_ID_RE = re.compile(r"^\s*-\s+id:\s*(\S+)\s*$", re.M)
+# Matches a file entry: captures the id and the optional mimetype that follows
+# in indented lines.  Used by the image-attachment resolver to pair each Slack
+# file ID with its declared MIME type without splitting the block by entry.
+_SLACK_FILE_ENTRY_RE = re.compile(
+    r"^\s*-\s+id:\s*(\S+)((?:\n(?!\s*-\s+id:).+)*)",
+    re.M,
+)
+_SLACK_FILE_MIMETYPE_RE = re.compile(r"^\s+mimetype:\s*(\S+)\s*$", re.M)
 THREAD_CONTEXT_EVENT_TYPES = {
     TaskEventType.llm_call,
     TaskEventType.tool_call,
@@ -312,6 +321,7 @@ class ContextAssembler:
         embedding_index: EmbeddingIndex | None = None,
         skill_direct_threshold: float = DEFAULT_SKILL_DIRECT_THRESHOLD,
         recency_half_life_days: float = DEFAULT_RECENCY_HALF_LIFE_DAYS,
+        image_resolver: ImageAttachmentResolver | None = None,
     ) -> None:
         if thread_context_max_chars < 1:
             raise ValueError("thread_context_max_chars must be at least 1")
@@ -355,6 +365,7 @@ class ContextAssembler:
         self.embedding_index = embedding_index
         self.skill_direct_threshold = skill_direct_threshold
         self.recency_half_life_days = recency_half_life_days
+        self.image_resolver = image_resolver
         self.workspace_state_service = WorkspaceStateService(
             session,
             task_service=self.task_service,
@@ -399,6 +410,36 @@ class ContextAssembler:
             "untouched blocks — do NOT start a new document.\n\n"
             f"Current document spec (JSON):\n{spec_json}"
         )
+
+    def _build_user_message(self, input_text: str) -> ChatMessage:
+        """Build the user ``ChatMessage``, attaching resolved images if any.
+
+        When ``image_resolver`` is set and the input contains a
+        ``<slack_files>`` block with image MIME entries, each image file is
+        downloaded and attached as an ``ImagePart``.  Text-only tasks — or any
+        task where resolution yields no parts — produce an unchanged
+        ``ChatMessage(role="user", content=input_text)``.
+        """
+        if self.image_resolver is None:
+            return ChatMessage(role="user", content=input_text)
+
+        image_pairs = _slack_image_file_pairs(input_text)
+        if not image_pairs:
+            return ChatMessage(role="user", content=input_text)
+
+        try:
+            resolved: tuple[ImagePart, ...] = self.image_resolver(image_pairs)
+        except Exception as exc:
+            logger.warning(
+                "context: image resolver raised unexpectedly, continuing text-only: %s",
+                exc,
+            )
+            resolved = ()
+
+        if not resolved:
+            return ChatMessage(role="user", content=input_text)
+
+        return ChatMessage(role="user", content=input_text, images=resolved)
 
     def build_for_task(self, task: Task) -> ContextPackage:
         """Build prompt messages and context-selection metadata."""
@@ -460,7 +501,7 @@ class ContextAssembler:
         if document_context:
             messages.append(ChatMessage(role="system", content=document_context))
 
-        messages.append(ChatMessage(role="user", content=task.input))
+        messages.append(self._build_user_message(task.input))
 
         package = ContextPackage(
             messages=tuple(messages),
@@ -1870,6 +1911,28 @@ def _slack_file_ids(input_text: str) -> list[str]:
     if block is None:
         return []
     return SLACK_FILE_ID_RE.findall(block)
+
+
+def _slack_image_file_pairs(input_text: str) -> list[tuple[str, str]]:
+    """Parse the ``<slack_files>`` block and return ``(file_id, mime)`` pairs.
+
+    Only entries whose ``mimetype`` starts with ``image/`` are returned.
+    Entries without a ``mimetype`` line are skipped.
+    """
+    block = _slack_files_block(input_text)
+    if block is None:
+        return []
+    pairs: list[tuple[str, str]] = []
+    for entry_match in _SLACK_FILE_ENTRY_RE.finditer(block):
+        file_id = entry_match.group(1).strip()
+        entry_body = entry_match.group(2)
+        mime_match = _SLACK_FILE_MIMETYPE_RE.search(entry_body)
+        if mime_match is None:
+            continue
+        mime = mime_match.group(1).strip()
+        if mime.startswith("image/"):
+            pairs.append((file_id, mime))
+    return pairs
 
 
 def _error_summary(error: dict | None) -> str | None:
