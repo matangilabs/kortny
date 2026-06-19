@@ -257,7 +257,6 @@ Your Slack name and avatar, your LLM keys, your servers. Every token and cent tr
 | Per-channel personality profiles (tone, verbosity, proactivity) | ✅ Shipped |
 | OTEL tracing (Phoenix local / Langfuse Cloud) | ✅ Shipped |
 | Bring-your-own MCP servers (Composio-free integration plane) | ✅ Shipped |
-| Google ADK agent runtime (`AGENT_RUNTIME=adk`) | 🟡 Beta |
 | Temporal durable workflow backend | 🟡 Experimental |
 | Network-enabled sandbox profile (pip/npm via egress allowlist) | ⬜ Planned |
 
@@ -414,7 +413,6 @@ make check         # ruff lint + format-check, mypy, pytest
 make lint          # ruff check
 make typecheck     # mypy
 make test          # pytest (unit)
-make playground    # adk web .
 ```
 
 Host-side commands need a local `POSTGRES_URL`:

@@ -3171,7 +3171,7 @@ def test_dashboard_task_detail_shows_events_usage_and_artifacts(
     assert "dashboard_report.pdf" in response.text
     assert "analysis" in response.text
     assert "Planned Trace" in response.text
-    assert "ADK planned workflow" in response.text
+    assert "Legacy planned workflow" in response.text
     assert "planned_parallel" in response.text
     assert "research_analysis" in response.text
     assert "Budget Hits" in response.text

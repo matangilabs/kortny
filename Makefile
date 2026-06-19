@@ -1,4 +1,4 @@
-.PHONY: install lock lint lint-fix format format-check typecheck test test-serial check migrate downgrade compose-up compose-up-observability compose-up-workflow compose-down compose-down-observability compose-down-workflow compose-down-observability-volumes compose-logs compose-logs-observability compose-logs-workflow playground clean seed-sim clean-sim status-sim
+.PHONY: install lock lint lint-fix format format-check typecheck test test-serial check migrate downgrade compose-up compose-up-observability compose-up-workflow compose-down compose-down-observability compose-down-workflow compose-down-observability-volumes compose-logs compose-logs-observability compose-logs-workflow clean seed-sim clean-sim status-sim
 
 install:
 	uv sync
@@ -64,9 +64,6 @@ compose-logs-observability:
 
 compose-logs-workflow:
 	docker compose logs -f app worker temporal temporal-worker
-
-playground:
-	uv run adk web .
 
 # Workspace simulator (runs against the live dev DB inside compose).
 # Usage: make seed-sim CHANNEL=C0123456789 [DAYS=21]

@@ -56,7 +56,7 @@ class LLMProviderBootstrapResult:
 
 @dataclass(frozen=True, slots=True)
 class ResolvedLLMModel:
-    """Provider/model config ready for ADK or direct provider construction."""
+    """Provider/model config ready for LiteLLM/direct provider construction."""
 
     tier: ModelRouteTier
     provider_kind: str
@@ -75,7 +75,7 @@ class ResolvedLLMModel:
 
     @property
     def litellm_model(self) -> str:
-        """Return the model name shape ADK/LiteLLM expects."""
+        """Return the model name shape LiteLLM expects."""
 
         if self.provider_kind == "openrouter" and not self.model.startswith(
             "openrouter/"
@@ -84,8 +84,8 @@ class ResolvedLLMModel:
         return self.model
 
     @property
-    def adk_litellm_kwargs(self) -> dict[str, object]:
-        """Return constructor kwargs for ADK's `LiteLlm` wrapper."""
+    def litellm_kwargs(self) -> dict[str, object]:
+        """Return constructor kwargs for a LiteLLM model wrapper."""
 
         kwargs: dict[str, object] = {
             "model": self.litellm_model,

@@ -40,9 +40,6 @@ make compose-up                    # postgres, migrate, app, worker, scheduler, 
 make compose-up-observability      # + Phoenix OTEL tracing (observability profile)
 docker compose --profile temporal up -d   # + Temporal engine and worker (temporal profile)
 make compose-logs-workflow         # app + worker + temporal + temporal-worker logs
-
-# ADK web playground
-make playground    # uv run adk web .
 ```
 
 ## Architecture
@@ -55,7 +52,7 @@ make playground    # uv run adk web .
 
 3. **`kortny/worker/`** — Background worker (`kortny.worker.__main__`). `AgentTaskExecutor.execute()` runs, in order: Tier-0 deterministic fast paths (`kortny/routing/tier0.py`, currently schedule-state queries — no LLM), the channel graph-refresh pipeline for assessment tasks, then the general agent runtime. After success it runs post-completion hooks: post result to Slack, record routing trace, project witness opportunities, reinforce graph context, project task-summary graph entities, mark channel assessment complete, ack reaction.
 
-4. **`kortny/agent/`** — Agent runtimes implement the `AgentRuntime` protocol in `runtime.py`. `CustomAgentRuntime` (default, `AGENT_RUNTIME=custom`) wraps the `AgentCoordinator` LLM loop in `coordinator.py`; `AdkAgentRuntime` (`AGENT_RUNTIME=adk`, `adk_runtime.py`) runs the same task on Google ADK. The coordinator calls LiteLLM via `LLMService`, dispatches tool calls from `ToolRegistry`, records every turn as `TaskEvent` rows, and enforces guardrails from `execution.py`: max 6 turns, 12 tool calls, 4 recoverable failures, circuit breaker at 2 identical tool calls / 2 identical recoverable errors. Two execution modes: inline (default) and planned (`ExecutionPlanner` authors an explicit plan first; falls back to inline on planner failure).
+4. **`kortny/agent/`** — Agent runtimes implement the `AgentRuntime` protocol in `runtime.py`. `CustomAgentRuntime` (the only runtime; `AGENT_RUNTIME=custom`) wraps the `AgentCoordinator` LLM loop in `coordinator.py`. (The Google ADK runtime was retired in HIG-281; `AGENT_RUNTIME=adk` now fails loudly.) The coordinator calls LiteLLM via `LLMService`, dispatches tool calls from `ToolRegistry`, records every turn as `TaskEvent` rows, and enforces guardrails from `execution.py`: max 6 turns, 12 tool calls, 4 recoverable failures, circuit breaker at 2 identical tool calls / 2 identical recoverable errors. Two execution modes: inline (default) and planned (`ExecutionPlanner` authors an explicit plan first; falls back to inline on planner failure).
 
 5. **`kortny/workflow/`** — Temporal integration (optional). `KORTNY_WORKFLOW_BACKEND=temporal` routes tasks through `kortny.workflow.__main__` instead of the inline worker. `planning_classifier.py` and the semantic router (`kortny/routing/semantic.py`) are currently **observe-only/shadow** — they record decisions but do not change execution.
 
@@ -120,7 +117,7 @@ Copy `.env.example` to `.env`. All vars are declared in `kortny/config/settings.
 
 **Model tiers** (optional, fall back along a chain to `LLM_MODEL`): `LLM_CHEAP_MODEL`, `LLM_STANDARD_MODEL`, `LLM_ANALYSIS_MODEL`, `LLM_DOCUMENT_MODEL`, `LLM_HIGH_REASONING_MODEL`, `LLM_HUMANIZER_MODEL`. The dashboard model-config pages can override these from the DB (`kortny/llm/runtime_config.py`); env is the fallback. Note: LiteLLM runtime identifiers are provider-prefixed (e.g. `openrouter/anthropic/...`) by `litellm_catalog.py`.
 
-**Feature flags & integrations**: `AGENT_RUNTIME` (`custom` default / `adk`), `KORTNY_WORKFLOW_BACKEND` (`inline` default / `temporal`), `KORTNY_MCP_ENABLED`, `KORTNY_WITNESS_ENABLED`, `RESPONSE_HUMANIZER_ENABLED`, `OBSERVABILITY_ENABLED` + `OTEL_EXPORTER_OTLP_ENDPOINT` (Phoenix: `http://phoenix:6006/v1/traces`), `BRAVE_SEARCH_API_KEY` (web search), `ENCRYPTION_KEY` (secrets at rest), `KORTNY_SANDBOX_RUNNER_URL` (unset disables code execution), `KORTNY_SCHEDULER_POLL_INTERVAL_SECONDS` / `KORTNY_SCHEDULER_MATERIALIZE_LIMIT`.
+**Feature flags & integrations**: `KORTNY_WORKFLOW_BACKEND` (`inline` default / `temporal`), `KORTNY_MCP_ENABLED`, `KORTNY_WITNESS_ENABLED`, `RESPONSE_HUMANIZER_ENABLED`, `OBSERVABILITY_ENABLED` + `OTEL_EXPORTER_OTLP_ENDPOINT` (Phoenix: `http://phoenix:6006/v1/traces`), `BRAVE_SEARCH_API_KEY` (web search), `ENCRYPTION_KEY` (secrets at rest), `KORTNY_SANDBOX_RUNNER_URL` (unset disables code execution), `KORTNY_SCHEDULER_POLL_INTERVAL_SECONDS` / `KORTNY_SCHEDULER_MATERIALIZE_LIMIT`.
 
 Beware: pydantic-settings fills any field you don't pass explicitly from `.env`. Tests constructing `Settings` must pass every field they assert on, or local runs will diverge from CI (which has no `.env`).
 
