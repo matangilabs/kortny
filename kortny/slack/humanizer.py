@@ -841,11 +841,21 @@ def strip_internal_response_preamble(text: str) -> str:
                 candidate
             ) or _usable_short_final_answer_candidate(candidate):
                 return candidate
-    for candidate in reversed(_paragraphs(raw)[1:]):
-        if _usable_final_answer_candidate(candidate) and not _looks_like_humanizer_leak(
-            candidate
-        ):
-            return candidate
+    # Last resort: keep the trailing run of clean paragraphs. When a leak
+    # preamble is followed by the real answer with no explicit boundary marker
+    # (e.g. "...I should keep it short. response_record shows the figure.\n\nQ3
+    # revenue was $1.2M."), none of the marker/opener strategies fire, so walk
+    # paragraphs from the end and collect them until we hit a leaky one. A short
+    # but substantive answer counts (the 40-char bar wrongly dropped real one-
+    # liners); a bare ack ("Done.") does not. (HIG-255 leak-gap fix.)
+    clean_tail: list[str] = []
+    for candidate in reversed(_paragraphs(raw)):
+        if _looks_like_humanizer_leak(candidate):
+            break
+        clean_tail.insert(0, candidate)
+    tail = "\n\n".join(clean_tail).strip()
+    if tail and tail != raw and _is_substantive_answer(tail):
+        return tail
     return raw
 
 
@@ -893,6 +903,32 @@ def _usable_final_answer_candidate(text: str) -> bool:
 
 def _usable_short_final_answer_candidate(text: str) -> bool:
     return len(text.strip()) >= 8
+
+
+# Bare acknowledgements that are not a real answer — a clean tail of only these
+# should not be treated as the substantive final answer (HIG-255 leak-gap fix).
+_BARE_ACK_ANSWERS = frozenset(
+    {
+        "done",
+        "here you go",
+        "here's the answer",
+        "here is the answer",
+        "ok",
+        "okay",
+        "sure",
+        "got it",
+        "all set",
+    }
+)
+
+
+def _is_substantive_answer(text: str) -> bool:
+    """A clean tail is substantive when it has real content, not just an ack."""
+
+    stripped = text.strip()
+    if len(stripped) < 8:
+        return False
+    return stripped.casefold().rstrip(".!… ") not in _BARE_ACK_ANSWERS
 
 
 def build_response_record(
