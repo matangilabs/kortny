@@ -131,6 +131,7 @@ from kortny.slack.reactions import (
     ReactionProvider,
 )
 from kortny.slack.response_render import render_blocks
+from kortny.slack.source_index import SourceIndex
 from kortny.slack.thread_context import SlackThreadTranscriptProvider
 from kortny.tasks import TaskCancelledError, TaskService
 from kortny.tool_selection import ExternalToolProvider, ToolCard
@@ -1923,6 +1924,7 @@ class AgentTaskExecutor:
                 raw_text=response_source,
             )
             presentation: PresentationHint | None = None
+            source_index: SourceIndex | None = None
             if skip_humanizer_reason is not None:
                 response_text = response_source
                 task_service.append_event(
@@ -1947,7 +1949,10 @@ class AgentTaskExecutor:
                 )
                 response_text = synthesis.text
                 presentation = synthesis.presentation
-            blocks = render_blocks(response_text, presentation)
+                source_index = synthesis.source_index
+            blocks = render_blocks(
+                response_text, presentation, source_index=source_index
+            )
             if thread.is_assistant and settings.assistant_streaming_enabled:
                 poster.stream_message(thread, response_text, blocks=blocks)
             else:

@@ -5,6 +5,8 @@ Pure (no DB, no LLM): exercises parse_presentation and render_blocks directly.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from kortny.slack import blockkit
 from kortny.slack.presentation import (
     CardItem,
@@ -12,15 +14,26 @@ from kortny.slack.presentation import (
     ContextElement,
     FieldItem,
     FieldsElement,
+    ItemsElement,
+    ListItem,
     PresentationHint,
+    SourceCardItem,
+    SourcesElement,
     TableElement,
     parse_presentation,
 )
 from kortny.slack.response_render import render_blocks
+from kortny.slack.source_index import build_source_index
 
 
 def _types(blocks: list[dict]) -> list[str]:
     return [b["type"] for b in blocks]
+
+
+@dataclass(frozen=True)
+class _FakeEvidence:
+    urls: list[str] | None
+    preview: str | None
 
 
 # --------------------------------------------------------------------------- #
@@ -209,3 +222,122 @@ def test_hint_with_all_elements_dropped_returns_none_for_plain_prose() -> None:
     hint = parse_presentation({"elements": [{"type": "chart"}]})  # all dropped
     assert hint is None
     assert render_blocks("plain answer", hint) is None
+
+
+# --------------------------------------------------------------------------- #
+# items element — section + context + divider lists
+# --------------------------------------------------------------------------- #
+
+
+def test_items_render_section_context_divider() -> None:
+    hint = PresentationHint(
+        elements=[
+            ItemsElement(
+                items=[
+                    ListItem(
+                        title="HIG-276",
+                        facts=[FieldItem(label="Status", value="In progress")],
+                        context=["Source: Linear"],
+                    ),
+                    ListItem(
+                        title="HIG-255", facts=[FieldItem(label="Owner", value="A")]
+                    ),
+                ]
+            )
+        ]
+    )
+    blocks = render_blocks("You've got 2 open items.", hint)
+    assert blocks is not None
+    # voice + [section, context] + divider + [section]
+    assert _types(blocks) == [
+        "markdown",
+        "section",
+        "context",
+        "divider",
+        "section",
+    ]
+    assert blocks[1]["text"]["text"].startswith("*HIG-276*")
+
+
+def test_items_can_disable_dividers() -> None:
+    hint = PresentationHint(
+        elements=[
+            ItemsElement(
+                dividers=False,
+                items=[ListItem(title="A"), ListItem(title="B")],
+            )
+        ]
+    )
+    blocks = render_blocks("two items", hint)
+    assert blocks is not None
+    assert "divider" not in _types(blocks)
+
+
+# --------------------------------------------------------------------------- #
+# sources element — server-bound URLs only
+# --------------------------------------------------------------------------- #
+
+
+def test_sources_resolve_refs_to_evidence_urls() -> None:
+    index = build_source_index(
+        [
+            _FakeEvidence(urls=["https://nasa.gov/artemis"], preview="Mission page"),
+            _FakeEvidence(urls=["https://news.example/splashdown"], preview="Report"),
+        ]
+    )
+    hint = PresentationHint(
+        elements=[
+            SourcesElement(
+                items=[
+                    SourceCardItem(source_ref="source:0", body="Official page"),
+                    SourceCardItem(source_ref="source:1"),
+                ]
+            )
+        ]
+    )
+    blocks = render_blocks("Here's what I drew on:", hint, source_index=index)
+    assert blocks is not None
+    # carousel of 2 source cards after the voice block
+    assert _types(blocks) == ["markdown", "carousel"]
+    cards = blocks[1]["elements"]
+    assert len(cards) == 2
+    # The real URL is bound from evidence, never the LLM.
+    assert "https://nasa.gov/artemis" in cards[0]["body"]["text"]
+
+
+def test_sources_drop_unresolved_ref() -> None:
+    index = build_source_index([_FakeEvidence(urls=["https://a.test/x"], preview=None)])
+    hint = PresentationHint(
+        elements=[
+            SourcesElement(
+                items=[
+                    SourceCardItem(source_ref="source:0"),
+                    SourceCardItem(source_ref="source:99"),  # unresolved → dropped
+                ]
+            )
+        ]
+    )
+    blocks = render_blocks("sources:", hint, source_index=index)
+    assert blocks is not None
+    assert _types(blocks) == ["markdown", "carousel"]
+    assert len(blocks[1]["elements"]) == 1
+
+
+def test_sources_without_index_renders_nothing() -> None:
+    hint = PresentationHint(
+        elements=[SourcesElement(items=[SourceCardItem(source_ref="source:0")])]
+    )
+    assert render_blocks("plain answer", hint, source_index=None) is None
+
+
+def test_build_source_index_skips_non_http_and_caps() -> None:
+    index = build_source_index(
+        [
+            _FakeEvidence(urls=["ftp://nope", "https://ok.test/1"], preview="p"),
+            _FakeEvidence(urls=None, preview="none"),
+        ]
+    )
+    assert index.resolve("source:0") is not None
+    assert index.resolve("source:0").url == "https://ok.test/1"  # type: ignore[union-attr]
+    assert index.resolve("source:1") is None
+    assert index.available()[0]["domain"] == "ok.test"

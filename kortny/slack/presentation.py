@@ -92,14 +92,72 @@ class ContextElement(BaseModel):
     items: list[str] = Field(min_length=1)
 
 
+class ListItem(BaseModel):
+    """One entity in an ``items`` list (a title + a few facts + a meta line)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str
+    facts: list[FieldItem] = Field(default_factory=list, max_length=6)
+    body: str | None = None
+    context: list[str] = Field(default_factory=list, max_length=3)
+
+
+class ItemsElement(BaseModel):
+    """A list of entities rendered the Slack-native way: section + context per
+    item, divider-separated. The default for "list my X" answers — readable in
+    narrow threads and budget-friendly, unlike a wall of cards."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["items"] = "items"
+    title: str | None = None
+    items: list[ListItem] = Field(min_length=1, max_length=12)
+    dividers: bool = True
+
+
+class SourceCardItem(BaseModel):
+    """A citation. The LLM gives a ``source_ref`` (and optional display copy);
+    the real URL is resolved server-side from evidence — never LLM-authored, so
+    a hallucinated/phishing link can't reach the user. ``extra="forbid"`` means a
+    stray ``url`` key invalidates (and drops) the item."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_ref: str
+    title: str | None = None
+    subtitle: str | None = None
+    body: str | None = None
+
+
+class SourcesElement(BaseModel):
+    """Citations/references the answer draws on, rendered as linked source cards
+    (links-only). Trust rendering, not decoration — only when the answer cites
+    real sources."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["sources"] = "sources"
+    title: str | None = None
+    items: list[SourceCardItem] = Field(min_length=1, max_length=10)
+    display: Literal["carousel", "stacked"] = "carousel"
+
+
 PresentationElement = Annotated[
-    FieldsElement | TableElement | CardsElement | ContextElement,
+    FieldsElement
+    | TableElement
+    | CardsElement
+    | ContextElement
+    | ItemsElement
+    | SourcesElement,
     Field(discriminator="type"),
 ]
 
 # The element types this schema understands today. Unknown types in a hint are
 # dropped (forward-compatible with hints authored against a newer vocabulary).
-KNOWN_ELEMENT_TYPES = frozenset({"fields", "table", "cards", "context"})
+KNOWN_ELEMENT_TYPES = frozenset(
+    {"fields", "table", "cards", "context", "items", "sources"}
+)
 
 
 class PresentationHint(BaseModel):
@@ -159,6 +217,8 @@ _ELEMENT_MODELS: dict[str, type[BaseModel]] = {
     "table": TableElement,
     "cards": CardsElement,
     "context": ContextElement,
+    "items": ItemsElement,
+    "sources": SourcesElement,
 }
 
 
@@ -173,8 +233,12 @@ __all__ = [
     "ContextElement",
     "FieldItem",
     "FieldsElement",
+    "ItemsElement",
+    "ListItem",
     "PresentationElement",
     "PresentationHint",
+    "SourceCardItem",
+    "SourcesElement",
     "TableElement",
     "parse_presentation",
 ]

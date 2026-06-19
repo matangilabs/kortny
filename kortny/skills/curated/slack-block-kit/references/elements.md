@@ -36,10 +36,21 @@ prose-only) so a bad layout never drops the answer.
 
 | Hint element | Renders as | Use for |
 |---|---|---|
-| `cards` | `card` blocks (one per item; section+fields fallback if a card overflows) | a list of discrete entities each with attributes |
-| `fields` | `section` with a fields array | key-value facts / metrics / status about one thing |
+| `items` | per item: `section`(title+facts) + `context`(meta), divider-separated | the default for an entity list ("list my X") |
 | `table` | `table` block (message) / markdown table (modal/Home) | rows that share columns, 3+ rows |
+| `fields` | `section` with a fields array | key-value facts / metrics / status about one thing |
+| `cards` | `card` blocks (one per item; section+fields fallback if a card overflows) | 2-5 important objects that each deserve a tile (sparingly) |
+| `sources` | carousel of source cards / stacked sections, links only | citations — URLs resolved server-side from evidence, never LLM-authored |
 | `context` | `context` block | provenance, freshness, source footnotes |
+
+### Source binding (the `sources` element)
+
+The LLM gives only a `source_ref` (e.g. `source:0`) chosen from the
+`available_sources` it was shown; the renderer resolves that ref to a
+server-built URL from the response record's evidence. The hint may not carry a
+URL (the schema forbids stray keys). An unresolved ref is dropped; a `sources`
+element with no resolvable refs renders nothing. This is the trust guarantee: a
+hallucinated or phishing link can never reach the user.
 
 ## Voice vs. data (the product principle)
 

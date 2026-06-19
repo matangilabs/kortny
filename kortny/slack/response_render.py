@@ -31,11 +31,15 @@ from kortny.slack.presentation import (
     CardsElement,
     ContextElement,
     FieldsElement,
+    ItemsElement,
+    ListItem,
     PresentationElement,
     PresentationHint,
+    SourcesElement,
     TableElement,
 )
 from kortny.slack.response_blocks import _contains_markdown_table
+from kortny.slack.source_index import SourceIndex
 
 logger = logging.getLogger(__name__)
 
@@ -48,11 +52,13 @@ def render_blocks(
     hint: PresentationHint | None = None,
     *,
     surface: str = MESSAGE_SURFACE,
+    source_index: SourceIndex | None = None,
 ) -> list[dict] | None:
     """Render ``message`` + optional ``hint`` to Block Kit, or ``None`` for prose.
 
     ``None`` means "post the prose as plain text" — the caller always carries the
-    full prose in the message ``text`` fallback.
+    full prose in the message ``text`` fallback. ``source_index`` resolves a
+    ``sources`` element's refs to server-owned URLs (the LLM never authors them).
     """
 
     text = message.strip()
@@ -75,7 +81,9 @@ def render_blocks(
 
     element_blocks: list[dict] = []
     for element in hint.elements:
-        element_blocks.extend(_render_element(element, surface=surface))
+        element_blocks.extend(
+            _render_element(element, surface=surface, source_index=source_index)
+        )
 
     if not element_blocks:
         # Hint produced nothing usable: keep legacy behavior (table→block,
@@ -95,7 +103,12 @@ def _voice_block(text: str) -> dict | None:
         return None
 
 
-def _render_element(element: PresentationElement, *, surface: str) -> list[dict]:
+def _render_element(
+    element: PresentationElement,
+    *,
+    surface: str,
+    source_index: SourceIndex | None,
+) -> list[dict]:
     """Build blocks for one hint element; drop (return []) on any limit error."""
 
     try:
@@ -105,6 +118,10 @@ def _render_element(element: PresentationElement, *, surface: str) -> list[dict]
             return _render_table(element, surface=surface)
         if isinstance(element, CardsElement):
             return _render_cards(element)
+        if isinstance(element, ItemsElement):
+            return _render_items(element)
+        if isinstance(element, SourcesElement):
+            return _render_sources(element, source_index=source_index)
         if isinstance(element, ContextElement):
             return _render_context(element)
     except ValueError as exc:
@@ -176,6 +193,74 @@ def _render_card(item: CardItem) -> list[dict]:
 def _render_context(element: ContextElement) -> list[dict]:
     items = element.items[: blockkit.MAX_CONTEXT_ELEMENTS]
     return [blockkit.context(*items)]
+
+
+def _render_items(element: ItemsElement) -> list[dict]:
+    """Render an entity list the Slack-native way: per item a section (title +
+    facts/body) and a context (meta), divider-separated. The default for lists."""
+
+    blocks: list[dict] = []
+    if element.title:
+        blocks.append(blockkit.section(f"*{element.title}*"))
+    for index, item in enumerate(element.items):
+        if element.dividers and (blocks or index > 0):
+            blocks.append(blockkit.divider())
+        blocks.extend(_render_list_item(item))
+    return blocks
+
+
+def _render_list_item(item: ListItem) -> list[dict]:
+    blocks: list[dict] = []
+    lines = [f"*{item.title}*"]
+    if item.body:
+        lines.append(item.body)
+    section_text = "\n".join(lines)[: blockkit.MAX_SECTION_TEXT_CHARS]
+    field_strings = [f"*{f.label}*\n{f.value}" for f in item.facts][
+        : blockkit.MAX_SECTION_FIELDS
+    ]
+    blocks.append(blockkit.section(section_text, fields=field_strings))
+    if item.context:
+        blocks.append(blockkit.context(*item.context[: blockkit.MAX_CONTEXT_ELEMENTS]))
+    return blocks
+
+
+def _render_sources(
+    element: SourcesElement, *, source_index: SourceIndex | None
+) -> list[dict]:
+    """Render citations as linked source cards. The link target always comes from
+    the server-built index — an unresolved ref is dropped, never guessed."""
+
+    if source_index is None:
+        return []
+    resolved: list[tuple[dict, str]] = []  # (hint item display, resolved url+meta)
+    cards: list[dict] = []
+    for item in element.items:
+        source = source_index.resolve(item.source_ref)
+        if source is None:
+            logger.info("dropping source: unresolved ref %s", item.source_ref)
+            continue
+        title = (item.title or source.domain).strip()
+        subtitle = (item.subtitle or source.domain).strip()
+        body_text = (item.body or source.snippet or "").strip()
+        # Link lives in the card body as mrkdwn (no button) so it stays a pure
+        # display link — no interaction payload to ack (slice 2 owns buttons).
+        link = f"<{source.url}|Read →>"
+        body = f"{body_text}\n{link}" if body_text else link
+        body = body[: blockkit.MAX_CARD_BODY_CHARS]
+        try:
+            cards.append(blockkit.card(title=title, subtitle=subtitle, body=body))
+        except ValueError:
+            resolved.append(({"title": title, "body": body}, source.url))
+    if not cards and not resolved:
+        return []
+    # Carousel needs real card blocks; fall back to stacked sections for any that
+    # overflowed the card limits, and for the "stacked" display preference.
+    if element.display == "carousel" and cards and not resolved:
+        return [blockkit.carousel(*cards)]
+    blocks: list[dict] = list(cards)
+    for display, _url in resolved:
+        blocks.append(blockkit.section(f"*{display['title']}*\n{display['body']}"))
+    return blocks
 
 
 def _markdown_table(element: TableElement) -> str:

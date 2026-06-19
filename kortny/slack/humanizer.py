@@ -34,6 +34,7 @@ from kortny.skills import (
     SkillRegistryService,
 )
 from kortny.slack.presentation import PresentationHint, parse_presentation
+from kortny.slack.source_index import SourceIndex, build_source_index
 from kortny.slack.synthesis import (
     EvidenceKind,
     EvidenceTrust,
@@ -518,6 +519,7 @@ class ResponseSynthesisResult:
     changed: bool
     reason: str
     presentation: PresentationHint | None = None
+    source_index: SourceIndex | None = None
 
 
 class ChannelStyleResolver(Protocol):
@@ -824,7 +826,9 @@ def synthesize_response(
             ),
         },
     )
-    return result
+    # Attach the server-built source index so the renderer can resolve any
+    # `sources` refs to real URLs (built from the same evidence the LLM saw).
+    return replace(result, source_index=build_source_index(response_record.evidence))
 
 
 def sanitize_humanized_response(text: str | None, *, fallback: str) -> str:
@@ -1151,7 +1155,7 @@ def _synthesis_payload(
     response_record: ResponseRecord,
     synthesis_context: SynthesisContext,
 ) -> JsonObject:
-    return {
+    payload: JsonObject = {
         "response_record": response_record.to_payload(),
         "synthesis_context": synthesis_context.to_payload(),
         "renderer_constraints": {
@@ -1159,6 +1163,12 @@ def _synthesis_payload(
             "avoid": ["GitHub Markdown headings", "Markdown tables"],
         },
     }
+    # Expose the citable sources (server-built refs) so the humanizer can
+    # reference them in a `sources` presentation element without authoring URLs.
+    available_sources = build_source_index(response_record.evidence).available()
+    if available_sources:
+        payload["available_sources"] = available_sources
+    return payload
 
 
 def _synthesis_evidence_from_events(
