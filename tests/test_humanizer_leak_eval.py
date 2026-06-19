@@ -47,19 +47,37 @@ def test_clean_answer_is_unchanged() -> None:
     assert strip_internal_response_preamble(_FINAL) == _FINAL
 
 
-@pytest.mark.xfail(
-    reason="known gap (HIG-203): a leak preamble followed by a bare sentence "
-    "with no recognized final-answer boundary is not stripped — the function "
-    "keys on markers/openers. Documented so a future fix flips this green.",
-    strict=True,
-)
-def test_bare_answer_after_preamble_is_a_known_gap() -> None:
+def test_bare_answer_after_preamble_is_stripped() -> None:
+    # HIG-255 leak-gap fix: a leak preamble followed by a bare answer sentence
+    # with no recognized boundary marker must still be stripped to the answer.
     leaky = (
         "According to my guidelines I should keep it short. response_record "
         f"shows the figure.\n\n{_FINAL}"
     )
-    cleaned = strip_internal_response_preamble(leaky).casefold()
-    assert not any(marker in cleaned for marker in HUMANIZER_LEAK_MARKERS)
+    cleaned = strip_internal_response_preamble(leaky)
+    assert not any(marker in cleaned.casefold() for marker in HUMANIZER_LEAK_MARKERS)
+    assert "1.2M" in cleaned
+
+
+def test_bare_answer_keeps_contiguous_clean_tail() -> None:
+    # The whole clean tail survives, not just the last paragraph.
+    leaky = (
+        "Let me write the response. The user is asking for the numbers.\n\n"
+        "Q3 revenue was $1.2M, up 14% from Q2.\n\n"
+        "Margins held steady at 38%."
+    )
+    cleaned = strip_internal_response_preamble(leaky)
+    assert not any(marker in cleaned.casefold() for marker in HUMANIZER_LEAK_MARKERS)
+    assert "1.2M" in cleaned
+    assert "Margins held steady" in cleaned
+
+
+def test_preamble_with_only_a_bare_ack_is_not_treated_as_answer() -> None:
+    # A clean tail of only "Done." is not substantive; don't promote it. The
+    # function returns raw (the caller's safety net handles a leak-only output).
+    leaky = "I should keep it short. response_record shows the figure.\n\nDone."
+    cleaned = strip_internal_response_preamble(leaky)
+    assert cleaned == leaky.strip()
 
 
 def test_empty_stays_empty() -> None:

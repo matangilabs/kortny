@@ -578,6 +578,12 @@ class SkillRegistryService:
                 "slack-humanizer",
                 reason="built-in rendering skill for response humanizer",
             )
+            self._append_selected(
+                selected,
+                by_slug,
+                "slack-block-kit",
+                reason="teaches Block Kit presentation for structured data",
+            )
             if response_shape in {"analyst_audit", "comparison_memo"}:
                 self._append_selected(
                     selected,

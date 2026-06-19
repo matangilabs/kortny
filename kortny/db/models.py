@@ -12,6 +12,7 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
+from typing import Any
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
@@ -2662,11 +2663,20 @@ class Artifact(Base):
     storage_path: Mapped[str | None] = mapped_column(String)
     slack_file_id: Mapped[str | None] = mapped_column(String)
     posted_at: Mapped[datetime | None] = mapped_column(TZ)
+    # Living-document fields (HIG-244): the canonical post-critique spec is kept
+    # so a doc can be re-rendered/edited from buttons. All versions of one doc
+    # share doc_group_id; doc_version increments per visible revision.
+    doc_group_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    doc_version: Mapped[int | None] = mapped_column(Integer)
+    spec_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(
         TZ, nullable=False, server_default=func.now()
     )
 
-    __table_args__ = (Index("idx_artifacts_task", "task_id"),)
+    __table_args__ = (
+        Index("idx_artifacts_task", "task_id"),
+        Index("idx_artifacts_doc_group", "doc_group_id", "doc_version"),
+    )
 
 
 class ModelPricing(Base):
@@ -2731,5 +2741,89 @@ class AssistantThreadContext(Base):
             "channel_id",
             "thread_ts",
             name="uq_assistant_thread_context_channel_thread",
+        ),
+    )
+
+
+class InteractiveAction(Base):
+    """A Block Kit interactive action bound into a posted Slack message (HIG-255
+    slice 2). The Slack button carries only an opaque raw key; this row stores
+    the key's HMAC hash plus everything needed to authorize a click — the actor,
+    workspace, container, target, and lifecycle. The opaque key is the lookup,
+    not the security model: a click is honored only when key + Slack-authed actor
+    + workspace/container match + the target is still actionable, under a row
+    lock. Wrong-user/forged clicks increment the denial audit and leave the row
+    usable.
+    """
+
+    __tablename__ = "interactive_actions"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    installation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("installations.id", ondelete="CASCADE"), nullable=False
+    )
+    task_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("tasks.id", ondelete="CASCADE")
+    )
+    # The task created by acting on this action (retry/run_again), if any.
+    result_task_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("tasks.id", ondelete="SET NULL")
+    )
+
+    action_key_hash: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    action_kind: Mapped[str] = mapped_column(String, nullable=False)
+    route: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String, nullable=False, server_default=text("'pending_send'")
+    )
+
+    target_type: Mapped[str] = mapped_column(String, nullable=False)
+    target_id: Mapped[str] = mapped_column(String, nullable=False)
+    payload_json: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+
+    slack_team_id: Mapped[str | None] = mapped_column(String)
+    slack_channel_id: Mapped[str | None] = mapped_column(String)
+    slack_thread_ts: Mapped[str | None] = mapped_column(String)
+    slack_message_ts: Mapped[str | None] = mapped_column(String)
+    slack_block_id: Mapped[str | None] = mapped_column(String)
+    slack_action_id: Mapped[str | None] = mapped_column(String)
+
+    created_for_user_id: Mapped[str | None] = mapped_column(String)
+    allowed_user_id: Mapped[str | None] = mapped_column(String)
+    required_role: Mapped[str | None] = mapped_column(String)
+    allowed_channel_id: Mapped[str | None] = mapped_column(String)
+
+    expires_at: Mapped[datetime] = mapped_column(TZ, nullable=False)
+    sent_at: Mapped[datetime | None] = mapped_column(TZ)
+    consumed_at: Mapped[datetime | None] = mapped_column(TZ)
+    consumed_by_user_id: Mapped[str | None] = mapped_column(String)
+    last_denied_at: Mapped[datetime | None] = mapped_column(TZ)
+    denied_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+
+    metadata_json: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        Index("idx_interactive_actions_installation", "installation_id"),
+        Index("idx_interactive_actions_task", "task_id"),
+        Index(
+            "idx_interactive_actions_target",
+            "installation_id",
+            "target_type",
+            "target_id",
+            "status",
         ),
     )

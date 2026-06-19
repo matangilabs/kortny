@@ -164,10 +164,78 @@ def test_renders_docx_format(tmp_path: Path) -> None:
     assert "wordprocessingml" in result.output["mime_type"]
 
 
+def test_renders_xlsx_format(tmp_path: Path) -> None:
+    result = DocumentStudioTool(working_dir=tmp_path).invoke(
+        _args(format="xlsx", filename="data")
+    )
+    output_path = Path(result.output["path"])
+    assert output_path.exists()
+    assert output_path.read_bytes()[:2] == b"PK"
+    assert result.output["filename"] == "data.xlsx"
+    assert result.output["format"] == "xlsx"
+    assert "spreadsheetml" in result.output["mime_type"]
+
+
+class _FakeCanvasClient:
+    def __init__(self) -> None:
+        self.created: list[tuple[str, str | None]] = []
+
+    def conversations_canvases_create(
+        self,
+        *,
+        channel_id: str,
+        document_content: dict[str, object],
+        title: str | None = None,
+    ) -> dict[str, object]:
+        self.created.append((channel_id, title))
+        return {"ok": True, "canvas_id": "Fcanvas1"}
+
+
+def test_renders_canvas_delivery(db_session: Session, tmp_path: Path) -> None:
+    task = _create_task(db_session)
+    client = _FakeCanvasClient()
+    result = DocumentStudioTool(
+        working_dir=tmp_path,
+        session=db_session,
+        task_id=task.id,
+        task_service=TaskService(db_session),
+        slack_client=client,
+    ).invoke(_args(format="canvas"))
+    assert result.output["format"] == "canvas"
+    assert result.output["canvas_id"] == "Fcanvas1"
+    assert result.artifacts == ()
+    assert client.created and client.created[0][0] == "C123"
+
+
+def test_canvas_without_slack_client_is_recoverable(tmp_path: Path) -> None:
+    with pytest.raises(RecoverableToolError) as exc:
+        DocumentStudioTool(working_dir=tmp_path).invoke(_args(format="canvas"))
+    assert exc.value.code == "canvas_unavailable"
+
+
 def test_invalid_format_raises_recoverable(tmp_path: Path) -> None:
     with pytest.raises(RecoverableToolError) as exc:
-        DocumentStudioTool(working_dir=tmp_path).invoke(_args(format="xlsx"))
+        DocumentStudioTool(working_dir=tmp_path).invoke(_args(format="rtf"))
     assert exc.value.code == "invalid_document_format"
+
+
+def test_critique_autofixes_ragged_table_and_reports(tmp_path: Path) -> None:
+    ragged = {"type": "table", "columns": ["A", "B", "C"], "rows": [["1"]]}
+    result = DocumentStudioTool(working_dir=tmp_path).invoke(
+        _args(blocks=[{"type": "prose", "text": "body"}, ragged])
+    )
+    assert Path(result.output["path"]).exists()
+    critique = result.output["critique"]
+    assert critique["autofixes"] >= 1
+    assert "ragged_table_rows" in critique["codes"]
+
+
+def test_empty_document_raises_needs_revision(tmp_path: Path) -> None:
+    with pytest.raises(RecoverableToolError) as exc:
+        DocumentStudioTool(working_dir=tmp_path).invoke(
+            _args(blocks=[{"type": "prose", "text": "   "}])
+        )
+    assert exc.value.code == "document_spec_needs_revision"
 
 
 # --------------------------------------------------------------------------- #
@@ -232,6 +300,24 @@ def test_records_artifact_row_and_event(db_session: Session, tmp_path: Path) -> 
     assert result.output["artifact_id"] == str(artifact.id)
     assert event is not None
     assert event.payload["artifact_id"] == str(artifact.id)
+    # Living-document persistence: the canonical spec rides on the artifact.
+    assert artifact.doc_group_id is not None
+    assert artifact.doc_version == 1
+    assert artifact.spec_json is not None
+    assert artifact.spec_json["title"] == "Test Report"
+    assert result.output["doc_group_id"] == str(artifact.doc_group_id)
+
+
+def test_fresh_render_mints_group_v1_and_rerender_increments(tmp_path: Path) -> None:
+    tool = DocumentStudioTool(working_dir=tmp_path)
+    first = tool.invoke(_args())
+    assert first.output["doc_version"] == 1
+    group = first.output["doc_group_id"]
+
+    # A re-render of the same group at base_version 1 → v2, same group.
+    second = tool.invoke(_args(doc_group_id=group, base_version=1))
+    assert second.output["doc_group_id"] == group
+    assert second.output["doc_version"] == 2
 
 
 def _cleanup(session: Session) -> None:

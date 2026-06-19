@@ -18,6 +18,7 @@ colours/fonts come from the same Theme object the Typst writer uses.
 from __future__ import annotations
 
 import io
+from collections.abc import Callable
 from typing import cast
 
 from pptx import Presentation as new_presentation
@@ -365,22 +366,71 @@ class _DeckBuilder:
         self._y += card_h + int(Inches(0.25))
 
     def _table(self, block: Table) -> None:
-        rows = len(block.rows) + 1
         cols = len(block.columns)
-        row_h = int(Inches(0.4))
-        total_h = row_h * rows
-        self._space(total_h + int(Inches(0.2)))
+        if cols == 0:
+            return
+        # Estimate per-row height from wrapped text so a tall table paginates
+        # onto continuation slides instead of overflowing off the slide.
+        chars_per_col = max(10, 90 // cols)
+        line_h = int(Inches(0.26))
+        pad = int(Inches(0.14))
+
+        def row_height(cells: list[str]) -> int:
+            lines = 1
+            for cell in cells:
+                lines = max(lines, -(-len(str(cell)) // chars_per_col))
+            return line_h * lines + pad
+
+        header_h = row_height([str(c) for c in block.columns])
+        remaining = [(list(r) + [""] * cols)[:cols] for r in block.rows]
+
+        while True:
+            first_row_h = row_height(remaining[0]) if remaining else line_h + pad
+            self._space(header_h + first_row_h + int(Inches(0.2)))
+            assert self._content is not None
+            avail = int(_CONTENT_BOTTOM) - self._y - header_h - int(Inches(0.2))
+            chunk: list[list[str]] = []
+            used = 0
+            for row in remaining:
+                h = row_height(row)
+                if chunk and used + h > avail:
+                    break
+                chunk.append(row)
+                used += h
+            self._draw_table_chunk(block.columns, chunk, header_h, used, row_height)
+            remaining = remaining[len(chunk) :]
+            if not remaining:
+                break
+            # Continuation slide; don't stack "(cont.)" suffixes.
+            title = self._content_title
+            base = (
+                title[: -len(" (cont.)")]
+                if title and title.endswith(" (cont.)")
+                else title
+            )
+            self._ensure_content_slide(title=f"{base} (cont.)" if base else None)
+
+    def _draw_table_chunk(
+        self,
+        columns: list[str],
+        rows: list[list[str]],
+        header_h: int,
+        body_h: int,
+        row_height: Callable[[list[str]], int],
+    ) -> None:
         assert self._content is not None
         c = self.theme.colors
+        total_h = header_h + body_h
         shape = self._content.shapes.add_table(
-            rows, cols, _MARGIN, Emu(self._y), _BODY_W, Emu(total_h)
+            len(rows) + 1, len(columns), _MARGIN, Emu(self._y), _BODY_W, Emu(total_h)
         )
         table = shape.table
         # The default table style paints a banded blue Office theme that fights
         # our explicit cell fills; turn the styled bands off.
         table.first_row = False
         table.horz_banding = False
-        for j, col in enumerate(block.columns):
+        table.rows[0].height = Emu(header_h)
+        for j, col in enumerate(columns):
             cell = table.cell(0, j)
             cell.fill.solid()
             cell.fill.fore_color.rgb = _rgb(c.ink)
@@ -392,9 +442,9 @@ class _DeckBuilder:
                 font=self.theme.mono_font,
                 color="#FFFFFF",
             )
-        for i, row in enumerate(block.rows, start=1):
-            padded = (list(row) + [""] * cols)[:cols]
-            for j, value in enumerate(padded):
+        for i, row in enumerate(rows, start=1):
+            table.rows[i].height = Emu(row_height(row))
+            for j, value in enumerate(row):
                 cell = table.cell(i, j)
                 cell.fill.solid()
                 cell.fill.fore_color.rgb = _rgb(c.paper)

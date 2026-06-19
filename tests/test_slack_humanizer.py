@@ -5,10 +5,36 @@ from kortny.slack.humanizer import (
     ResponseShapeProfile,
     ResponseStyleProfile,
     SlackSurface,
+    _parse_presentation_hint,
     _synthesis_payload,
     sanitize_humanized_response,
 )
+from kortny.slack.presentation import FieldsElement
 from kortny.slack.synthesis import SynthesisContext, SynthesisOutcome
+
+
+def test_parse_presentation_hint_extracts_elements() -> None:
+    raw = (
+        '{"message":"Your schedule is set.","presentation":{"elements":'
+        '[{"type":"fields","items":[{"label":"Cadence","value":"Daily"}]}]}}'
+    )
+    hint = _parse_presentation_hint(raw)
+    assert hint is not None
+    assert len(hint.elements) == 1
+    assert isinstance(hint.elements[0], FieldsElement)
+
+
+def test_parse_presentation_hint_none_when_absent_or_garbled() -> None:
+    assert _parse_presentation_hint('{"message":"hi"}') is None
+    assert _parse_presentation_hint("not json") is None
+    assert _parse_presentation_hint(None) is None
+    # Unknown element type → dropped → no usable hint.
+    assert (
+        _parse_presentation_hint(
+            '{"message":"x","presentation":{"elements":[{"type":"chart"}]}}'
+        )
+        is None
+    )
 
 
 def test_sanitize_humanized_response_falls_back_when_empty() -> None:

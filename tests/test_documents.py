@@ -319,6 +319,195 @@ def test_render_docx_both_themes() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# XLSX (data export)
+# --------------------------------------------------------------------------- #
+
+
+def _xlsx_sheet_names(data: bytes) -> list[str]:
+    import re as _re
+    import zipfile
+
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        assert "[Content_Types].xml" in zf.namelist()
+        workbook_xml = zf.read("xl/workbook.xml").decode("utf-8")
+    return _re.findall(r'<sheet[^>]*name="([^"]+)"', workbook_xml)
+
+
+def test_render_xlsx_produces_valid_workbook_with_data_sheets() -> None:
+    from kortny.documents import render_xlsx
+
+    data = render_xlsx(_spec())
+    assert data[:2] == b"PK"  # OOXML zip
+    names = _xlsx_sheet_names(data)
+    # The fixture has a table + stat_cards → Summary + Table 1 + Metrics.
+    assert "Summary" in names
+    assert "Table 1" in names
+    assert "Metrics" in names
+
+
+def test_render_xlsx_chart_block_becomes_a_data_sheet() -> None:
+    from kortny.documents import render_xlsx
+
+    spec = _spec(blocks=[*_FULL_SPEC["blocks"], _BAR.model_dump()])
+    names = _xlsx_sheet_names(render_xlsx(spec))
+    assert "Chart 1 Data" in names
+
+
+def test_render_xlsx_dedupes_multiple_table_sheets() -> None:
+    from kortny.documents import render_xlsx
+
+    two_tables = {
+        "type": "table",
+        "columns": ["A", "B"],
+        "rows": [["1", "2"]],
+    }
+    spec = _spec(blocks=[two_tables, dict(two_tables)])
+    names = _xlsx_sheet_names(render_xlsx(spec))
+    assert "Table 1" in names
+    assert "Table 2" in names
+
+
+def test_xlsx_is_poor_fit_for_prose_good_for_data() -> None:
+    from kortny.documents import xlsx_is_poor_fit
+
+    prose_only = _spec(
+        blocks=[
+            {"type": "heading", "text": "Overview"},
+            {"type": "prose", "text": "All narrative, no data."},
+        ]
+    )
+    assert xlsx_is_poor_fit(prose_only) is True
+    # The full fixture (table + stat_cards) is a fine spreadsheet.
+    assert xlsx_is_poor_fit(_spec()) is False
+
+
+# --------------------------------------------------------------------------- #
+# Deterministic critique (lint + auto-fix + post-render validation)
+# --------------------------------------------------------------------------- #
+
+
+def test_critique_pads_ragged_table_rows() -> None:
+    from kortny.documents.critique import critique_and_fix
+
+    spec = _spec(
+        blocks=[
+            {"type": "table", "columns": ["A", "B", "C"], "rows": [["1"], ["2", "3"]]}
+        ]
+    )
+    result = critique_and_fix(spec)
+    table = result.spec.blocks[0]
+    assert all(len(row) == 3 for row in table.rows)  # type: ignore[union-attr]
+    assert any(
+        i.code == "ragged_table_rows" and i.autofix == "applied" for i in result.issues
+    )
+
+
+def test_critique_drops_empty_table_and_blank_blocks() -> None:
+    from kortny.documents.critique import critique_and_fix
+
+    spec = _spec(
+        blocks=[
+            {"type": "heading", "text": "Keep me"},
+            {"type": "prose", "text": "body"},
+            {"type": "table", "columns": ["A"], "rows": []},
+            {"type": "prose", "text": "   "},
+        ]
+    )
+    result = critique_and_fix(spec)
+    kinds = [b.type for b in result.spec.blocks]
+    assert "table" not in kinds
+    assert kinds.count("prose") == 1
+    assert {"empty_table", "empty_prose"} <= {i.code for i in result.issues}
+
+
+def test_critique_dedupes_columns_and_drops_bad_accent_tail() -> None:
+    from kortny.documents.critique import critique_and_fix
+
+    spec = _spec(
+        blocks=[
+            {"type": "cover_header", "title": "Report", "accent_tail": "Nope"},
+            {"type": "table", "columns": ["X", "", "X"], "rows": [["1", "2", "3"]]},
+        ]
+    )
+    result = critique_and_fix(spec)
+    cover, table = result.spec.blocks
+    assert cover.accent_tail is None  # type: ignore[union-attr]
+    assert len(set(table.columns)) == 3  # type: ignore[union-attr]
+
+
+def test_critique_empty_document_is_an_error() -> None:
+    from kortny.documents.critique import critique_and_fix
+
+    result = critique_and_fix(_spec(blocks=[{"type": "prose", "text": "  "}]))
+    assert result.has_errors
+    assert any(i.code == "empty_document" for i in result.issues)
+
+
+def test_validate_render_flags_garbage_and_passes_real_files() -> None:
+    from kortny.documents import render_xlsx
+    from kortny.documents.critique import validate_render
+
+    assert validate_render(b"not a pdf", "pdf")[0].severity == "error"
+    assert validate_render(b"not a zip", "xlsx")[0].severity == "error"
+    assert validate_render(render_xlsx(_spec()), "xlsx") == []
+
+
+# --------------------------------------------------------------------------- #
+# Canvas (markdown delivery)
+# --------------------------------------------------------------------------- #
+
+
+def test_render_pptx_paginates_long_table_without_truncation() -> None:
+    from pptx import Presentation
+
+    from kortny.documents import render_pptx
+
+    big_table = {
+        "type": "table",
+        "columns": ["Title", "Note"],
+        "rows": [[f"Row {i}", "some descriptive text " * 3] for i in range(80)],
+    }
+    spec = _spec(blocks=[{"type": "heading", "text": "The Year's Best"}, big_table])
+    prs = Presentation(io.BytesIO(render_pptx(spec)))
+
+    table_shapes = [sh for s in prs.slides for sh in s.shapes if sh.has_table]
+    # The table spilled across continuation slides...
+    assert len(table_shapes) >= 2
+    # ...and every data row survived (no truncation).
+    total_rows = sum(len(sh.table.rows) - 1 for sh in table_shapes)
+    assert total_rows == 80
+
+
+def test_critique_warns_on_unlabelled_chart() -> None:
+    from kortny.documents.critique import critique_and_fix
+
+    spec = _spec(
+        blocks=[
+            {
+                "type": "chart",
+                "chart_type": "bar",
+                "series": [{"name": "s", "points": [{"x": "a", "y": 1.0}]}],
+            }
+        ]
+    )
+    codes = {i.code for i in critique_and_fix(spec).issues}
+    assert "chart_missing_title" in codes
+    assert "chart_missing_axis_labels" in codes
+
+
+def test_render_canvas_markdown_maps_blocks_and_drops_charts() -> None:
+    from kortny.documents.canvas_writer import render_canvas_markdown
+
+    spec = _spec(blocks=[*_FULL_SPEC["blocks"], _BAR.model_dump()])
+    markdown, omitted = render_canvas_markdown(spec)
+    assert markdown.startswith("# ")  # cover title as H1
+    assert "| " in markdown  # the table became a markdown table
+    # The chart is dropped with a note.
+    assert omitted
+    assert "Charts aren't supported" in markdown
+
+
+# --------------------------------------------------------------------------- #
 # Charts (vl-convert)
 # --------------------------------------------------------------------------- #
 

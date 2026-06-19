@@ -33,6 +33,8 @@ from kortny.skills import (
     SkillActivation,
     SkillRegistryService,
 )
+from kortny.slack.presentation import PresentationHint, parse_presentation
+from kortny.slack.source_index import SourceIndex, build_source_index
 from kortny.slack.synthesis import (
     EvidenceKind,
     EvidenceTrust,
@@ -52,9 +54,23 @@ RESPONSE_HUMANIZER_SYSTEM_PROMPT = """You write __AGENT_NAME__'s final Slack res
 Return exactly one JSON object:
 {"message":"Slack-ready message"}
 
+You MAY add an optional "presentation" object to render structured data as
+Slack Block Kit, e.g.:
+{"message":"...","presentation":{"elements":[ ... ]}}
+
 The message value must contain only the Slack-ready response. Do not include
 notes, reasoning, draft analysis, labels like final_mode, or explanations of
-your rewrite.
+your rewrite. Never put Block Kit JSON, block types, or the presentation object
+inside the message string.
+
+When the answer carries structured data (a list of entities with attributes,
+key-value facts/metrics, status, comparisons, or rows), add a "presentation"
+object so it renders as native Slack Block Kit. Follow the "Slack Block Kit
+Presentation" skill in the procedural_skills you are given - it tells you exactly
+when and how (cards/fields/table/context) with examples. The message is always
+the complete answer on its own; presentation only re-renders data already in the
+message; never put Block Kit JSON or the presentation object inside the message
+string. Skip presentation for plain conversation.
 
 Rules:
 - Use only facts, actions, artifacts, failures, uncertainties, links, and the raw
@@ -103,9 +119,12 @@ Rules:
   genuinely useful and specific.
 - Keep it concise for Slack, but do not omit important recommendations.
 - When tool results contain concrete records the user asked about (issues,
-  tickets, rows, search hits, line items), LIST them as bullets with the
-  identifying detail (title/id/status/owner), do not collapse them to a count.
-  "You have one Linear issue" is wrong when you fetched the issue - show it.
+  tickets, rows, search hits, line items), SHOW them with identifying detail
+  (title/id/status/owner) - never collapse them to a count. "You have one Linear
+  issue" is wrong when you fetched the issue. Show them EITHER as a presentation
+  element (cards/table/fields) OR as message bullets - never both, or the reader
+  sees the same data twice. Prefer a presentation element when the records carry
+  attributes; the message then just frames them.
 - Apply human editing principles: remove inflated/promotional language, cut
   chatbot artifacts, vary rhythm naturally, and preserve substance.
 - The style_profile may include channel_voice: match its register (formality,
@@ -499,6 +518,8 @@ class ResponseSynthesisResult:
     text: str
     changed: bool
     reason: str
+    presentation: PresentationHint | None = None
+    source_index: SourceIndex | None = None
 
 
 class ChannelStyleResolver(Protocol):
@@ -687,10 +708,12 @@ class LLMResponseSynthesizer:
             completion.content,
             fallback=response_record.raw_answer,
         )
+        presentation = _parse_presentation_hint(completion.content)
         return ResponseSynthesisResult(
             text=text,
             changed=text != response_record.raw_answer,
             reason="llm_humanizer",
+            presentation=presentation,
         )
 
 
@@ -702,8 +725,12 @@ def synthesize_response(
     raw_text: str,
     task_service: TaskService,
     style_resolver: ChannelStyleResolver | None = None,
-) -> str:
-    """Generate Slack-facing response text, failing open to the raw answer."""
+) -> ResponseSynthesisResult:
+    """Generate the Slack-facing response, failing open to the raw answer.
+
+    Returns the full :class:`ResponseSynthesisResult` (text + optional
+    presentation hint); callers that only need the text read ``.text``.
+    """
 
     response_record = build_response_record(
         session=session,
@@ -776,7 +803,11 @@ def synthesize_response(
                 "fallback": "sanitized_raw_answer",
             },
         )
-        return sanitize_humanized_response(None, fallback=raw_text)
+        return ResponseSynthesisResult(
+            text=sanitize_humanized_response(None, fallback=raw_text),
+            changed=False,
+            reason="humanizer_failed",
+        )
 
     task_service.append_event(
         task,
@@ -788,9 +819,16 @@ def synthesize_response(
             "raw_chars": len(raw_text),
             "output_chars": len(result.text),
             "response_mode": response_record.response_mode.value,
+            "presentation_elements": (
+                len(result.presentation.elements)
+                if result.presentation is not None
+                else 0
+            ),
         },
     )
-    return result.text
+    # Attach the server-built source index so the renderer can resolve any
+    # `sources` refs to real URLs (built from the same evidence the LLM saw).
+    return replace(result, source_index=build_source_index(response_record.evidence))
 
 
 def sanitize_humanized_response(text: str | None, *, fallback: str) -> str:
@@ -841,11 +879,21 @@ def strip_internal_response_preamble(text: str) -> str:
                 candidate
             ) or _usable_short_final_answer_candidate(candidate):
                 return candidate
-    for candidate in reversed(_paragraphs(raw)[1:]):
-        if _usable_final_answer_candidate(candidate) and not _looks_like_humanizer_leak(
-            candidate
-        ):
-            return candidate
+    # Last resort: keep the trailing run of clean paragraphs. When a leak
+    # preamble is followed by the real answer with no explicit boundary marker
+    # (e.g. "...I should keep it short. response_record shows the figure.\n\nQ3
+    # revenue was $1.2M."), none of the marker/opener strategies fire, so walk
+    # paragraphs from the end and collect them until we hit a leaky one. A short
+    # but substantive answer counts (the 40-char bar wrongly dropped real one-
+    # liners); a bare ack ("Done.") does not. (HIG-255 leak-gap fix.)
+    clean_tail: list[str] = []
+    for candidate in reversed(_paragraphs(raw)):
+        if _looks_like_humanizer_leak(candidate):
+            break
+        clean_tail.insert(0, candidate)
+    tail = "\n\n".join(clean_tail).strip()
+    if tail and tail != raw and _is_substantive_answer(tail):
+        return tail
     return raw
 
 
@@ -860,6 +908,24 @@ def _json_message(text: str) -> str | None:
     if isinstance(message, str) and message.strip():
         return message
     return None
+
+
+def _parse_presentation_hint(text: str | None) -> PresentationHint | None:
+    """Extract the optional Block Kit presentation hint from the LLM JSON.
+
+    The hint is structured data consumed by the deterministic renderer; it is
+    never posted as text. Lenient: a missing/garbled hint yields None (prose).
+    """
+
+    if text is None:
+        return None
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return parse_presentation(payload.get("presentation"))
 
 
 def _looks_like_humanizer_leak(text: str) -> bool:
@@ -893,6 +959,32 @@ def _usable_final_answer_candidate(text: str) -> bool:
 
 def _usable_short_final_answer_candidate(text: str) -> bool:
     return len(text.strip()) >= 8
+
+
+# Bare acknowledgements that are not a real answer — a clean tail of only these
+# should not be treated as the substantive final answer (HIG-255 leak-gap fix).
+_BARE_ACK_ANSWERS = frozenset(
+    {
+        "done",
+        "here you go",
+        "here's the answer",
+        "here is the answer",
+        "ok",
+        "okay",
+        "sure",
+        "got it",
+        "all set",
+    }
+)
+
+
+def _is_substantive_answer(text: str) -> bool:
+    """A clean tail is substantive when it has real content, not just an ack."""
+
+    stripped = text.strip()
+    if len(stripped) < 8:
+        return False
+    return stripped.casefold().rstrip(".!… ") not in _BARE_ACK_ANSWERS
 
 
 def build_response_record(
@@ -1063,7 +1155,7 @@ def _synthesis_payload(
     response_record: ResponseRecord,
     synthesis_context: SynthesisContext,
 ) -> JsonObject:
-    return {
+    payload: JsonObject = {
         "response_record": response_record.to_payload(),
         "synthesis_context": synthesis_context.to_payload(),
         "renderer_constraints": {
@@ -1071,6 +1163,12 @@ def _synthesis_payload(
             "avoid": ["GitHub Markdown headings", "Markdown tables"],
         },
     }
+    # Expose the citable sources (server-built refs) so the humanizer can
+    # reference them in a `sources` presentation element without authoring URLs.
+    available_sources = build_source_index(response_record.evidence).available()
+    if available_sources:
+        payload["available_sources"] = available_sources
+    return payload
 
 
 def _synthesis_evidence_from_events(

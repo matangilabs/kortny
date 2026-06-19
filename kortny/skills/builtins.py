@@ -3,6 +3,25 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
+
+_CURATED_DIR = Path(__file__).parent / "curated"
+
+
+def _curated_body(slug: str) -> str:
+    """Return a curated skill's SKILL.md body (frontmatter stripped).
+
+    Some built-ins inject a curated skill's body verbatim so the curated
+    ``SKILL.md`` stays the single source of truth (it is also the open-sourceable
+    artifact) while the built-in is the reliable always-seeded injection path.
+    """
+
+    text = (_CURATED_DIR / slug / "SKILL.md").read_text(encoding="utf-8")
+    if text.startswith("---"):
+        parts = text.split("---", 2)
+        if len(parts) == 3:
+            return parts[2].strip()
+    return text.strip()
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,5 +201,22 @@ Produce a compact status recap from recent context.
 - Call out open questions or blockers only when the evidence supports them.
 - Avoid sounding like an activity log.
 """,
+    ),
+    BuiltInSkillDefinition(
+        slug="slack-block-kit",
+        name="Slack Block Kit Presentation",
+        version="1.0.0",
+        description=(
+            "Use when a reply carries structured data — a list of entities with "
+            "attributes, key-value facts/metrics, status, comparisons, or rows — "
+            "to render it as native Slack Block Kit via a presentation hint."
+        ),
+        intent_tags=("slack", "block kit", "presentation", "data", "rendering"),
+        response_modes=("all",),
+        trigger_phrases=("show", "list", "status", "breakdown", "compare"),
+        metadata={"kind": "instruction_only", "source": "kortny"},
+        # Body is the curated SKILL.md (single source of truth); injected into the
+        # humanizer so it reliably emits a presentation hint for structured data.
+        instructions_md=_curated_body("slack-block-kit"),
     ),
 )

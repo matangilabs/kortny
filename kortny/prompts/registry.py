@@ -54,8 +54,8 @@ def _seed() -> None:
     (moving the text in is a follow-on refactor).
     """
 
-    seed: tuple[tuple[str, str, str], ...] = (
-        # name, subsystem, one-line description
+    seed: tuple[tuple[str, ...], ...] = (
+        # name, subsystem, one-line description, [version (defaults to "1")]
         (
             "kortny.intent_classifier",
             "intent",
@@ -76,6 +76,7 @@ def _seed() -> None:
             "kortny.response_humanizer",
             "slack",
             "Rewrite the agent answer in Kortny's Slack voice.",
+            "2",  # v2 (HIG-255): may emit an optional presentation hint
         ),
         ("kortny.ack_generator", "slack", "Generate a short acknowledgement line."),
         (
@@ -154,9 +155,11 @@ def _seed() -> None:
             "Synthesize a tool-approval request prompt.",
         ),
     )
-    for name, subsystem, description in seed:
+    for entry in seed:
+        name, subsystem, description = entry[0], entry[1], entry[2]
+        version = entry[3] if len(entry) > 3 else "1"
         register_prompt(
-            name=name, subsystem=subsystem, version="1", description=description
+            name=name, subsystem=subsystem, version=version, description=description
         )
 
 

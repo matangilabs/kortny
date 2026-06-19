@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from pydantic import ValidationError
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from kortny.db.models import Artifact, TaskEventType
@@ -31,8 +32,16 @@ from kortny.documents import (
     render_docx,
     render_pptx,
     render_spec_pdf,
+    render_xlsx,
     theme_names,
+    xlsx_is_poor_fit,
 )
+from kortny.documents.critique import (
+    DocumentIssue,
+    critique_and_fix,
+    validate_render,
+)
+from kortny.tasks import TaskService
 from kortny.tools.types import (
     JsonObject,
     JsonSchema,
@@ -51,6 +60,10 @@ _FORMATS: dict[str, tuple[str, str]] = {
     "docx": (
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         "docx",
+    ),
+    "xlsx": (
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "xlsx",
     ),
 }
 DEFAULT_FORMAT = "pdf"
@@ -73,7 +86,10 @@ _BLOCK_GUIDE = (
     "- cta: label (req), text.\n"
     "- chart: chart_type (bar|line|area|pie|scatter), title, x_label, y_label, "
     "caption, series (req, 1-8) of {name, points:[{x,y}]}. Use for real data "
-    "visualizations; x is a category label or a number, y is numeric.\n"
+    "visualizations; x is a category label or a number, y is numeric. ALWAYS set "
+    "a title and (except pie) x_label and y_label — an unlabelled chart is "
+    "unreadable. Give each series a descriptive name; multiple series render a "
+    "legend, so use >1 series only when comparing distinct quantities.\n"
     "Composition: a section_divider takes its own full page, so put dividers "
     "BETWEEN major sections — never immediately after the cover, and never strand "
     "a single small block (e.g. stat_cards alone) right before a divider, which "
@@ -148,10 +164,16 @@ class DocumentStudioTool:
             },
             "format": {
                 "type": "string",
-                "enum": ["pdf", "pptx", "docx"],
+                "enum": ["pdf", "pptx", "docx", "xlsx", "canvas"],
                 "description": (
                     "Output format. 'pdf' = finished deliverable (default), "
-                    "'pptx' = slide deck, 'docx' = editable Word document."
+                    "'pptx' = slide deck, 'docx' = editable Word document, "
+                    "'xlsx' = spreadsheet DATA EXPORT — use only when the answer "
+                    "is mostly tables/metrics/chart data the user will analyze, "
+                    "never for a prose narrative (use pdf/docx for those). "
+                    "'canvas' = a living, editable Slack channel canvas — use when "
+                    "the user wants a shared doc the team keeps in the channel "
+                    "(notes, runbook, hub); charts are dropped (no canvas support)."
                 ),
             },
             "filename": {
@@ -159,6 +181,22 @@ class DocumentStudioTool:
                 "description": (
                     "Optional output filename; the correct extension for the "
                     "chosen format is enforced."
+                ),
+            },
+            "doc_group_id": {
+                "type": "string",
+                "description": (
+                    "When REVISING an existing document (e.g. shortening or "
+                    "extending one already in this thread), pass its doc_group_id "
+                    "so the new render is tracked as the next version, not a new "
+                    "document. Omit for a brand-new document."
+                ),
+            },
+            "base_version": {
+                "type": "integer",
+                "description": (
+                    "The version you are revising from (paired with "
+                    "doc_group_id); the render becomes base_version + 1."
                 ),
             },
         },
@@ -174,6 +212,7 @@ class DocumentStudioTool:
         session: Session | None = None,
         task_id: uuid.UUID | None = None,
         task_service: TaskEventSink | None = None,
+        slack_client: Any | None = None,
     ) -> None:
         if (session is None) != (task_id is None):
             raise ValueError("session and task_id must be provided together")
@@ -182,14 +221,44 @@ class DocumentStudioTool:
         self.session = session
         self.task_id = task_id
         self.task_service = task_service
+        self.slack_client = slack_client
 
     def invoke(self, args: JsonObject) -> ToolResult:
         """Validate the spec, render the chosen format, record the artifact."""
 
         spec = _parse_spec(args)
-        fmt = _parse_format(args.get("format"))
+        raw_format = args.get("format")
+
+        # Lint + auto-fix before any delivery (shared by files and canvas).
+        critique = critique_and_fix(spec)
+        if critique.has_errors:
+            raise RecoverableToolError(
+                code="document_spec_needs_revision",
+                message="The document spec has defects that can't be auto-fixed.",
+                hint="Address the reported issues (e.g. add content) and retry.",
+                details={"issues": [i.model_dump() for i in critique.issues]},
+            )
+        spec = critique.spec
+
+        if raw_format == "canvas":
+            return self._deliver_canvas(spec, critique.issues)
+
+        fmt = _parse_format(raw_format)
         mime_type, extension = _FORMATS[fmt]
         filename = _safe_filename(args.get("filename"), extension)
+
+        issues = list(critique.issues)
+        if fmt == "xlsx" and xlsx_is_poor_fit(spec):
+            issues.append(
+                DocumentIssue(
+                    code="xlsx_poor_fit",
+                    severity="warning",
+                    message=(
+                        "This document is mostly prose; a spreadsheet is a weak "
+                        "fit. Consider pdf or docx."
+                    ),
+                )
+            )
 
         try:
             data = self._render(spec, fmt)
@@ -220,10 +289,26 @@ class DocumentStudioTool:
                 details={"stderr": exc.stderr[:2000]},
             ) from exc
 
+        # Post-render validation: the bytes must be a real file of the right kind.
+        render_issues = validate_render(data, fmt)
+        issues.extend(render_issues)
+        if any(issue.severity == "error" for issue in render_issues):
+            raise RecoverableToolError(
+                code="document_render_invalid",
+                message="The rendered document failed validation.",
+                hint="Simplify the content and retry.",
+                details={"issues": [i.model_dump() for i in render_issues]},
+            )
+
         self.working_dir.mkdir(parents=True, exist_ok=True)
         output_path = self.working_dir / filename
         output_path.write_bytes(data)
         size_bytes = len(data)
+
+        # Living-document identity: a new group for a fresh doc, or the next
+        # version of an existing group on a re-render/edit (HIG-244).
+        doc_group_id, doc_version = self._resolve_doc_identity(args)
+        spec_json = spec.model_dump(mode="json")
 
         artifact = ToolArtifact(
             filename=filename,
@@ -240,6 +325,9 @@ class DocumentStudioTool:
                     path=output_path,
                     size_bytes=size_bytes,
                     mime_type=mime_type,
+                    doc_group_id=doc_group_id,
+                    doc_version=doc_version,
+                    spec_json=spec_json,
                 ).id
             )
 
@@ -253,19 +341,106 @@ class DocumentStudioTool:
                 "doc_kind": spec.doc_kind.value,
                 "block_count": len(spec.blocks),
                 "artifact_id": artifact_id,
+                "doc_group_id": str(doc_group_id),
+                "doc_version": doc_version,
+                "critique": {
+                    "autofixes": sum(1 for i in issues if i.autofix == "applied"),
+                    "warnings": sum(1 for i in issues if i.severity == "warning"),
+                    "codes": sorted({i.code for i in issues}),
+                },
             },
             artifacts=(artifact,),
         )
+
+    def _resolve_doc_identity(self, args: JsonObject) -> tuple[uuid.UUID, int]:
+        """A fresh group for a new doc, or the next version of an existing one."""
+
+        raw_group = args.get("doc_group_id")
+        if not isinstance(raw_group, str) or not raw_group:
+            return uuid.uuid4(), 1
+        try:
+            group = uuid.UUID(raw_group)
+        except ValueError:
+            return uuid.uuid4(), 1
+        base = args.get("base_version")
+        prior = (
+            base if isinstance(base, int) and base >= 1 else self._latest_version(group)
+        )
+        return group, prior + 1
+
+    def _latest_version(self, group: uuid.UUID) -> int:
+        if self.session is None:
+            return 0
+        value = self.session.scalar(
+            select(func.max(Artifact.doc_version)).where(Artifact.doc_group_id == group)
+        )
+        return value or 0
+
+    def _deliver_canvas(
+        self, spec: DocumentSpec, issues: list[DocumentIssue]
+    ) -> ToolResult:
+        """Deliver the document as an editable Slack channel canvas (HIG-244).
+
+        Reuses the existing channel-canvas tool (idempotent outbox delivery);
+        canvas has no file artifact and no version lineage in the close-out.
+        """
+
+        from kortny.db.models import Task
+        from kortny.documents.canvas_writer import render_canvas_markdown
+        from kortny.tools.slack_actions import SlackCreateChannelCanvasTool
+
+        if self.slack_client is None or self.session is None or self.task_id is None:
+            raise RecoverableToolError(
+                code="canvas_unavailable",
+                message="Canvas delivery needs an active Slack channel.",
+                hint="Render as pdf/pptx/docx instead, or ask from a channel.",
+            )
+        task = self.session.get(Task, self.task_id)
+        if task is None:
+            raise RecoverableToolError(
+                code="canvas_unavailable",
+                message="Canvas delivery needs an active Slack channel.",
+                hint="Render as pdf/pptx/docx instead, or ask from a channel.",
+            )
+        markdown, omitted = render_canvas_markdown(spec)
+        canvas_tool = SlackCreateChannelCanvasTool(
+            client=self.slack_client,
+            session=self.session,
+            task=task,
+            task_service=self.task_service
+            if isinstance(self.task_service, TaskService)
+            else None,
+        )
+        result = canvas_tool.invoke({"title": spec.title, "markdown": markdown})
+        output = dict(result.output)
+        output["format"] = "canvas"
+        output["omitted_blocks"] = omitted
+        output["critique"] = {
+            "autofixes": sum(1 for i in issues if i.autofix == "applied"),
+            "warnings": sum(1 for i in issues if i.severity == "warning"),
+            "codes": sorted({i.code for i in issues}),
+        }
+        return ToolResult(output=output, artifacts=())
 
     def _render(self, spec: DocumentSpec, fmt: str) -> bytes:
         if fmt == "pptx":
             return render_pptx(spec)
         if fmt == "docx":
             return render_docx(spec)
+        if fmt == "xlsx":
+            return render_xlsx(spec)
         return render_spec_pdf(spec, font_paths=self.font_paths)
 
     def _record_artifact(
-        self, *, filename: str, path: Path, size_bytes: int, mime_type: str
+        self,
+        *,
+        filename: str,
+        path: Path,
+        size_bytes: int,
+        mime_type: str,
+        doc_group_id: uuid.UUID,
+        doc_version: int,
+        spec_json: dict[str, Any],
     ) -> Artifact:
         assert self.session is not None
         assert self.task_id is not None
@@ -276,6 +451,9 @@ class DocumentStudioTool:
             mime_type=mime_type,
             size_bytes=size_bytes,
             storage_path=str(path),
+            doc_group_id=doc_group_id,
+            doc_version=doc_version,
+            spec_json=spec_json,
         )
         self.session.add(artifact)
         self.session.flush()
@@ -297,7 +475,7 @@ class DocumentStudioTool:
 
 # The IR fields live alongside the tool-only knobs in args; strip the knobs
 # before validating the spec.
-_NON_SPEC_KEYS = frozenset({"filename", "format"})
+_NON_SPEC_KEYS = frozenset({"filename", "format", "doc_group_id", "base_version"})
 
 
 def _parse_spec(args: JsonObject) -> DocumentSpec:
