@@ -457,6 +457,44 @@ def test_validate_render_flags_garbage_and_passes_real_files() -> None:
 # --------------------------------------------------------------------------- #
 
 
+def test_render_pptx_paginates_long_table_without_truncation() -> None:
+    from pptx import Presentation
+
+    from kortny.documents import render_pptx
+
+    big_table = {
+        "type": "table",
+        "columns": ["Title", "Note"],
+        "rows": [[f"Row {i}", "some descriptive text " * 3] for i in range(80)],
+    }
+    spec = _spec(blocks=[{"type": "heading", "text": "The Year's Best"}, big_table])
+    prs = Presentation(io.BytesIO(render_pptx(spec)))
+
+    table_shapes = [sh for s in prs.slides for sh in s.shapes if sh.has_table]
+    # The table spilled across continuation slides...
+    assert len(table_shapes) >= 2
+    # ...and every data row survived (no truncation).
+    total_rows = sum(len(sh.table.rows) - 1 for sh in table_shapes)
+    assert total_rows == 80
+
+
+def test_critique_warns_on_unlabelled_chart() -> None:
+    from kortny.documents.critique import critique_and_fix
+
+    spec = _spec(
+        blocks=[
+            {
+                "type": "chart",
+                "chart_type": "bar",
+                "series": [{"name": "s", "points": [{"x": "a", "y": 1.0}]}],
+            }
+        ]
+    )
+    codes = {i.code for i in critique_and_fix(spec).issues}
+    assert "chart_missing_title" in codes
+    assert "chart_missing_axis_labels" in codes
+
+
 def test_render_canvas_markdown_maps_blocks_and_drops_charts() -> None:
     from kortny.documents.canvas_writer import render_canvas_markdown
 

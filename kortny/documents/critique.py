@@ -276,6 +276,24 @@ def _fix_cover(block: CoverHeader, index: int) -> tuple[Block, list[DocumentIssu
 
 def _lint_chart(block: Chart, index: int) -> list[DocumentIssue]:
     issues: list[DocumentIssue] = []
+    if not (block.title or block.caption):
+        issues.append(
+            DocumentIssue(
+                code="chart_missing_title",
+                severity="warning",
+                message="A chart has no title or caption — it reads as an unlabelled plot.",
+                block_index=index,
+            )
+        )
+    if block.chart_type != "pie" and not (block.x_label and block.y_label):
+        issues.append(
+            DocumentIssue(
+                code="chart_missing_axis_labels",
+                severity="warning",
+                message="A chart is missing x/y axis labels.",
+                block_index=index,
+            )
+        )
     if block.chart_type == "pie" and len(block.series) > 1:
         issues.append(
             DocumentIssue(
