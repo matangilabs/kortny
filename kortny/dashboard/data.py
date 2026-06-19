@@ -7818,6 +7818,7 @@ def _tier_description(tier: str) -> str:
         "document": "Long-form document and artifact generation.",
         "high_reasoning": "Highest-effort planning, audits, and difficult reasoning.",
         "humanizer": "Final Slack response synthesis and tone polishing.",
+        "vision": "Reading uploaded images and visual documents; image tasks route here.",
     }
     return descriptions.get(tier, "Model tier route.")
 
