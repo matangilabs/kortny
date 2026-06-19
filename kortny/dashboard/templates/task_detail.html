@@ -64,12 +64,12 @@
     <details open>
     <summary style="cursor:pointer; padding: 10px 0; font-weight: 700; font-size: 14px; color: var(--muted-foreground); list-style: none; display: flex; align-items: center; gap: 6px; margin-bottom: 4px;">
       <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex-shrink:0"><rect width="16" height="16" x="4" y="4" rx="2"/><rect width="6" height="6" x="9" y="9" rx="1"/></svg>
-      ADK Planned Trace
+      Legacy Planned Trace
     </summary>
     <section class="planned-trace-panel" aria-labelledby="planned-trace-heading">
       <header class="planned-trace-header">
         <div>
-          <span class="detail-label">ADK planned workflow</span>
+          <span class="detail-label">Legacy planned workflow</span>
           <h2 id="planned-trace-heading">Planned Trace</h2>
           <p>
             Branch execution, budgets, tool usage, and final-response handling for this task.
@@ -220,7 +220,7 @@
                 {% endif %}
               </div>
             {% else %}
-              <p class="empty">No ADK tool calls recorded for this planned workflow.</p>
+              <p class="empty">No tool calls recorded for this planned workflow.</p>
             {% endfor %}
           </div>
         </section>

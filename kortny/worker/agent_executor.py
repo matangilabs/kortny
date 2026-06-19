@@ -179,8 +179,6 @@ GENERIC_FAILURE_TEXT = (
     "Something went wrong while I was working on this. Please try again soon."
 )
 MEMORY_CONFIRMATION_PURPOSE = "memory_confirmation"
-PLANNED_WORKFLOW_PROGRESS_PURPOSE = "planned_progress_start"
-PLANNED_WORKFLOW_PROGRESS_TEXT = "Hang on, I'll check."
 TOOL_APPROVAL_PROMPT_SYNTHESIS_PROMPT_NAME = "kortny.tool_approval_prompt"
 
 # Deterministic progress templates — picked by stable hash of task id so retries
@@ -1170,7 +1168,7 @@ class AgentTaskExecutor:
                     planned_workflow_payload
                 ),
                 escalated=handoff.durable_candidate or planned_workflow_candidate,
-                selected_runtime=settings.agent_runtime,
+                selected_runtime="custom",
                 selected_backend=handoff.selected_backend,
                 actual_path="pending_runtime_selection",
                 reason=handoff.reason,
@@ -1197,25 +1195,21 @@ class AgentTaskExecutor:
             TaskEventType.log,
             {
                 "message": "agent_runtime_selected",
-                "runtime": settings.agent_runtime,
+                "runtime": "custom",
             },
         )
         log_observation(
             logger,
             "agent_runtime_selected",
             task=task,
-            runtime=settings.agent_runtime,
+            runtime="custom",
         )
         task_service.append_event(
             task,
             TaskEventType.log,
             RoutingDecisionTrace(
                 stage="worker_runtime_selected",
-                route_tier=(
-                    "tier2_orchestrator"
-                    if settings.agent_runtime == "adk"
-                    else "custom_runtime"
-                ),
+                route_tier="custom_runtime",
                 source="agent_executor",
                 runtime_class=handoff.runtime_class.value,
                 intent=_routing_intent_from_handoff(
@@ -1225,10 +1219,10 @@ class AgentTaskExecutor:
                 confidence=_routing_confidence_from_planned_payload(
                     planned_workflow_payload
                 ),
-                escalated=settings.agent_runtime == "adk",
-                selected_runtime=settings.agent_runtime,
+                escalated=False,
+                selected_runtime="custom",
                 selected_backend=handoff.selected_backend,
-                actual_path=settings.agent_runtime,
+                actual_path="custom",
                 reason="Worker selected configured agent runtime.",
                 reason_codes=handoff.reason_codes,
                 shadow_runtime_class=handoff.runtime_class.value,
@@ -1243,90 +1237,6 @@ class AgentTaskExecutor:
                 depth_source=depth.depth_source,
             ).to_payload(),
         )
-        if settings.agent_runtime == "adk":
-            from kortny.agent.adk_runtime import AdkAgentRuntime
-
-            if planned_workflow_candidate and settings.planned_workflows_enabled:
-                self._record_planned_task_started(
-                    task=task,
-                    task_service=task_service,
-                    progress_enabled=settings.planned_workflow_progress_updates_enabled,
-                )
-                if settings.planned_workflow_progress_updates_enabled:
-                    self._post_planned_workflow_progress(
-                        settings=settings,
-                        session=session,
-                        task=task,
-                        task_service=task_service,
-                    )
-
-            model_route = ModelRouter(settings).route_for_task(
-                task,
-                events=_task_events(session, task),
-            )
-            selection = self._select_runtime_model(
-                settings=settings,
-                session=session,
-                task=task,
-                model_route=model_route,
-            )
-            model_route = selection.model_route
-            task_service.append_event(
-                task,
-                TaskEventType.log,
-                {
-                    "message": "model_route_selected",
-                    "tier": model_route.tier.value,
-                    "model": model_route.model,
-                    "reason": model_route.reason,
-                    "runtime": "adk",
-                    **selection.event_payload,
-                },
-            )
-            logger.info(
-                "agent executor model route selected task_id=%s runtime=adk tier=%s model=%s reason=%s source=%s",
-                task.id,
-                model_route.tier.value,
-                model_route.model,
-                model_route.reason,
-                selection.chain.source,
-            )
-
-            cached_registry: ToolRegistry | None = None
-
-            def registry_factory() -> ToolRegistry:
-                nonlocal cached_registry
-                if cached_registry is not None:
-                    return cached_registry
-                registry = self._build_registry(
-                    settings=settings,
-                    session=session,
-                    task=task,
-                    task_service=task_service,
-                    working_dir=working_dir,
-                )
-                cached_registry = registry
-                logger.info(
-                    "agent executor registry ready task_id=%s runtime=adk_lazy tools=%s",
-                    task.id,
-                    ",".join(registry.names()),
-                )
-                return registry
-
-            return AdkAgentRuntime(
-                settings=settings,
-                session=session,
-                task_service=task_service,
-                registry_factory=registry_factory,
-                model=model_route.model,
-                model_route=model_route,
-                thread_transcript_provider=self._build_thread_transcript_provider(
-                    settings
-                ),
-                tool_result_prompt_max_chars=settings.tool_result_prompt_max_chars,
-                response_depth=depth.response_depth,
-            ).run(task)
-
         llm = self._build_llm(
             settings=settings,
             session=session,
@@ -1730,7 +1640,7 @@ class AgentTaskExecutor:
                 or "unknown",
                 confidence=None,
                 escalated=False,
-                selected_runtime=settings.agent_runtime,
+                selected_runtime="custom",
                 selected_backend="inline",
                 actual_path="native_tool_scope",
                 reason="Native tool exposure policy applied before runtime registry selection.",
@@ -2499,139 +2409,6 @@ class AgentTaskExecutor:
                 error_summary=str(exc)[:500],
             )
             return fallback
-
-    def _record_planned_task_started(
-        self,
-        *,
-        task: Task,
-        task_service: TaskService,
-        progress_enabled: bool,
-    ) -> None:
-        task_service.append_event(
-            task,
-            TaskEventType.log,
-            {
-                "message": "planned_task_started",
-                "runtime": "adk",
-                "phase": "started",
-                "progress_updates_enabled": progress_enabled,
-            },
-        )
-        log_observation(
-            logger,
-            "planned_task_started",
-            task=task,
-            runtime="adk",
-            phase="started",
-            progress_updates_enabled=progress_enabled,
-        )
-
-    def _post_planned_workflow_progress(
-        self,
-        *,
-        settings: Settings,
-        session: Session,
-        task: Task,
-        task_service: TaskService,
-    ) -> None:
-        if _ack_reaction_already_added(session, task):
-            # The ingress ack reaction is the acknowledgement; a templated
-            # "On it..." message on top reads as bot filler (user feedback).
-            log_observation(
-                logger,
-                "planned_task_progress_suppressed",
-                task=task,
-                runtime="adk",
-                phase="started",
-                reason="ack_reaction_present",
-            )
-            return
-        client = self.slack_client
-        if client is None:
-            client = cast(
-                SlackPostingClient,
-                WebClient(token=settings.slack_bot_token),
-            )
-        progress_text, progress_source = self._planned_workflow_progress_text(
-            settings=settings,
-            session=session,
-            task=task,
-            task_service=task_service,
-        )
-        try:
-            message_ts = SlackPoster(
-                session=session,
-                client=client,
-                task_service=task_service,
-            ).post_message(
-                SlackThread.from_task(task),
-                progress_text,
-                purpose=PLANNED_WORKFLOW_PROGRESS_PURPOSE,
-            )
-        except Exception as exc:
-            task_service.append_event(
-                task,
-                TaskEventType.error,
-                {
-                    "message": "planned_task_progress_post_failed",
-                    "runtime": "adk",
-                    "phase": "started",
-                    "error_type": type(exc).__name__,
-                    "error": str(exc),
-                },
-            )
-            log_observation(
-                logger,
-                "planned_task_progress_post_failed",
-                task=task,
-                runtime="adk",
-                phase="started",
-                error_type=type(exc).__name__,
-                error_summary=str(exc)[:500],
-            )
-            logger.warning(
-                "planned workflow progress post failed task_id=%s",
-                task.id,
-                exc_info=True,
-            )
-            return
-
-        task_service.append_event(
-            task,
-            TaskEventType.log,
-            {
-                "message": "planned_task_progress_posted",
-                "runtime": "adk",
-                "phase": "started",
-                "purpose": PLANNED_WORKFLOW_PROGRESS_PURPOSE,
-                "message_ts": message_ts,
-                "text_chars": len(progress_text),
-                "text_source": progress_source,
-            },
-        )
-        log_observation(
-            logger,
-            "planned_task_progress_posted",
-            task=task,
-            runtime="adk",
-            phase="started",
-            purpose=PLANNED_WORKFLOW_PROGRESS_PURPOSE,
-            message_ts=message_ts,
-            text_chars=len(progress_text),
-            text_source=progress_source,
-        )
-
-    def _planned_workflow_progress_text(
-        self,
-        *,
-        settings: Settings,
-        session: Session,
-        task: Task,
-        task_service: TaskService,
-    ) -> tuple[str, str]:
-        del settings, session, task_service
-        index = int(task.id.hex[:8], 16) % len(_PLANNED_PROGRESS_TEMPLATES)
-        return _PLANNED_PROGRESS_TEMPLATES[index], "template"
 
     def _project_witness_opportunities_from_result(
         self,

@@ -50,17 +50,10 @@ async def run_temporal_worker(*, once: bool = False) -> None:
 
 
 def _temporal_plugins() -> list[Any]:
-    """Return optional Temporal plugins compatible with installed packages."""
+    """Return optional Temporal plugins. The Google ADK plugin was retired with
+    the ADK runtime (HIG-281); the seam stays for future plugins."""
 
-    try:
-        from temporalio.contrib.google_adk_agents import GoogleAdkPlugin
-    except ImportError as exc:
-        logger.warning(
-            "temporal google_adk plugin unavailable; continuing without it error=%s",
-            exc,
-        )
-        return []
-    return [GoogleAdkPlugin()]
+    return []
 
 
 def main(argv: Sequence[str] | None = None) -> None:

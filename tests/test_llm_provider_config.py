@@ -244,7 +244,7 @@ def test_model_config_service_resolves_db_chain_in_priority_order(
     assert chain.models[1].model_catalog_id == fallback_model.id
     assert chain.primary.api_key == "secret-llm-key"
     assert chain.primary.credential_source == "env"
-    assert chain.primary.adk_litellm_kwargs == {
+    assert chain.primary.litellm_kwargs == {
         "model": "openrouter/anthropic/claude-sonnet-4.6",
         "api_key": "secret-llm-key",
         "extra_headers": {"X-Test": "ok"},
@@ -437,7 +437,7 @@ def test_model_config_service_resolves_secret_backed_provider_credentials(
     assert chain.source == "db"
     assert chain.primary.provider_kind == "azure"
     assert chain.primary.api_key == "db-provider-key"
-    assert chain.primary.adk_litellm_kwargs == {
+    assert chain.primary.litellm_kwargs == {
         "model": "azure/gpt-4o-mini",
         "api_key": "db-provider-key",
         "api_base": "https://example.openai.azure.com",

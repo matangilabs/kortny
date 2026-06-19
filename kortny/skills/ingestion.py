@@ -1,10 +1,9 @@
 """SKILL.md ingestion: parse skill directories/zips/markdown into the registry.
 
-Format validation delegates to ADK's skill models
-(``google.adk.skills.models``: ``Frontmatter``/``Skill``) so community
-Claude/Codex/ADK skills import verbatim. The directory walk is our own rather
-than ADK's ``load_skill_from_dir`` because ADK requires the directory name to
-match the frontmatter name — uploaded zips rarely satisfy that. Storage is
+Format validation uses our own SKILL.md models (``kortny.skills.skill_models``),
+whose contract matches the community SKILL.md format so Claude/Codex/ADK skills
+import verbatim. The directory walk is intentionally permissive about the
+directory name (uploaded zips rarely match the frontmatter name). Storage is
 kortny's multi-tenant ``ProceduralSkill`` registry; bundled resources land in
 ``skill_files``. Scripts are stored but never executed here (trust-gated
 sandbox execution is a later slice).
@@ -22,13 +21,13 @@ from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
 
-from google.adk.skills.models import Frontmatter, Resources, Script, Skill
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from kortny.db.models import ProceduralSkill, ProceduralSkillVersion, SkillFile
 from kortny.embeddings import EmbeddingIndex
 from kortny.skills.embedding import SKILL_EMBEDDING_KIND, skill_embedding_text
+from kortny.skills.skill_models import Frontmatter, Resources, Script, Skill
 
 MAX_SKILL_ARCHIVE_BYTES = 16 * 1024 * 1024
 DEFAULT_SKILL_VERSION = "1.0.0"
@@ -57,7 +56,7 @@ class IngestedSkill:
 
 
 class SkillIngestionService:
-    """Parses SKILL.md content via ADK and upserts the skill registry."""
+    """Parses SKILL.md content and upserts the skill registry."""
 
     def __init__(
         self,
@@ -337,7 +336,7 @@ class SkillIngestionService:
 
 
 def _parse_skill_markdown(content: str) -> tuple[Frontmatter, str]:
-    """Split YAML frontmatter from body and validate via ADK's Frontmatter."""
+    """Split YAML frontmatter from body and validate it."""
 
     import yaml  # type: ignore[import-untyped]
 
@@ -360,7 +359,7 @@ def _parse_skill_markdown(content: str) -> tuple[Frontmatter, str]:
 
 
 def _load_skill_dir(directory: Path) -> Skill:
-    """Load SKILL.md + text resources from a skill directory into ADK models."""
+    """Load SKILL.md + text resources from a skill directory into skill models."""
 
     if not directory.is_dir():
         raise SkillIngestionError(f"Skill directory '{directory}' not found.")
@@ -434,7 +433,7 @@ def _find_skill_root(extract_root: Path) -> Path:
 
 
 def _collect_binary_files(directory: Path) -> dict[str, bytes]:
-    """Capture non-UTF-8 resource files that ADK's text loader skips."""
+    """Capture non-UTF-8 resource files that the text loader skips."""
 
     binary: dict[str, bytes] = {}
     for sub, _kind in _RESOURCE_DIRS.items():
