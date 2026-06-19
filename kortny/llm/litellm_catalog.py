@@ -587,6 +587,61 @@ def _display_name(model_identifier: str) -> str:
     return model_identifier.removeprefix("openrouter/")
 
 
+def model_supports_vision(
+    provider_kind: str,
+    model_identifier: str,
+    *,
+    catalog_row: object = None,
+) -> bool:
+    """Return True if the resolved model is known to accept image input.
+
+    Resolution order (first hit wins):
+    1. ``catalog_row`` / ``capabilities_json`` present: ``supports_vision is True``
+       OR ``input_modalities`` contains ``"image"``.
+    2. LiteLLM model-cost ``supports_vision`` truthy (local catalog lookup).
+    3. OpenRouter ``architecture.input_modalities`` contains ``"image"`` (provider
+       catalog lookup).
+    4. Unknown → ``False`` (fail safe; never infer from model name string).
+    """
+
+    # --- 1. DB catalog row capabilities_json ---------------------------------
+    if catalog_row is not None:
+        capabilities: object
+        # Accept any object with a capabilities_json attribute (ORM row) or a
+        # plain dict (test stub).
+        if isinstance(catalog_row, dict):
+            capabilities = catalog_row
+        else:
+            capabilities = getattr(catalog_row, "capabilities_json", None)
+        if isinstance(capabilities, dict):
+            if capabilities.get("supports_vision") is True:
+                return True
+            modalities = capabilities.get("input_modalities")
+            if isinstance(modalities, list) and "image" in modalities:
+                return True
+            # Explicit False (or absent key) on capabilities_json → fall through
+            # to the live catalog lookups for a fuller signal.
+
+    # --- 2. LiteLLM local model-cost map -------------------------------------
+    local = _local_model_candidate_for_identifier(
+        provider_kind=provider_kind,
+        model_identifier=model_identifier,
+    )
+    if local is not None and local.capabilities.get("supports_vision") is True:
+        return True
+
+    # --- 3. OpenRouter provider catalog (architecture.input_modalities) ------
+    if provider_kind == "openrouter":
+        or_candidate = _openrouter_model_candidate_for_identifier(model_identifier)
+        if or_candidate is not None:
+            modalities = or_candidate.capabilities.get("input_modalities")
+            if isinstance(modalities, list) and "image" in modalities:
+                return True
+
+    # --- 4. Unknown → fail safe ----------------------------------------------
+    return False
+
+
 def _unique_strings(values: Iterable[str]) -> list[str]:
     seen: set[str] = set()
     output: list[str] = []

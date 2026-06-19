@@ -461,6 +461,29 @@ class Settings(BaseSettings):
         validation_alias="SLACK_FILE_READ_MAX_BYTES",
     )
 
+    # --- Vision (HIG-279) ----------------------------------------------------
+    vision_enabled: bool = Field(
+        default=True,
+        validation_alias="KORTNY_VISION_ENABLED",
+    )
+    vision_max_images_per_request: int = Field(
+        default=5,
+        validation_alias="KORTNY_VISION_MAX_IMAGES_PER_REQUEST",
+    )
+    vision_max_image_bytes: int = Field(
+        default=10_485_760,  # 10 MB
+        validation_alias="KORTNY_VISION_MAX_IMAGE_BYTES",
+    )
+    vision_max_total_image_bytes: int = Field(
+        default=26_214_400,  # 25 MB
+        validation_alias="KORTNY_VISION_MAX_TOTAL_IMAGE_BYTES",
+    )
+    # Comma-separated list of allowed MIME types for image attachments.
+    vision_allowed_image_mimes: str = Field(
+        default="image/png,image/jpeg,image/webp",
+        validation_alias="KORTNY_VISION_ALLOWED_IMAGE_MIMES",
+    )
+
     observability_enabled: bool = Field(
         default=True, validation_alias="OBSERVABILITY_ENABLED"
     )

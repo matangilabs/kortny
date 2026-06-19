@@ -12,10 +12,12 @@ from decimal import ROUND_HALF_UP, Decimal
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from kortny.config.settings import Settings
 from kortny.db.models import LLMProvider as DbLLMProvider
 from kortny.db.models import ModelPricing
+from kortny.llm.litellm_catalog import model_supports_vision
 from kortny.llm.routing import ModelRoute, ModelRouteTier
-from kortny.llm.types import ChatMessage, Completion, LLMProvider, TokenUsage
+from kortny.llm.types import ChatMessage, Completion, ImagePart, LLMProvider, TokenUsage
 from kortny.observability import (
     capture_content_mode,
     log_observation,
@@ -56,6 +58,75 @@ class ModelPricingNotFoundError(LookupError):
     """Raised when no model pricing row can price an LLM call."""
 
 
+class VisionUnsupportedError(Exception):
+    """Raised when a request contains images but the configured model cannot accept them."""
+
+
+class ImageGuardError(Exception):
+    """Raised when image attachments violate a size, count, or policy guard (HIG-279)."""
+
+
+def enforce_image_guards(
+    messages: Sequence[ChatMessage],
+    settings: Settings,
+) -> None:
+    """Validate image attachments against workspace policy guards.
+
+    Call this BEFORE forwarding messages to any provider.  If ``messages``
+    contain no images the function returns immediately and is a no-op — text-
+    only requests are completely unaffected.
+
+    Raises:
+        ImageGuardError: if any policy limit is exceeded or vision is disabled.
+    """
+    images: list[ImagePart] = [img for m in messages for img in m.images]
+    if not images:
+        return
+
+    if not settings.vision_enabled:
+        raise ImageGuardError("Vision is disabled for this workspace.")
+
+    if len(images) > settings.vision_max_images_per_request:
+        raise ImageGuardError(
+            f"Too many images: {len(images)} (max {settings.vision_max_images_per_request})."
+        )
+
+    for img in images:
+        if img.byte_size > settings.vision_max_image_bytes:
+            raise ImageGuardError("An attached image is too large.")
+
+    if sum(img.byte_size for img in images) > settings.vision_max_total_image_bytes:
+        raise ImageGuardError("Attached images exceed the total size limit.")
+
+    allowed_mimes = {
+        m.strip() for m in settings.vision_allowed_image_mimes.split(",") if m.strip()
+    }
+    for img in images:
+        if img.mime not in allowed_mimes:
+            raise ImageGuardError(f"Unsupported image type {img.mime}.")
+
+
+def assert_vision_capable(
+    provider_kind: str,
+    model_identifier: str,
+    catalog_row: object = None,
+) -> None:
+    """Assert that the provider/model combination supports vision.
+
+    Call this AFTER ``enforce_image_guards`` when the message list contains
+    images.  Raises ``VisionUnsupportedError`` if the model is not known to
+    accept image input.
+    """
+    if not model_supports_vision(
+        provider_kind,
+        model_identifier,
+        catalog_row=catalog_row,
+    ):
+        raise VisionUnsupportedError(
+            "No vision-capable model is configured to read images."
+        )
+
+
 class LLMService:
     """Calls an LLM provider and records usage through the task service."""
 
@@ -67,12 +138,14 @@ class LLMService:
         provider_name: DbLLMProvider | str,
         task_service: TaskService | None = None,
         model_route: ModelRoute | None = None,
+        settings: Settings | None = None,
     ) -> None:
         self.session = session
         self.provider = provider
         self.provider_name = DbLLMProvider(provider_name)
         self.task_service = task_service or TaskService(session)
         self.model_route = model_route
+        self._settings = settings
 
     def complete(
         self,
@@ -95,6 +168,19 @@ class LLMService:
         generous enough never to truncate the structured output — they only
         bound runaway verbosity/reasoning on one-shot utility calls.
         """
+
+        # --- Vision guards (HIG-279) -----------------------------------------
+        # Pure helpers run only when images are present; text-only requests are
+        # completely unaffected.  Settings are optional so callers that don't
+        # have them (e.g. tests for the pricing logic) are not affected.
+        if self._settings is not None:
+            enforce_image_guards(messages, self._settings)
+            _images = [img for m in messages for img in m.images]
+            if _images:
+                assert_vision_capable(
+                    self.provider_name.value,
+                    self.provider.model,
+                )
 
         prompt_name = prompt_name or _default_prompt_name(
             tools=tools,
@@ -192,6 +278,10 @@ class LLMService:
                     tool_call.name for tool_call in completion.tool_calls
                 ],
             }
+            image_count = sum(len(m.images) for m in messages)
+            if image_count:
+                metadata["image_count"] = image_count
+                metadata["vision_request"] = True
             if response_content is not None:
                 metadata["response"] = response_content
             self.task_service.record_llm_usage(
