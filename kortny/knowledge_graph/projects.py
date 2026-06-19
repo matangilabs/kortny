@@ -202,6 +202,10 @@ class ProjectGraphService:
         project: KnowledgeGraphEntity,
         entity_ids: Sequence[uuid.UUID],
         evidence: EvidenceInput | None = None,
+        source_type: str = "user_explicit",
+        lifecycle_state: str = "confirmed",
+        confidence_score: Decimal = Decimal("1.000"),
+        confidence_reason: str = "Entity confirmed part of the project.",
     ) -> tuple[uuid.UUID, ...]:
         """Link a project hub to its constituent entities (HIG-276 increment 2).
 
@@ -210,6 +214,12 @@ class ProjectGraphService:
         own visibility scope, so a public-channel topic widens project answers
         while a private one stays gated — matching the audience-safe model.
         Idempotent; returns the entity ids actually linked.
+
+        Provenance defaults to a human-confirmed link. Implicit inference must
+        pass ``source_type='agent_inferred'``, ``lifecycle_state='active'`` and a
+        cluster-derived ``confidence_score`` — otherwise inferred membership is
+        indistinguishable from a fact the user explicitly confirmed, which
+        overstates certainty in audit, dashboard trust, and confirmation flows.
         """
 
         wanted = tuple(dict.fromkeys(entity_ids))
@@ -246,10 +256,10 @@ class ProjectGraphService:
                 visibility_scope=VisibilityScope(
                     entity.visibility_scope_type, entity.visibility_scope_id
                 ),
-                source_type="user_explicit",
-                lifecycle_state="confirmed",
-                confidence_score=Decimal("1.000"),
-                confidence_reason="Entity confirmed part of the project.",
+                source_type=source_type,
+                lifecycle_state=lifecycle_state,
+                confidence_score=confidence_score,
+                confidence_reason=confidence_reason,
                 evidence=evidence,
             )
             linked.append(entity.id)

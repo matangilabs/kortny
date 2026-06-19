@@ -62,6 +62,7 @@ class OpenRouterProvider:
         tools: Sequence[JsonSchema] = (),
         *,
         response_format: JsonObject | None = None,
+        max_output_tokens: int | None = None,
     ) -> Completion:
         payload: JsonObject = {
             "model": self.model,
@@ -71,6 +72,12 @@ class OpenRouterProvider:
             payload["tools"] = [_tool_to_openai_payload(tool) for tool in tools]
         if response_format is not None:
             payload["response_format"] = response_format
+        # HIG-220 effort steering: LLMService forwards this for clamped utility
+        # prompts. The LLMProvider protocol declares it, so every implementation
+        # must accept it or the call raises TypeError. OpenRouter's field is
+        # ``max_tokens``.
+        if max_output_tokens is not None:
+            payload["max_tokens"] = max_output_tokens
 
         headers = {
             "Authorization": f"Bearer {self.api_key}",

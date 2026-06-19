@@ -38,17 +38,41 @@ _TYPST_SIGILS = ("$", "#", "[", "]", "*", "_", "`", "@", "<", ">")
 
 
 def esc(text: str) -> str:
-    """Escape Typst markup-significant characters in free text.
+    """Escape Typst markup-significant characters in free text placed in [ ... ].
 
     Backslash first (so we don't double-escape the escapes we add), then the
     markup sigils. ``$`` is the big one — it opens math mode and silently breaks
     compilation on values like ``$15B``.
+
+    Use this ONLY for content inside markup brackets ``[ ... ]``. For content
+    interpolated into a Typst *string literal* (``"..."``), use ``esc_str`` — the
+    escape rules are different (a string treats ``#``/``$`` as literal but breaks
+    on a bare ``"``, and ``\\$`` is an invalid string escape).
     """
 
     text = text.replace("\\", "\\\\")
     for sigil in _TYPST_SIGILS:
         text = text.replace(sigil, "\\" + sigil)
     return text
+
+
+def esc_str(text: str) -> str:
+    """Escape text interpolated into a Typst string literal (``"..."``).
+
+    A Typst string only special-cases the backslash and the closing quote (plus
+    the ``\\n``/``\\r``/``\\t`` escapes), so an ordinary title like ``CEO "Q2"
+    Brief`` or a value with a ``#``/``$`` must be quote/backslash-escaped here,
+    NOT markup-escaped — markup escaping would emit invalid ``\\$``/``\\#``
+    sequences inside the literal and fail compilation.
+    """
+
+    return (
+        text.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+        .replace("\t", "\\t")
+    )
 
 
 def build_typst(spec: DocumentSpec) -> tuple[str, dict[str, bytes]]:
@@ -77,7 +101,7 @@ def _preamble(spec: DocumentSpec, theme: Theme) -> str:
     c = theme.colors
     margin = f"{theme.page_margin_mm}mm"
     justify = "true" if theme.justify_body else "false"
-    brand = esc(spec.title)
+    brand = esc_str(spec.title)
     return f"""\
 #let ink = rgb("{c.ink}")
 #let paper = rgb("{c.paper}")
@@ -142,7 +166,7 @@ def _chart(block: Chart, theme: Theme, index: int, assets: dict[str, bytes]) -> 
     if block.caption:
         lines.append(
             f"#v(4pt)\n#text(font: mono, size: 8pt, fill: muted, "
-            f'tracking: 1pt)[#upper("{esc(block.caption)}")]'
+            f'tracking: 1pt)[#upper("{esc_str(block.caption)}")]'
         )
     lines.append("#v(14pt)")
     return "\n".join(lines)
@@ -171,7 +195,7 @@ def _cover(block: CoverHeader, theme: Theme) -> str:
         "  #v(1fr)",
     ]
     if block.eyebrow:
-        lines.append(f'  #eyebrow("{esc(block.eyebrow)}")')
+        lines.append(f'  #eyebrow("{esc_str(block.eyebrow)}")')
         lines.append("  #v(12pt)")
     lines.append(
         f"  #text(font: display, size: 50pt, weight: dispWeight, fill: {fg})"
@@ -186,7 +210,7 @@ def _cover(block: CoverHeader, theme: Theme) -> str:
     lines.append("  #v(22pt)")
     lines.append("  #line(length: 36pt, stroke: 1pt + accent)")
     if block.meta:
-        meta = "  ·  ".join(esc(m) for m in block.meta)
+        meta = "  ·  ".join(esc_str(m) for m in block.meta)
         lines.append("  #v(10pt)")
         lines.append(f'  #eyebrow("{meta}", c: {fg_muted})')
     lines.append("  #v(2fr)")
@@ -213,7 +237,7 @@ def _divider(block: SectionDivider, theme: Theme) -> str:
         )
         lines.append("  #v(6pt)")
     if block.label:
-        lines.append(f'  #eyebrow("{esc(block.label)}", c: {fg_muted})')
+        lines.append(f'  #eyebrow("{esc_str(block.label)}", c: {fg_muted})')
         lines.append("  #v(8pt)")
     lines.append(
         f"  #text(font: display, size: 34pt, weight: dispWeight, "
@@ -234,7 +258,7 @@ def _heading(block: Heading) -> str:
     return (
         f"#block(above: 18pt, below: 8pt)[\n"
         f"  #text(font: mono, size: 10pt, weight: 700, fill: ink, "
-        f'tracking: 1.5pt)[#upper("{esc(block.text)}")]\n'
+        f'tracking: 1.5pt)[#upper("{esc_str(block.text)}")]\n'
         f"  #v(3pt)\n"
         f"  #line(length: 34pt, stroke: 2pt + accent)\n"
         f"]"
@@ -281,7 +305,7 @@ def _table(block: Table) -> str:
     cols = ", ".join(["1fr"] * ncol)
     header = ", ".join(
         f"table.cell(fill: ink)[#text(fill: white, font: mono, size: 8pt, "
-        f'weight: 700, tracking: 1pt)[#upper("{esc(col)}")]]'
+        f'weight: 700, tracking: 1pt)[#upper("{esc_str(col)}")]]'
         for col in block.columns
     )
     body_cells = []
@@ -298,7 +322,7 @@ def _table(block: Table) -> str:
     if block.caption:
         parts.append(
             f"#text(font: mono, size: 8pt, fill: muted, "
-            f'tracking: 1pt)[#upper("{esc(block.caption)}")]'
+            f'tracking: 1pt)[#upper("{esc_str(block.caption)}")]'
         )
         parts.append("#v(4pt)")
     table_body = f",\n  {body}" if body else ""
@@ -316,7 +340,7 @@ def _callout(block: Callout) -> str:
         "  stroke: (left: 3pt + accent))[",
     ]
     if block.label:
-        lines.append(f'  #eyebrow("{esc(block.label)}")\n  #v(7pt)')
+        lines.append(f'  #eyebrow("{esc_str(block.label)}")\n  #v(7pt)')
     lines.append(f"  #text(font: bodyFont, size: 12pt, fill: ink)[{esc(block.text)}]")
     lines.append("]")
     lines.append("#v(14pt)")
@@ -333,7 +357,7 @@ def _pull_quote(block: PullQuote) -> str:
         lines.append("  #v(5pt)")
         lines.append(
             f"  #text(font: mono, size: 8pt, fill: muted, "
-            f'tracking: 1pt)[#upper("— {esc(block.attribution)}")]'
+            f'tracking: 1pt)[#upper("— {esc_str(block.attribution)}")]'
         )
     lines.append("]")
     lines.append("#v(14pt)")
@@ -350,7 +374,7 @@ def _cta(block: CTA) -> str:
     lines.append(
         f"#box(fill: ink, inset: (x: 18pt, y: 11pt), radius: 2pt)["
         f"#text(font: mono, size: 9pt, fill: white, "
-        f'tracking: 1pt)[#upper("{esc(block.label)}")]]'
+        f'tracking: 1pt)[#upper("{esc_str(block.label)}")]]'
     )
     lines.append("#v(14pt)")
     return "\n".join(lines)

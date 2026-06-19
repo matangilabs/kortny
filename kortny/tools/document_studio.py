@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 
 from kortny.db.models import Artifact, TaskEventType
 from kortny.documents import (
+    ChartRenderError,
     DocumentRenderError,
     DocumentSpec,
     TypstNotAvailableError,
@@ -200,6 +201,16 @@ class DocumentStudioTool:
                     "Fall back to the pdf_generator tool for a plain PDF, or "
                     "inform the user that document rendering is not configured."
                 ),
+            ) from exc
+        except ChartRenderError as exc:
+            raise RecoverableToolError(
+                code="chart_render_failed",
+                message="Failed to render a chart in the document.",
+                hint=(
+                    "Check the chart block's data and encoding (valid numbers, "
+                    "matching series), simplify the chart, or drop it and retry."
+                ),
+                details={"error": str(exc)[:2000]},
             ) from exc
         except DocumentRenderError as exc:
             raise RecoverableToolError(
