@@ -162,6 +162,21 @@ class TrifectaGateState:
 
         return self._armed_by
 
+    def arm(self, source: str) -> bool:
+        """Arm the gate with an explicit source label.
+
+        Used when untrusted content enters context outside of a tool call
+        (e.g. an image attached directly to the user message). Returns True
+        only on the transition from disarmed to armed; a no-op if already
+        armed (never downgrades the first source).
+        """
+
+        if not self.enabled or self._armed:
+            return False
+        self._armed = True
+        self._armed_by = source
+        return True
+
     def note_tool_result(self, tool_name: str) -> bool:
         """Record a tool result; arm the gate if it was untrusted-origin.
 
