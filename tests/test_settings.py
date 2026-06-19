@@ -159,7 +159,7 @@ def test_settings_loads_optional_environment(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("LLM_CHEAP_MODEL", "anthropic/claude-haiku-test")
     monkeypatch.setenv("LLM_DOCUMENT_MODEL", "anthropic/claude-sonnet-test")
     monkeypatch.setenv("LLM_HUMANIZER_MODEL", "anthropic/claude-haiku-humanizer")
-    monkeypatch.setenv("AGENT_RUNTIME", "adk")
+    monkeypatch.setenv("AGENT_RUNTIME", "custom")
     monkeypatch.setenv("KORTNY_PLANNED_WORKFLOWS_ENABLED", "false")
     monkeypatch.setenv("KORTNY_PLANNED_WORKFLOW_MAX_PARALLEL_BRANCHES", "4")
     monkeypatch.setenv("KORTNY_PLANNED_WORKFLOW_COST_CEILING_USD", "1.25")
@@ -217,7 +217,7 @@ def test_settings_loads_optional_environment(monkeypatch: pytest.MonkeyPatch) ->
     assert settings.llm_cheap_model == "anthropic/claude-haiku-test"
     assert settings.llm_document_model == "anthropic/claude-sonnet-test"
     assert settings.llm_humanizer_model == "anthropic/claude-haiku-humanizer"
-    assert settings.agent_runtime == "adk"
+    assert settings.agent_runtime == "custom"
     assert settings.planned_workflows_enabled is False
     assert settings.planned_workflow_max_parallel_branches == 4
     assert settings.planned_workflow_cost_ceiling_usd == 1.25
@@ -326,3 +326,18 @@ def test_settings_rejects_unknown_llm_provider(
         load_settings(env_file=None)
 
     assert "LLM_PROVIDER" in str(exc_info.value)
+
+
+def test_settings_rejects_retired_adk_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # AGENT_RUNTIME=adk was retired (HIG-281); loading must fail loudly rather
+    # than silently fall back, so config drift is caught.
+    clear_settings_env(monkeypatch)
+    set_required_settings_env(monkeypatch)
+    monkeypatch.setenv("AGENT_RUNTIME", "adk")
+
+    with pytest.raises(SettingsError) as exc_info:
+        load_settings(env_file=None)
+
+    assert "AGENT_RUNTIME" in str(exc_info.value)

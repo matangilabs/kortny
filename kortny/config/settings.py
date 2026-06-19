@@ -81,7 +81,9 @@ class Settings(BaseSettings):
     channel_progress_enabled: bool = Field(
         default=False, validation_alias="KORTNY_CHANNEL_PROGRESS_ENABLED"
     )
-    agent_runtime: Literal["custom", "adk"] = Field(
+    # AGENT_RUNTIME is still accepted for env compatibility, but the Google ADK
+    # runtime was retired (HIG-281); custom is the only runtime.
+    agent_runtime: Literal["custom"] = Field(
         default="custom", validation_alias="AGENT_RUNTIME"
     )
     workflow_backend: Literal["inline", "temporal"] = Field(
@@ -537,6 +539,16 @@ class Settings(BaseSettings):
         if not stripped:
             raise ValueError("COMPOSIO_API_KEY cannot be blank")
         return stripped
+
+    @field_validator("agent_runtime", mode="before")
+    @classmethod
+    def _reject_retired_adk_runtime(cls, value: object) -> object:
+        if value == "adk":
+            raise ValueError(
+                "AGENT_RUNTIME=adk was removed (HIG-281). The custom runtime is "
+                "now the only runtime; unset AGENT_RUNTIME or set it to 'custom'."
+            )
+        return value
 
     @field_validator(
         "llm_cheap_model",
