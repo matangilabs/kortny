@@ -26,8 +26,10 @@
     </div>
   </section>
 
-  {% set toolbar = usage_toolbar %}
-  {% include "_data_toolbar.html" with context %}
+  <div class="usage-window">
+    {% set toolbar = usage_toolbar %}
+    {% include "_data_toolbar.html" with context %}
+  </div>
 
   <section class="summary-grid usage-summary" aria-label="Usage overview">
     <div class="card metric-card metric-success">
