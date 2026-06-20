@@ -5,13 +5,16 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{% block title %}Kortny Dashboard{% endblock %}</title>
     {% include "_theme_init.html" %}
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
     <link rel="icon" type="image/png" sizes="830x830" href="{{ url_for('static', path='/assets/kortny_icon.png') }}">
     <link rel="stylesheet" href="{{ url_for('static', path='/dashboard.css') }}">
     <script src="{{ url_for('static', path='/theme.js') }}" defer></script>
   </head>
   <body>
     <a class="skip-link" href="#main">Skip to dashboard content</a>
-    <div class="dashboard-layout">
+    <div class="dashboard-layout dash-v2">
       <aside class="sidebar" aria-label="Dashboard navigation">
         <div class="sidebar-header">
           <a class="brand" href="/">

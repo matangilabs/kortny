@@ -1,82 +1,53 @@
-<div class="task-list">
-  {% for item in task_items %}
-    {% set task_detail_url = (tasks_base_path|default('/tasks')) ~ '/' ~ item.task.id %}
-    {% set status_label = item.task.status.value.replace("_", " ").title() %}
-    <a class="task-list-item task-status-{{ item.task.status.value }}" href="{{ task_detail_url }}" aria-label="Open task: {{ item.task.input }}">
-      <span class="task-status-rail status-rail-{{ item.task.status.value }}" aria-hidden="true">
-        <span class="task-status-dot"></span>
-      </span>
-
-      <span class="task-list-body">
-        <span class="task-list-main">
-          <span class="task-list-copy">
-            <span class="task-list-kicker">
-              <span class="badge status-{{ item.task.status.value }}">{{ status_label }}</span>
-              <span class="task-time">
-                <svg class="meta-icon icon-clock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="width: 12px; height: 12px; margin-right: 4px; display: inline-block; vertical-align: -1px;"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
-                <time datetime="{{ item.task.created_at.isoformat() }}" title="{{ item.task.created_at|datetime }}">
-                  {{ item.task.created_at.strftime("%Y-%m-%d %H:%M") }}
-                </time>
-              </span>
-            </span>
-            <span class="task-list-title">{{ item.task.input }}</span>
-            <div class="task-summary-block summary-{{ item.task.status.value }}">
-              {% if item.task.error %}
-                <svg class="summary-block-icon status-failed" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
-                <span class="task-list-summary task-list-summary-danger">Failure details recorded</span>
-              {% elif item.task.result_summary %}
-                <svg class="summary-block-icon status-succeeded" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg>
-                <span class="task-list-summary">{{ item.task.result_summary }}</span>
-              {% else %}
-                <svg class="summary-block-icon status-pending" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
-                <span class="task-list-summary">Waiting for a recorded result summary.</span>
-              {% endif %}
-            </div>
-          </span>
-
-          <span class="task-runtime-panel" aria-label="Task runtime summary">
-            <span class="task-runtime-cost">
-              <svg class="meta-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="width: 13px; height: 13px; margin-right: 4px; display: inline-block; vertical-align: -1.5px;"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="16"></line><line x1="8" y1="12" x2="16" y2="12"></line></svg>
-              {{ item.task.total_cost_usd|money }}
-            </span>
-            <span class="task-runtime-label">total cost</span>
-            <span class="task-runtime-sub">
-              <svg class="meta-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="width: 11px; height: 11px; margin-right: 3px; display: inline-block; vertical-align: -1px;"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
-              {{ item.turn_count|number }} model turn{{ "" if item.turn_count == 1 else "s" }}
-            </span>
-          </span>
-        </span>
-
-        <span class="task-list-meta" aria-label="Task metadata">
-          <span class="task-meta-pill">
-            <span class="task-meta-header">
-              <svg class="meta-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="width: 12px; height: 12px; margin-right: 4px; display: inline-block; vertical-align: -1px;"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
-              <span class="task-meta-label">From</span>
-            </span>
-            <span class="task-meta-value" title="{{ item.user.name }}">{{ item.user.name }}</span>
-            {% if item.user.secondary %}<span class="task-meta-id" title="{{ item.user.secondary }}">{{ item.user.secondary }}</span>{% endif %}
-          </span>
-          <span class="task-meta-pill">
-            <span class="task-meta-header">
-              <svg class="meta-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="width: 12px; height: 12px; margin-right: 4px; display: inline-block; vertical-align: -1px;"><line x1="4" y1="9" x2="20" y2="9"></line><line x1="4" y1="15" x2="20" y2="15"></line><line x1="10" y1="3" x2="8" y2="21"></line><line x1="16" y1="3" x2="14" y2="21"></line></svg>
-              <span class="task-meta-label">Channel</span>
-            </span>
-            <span class="task-meta-value" title="{{ item.channel.name }}">{{ item.channel.name }}</span>
-            {% if item.channel.secondary %}<span class="task-meta-id" title="{{ item.channel.secondary }}">{{ item.channel.secondary }}</span>{% endif %}
-          </span>
-          <span class="task-meta-pill task-meta-models">
-            <span class="task-meta-header">
-              <svg class="meta-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="width: 12px; height: 12px; margin-right: 4px; display: inline-block; vertical-align: -1px;"><rect x="4" y="4" width="16" height="16" rx="2" ry="2"></rect><rect x="9" y="9" width="6" height="6"></rect><line x1="9" y1="1" x2="9" y2="4"></line><line x1="15" y1="1" x2="15" y2="4"></line><line x1="9" y1="20" x2="9" y2="23"></line><line x1="15" y1="20" x2="15" y2="23"></line><line x1="20" y1="9" x2="23" y2="9"></line><line x1="20" y1="15" x2="23" y2="15"></line><line x1="1" y1="9" x2="4" y2="9"></line><line x1="1" y1="15" x2="4" y2="15"></line></svg>
-              <span class="task-meta-label">Models</span>
-            </span>
-            <span class="task-meta-value" title="{{ item.models|join(', ') if item.models else '-' }}">
-              {{ item.models|join(", ") if item.models else "-" }}
-            </span>
-          </span>
-        </span>
-      </span>
-    </a>
-  {% else %}
-    <p class="empty task-list-empty">{{ task_empty_message }}</p>
-  {% endfor %}
-</div>
+{% if task_items %}
+<table class="table task-table" aria-label="Task list">
+  <thead>
+    <tr>
+      <th data-sort="status">Status</th>
+      <th data-sort="task">Task</th>
+      <th data-sort="user">From</th>
+      <th data-sort="channel">Channel</th>
+      <th data-sort="model">Model</th>
+      <th class="num" data-sort="turns">Turns</th>
+      <th class="num" data-sort="cost">Cost</th>
+      <th class="num nowrap" data-sort="time">Time</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for item in task_items %}
+      {% set task_detail_url = (tasks_base_path|default('/tasks')) ~ '/' ~ item.task.id %}
+      <tr class="task-row" data-href="{{ task_detail_url }}"
+          data-status="{{ item.task.status.value }}"
+          data-cost="{{ item.task.total_cost_usd }}"
+          data-turns="{{ item.turn_count }}"
+          data-time="{{ item.task.created_at.isoformat() }}">
+        <td class="nowrap"><span class="badge status-{{ item.task.status.value }}">{{ item.task.status.value.replace('_', ' ').title() }}</span></td>
+        <td class="task-cell"><a href="{{ task_detail_url }}" aria-label="Open task: {{ item.task.input }}">{{ item.task.input }}</a></td>
+        <td class="nowrap">{{ item.user.name }}</td>
+        <td class="nowrap">{{ item.channel.name }}</td>
+        <td class="task-model-cell nowrap">{{ item.models|join(', ') if item.models else '—' }}</td>
+        <td class="num">{{ item.turn_count|number }}</td>
+        <td class="num nowrap">{{ item.task.total_cost_usd|money }}</td>
+        <td class="num nowrap">{{ item.task.created_at|datetime }}</td>
+      </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<table class="table task-table" aria-label="Task list">
+  <thead>
+    <tr>
+      <th data-sort="status">Status</th>
+      <th data-sort="task">Task</th>
+      <th data-sort="user">From</th>
+      <th data-sort="channel">Channel</th>
+      <th data-sort="model">Model</th>
+      <th class="num" data-sort="turns">Turns</th>
+      <th class="num" data-sort="cost">Cost</th>
+      <th class="num nowrap" data-sort="time">Time</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr><td colspan="8" class="empty">{{ task_empty_message }}</td></tr>
+  </tbody>
+</table>
+{% endif %}

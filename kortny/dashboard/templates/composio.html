@@ -37,19 +37,6 @@
       <strong>{{ catalog.connection_count|number }}</strong>
       <small>Local Composio connections</small>
     </div>
-    <div class="card metric-card">
-      <span>Loaded</span>
-      <strong id="catalog-loaded-count">{{ catalog.visible_count|number }}</strong>
-      <small id="catalog-loaded-detail">
-        {% if catalog.pinned_connected_count %}
-          Includes {{ catalog.pinned_connected_count|number }} connected app{% if catalog.pinned_connected_count != 1 %}s{% endif %}
-        {% elif catalog.cursor %}
-          Current batch
-        {% else %}
-          Initial batch
-        {% endif %}
-      </small>
-    </div>
   </section>
 
   {% if runtime_error %}
@@ -64,14 +51,59 @@
     </div>
   {% endif %}
 
-  <section class="composio-directory" aria-label="Composio integration catalog">
-    <div class="section-header-row">
-      <div>
-        <h2>Integration Catalog</h2>
-        <p>Connected integrations stay pinned above the Composio catalog results.</p>
-      </div>
-    </div>
+  {# Macro: toolkit card — used in both the connected section and the catalog grid #}
+  {% macro toolkit_card(toolkit, detail_base_url) %}
+    <a class="composio-card composio-catalog-item {{ 'connected' if toolkit.connected else '' }}" href="{{ detail_base_url }}/{{ toolkit.slug }}" data-toolkit-slug="{{ toolkit.slug }}">
+      <header class="composio-card-header">
+        <span class="integration-logo" aria-hidden="true">
+          {% if toolkit.logo_url %}
+            <img src="{{ toolkit.logo_url }}" alt="" loading="lazy" referrerpolicy="no-referrer">
+          {% else %}
+            <span>{{ toolkit.name[:1] }}</span>
+          {% endif %}
+        </span>
+        <span class="composio-card-title">
+          <h3>{{ toolkit.name }}</h3>
+          <code>{{ toolkit.slug }}</code>
+        </span>
+        {% if toolkit.connected %}
+          <span class="badge badge-success">Connected</span>
+        {% endif %}
+      </header>
+      {% if toolkit.description %}
+        <p class="integration-card-description">{{ toolkit.description }}</p>
+      {% endif %}
+      <dl class="integration-card-facts">
+        <div>
+          <dt>Tools</dt>
+          <dd>{{ toolkit.tools_count|number }}</dd>
+        </div>
+        <div>
+          <dt>Triggers</dt>
+          <dd>{{ toolkit.triggers_count|number }}</dd>
+        </div>
+        <div>
+          <dt>Auth</dt>
+          <dd>
+            {% if toolkit.no_auth %}
+              None
+            {% elif toolkit.auth_schemes %}
+              {{ toolkit.auth_schemes|join(" / ")|replace("_", " ")|title }}
+            {% else %}
+              Account
+            {% endif %}
+          </dd>
+        </div>
+      </dl>
+      {% if toolkit.categories %}
+        <div class="integration-card-tags">
+          {% for cat in toolkit.categories[:3] %}<span class="integration-tag">{{ cat }}</span>{% endfor %}
+        </div>
+      {% endif %}
+    </a>
+  {% endmacro %}
 
+  <section class="composio-directory" aria-label="Composio integration catalog">
     <form class="catalog-search" method="get" action="{{ catalog_url }}">
       <label class="catalog-search-main">
         Search integrations
@@ -88,101 +120,107 @@
     </form>
 
     {% if catalog.toolkits %}
-      <div class="catalog-view-toolbar" aria-label="Catalog view controls">
-        <div class="catalog-result-count">
-          {% if catalog.total_items is not none %}
-            <span id="catalog-loaded-label">{{ catalog.visible_count|number }} shown of {{ catalog.total_items|number }}</span>
-          {% else %}
-            <span id="catalog-loaded-label">{{ catalog.visible_count|number }} shown</span>
+      {% set connected_toolkits = catalog.toolkits | selectattr('connected') | list %}
+      <div class="composio-toolbar">
+        <nav class="segmented-nav composio-tabs" role="tablist" aria-label="Composio view">
+          <button type="button" class="segmented-item active" data-composio-tab="catalog" role="tab" aria-selected="true">Catalog</button>
+          {% if connected_toolkits %}
+            <button type="button" class="segmented-item" data-composio-tab="connected" role="tab" aria-selected="false">Connected ({{ catalog.connected_toolkit_count|number }})</button>
           {% endif %}
-        </div>
-        <div class="segmented-control catalog-view-switch" role="group" aria-label="Catalog layout">
-          <a class="segmented-item {{ 'active' if catalog_view == 'card' else '' }}" href="{{ catalog_card_view_url }}" aria-current="{{ 'true' if catalog_view == 'card' else 'false' }}">Cards</a>
-          <a class="segmented-item {{ 'active' if catalog_view == 'list' else '' }}" href="{{ catalog_list_view_url }}" aria-current="{{ 'true' if catalog_view == 'list' else 'false' }}">List</a>
+        </nav>
+        <div class="composio-catalog-controls" aria-label="Catalog view controls">
+          <span class="catalog-result-count">
+            {% if catalog.total_items is not none %}
+              <span id="catalog-loaded-label">{{ catalog.visible_count|number }} shown of {{ catalog.total_items|number }}</span>
+            {% else %}
+              <span id="catalog-loaded-label">{{ catalog.visible_count|number }} shown</span>
+            {% endif %}
+          </span>
+          <nav class="segmented-nav catalog-view-switch" role="group" aria-label="Catalog layout">
+            <a class="segmented-item {{ 'active' if catalog_view == 'card' else '' }}" href="{{ catalog_card_view_url }}" aria-current="{{ 'true' if catalog_view == 'card' else 'false' }}" title="Card view">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></svg>
+              Cards
+            </a>
+            <a class="segmented-item {{ 'active' if catalog_view == 'list' else '' }}" href="{{ catalog_list_view_url }}" aria-current="{{ 'true' if catalog_view == 'list' else 'false' }}" title="List view">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+              List
+            </a>
+          </nav>
         </div>
       </div>
-      <div class="composio-catalog-results" data-view="{{ catalog_view }}">
-        {% for toolkit in catalog.toolkits %}
-          <a class="composio-card composio-catalog-item {{ 'connected' if toolkit.connected else '' }}" href="{{ detail_base_url }}/{{ toolkit.slug }}" data-toolkit-slug="{{ toolkit.slug }}">
-            <header class="composio-card-header">
-              <span class="integration-logo" aria-hidden="true">
-                {% if toolkit.logo_url %}
-                  <img src="{{ toolkit.logo_url }}" alt="" loading="lazy" referrerpolicy="no-referrer">
-                {% else %}
-                  <span>{{ toolkit.name[:1] }}</span>
-                {% endif %}
-              </span>
-              <span class="composio-card-title">
-                <h3>{{ toolkit.name }}</h3>
-                <code>{{ toolkit.slug }}</code>
-              </span>
-              {% if toolkit.connected %}
-                <span class="badge badge-success">Connected</span>
-              {% endif %}
-            </header>
-            {% if toolkit.description %}
-              <p class="integration-card-description">{{ toolkit.description }}</p>
+
+      <div class="composio-tab-panel" data-composio-panel="catalog" role="tabpanel">
+        <div id="catalog-results" class="composio-catalog-results" data-view="{{ catalog_view }}">
+          {% for toolkit in catalog.toolkits if not toolkit.connected %}{{ toolkit_card(toolkit, detail_base_url) }}{% endfor %}
+        </div>
+        <div
+          id="catalog-load-state"
+          class="catalog-load-state"
+          data-next-url="{{ catalog_next_url or '' }}"
+          data-total-items="{{ catalog.total_items if catalog.total_items is not none else '' }}"
+          data-view="{{ catalog_view }}"
+          aria-live="polite"
+        >
+          <span class="catalog-load-status">
+            {% if catalog_next_url %}
+              Loading more integrations
+            {% else %}
+              All integrations loaded
             {% endif %}
-            <dl class="integration-card-facts">
-              <div>
-                <dt>Tools</dt>
-                <dd>{{ toolkit.tools_count|number }}</dd>
-              </div>
-              <div>
-                <dt>Triggers</dt>
-                <dd>{{ toolkit.triggers_count|number }}</dd>
-              </div>
-              <div>
-                <dt>Auth</dt>
-                <dd>
-                  {% if toolkit.no_auth %}
-                    None
-                  {% elif toolkit.auth_schemes %}
-                    {{ toolkit.auth_schemes|join(" / ")|replace("_", " ")|title }}
-                  {% else %}
-                    Account
-                  {% endif %}
-                </dd>
-              </div>
-            </dl>
-            {% if toolkit.categories %}
-              <p class="integration-card-categories">{{ toolkit.categories[:3]|join(" / ") }}</p>
-            {% endif %}
-          </a>
-        {% endfor %}
-      </div>
-      <div
-        id="catalog-load-state"
-        class="catalog-load-state"
-        data-next-url="{{ catalog_next_url or '' }}"
-        data-total-items="{{ catalog.total_items if catalog.total_items is not none else '' }}"
-        data-view="{{ catalog_view }}"
-        aria-live="polite"
-      >
-        <span class="catalog-load-status">
+          </span>
           {% if catalog_next_url %}
-            Loading more integrations
-          {% else %}
-            All integrations loaded
+            <a class="btn-ghost catalog-load-fallback" href="{{ catalog_next_url }}">Load more</a>
           {% endif %}
-        </span>
-        {% if catalog_next_url %}
-          <a class="btn-ghost catalog-load-fallback" href="{{ catalog_next_url }}">Load more</a>
-        {% endif %}
+        </div>
       </div>
+
+      {% if connected_toolkits %}
+        <div class="composio-tab-panel" data-composio-panel="connected" role="tabpanel" hidden>
+          <div class="composio-catalog-results composio-connected-grid" data-view="card">
+            {% for toolkit in connected_toolkits %}{{ toolkit_card(toolkit, detail_base_url) }}{% endfor %}
+          </div>
+        </div>
+      {% endif %}
     {% elif catalog.configured and catalog.enabled and not catalog.error %}
       <p class="empty-state">No Composio toolkits matched the current search.</p>
     {% else %}
       <article class="card empty-panel">
         <h2>Catalog not available</h2>
-        <p>Add `COMPOSIO_API_KEY` and keep `COMPOSIO_CATALOG_ENABLED=true` to browse supported integrations.</p>
+        <p>Add <code>COMPOSIO_API_KEY</code> and keep <code>COMPOSIO_CATALOG_ENABLED=true</code> to browse supported integrations.</p>
       </article>
     {% endif %}
   </section>
 
   <script>
     (() => {
-      const results = document.querySelector(".composio-catalog-results");
+      // Catalog / Connected tabs (client-side; Catalog is the default panel).
+      const tabBar = document.querySelector(".composio-tabs");
+      if (tabBar) {
+        const tabs = tabBar.querySelectorAll("[data-composio-tab]");
+        const panels = document.querySelectorAll("[data-composio-panel]");
+        const catalogControls = document.querySelector(".composio-catalog-controls");
+        tabBar.addEventListener("click", (event) => {
+          const btn = event.target.closest("[data-composio-tab]");
+          if (!btn) {
+            return;
+          }
+          const key = btn.dataset.composioTab;
+          tabs.forEach((tab) => {
+            const active = tab === btn;
+            tab.classList.toggle("active", active);
+            tab.setAttribute("aria-selected", active ? "true" : "false");
+          });
+          panels.forEach((panel) => {
+            panel.hidden = panel.dataset.composioPanel !== key;
+          });
+          // The result count + Cards/List switch only apply to the catalog tab.
+          if (catalogControls) {
+            catalogControls.hidden = key !== "catalog";
+          }
+        });
+      }
+
+      const results = document.getElementById("catalog-results");
       const loadState = document.getElementById("catalog-load-state");
       if (!results || !loadState) {
         return;
@@ -194,7 +232,7 @@
       const status = loadState.querySelector(".catalog-load-status");
       const fallback = loadState.querySelector(".catalog-load-fallback");
       const seenSlugs = new Set(
-        Array.from(results.querySelectorAll("[data-toolkit-slug]"))
+        Array.from(document.querySelectorAll("[data-toolkit-slug]"))
           .map((item) => item.getAttribute("data-toolkit-slug"))
           .filter(Boolean)
       );
@@ -251,7 +289,7 @@
           }
           const html = await response.text();
           const doc = new DOMParser().parseFromString(html, "text/html");
-          const nextResults = doc.querySelector(".composio-catalog-results");
+          const nextResults = doc.getElementById("catalog-results");
           const nextState = doc.getElementById("catalog-load-state");
           if (!nextResults || !nextState) {
             throw new Error("Catalog response did not include results.");

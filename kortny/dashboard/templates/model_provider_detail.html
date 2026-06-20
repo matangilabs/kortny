@@ -15,7 +15,6 @@
       <p>Inspect provider health, synced models, pricing metadata, and tier usage for this workspace.</p>
     </div>
     <div class="heading-actions">
-      <a class="btn-ghost" href="/admin/models">All Providers</a>
       <a class="btn-ghost" href="/tasks">View Traces</a>
     </div>
   </section>
@@ -41,50 +40,17 @@
   </section>
 
   <!-- Tab Navigation -->
-  <nav class="tab-navigation" role="tablist" aria-label="Provider sections">
+  <nav class="tab-navigation provider-detail-tabs" role="tablist" aria-label="Provider sections">
     <button class="tab-btn active" role="tab" aria-selected="true" aria-controls="tab-catalog" id="btn-tab-catalog">Model Catalog</button>
     <button class="tab-btn" role="tab" aria-selected="false" aria-controls="tab-routing" id="btn-tab-routing">Routed Models</button>
     <button class="tab-btn" role="tab" aria-selected="false" aria-controls="tab-connection" id="btn-tab-connection">Connection & Settings</button>
-    <button class="tab-btn" role="tab" aria-selected="false" aria-controls="tab-audits" id="btn-tab-audits">Activity Logs</button>
+    <button class="tab-btn" role="tab" aria-selected="false" aria-controls="tab-audits" id="btn-tab-audits">Audit Trail</button>
   </nav>
 
   <!-- Tab Panel 1: Model Catalog (Full Width) -->
   <div class="tab-content active" id="tab-catalog" role="tabpanel" aria-labelledby="btn-tab-catalog">
     <section class="model-provider-model-workspace is-full" aria-label="Provider model management">
       <div class="model-provider-main-stack">
-
-        <!-- Collapsible Needs Attention banner (outside catalog card) -->
-        <div id="attention-notice-container">
-          {% if detail.attention_models %}
-            <div class="notice notice-warning attention-notice" id="attention-notice">
-              <button
-                type="button"
-                class="attention-notice-close"
-                onclick="document.getElementById('attention-notice').remove()"
-                aria-label="Dismiss warning"
-              >
-                &times;
-              </button>
-              <details>
-                <summary>
-                  <span>{{ detail.attention_models|length }} model(s) require attention</span>
-                </summary>
-                <ul class="attention-notice-list">
-                  {% for row in detail.attention_models %}
-                    <li>
-                      <strong>{{ row.model.display_name }}</strong> (<code>{{ row.model.model_identifier }}</code>) -
-                      {% if row.latest_pricing is none %}<span class="badge badge-warning">Missing pricing</span>{% endif %}
-                      {% if not row.model.is_enabled %}<span class="badge badge-danger">Disabled</span>{% endif %}
-                      {% for label in row.assignment_labels %}
-                        <span class="badge badge-neutral">{{ label }}</span>
-                      {% endfor %}
-                    </li>
-                  {% endfor %}
-                </ul>
-              </details>
-            </div>
-          {% endif %}
-        </div>
 
         <!-- Model Catalog Card (Swappable) -->
         <section class="card detail-section model-config-panel model-provider-catalog-card" id="catalog-card">
@@ -654,7 +620,6 @@
         const selectors = [
           '#metric-summary',
           '#routed-models-card',
-          '#attention-notice-container',
           '#catalog-card',
           '#audit-trail-card'
         ];

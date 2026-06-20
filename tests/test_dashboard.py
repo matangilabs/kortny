@@ -552,7 +552,7 @@ def test_dashboard_admin_can_edit_schedule_detail(
     assert "send a stock market update" in detail_response.text
     assert f'href="/tasks/{run.id}"' in detail_response.text
     assert "DM to Schedule Owner" in detail_response.text
-    assert "$0.0185" in detail_response.text
+    assert "$0.02" in detail_response.text
     assert "3,650" in detail_response.text
     assert "Every morning at 8:00 AM Central time" in detail_response.text
     assert edit_response.status_code == 303
@@ -754,7 +754,7 @@ def test_dashboard_member_schedules_are_scoped_to_their_user(
     assert "Recent Runs" in detail_response.text
     assert "send my morning market update" in detail_response.text
     assert f'href="/me/tasks/{own_run.id}"' in detail_response.text
-    assert "$0.0099" in detail_response.text
+    assert "&lt;$0.01" in detail_response.text
     assert blocked_detail.status_code == 404
     assert admin_response.status_code == 403
     assert blocked_cancel.status_code == 303
@@ -1464,11 +1464,10 @@ def test_dashboard_admin_can_inspect_provider_detail_page(
     assert (
         "All synced model rows already have pricing metadata." in detail_response.text
     )
-    assert "All Providers" in detail_response.text
+    assert "LLM Providers" in detail_response.text
     assert "Routed Models" in detail_response.text
     # Catalog search is now always rendered (client-side filtering)
     assert "Search models" in detail_response.text
-    assert "Needs Attention" in detail_response.text
     assert "Model Catalog" in detail_response.text
     assert "Add Manual Model" in detail_response.text
     assert "DeepSeek Flash" in detail_response.text
@@ -2048,7 +2047,7 @@ def test_dashboard_integrations_page_shows_providers_tools_and_redacts_secrets(
     assert response.status_code == 200
     assert "Integrations" in response.text
     assert "Providers" in response.text
-    assert "Native Tool Registry" in response.text
+    assert "Built-in tools" in response.text
     assert "Slack workspace" in response.text
     assert "LLM provider" in response.text
     assert "Brave Search" in response.text
@@ -2083,9 +2082,9 @@ def test_dashboard_composio_page_renders_catalog_shell(
 
     assert response.status_code == 200
     assert "Composio" in response.text
-    assert "Integration Catalog" in response.text
+    assert "Search integrations" in response.text
     assert "Catalog not available" in response.text
-    assert "Composio catalog results" in response.text
+    assert "Composio integration catalog" in response.text
     assert 'href="/composio" aria-current="page"' in response.text
     assert "composio-dashboard-secret" not in response.text
 
@@ -2146,8 +2145,13 @@ def test_dashboard_composio_page_sorts_connected_toolkits_first(
     response = test_client.get("/composio")
 
     assert response.status_code == 200
-    assert response.text.index("<h3>Notion</h3>") < response.text.index(
-        "<h3>GitHub</h3>"
+    # Connected toolkits now render in their own Connected tab panel (after the
+    # catalog grid), not pinned into the catalog grid.
+    assert response.text.index('data-composio-panel="connected"') < response.text.index(
+        "<h3>Notion</h3>"
+    )
+    assert response.text.index("<h3>GitHub</h3>") < response.text.index(
+        'data-composio-panel="connected"'
     )
 
 
@@ -2208,11 +2212,16 @@ def test_dashboard_composio_page_pins_connected_toolkits_missing_from_page(
     response = test_client.get("/composio")
 
     assert response.status_code == 200
-    assert response.text.index("<h3>Alpha Vantage</h3>") < response.text.index(
-        "<h3>GitHub</h3>"
+    # Connected toolkits render in the Connected tab panel; non-connected ones
+    # (GitHub) stay in the catalog grid that precedes it.
+    assert response.text.index('data-composio-panel="connected"') < response.text.index(
+        "<h3>Alpha Vantage</h3>"
+    )
+    assert response.text.index("<h3>GitHub</h3>") < response.text.index(
+        'data-composio-panel="connected"'
     )
     assert "Connected Apps" in response.text
-    assert "Includes 1 connected app" in response.text
+    assert "Connected (1)" in response.text
 
 
 def test_dashboard_composio_page_exposes_cursor_pagination(
@@ -2349,7 +2358,7 @@ def test_dashboard_composio_detail_lists_tool_capabilities(
     response = test_client.get("/composio/github")
 
     assert response.status_code == 200
-    assert "Capabilities" in response.text
+    assert "Available tools" in response.text
     assert "Search repositories" in response.text
     assert "Find repositories by keyword." in response.text
     assert 'src="https://assets.composio.dev/logos/github.png"' in response.text
@@ -3082,7 +3091,7 @@ def test_dashboard_homepage_renders_operator_overview(
     assert "Recent Work" in response.text
     assert "View all tasks" in response.text
     assert "Today Cost" in response.text
-    assert "$0.012600" in response.text
+    assert "$0.01" in response.text
     assert "50.0%" in response.text
     assert "Investigate failed overview task" in response.text
     assert f"/tasks/{failed_task.id}" in response.text
@@ -3119,15 +3128,13 @@ def test_dashboard_task_list_shows_cost_models_and_turns(
     assert response.status_code == 200
     assert "Tasks" in response.text
     assert "#ops-desk" in response.text
-    assert "CCost" in response.text
     assert "Aneesh Melkot" in response.text
-    assert "UCost" in response.text
     assert "openai/gpt-5.4-mini" in response.text
-    assert "$0.004200" in response.text
+    assert "&lt;$0.01" in response.text
     assert f"/tasks/{task.id}" in response.text
     assert 'class="card"' in response.text
-    assert 'class="task-list"' in response.text
-    assert 'class="task-list-item task-status-succeeded"' in response.text
+    assert 'class="table task-table"' in response.text
+    assert 'class="task-row"' in response.text
     assert 'class="badge status-succeeded"' in response.text
     assert 'class="sidebar"' in response.text
 
@@ -3288,7 +3295,7 @@ def test_dashboard_task_detail_shows_events_usage_and_artifacts(
     assert "Done with cost summary" in response.text
     assert "Posted Slack Response" in response.text
     assert "Posted Slack response after humanizer" in response.text
-    assert "Raw Agent Result" in response.text
+    assert "Internal draft (before formatting)" in response.text
     assert "status_changed" in response.text
     assert "Task created" in response.text
     assert "LLM call started" in response.text
@@ -3303,7 +3310,7 @@ def test_dashboard_task_detail_shows_events_usage_and_artifacts(
     assert "dashboard_report.pdf" in response.text
     assert "analysis" in response.text
     assert "Planned Trace" in response.text
-    assert "Legacy planned workflow" in response.text
+    assert "Planning trace (legacy runs only)" in response.text
     assert "planned_parallel" in response.text
     assert "research_analysis" in response.text
     assert "Budget Hits" in response.text
@@ -3350,7 +3357,7 @@ def test_dashboard_usage_rollups_by_model_user_and_day(
     assert "DUsage" not in response.text
     assert "2026-05-24" in response.text
     assert "2,400" in response.text
-    assert "$0.004200" in response.text
+    assert "&lt;$0.01" in response.text
     assert 'type="date"' in response.text
     assert 'name="from"' in response.text
     assert 'name="to"' in response.text
@@ -3382,7 +3389,7 @@ def test_dashboard_usage_renders_visual_analytics(
     assert "Cost by User" in response.text
     assert "Failure Rate" in response.text
     assert "50.0%" in response.text
-    assert "$0.012600" in response.text
+    assert "$0.01" in response.text
     assert "4,500" in response.text
     assert "1 failed" in response.text
     assert 'class="usage-charts-grid"' in response.text
@@ -3443,7 +3450,7 @@ def test_dashboard_users_list_shows_rollups_and_detail_links(
     assert "/users/UCost?from=2026-05-24&to=2026-05-24" in response.text
     assert "1,200" in response.text
     assert "300" in response.text
-    assert "$0.004200" in response.text
+    assert "&lt;$0.01" in response.text
     assert "dashboard_report.pdf" not in response.text
 
 
@@ -3464,7 +3471,7 @@ def test_dashboard_user_detail_shows_tasks_usage_artifacts_and_trace_links(
     assert "Create a usage dashboard" in response.text
     assert "#ops-desk" in response.text
     assert "1,200" in response.text
-    assert "$0.004200" in response.text
+    assert "&lt;$0.01" in response.text
     assert "dashboard_report.pdf" in response.text
     assert f"/tasks/{task.id}" in response.text
 
@@ -3541,7 +3548,7 @@ def test_dashboard_memory_page_shows_facts_and_episodes(
     assert response.status_code == 200
     assert "Memory" in response.text
     assert "Active Facts" in response.text
-    assert "Workspace State" in response.text
+    assert "Facts Kortny knows" in response.text
     assert "Showing 1-1" in response.text
     assert "of 1 facts." in response.text
     assert "All scopes" in response.text
@@ -3549,7 +3556,7 @@ def test_dashboard_memory_page_shows_facts_and_episodes(
     assert "no_auto_pdfs" in response.text
     assert "Do not generate PDFs unless explicitly requested" in response.text
     assert "Aneesh Melkot" in response.text
-    assert "Audit" in response.text
+    assert "Confirmed by" in response.text
     assert "Forget" in response.text
     assert "Supersede" in response.text
     assert f"/tasks/{task.id}" in response.text
@@ -3573,7 +3580,7 @@ def test_dashboard_memory_page_shows_facts_and_episodes(
 
     assert episodes_response.status_code == 200
     assert "Episodes" in episodes_response.text
-    assert "Task memories retained for follow-up context" in episodes_response.text
+    assert "Recorded task memories" in episodes_response.text
     assert "Showing 1-1" in episodes_response.text
     assert "of 1 episodes." in episodes_response.text
     assert (
@@ -3688,7 +3695,7 @@ def test_dashboard_knowledge_graph_page_shows_entities_relationships_and_evidenc
     assert "Extracted" in response.text
     assert "auto" in response.text
     assert "Channel membership recorded for ops-desk." in response.text
-    assert "runtime eligible" in response.text
+    assert "in use" in response.text
 
     relationship_response = test_client.get(
         "/knowledge-graph?view=relationships&q=operator-console"

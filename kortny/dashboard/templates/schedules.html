@@ -7,12 +7,12 @@
   <section class="page-heading">
     <div>
       <h1>Scheduled Tasks</h1>
-      <p>Inspect recurring and delayed work Kortny will run from Slack requests.</p>
+      <p>Recurring and delayed work Kortny will run for you, set up by asking it in Slack.</p>
     </div>
     <a class="btn-ghost" href="{{ '/tasks' if dashboard_is_admin else '/me/tasks' }}">View Tasks</a>
   </section>
 
-  {{ page_intro("Schedules are standing instructions: one-off, interval, or cron, created from natural language in Slack or by accepting a Witness suggestion. The scheduler materializes due schedules into ordinary tasks, so every run gets the same audit trail as a direct request. The System group lists Kortny's own ambient drives — the witness scan, memory consolidation, and integration catalog sync — with their cadence and last run. They can be paused here but not deleted: Kortny's initiative is visible and controllable, never hidden.") }}
+  {{ page_intro("Schedules are standing instructions: one-off, interval, or cron, created from natural language in Slack or by accepting a Witness suggestion. The scheduler materializes due schedules into ordinary tasks, so every run gets the same audit trail as a direct request. The System group lists Kortny's own background jobs — the suggestion scan, memory consolidation, and integration catalog sync — with how often they run and when they last ran. They can be paused here but not deleted: Kortny's initiative is visible and controllable, never hidden.") }}
 
   {% if notice %}
     <div class="notice notice-{{ notice_tone }}" role="status">{{ notice }}</div>
@@ -52,8 +52,8 @@
 
   <div class="section-header-row schedules-section-header">
     <div>
-      <h2>Schedule Registry</h2>
-      <p>Active schedules are materialized into normal tasks when they become due.</p>
+      <h2>All schedules</h2>
+      <p>When an active schedule comes due, Kortny turns it into a normal task and runs it.</p>
     </div>
   </div>
 
@@ -61,13 +61,13 @@
     <div class="schedule-section-header">
       <h2 class="schedule-section-title">
         <span class="badge badge-accent">System</span>
-        Kortny's ambient drives
+        Kortny's background jobs
       </h2>
-      <p class="muted schedule-section-note">These run continuously inside Kortny. Pause or resume them here; they cannot be cancelled. Edit cadence by talking to Kortny.</p>
+      <p class="muted schedule-section-note">Recurring jobs Kortny runs for itself, not ones you created — things like checking for suggestions and syncing integrations. Pause or resume them here; they cannot be cancelled. Change how often they run by talking to Kortny.</p>
     </div>
-    <div class="schedule-list" role="list" aria-label="System drives">
+    <div class="schedule-list" role="list" aria-label="Background jobs">
       {% for row in schedule_page.system_rows %}
-        <article class="schedule-card schedule-card-{{ row.tone }}" role="listitem">
+        <article class="schedule-card schedule-card-{{ row.tone }}{{ ' schedule-card-inactive' if row.inactive else '' }}" role="listitem">
           <div class="schedule-card-top">
             <div class="schedule-card-id">
               <span class="schedule-status-pill schedule-status-{{ row.tone }}">
@@ -111,7 +111,7 @@
 
   <div class="schedule-list" role="list" aria-label="Scheduled tasks">
     {% for row in schedule_page.user_rows %}
-      <article class="schedule-card schedule-card-{{ row.tone }}" role="listitem">
+      <article class="schedule-card schedule-card-{{ row.tone }}{{ ' schedule-card-inactive' if row.inactive else '' }}" role="listitem">
         <div class="schedule-card-top">
           <div class="schedule-card-id">
             <span class="schedule-status-pill schedule-status-{{ row.tone }}">

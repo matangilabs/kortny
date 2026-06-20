@@ -437,6 +437,22 @@ class UserDirectory:
     end: datetime | None
     users: tuple[UserListItem, ...]
 
+    @property
+    def total_tasks(self) -> int:
+        return sum(u.task_count for u in self.users)
+
+    @property
+    def total_failures(self) -> int:
+        return sum(u.failed_task_count for u in self.users)
+
+    @property
+    def total_cost_usd(self) -> Decimal:
+        return sum((u.total_cost_usd for u in self.users), Decimal(0))
+
+    @property
+    def failure_rate(self) -> float:
+        return (self.total_failures / self.total_tasks) if self.total_tasks else 0.0
+
 
 @dataclass(frozen=True)
 class UserTaskRow:
@@ -1777,7 +1793,7 @@ def get_dashboard_overview(
         ),
         SystemMetric(
             label="Last Task",
-            value=_datetime_label(last_task_at),
+            value=_relative_label(last_task_at, current),
             detail="Most recent task creation",
         ),
     )
@@ -4640,6 +4656,21 @@ def _datetime_label(value: datetime | None) -> str:
     if value is None:
         return "-"
     return value.astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def _relative_label(value: datetime | None, now: datetime) -> str:
+    if value is None:
+        return "Never"
+    moment = value if value.tzinfo else value.replace(tzinfo=UTC)
+    secs = (now - moment.astimezone(UTC)).total_seconds()
+    secs = max(secs, 0.0)
+    if secs < 90:
+        return "just now"
+    if secs < 3600:
+        return f"{int(secs // 60)}m ago"
+    if secs < 86400:
+        return f"{int(secs // 3600)}h ago"
+    return f"{int(secs // 86400)}d ago"
 
 
 def _redact_url(value: str) -> str:
@@ -8033,7 +8064,11 @@ def _percent_of(value: Decimal | int, max_value: Decimal | int) -> int:
 
 
 def _format_money(value: Decimal) -> str:
-    return f"${value:,.6f}"
+    if value == 0:
+        return "$0.00"
+    if Decimal(0) < value < Decimal("0.01"):
+        return "<$0.01"
+    return f"${value:,.2f}"
 
 
 def _format_number(value: int) -> str:

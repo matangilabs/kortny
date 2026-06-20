@@ -33,7 +33,8 @@
 
   // Accent-led multi-hue ramp for categorical charts (donuts / distributed bars).
   function categoricalColors(p) {
-    return [p.accent, '#0e7490', '#7c3aed', p.warning, '#0891b2', '#be185d', '#15803d', p.danger, '#a16207', '#4f46e5'];
+    // Restrained accent-led ramp: greens + teals + slate + amber. No purple/pink.
+    return [p.accent, '#3f9e83', '#0e7490', '#6bb6a0', '#0891b2', '#94c9b9', '#a16207', '#64748b', p.warning, '#cbd5e1'];
   }
 
   // Collapse a sorted (desc) label/value pair to the top N, summing the

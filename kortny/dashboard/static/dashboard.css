@@ -7073,6 +7073,14 @@ pre {
   padding: 3px;
 }
 
+.provider-detail-tabs {
+  margin-bottom: 4px;
+}
+
+.provider-detail-tabs + .tab-content.active {
+  margin-top: 0;
+}
+
 .tab-btn {
   align-items: center;
   background: transparent;
@@ -7429,21 +7437,26 @@ dialog::backdrop {
 
 /* Color Coded Capabilities Badges */
 .badge-capability-chat {
-  background: rgba(59, 130, 246, 0.08) !important;
-  color: #2563eb !important;
-  border: 1px solid rgba(59, 130, 246, 0.15) !important;
+  background: color-mix(in srgb, var(--pill-auth) 17%, var(--card)) !important;
+  color: var(--pill-auth) !important;
+  border: 1px solid color-mix(in srgb, var(--pill-auth) 42%, var(--border)) !important;
 }
 .badge-capability-vision {
-  background: rgba(147, 51, 234, 0.08) !important;
-  color: #7c3aed !important;
-  border: 1px solid rgba(147, 51, 234, 0.15) !important;
+  background: color-mix(in srgb, var(--pill-category) 18%, var(--card)) !important;
+  color: var(--pill-category) !important;
+  border: 1px solid color-mix(in srgb, var(--pill-category) 46%, var(--border)) !important;
 }
 .badge-capability-tools,
 .badge-capability-tool-calling,
 .badge-capability-tool_calling {
-  background: rgba(5, 150, 105, 0.08) !important;
-  color: #059669 !important;
-  border: 1px solid rgba(5, 150, 105, 0.15) !important;
+  background: color-mix(in srgb, var(--accent) 20%, var(--card)) !important;
+  color: var(--accent-strong) !important;
+  border: 1px solid color-mix(in srgb, var(--accent) 48%, var(--border)) !important;
+}
+.badge-capability-structured-output {
+  background: color-mix(in srgb, var(--warning) 22%, var(--card)) !important;
+  color: var(--warning) !important;
+  border: 1px solid color-mix(in srgb, var(--warning) 52%, var(--border)) !important;
 }
 
 /* Inline Specs Pills Layout */
@@ -10359,3 +10372,1723 @@ details[open] > summary::after {
   padding: 14px 16px 16px;
 }
 
+/* ===========================================================================
+   DASHBOARD VISUAL SYSTEM v2 (ui-optimize) — applied globally via the
+   .dash-v2 class on .dashboard-layout (base.html). Neutral-grotesk type
+   (Inter), flatter surfaces, tighter density, status by dot/color instead of
+   washed background tints.
+   ========================================================================= */
+.dash-v2 {
+  font-family: "Inter", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-feature-settings: "cv05", "ss01", "tnum";
+  -webkit-font-smoothing: antialiased;
+  --radius: 8px;
+}
+
+/* Heading: smaller, lighter, tighter — Linear/Vercel register */
+.dash-v2 .page-heading {
+  align-items: center;
+  margin-bottom: 22px;
+  padding-bottom: 16px;
+}
+.dash-v2 .page-heading h1 {
+  font-size: 19px;
+  font-weight: 600;
+  letter-spacing: -0.012em;
+}
+.dash-v2 .page-heading > div > p {
+  margin-top: 5px;
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--muted-foreground);
+}
+
+/* Buttons in the heading: quieter, smaller */
+.dash-v2 .heading-actions .btn,
+.dash-v2 .heading-actions .btn-ghost {
+  font-size: 12.5px;
+  padding: 6px 12px;
+  border-radius: 7px;
+}
+.dash-v2 .heading-actions .status-chip {
+  font-size: 11px;
+  font-weight: 500;
+}
+
+/* Metric cards: flat, hairline, neutral. No background wash. */
+.dash-v2 .summary-grid {
+  gap: 10px;
+  margin-bottom: 16px;
+}
+.dash-v2 .metric-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-left: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: none;
+  padding: 13px 14px;
+}
+.dash-v2 .metric-card > span {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.03em;
+  color: var(--muted-foreground);
+  text-transform: uppercase;
+}
+.dash-v2 .metric-card strong {
+  font-size: 21px;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  line-height: 1.15;
+  font-variant-numeric: tabular-nums;
+}
+.dash-v2 .metric-card small {
+  margin-top: 5px;
+  font-size: 11.5px;
+  color: var(--muted-foreground);
+}
+/* sub-stat spans inside <small> must stay inline + normal case (not the
+   block uppercase label styling) */
+.dash-v2 .metric-card small span {
+  display: inline;
+  margin: 0;
+  font-size: inherit;
+  font-weight: inherit;
+  letter-spacing: normal;
+  text-transform: none;
+  color: inherit;
+}
+.dash-v2 .metric-card .metric-time {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow-wrap: normal;
+}
+
+/* Status by a small dot + colored value, not a pink fill */
+.dash-v2 .metric-card.metric-danger > span::before,
+.dash-v2 .metric-card.metric-warning > span::before,
+.dash-v2 .metric-card.metric-success > span::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: none;
+}
+.dash-v2 .metric-card.metric-danger > span::before { background: var(--destructive); }
+.dash-v2 .metric-card.metric-warning > span::before { background: var(--warning); }
+.dash-v2 .metric-card.metric-success > span::before { background: var(--success); }
+.dash-v2 .metric-card.metric-danger strong { color: var(--destructive); }
+
+/* Cards/charts: flat with a crisp hairline; quieter headers */
+.dash-v2 .card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: none;
+}
+.dash-v2 .usage-charts-grid,
+.dash-v2 .insights-grid {
+  gap: 12px;
+}
+.dash-v2 .usage-chart-card header,
+.dash-v2 .insight-card header,
+.dash-v2 .attention-card header,
+.dash-v2 .detail-section .section-header-row {
+  padding-bottom: 2px;
+}
+.dash-v2 .usage-chart-card header h2,
+.dash-v2 .insight-card header h2,
+.dash-v2 .attention-card header h2,
+.dash-v2 .detail-section h2 {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+}
+.dash-v2 .usage-chart-card header p,
+.dash-v2 .insight-card header p,
+.dash-v2 .attention-card header p,
+.dash-v2 .detail-section .section-header-row p {
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+
+/* Needs-Review rows: tighter, hairline separators, calmer */
+.dash-v2 .attention-row {
+  border-radius: 7px;
+  padding: 11px 12px;
+}
+.dash-v2 .attention-row strong { font-size: 13px; font-weight: 600; }
+.dash-v2 .attention-row small { font-size: 11.5px; }
+
+/* Timestamp-valued metric cards: keep the value on one line, sized to fit */
+.dash-v2 .metric-card.metric-stamp strong {
+  font-size: 14px;
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow-wrap: normal;
+}
+
+/* Compact per-run summary: only the counters that actually moved */
+.dash-v2 .run-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+.dash-v2 .run-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 3px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--muted);
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.dash-v2 .run-chip strong {
+  font-weight: 600;
+  color: var(--foreground);
+}
+.dash-v2 .run-chip-muted {
+  background: transparent;
+  font-style: normal;
+}
+.dash-v2 .run-chip-warn {
+  border-color: var(--warning);
+  background: var(--warning-bg);
+  color: var(--warning);
+}
+.dash-v2 .run-chip-warn strong { color: var(--warning); }
+
+/* ===========================================================================
+   PAGE: Witness (templates/witness.html)
+   Candidate list now leads; analytics moved into a collapsed "Delivery
+   metrics" <details>. This block only adds spacing inside that collapsible so
+   the moved metric grids/table breathe; everything else reuses existing
+   .summary-grid / .metric-card / .detail-section styles.
+   ========================================================================= */
+.dash-v2 .witness-metrics-details {
+  margin-top: 8px;
+}
+.dash-v2 .witness-metrics-body {
+  padding: 16px;
+}
+.dash-v2 .witness-metrics-body > .summary-grid:first-child {
+  margin-top: 0;
+}
+.dash-v2 .witness-metrics-body > .detail-section {
+  margin-bottom: 0;
+}
+
+/* ===========================================================================
+   PAGE: Knowledge Graph (templates/knowledge_graph.html)
+   Lead badges (entity_type + lifecycle_state) keep full strength; secondary
+   tags (provenance, review status, "not current") are de-emphasized via
+   .badge-faint so rows read calmly. Plus a one-line legend above the list.
+   ========================================================================= */
+.dash-v2 .badge.badge-faint {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted-foreground);
+  font-size: 10.5px;
+  font-weight: 500;
+  padding: 1px 6px;
+}
+
+/* ===========================================================================
+   PAGE: Playground (templates/playground.html)
+   Moved out of the template's inline <style>. Console stays a dark terminal,
+   but every surface/accent now sources from design tokens — no off-palette
+   purple/pink/raw hex. Scoped under .playground (top-level wrapper) + .dash-v2.
+   ========================================================================= */
+.dash-v2 .playground.playground-layout-grid {
+  display: grid;
+  grid-template-columns: 1fr 340px;
+  gap: 24px;
+  align-items: start;
+  margin-top: 24px;
+}
+@media (max-width: 1024px) {
+  .dash-v2 .playground.playground-layout-grid {
+    grid-template-columns: 1fr;
+  }
+}
+.dash-v2 .playground .playground-main-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+/* Prompt form */
+.dash-v2 .playground .pg-form-card {
+  padding: 24px;
+}
+.dash-v2 .playground .pg-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.dash-v2 .playground .pg-form label {
+  font-weight: 600;
+  margin-bottom: 8px;
+  display: block;
+  font-size: 0.95rem;
+}
+.dash-v2 .playground .pg-form textarea {
+  width: 100%;
+  min-height: 100px;
+  padding: 12px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--card);
+  color: var(--foreground);
+  font-family: inherit;
+  font-size: 0.95rem;
+  line-height: 1.5;
+  resize: vertical;
+  transition: border-color 0.2s;
+}
+.dash-v2 .playground .pg-form textarea:focus {
+  outline: none;
+  border-color: var(--ring);
+  box-shadow: 0 0 0 2px var(--accent-bg);
+}
+.dash-v2 .playground .form-actions {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: flex-end;
+}
+.dash-v2 .playground .pg-run-hint {
+  margin-right: auto;
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+
+/* Stats bar */
+.dash-v2 .playground .playground-stats-bar {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  padding: 16px 20px;
+  gap: 16px;
+  text-align: center;
+  background: var(--card);
+  border: 1px solid var(--border);
+}
+@media (max-width: 640px) {
+  .dash-v2 .playground .playground-stats-bar {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+.dash-v2 .playground .stat-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.dash-v2 .playground .stat-item span {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted-foreground);
+}
+.dash-v2 .playground .stat-item strong {
+  font-size: 1rem;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Status pill — colored text + dot, no washed fill */
+.dash-v2 .playground .status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+.dash-v2 .playground .status-pill::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: none;
+}
+.dash-v2 .playground .status-idle { color: var(--muted-foreground); }
+.dash-v2 .playground .status-pending { color: var(--warning); }
+.dash-v2 .playground .status-running { color: var(--accent); }
+.dash-v2 .playground .status-succeeded { color: var(--success); }
+.dash-v2 .playground .status-failed { color: var(--destructive); }
+
+/* Console terminal — dark surface from tokens */
+.dash-v2 .playground .pg-console-card {
+  display: flex;
+  flex-direction: column;
+  background: var(--code-background);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  box-shadow: none;
+}
+.dash-v2 .playground .console-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  background: color-mix(in srgb, var(--code-background) 88%, var(--code-foreground));
+  border-bottom: 1px solid color-mix(in srgb, var(--code-background) 70%, var(--code-foreground));
+}
+.dash-v2 .playground .console-controls {
+  display: flex;
+  gap: 6px;
+}
+.dash-v2 .playground .console-controls .dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+.dash-v2 .playground .console-controls .dot.red { background: var(--destructive); }
+.dash-v2 .playground .console-controls .dot.yellow { background: var(--warning); }
+.dash-v2 .playground .console-controls .dot.green { background: var(--accent); }
+.dash-v2 .playground .console-title {
+  font-size: 0.8rem;
+  color: color-mix(in srgb, var(--code-foreground) 65%, var(--code-background));
+  font-weight: 600;
+  font-family: "Fira Code", ui-monospace, monospace;
+}
+.dash-v2 .playground .pg-console-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.dash-v2 .playground .console-meta {
+  font-size: 0.75rem;
+  color: color-mix(in srgb, var(--code-foreground) 50%, var(--code-background));
+  font-family: "Fira Code", ui-monospace, monospace;
+}
+.dash-v2 .playground .pg-copy-console-btn {
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--code-background) 70%, var(--code-foreground));
+  border-radius: 6px;
+  color: color-mix(in srgb, var(--code-foreground) 70%, var(--code-background));
+  cursor: pointer;
+  font-size: 0.72rem;
+  padding: 3px 9px;
+}
+.dash-v2 .playground .pg-copy-console-btn:hover {
+  color: var(--code-foreground);
+  border-color: var(--accent);
+}
+.dash-v2 .playground .console-body {
+  padding: 16px;
+  min-height: 380px;
+  max-height: 600px;
+  overflow-y: auto;
+  font-family: "Fira Code", "Courier New", Courier, monospace;
+  font-size: 0.85rem;
+  line-height: 1.6;
+  color: var(--code-foreground);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Console line types — tokenized, no purple/pink */
+.dash-v2 .playground .console-line {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.dash-v2 .playground .system-line { color: var(--accent); }
+.dash-v2 .playground .log-line { color: color-mix(in srgb, var(--code-foreground) 60%, var(--code-background)); }
+.dash-v2 .playground .llm-line { color: color-mix(in srgb, var(--code-foreground) 80%, var(--code-background)); }
+.dash-v2 .playground .tool-call-line { color: var(--warning); }
+.dash-v2 .playground .tool-result-line { color: var(--accent); }
+.dash-v2 .playground .artifact-line { color: var(--accent); }
+.dash-v2 .playground .output-line { color: var(--code-foreground); font-weight: 500; }
+.dash-v2 .playground .error-line {
+  color: var(--destructive);
+  background: var(--destructive-bg);
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+.dash-v2 .playground .status-line { color: color-mix(in srgb, var(--code-foreground) 70%, var(--code-background)); }
+
+/* History sidebar */
+.dash-v2 .playground .playground-history-panel {
+  padding: 20px;
+  max-height: 800px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.dash-v2 .playground .playground-history-panel header h2 {
+  font-size: 1.1rem;
+  margin-bottom: 4px;
+}
+.dash-v2 .playground .playground-history-panel header p {
+  font-size: 0.8rem;
+  color: var(--muted-foreground);
+}
+.dash-v2 .playground .history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow-y: auto;
+  flex: 1;
+}
+.dash-v2 .playground .history-card {
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: calc(var(--radius) - 2px);
+  background: var(--card);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  transition: border-color 0.2s;
+}
+.dash-v2 .playground .history-card:hover {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+}
+.dash-v2 .playground .history-card.active-history {
+  border-color: var(--ring);
+  box-shadow: 0 0 0 2px var(--accent-bg);
+}
+.dash-v2 .playground .history-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.dash-v2 .playground .history-card-header small {
+  font-size: 0.75rem;
+  color: var(--muted-foreground);
+}
+.dash-v2 .playground .history-prompt-preview {
+  font-size: 0.85rem;
+  color: var(--foreground);
+  line-height: 1.4;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  margin: 0;
+}
+.dash-v2 .playground .history-card-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 4px;
+}
+.dash-v2 .playground .history-card-footer span {
+  font-size: 0.8rem;
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+}
+.dash-v2 .playground .load-history-btn {
+  font-size: 0.75rem;
+  padding: 4px 8px;
+  height: auto;
+}
+
+/* ---- Data tables (v2): divider-only header, tabular figures everywhere ---- */
+.dash-v2 .table th,
+.dash-v2 .table td {
+  padding: 9px 14px;
+  font-variant-numeric: tabular-nums;
+  border-bottom: 1px solid var(--border);
+}
+.dash-v2 .table th {
+  background: transparent;
+  border-bottom: 1px solid var(--input);
+  color: var(--muted-foreground);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  vertical-align: bottom;
+}
+.dash-v2 .table tbody tr:hover {
+  background: var(--table-row-hover);
+}
+.dash-v2 .table .num {
+  text-align: right;
+  white-space: nowrap;
+}
+/* Right-align numeric column headers to match their cells */
+.dash-v2 .table th.num {
+  text-align: right;
+}
+
+/* ===========================================================================
+   EXPANDABLE LIST ROW (v2) — reusable progressive-disclosure pattern.
+   Markup:
+     <details class="ex-row">
+       <summary class="ex-row-summary"> ...compact one-line content... </summary>
+       <div class="ex-row-detail"> ...audit / evidence / raw / action forms... </div>
+     </details>
+   Native <details> = zero JS. Compact by default; expand for detail + actions.
+   ========================================================================= */
+.dash-v2 .ex-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.dash-v2 .ex-row {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card);
+  overflow: hidden;
+}
+.dash-v2 .ex-row[open] {
+  border-color: var(--input);
+}
+.dash-v2 .ex-row-summary {
+  list-style: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 14px;
+}
+.dash-v2 .ex-row-summary::-webkit-details-marker {
+  display: none;
+}
+.dash-v2 .ex-row-summary:hover {
+  background: var(--table-row-hover);
+}
+/* chevron affordance, pushed to the far right */
+.dash-v2 .ex-row-summary::after {
+  content: "";
+  margin-left: 6px;
+  width: 7px;
+  height: 7px;
+  border-right: 1.5px solid var(--muted-foreground);
+  border-bottom: 1.5px solid var(--muted-foreground);
+  transform: rotate(-45deg);
+  transition: transform 0.15s ease;
+  flex: none;
+}
+.dash-v2 .ex-row[open] .ex-row-summary::after {
+  transform: rotate(45deg);
+}
+/* compact-summary content helpers */
+.dash-v2 .ex-row-title {
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dash-v2 .ex-row-summary-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--muted-foreground);
+  font-size: 12.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dash-v2 .ex-row-meta {
+  flex: none;
+  color: var(--muted-foreground);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.dash-v2 .ex-row-confidence {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.dash-v2 .ex-row-confidence svg {
+  width: 13px;
+  height: 13px;
+  opacity: 0.75;
+}
+.dash-v2 .badge-confidence {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.dash-v2 .badge-confidence svg {
+  width: 12px;
+  height: 12px;
+  opacity: 0.8;
+}
+/* push everything after a flagged element to the right */
+.dash-v2 .ex-row-spacer {
+  margin-left: auto;
+}
+/* expanded detail region */
+.dash-v2 .ex-row-detail {
+  padding: 12px 14px 13px;
+  border-top: 1px solid var(--border);
+  font-size: 13px;
+}
+.dash-v2 .ex-row-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 14px 22px;
+}
+/* small labelled fact inside the detail region */
+.dash-v2 .ex-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.dash-v2 .ex-field-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--muted-foreground);
+}
+/* action row inside the detail region */
+.dash-v2 .ex-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.dash-v2 .ex-row-actions form {
+  margin: 0;
+}
+
+/* ---- Witness DRAFT DM box: neutral quoted-message, not a loud green box ---- */
+.dash-v2 .witness-message-preview {
+  background: color-mix(in srgb, var(--muted) 55%, var(--card));
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--accent);
+}
+
+/* ---- LLM Providers: full-width provider rows ---- */
+.dash-v2 .provider-main .provider-accounts-grid {
+  grid-template-columns: 1fr;
+  gap: 10px;
+}
+/* Flex row that wraps: identity | stats | actions. The actions push right and
+   drop to their own line when the row (shared with the setup rail) gets tight,
+   so nothing is ever clipped. */
+.dash-v2 .provider-account-card {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: flex-start;
+  flex-wrap: wrap;
+  text-align: left;
+  gap: 12px 36px;
+  min-height: 0;
+  padding: 15px 20px;
+}
+.dash-v2 .provider-account-card:hover {
+  transform: none;
+}
+.dash-v2 .provider-account-header {
+  flex: 0 0 auto;
+  min-width: 170px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 7px;
+  margin: 0;
+  padding: 0;
+  border-bottom: 0;
+}
+.dash-v2 .provider-account-header h3 {
+  font-size: 14.5px;
+  font-weight: 650;
+}
+.dash-v2 .provider-kind-slug {
+  font-size: 11px;
+  color: var(--muted-foreground);
+}
+/* status + health inline, not a tall stack */
+.dash-v2 .provider-account-badges {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+}
+.dash-v2 .provider-account-body {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 12px 36px;
+  margin: 0;
+}
+.dash-v2 .provider-account-body .provider-detail-item {
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 3px;
+}
+.dash-v2 .provider-detail-item .provider-detail-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--muted-foreground);
+}
+.dash-v2 .provider-detail-item strong,
+.dash-v2 .provider-detail-item > span:not(.provider-detail-label) {
+  font-size: 13px;
+  font-weight: 600;
+}
+.dash-v2 .provider-account-actions {
+  flex: 0 0 auto;
+  margin-left: auto;
+  display: flex;
+  gap: 8px;
+  border-top: 0;
+  padding-top: 0;
+}
+
+/* ---- Skills cards: 3 per row, calmer + cleaner ---- */
+.dash-v2 .skill-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+}
+@media (max-width: 1120px) {
+  .dash-v2 .skill-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 720px) {
+  .dash-v2 .skill-grid { grid-template-columns: 1fr; }
+}
+.dash-v2 .skill-card {
+  padding: 18px 20px;
+  gap: 12px;
+  box-shadow: none;
+  border-color: var(--border);
+}
+.dash-v2 .skill-card:hover {
+  box-shadow: none;
+  transform: none;
+  border-color: color-mix(in srgb, var(--border) 45%, var(--accent));
+}
+.dash-v2 .skill-card-title {
+  font-size: 16px;
+  font-weight: 650;
+}
+/* trust/curated pills: quiet outline chips, not loud fills */
+.dash-v2 .skill-card-pills .badge {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted-foreground);
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  padding: 1px 8px;
+}
+/* keep just a colour hint on the trust badge via its text */
+.dash-v2 .skill-card-pills .badge.badge-success { color: var(--accent-strong); border-color: var(--accent-border); }
+.dash-v2 .skill-card-pills .badge.badge-warning { color: var(--warning); }
+.dash-v2 .skill-card-pills .badge.badge-danger { color: var(--destructive); }
+/* description: consistent 3-line region so footers align */
+.dash-v2 .skill-card-description {
+  font-size: 13px;
+  min-height: calc(1.55em * 3);
+}
+/* capability chips: subtle, transparent */
+.dash-v2 .skill-card-meta .skill-meta-chip {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 500;
+}
+.dash-v2 .skill-card-foot {
+  padding-top: 13px;
+}
+
+/* ---- Utility: keep date/short cells on one line ---- */
+.dash-v2 .table td.nowrap,
+.dash-v2 .table th.nowrap {
+  white-space: nowrap;
+}
+
+/* ---- Schedules: mute cancelled/completed so active work stands out ---- */
+.dash-v2 .schedule-card.schedule-card-inactive {
+  border-left-color: var(--border);
+  opacity: 0.66;
+}
+.dash-v2 .schedule-card.schedule-card-inactive:hover {
+  opacity: 1;
+}
+
+/* ---- Composio catalog cards: equal height, clean facts, subtle hover ---- */
+.dash-v2 .composio-catalog-results[data-view="card"] {
+  align-items: stretch;
+}
+.dash-v2 .composio-card {
+  height: 100%;
+  box-shadow: none;
+  border: 1px solid var(--border);
+}
+.dash-v2 .composio-card:hover {
+  border-color: color-mix(in srgb, var(--border) 45%, var(--accent));
+  box-shadow: none;
+  transform: none;
+}
+.dash-v2 .integration-card-description {
+  min-height: calc(1.5em * 2);
+}
+.dash-v2 .integration-card-facts dt {
+  font-size: 10px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--muted-foreground);
+}
+.dash-v2 .integration-card-facts dd {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+/* ---- Model Catalog: quiet the noise so real signal stands out ---- */
+/* capability chips → subtle outline, not filled neutral badges */
+.dash-v2 .model-catalog-capabilities-compact .badge {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted-foreground);
+  font-weight: 500;
+}
+/* unknown / pending / not-routable placeholders → de-emphasized, not loud */
+.dash-v2 .catalog-muted {
+  background: transparent !important;
+  border: 1px solid var(--border) !important;
+  color: var(--muted-foreground) !important;
+  font-weight: 500 !important;
+  opacity: 0.75;
+}
+.dash-v2 .spec-val.catalog-muted {
+  border: 0 !important;
+  opacity: 0.6;
+}
+/* model name is the signal — make identifier + meta quieter */
+.dash-v2 .model-catalog-model-title strong {
+  font-weight: 650;
+}
+.dash-v2 .model-catalog-meta-line {
+  color: var(--muted-foreground);
+  font-size: 11.5px;
+}
+/* routing: make "Unused" a calm placeholder, assigned tiers the accent */
+.dash-v2 .route-unused {
+  color: var(--muted-foreground);
+  font-style: normal;
+  opacity: 0.7;
+}
+
+/* ===========================================================================
+   TASK TABLE — replaces the stacked task-list card layout
+   All selectors prefixed .dash-v2 to scope to the v2 layout.
+   =========================================================================== */
+
+/* Let the browser size columns naturally; no forced min-width straitjacket */
+.dash-v2 .task-table {
+  table-layout: auto;
+}
+
+/* Clickable rows */
+.dash-v2 .task-row {
+  cursor: pointer;
+}
+.dash-v2 .task-row:hover {
+  background: var(--table-row-hover);
+}
+
+/* Task input cell: truncate long prompts to one line */
+.dash-v2 .task-cell {
+  max-width: 340px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dash-v2 .task-cell a {
+  color: var(--foreground);
+  text-decoration: none;
+}
+.dash-v2 .task-cell a:hover {
+  text-decoration: underline;
+}
+
+/* Model cell: truncate long model identifiers */
+.dash-v2 .task-model-cell {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Sortable column headers */
+.dash-v2 .task-table th[data-sort] {
+  cursor: pointer;
+  user-select: none;
+}
+.dash-v2 .task-table th[data-sort]::after {
+  content: '';
+  display: inline-block;
+  margin-left: 5px;
+  opacity: 0;
+  width: 0;
+  height: 0;
+  vertical-align: middle;
+}
+.dash-v2 .task-table th[data-sort]:hover::after {
+  content: ' ↕';
+  opacity: 0.4;
+  width: auto;
+  height: auto;
+}
+.dash-v2 .task-table th[data-sort].sort-asc::after {
+  content: ' ↑';
+  opacity: 0.75;
+  width: auto;
+  height: auto;
+}
+.dash-v2 .task-table th[data-sort].sort-desc::after {
+  content: ' ↓';
+  opacity: 0.75;
+  width: auto;
+  height: auto;
+}
+
+/* ---- Model Catalog rows: denser + calmer ---- */
+/* capability chips: colored by support type, still quiet enough for dense lists */
+.dash-v2 .model-catalog-capabilities-compact .badge[class*="badge-capability"] {
+  background: transparent !important;
+  border: 1px solid var(--border) !important;
+  color: var(--muted-foreground) !important;
+  font-weight: 700 !important;
+}
+.dash-v2 .model-catalog-capabilities-compact .badge.badge-capability-tools,
+.dash-v2 .model-catalog-capabilities-compact .badge.badge-capability-tool-calling,
+.dash-v2 .model-catalog-capabilities-compact .badge.badge-capability-parallel-tools,
+.dash-v2 .model-catalog-capabilities-compact .badge.badge-capability-tool_calling {
+  background: color-mix(in srgb, var(--accent) 20%, var(--card)) !important;
+  border-color: color-mix(in srgb, var(--accent) 48%, var(--border)) !important;
+  color: var(--accent-strong) !important;
+}
+.dash-v2 .model-catalog-capabilities-compact .badge.badge-capability-vision,
+.dash-v2 .model-catalog-capabilities-compact .badge.badge-capability-image-out {
+  background: color-mix(in srgb, var(--pill-category) 18%, var(--card)) !important;
+  border-color: color-mix(in srgb, var(--pill-category) 46%, var(--border)) !important;
+  color: var(--pill-category) !important;
+}
+.dash-v2 .model-catalog-capabilities-compact .badge.badge-capability-structured-output,
+.dash-v2 .model-catalog-capabilities-compact .badge.badge-capability-system-prompts {
+  background: color-mix(in srgb, var(--warning) 22%, var(--card)) !important;
+  border-color: color-mix(in srgb, var(--warning) 52%, var(--border)) !important;
+  color: var(--warning) !important;
+}
+.dash-v2 .model-catalog-capabilities-compact .badge.badge-capability-audio-in {
+  background: color-mix(in srgb, var(--pill-auth) 17%, var(--card)) !important;
+  border-color: color-mix(in srgb, var(--pill-auth) 42%, var(--border)) !important;
+  color: var(--pill-auth) !important;
+}
+.dash-v2 .model-catalog-capabilities-compact .badge.badge-capability-not-routable,
+.dash-v2 .model-catalog-capabilities-compact .badge.badge-capability-metadata-pending {
+  background: transparent !important;
+  border-color: var(--border) !important;
+  color: var(--muted-foreground) !important;
+  font-weight: 500 !important;
+  opacity: 0.75;
+}
+/* tighten internal spacing so rows aren't 3 lines tall */
+.dash-v2 [data-model-catalog-row] > td {
+  padding-top: 11px;
+  padding-bottom: 11px;
+  vertical-align: top;
+}
+.dash-v2 .model-catalog-model-title {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.dash-v2 .model-catalog-title-line {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  min-width: 0;
+}
+.dash-v2 .model-catalog-model-title strong {
+  font-size: 13px;
+  font-weight: 650;
+}
+.dash-v2 .model-catalog-meta-line {
+  margin-top: 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.dash-v2 .model-specs-container {
+  margin-bottom: 5px;
+}
+/* pricing "per 1M tokens · USD" note → quieter, it repeats every row */
+.dash-v2 .price-detail-label {
+  opacity: 0.6;
+  font-size: 9.5px;
+}
+
+/* Provider detail catalog rows: record-like scanning for large model lists */
+.dash-v2 .model-catalog-table {
+  min-width: 1120px;
+  table-layout: fixed;
+}
+.dash-v2 .model-catalog-table th:nth-child(1) {
+  width: 29%;
+}
+.dash-v2 .model-catalog-table th:nth-child(2) {
+  width: 25%;
+}
+.dash-v2 .model-catalog-table th:nth-child(3) {
+  width: 16%;
+}
+.dash-v2 .model-catalog-table th:nth-child(4) {
+  width: 20%;
+}
+.dash-v2 .model-catalog-table th:nth-child(5) {
+  width: 10%;
+}
+.dash-v2 .model-catalog-table tbody tr.model-catalog-record {
+  box-shadow: inset 3px 0 0 transparent;
+  transition: background-color 160ms ease, box-shadow 160ms ease;
+}
+.dash-v2 .model-catalog-table tbody tr.model-catalog-record:hover {
+  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--accent) 42%, transparent);
+}
+.dash-v2 .model-catalog-table tbody tr.model-catalog-record.needs-attention {
+  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--warning) 56%, transparent);
+}
+.dash-v2 .model-catalog-table tbody tr.model-catalog-record.is-disabled {
+  color: var(--muted-foreground);
+}
+.dash-v2 [data-model-catalog-row] > td {
+  padding: 12px 14px;
+}
+.dash-v2 .model-catalog-identity {
+  align-items: flex-start;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 8px minmax(0, 1fr);
+}
+.dash-v2 .model-row-status-dot {
+  border-radius: 999px;
+  box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 13%, transparent);
+  height: 8px;
+  margin-top: 5px;
+  width: 8px;
+}
+.dash-v2 .model-row-status-dot.status-enabled {
+  color: var(--success);
+  background: var(--success);
+}
+.dash-v2 .model-row-status-dot.status-disabled {
+  color: var(--muted-foreground);
+  background: var(--muted-foreground);
+}
+.dash-v2 .model-identifier-subtle {
+  background: transparent;
+  border-color: color-mix(in srgb, var(--border) 70%, transparent);
+  color: color-mix(in srgb, var(--muted-foreground) 92%, transparent);
+  display: inline-flex;
+  line-height: 1.35;
+  max-width: 100%;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+.dash-v2 .model-catalog-meta-line {
+  margin-top: 7px;
+  padding-left: 16px;
+}
+.dash-v2 .catalog-source-label {
+  color: var(--muted-foreground);
+}
+.dash-v2 .catalog-source-label::before {
+  color: color-mix(in srgb, var(--muted-foreground) 45%, transparent);
+  content: "/";
+  margin-right: 6px;
+}
+.dash-v2 .model-specs-container {
+  align-items: stretch;
+  display: grid;
+  gap: 5px;
+  max-width: 230px;
+}
+.dash-v2 .spec-pill {
+  background: transparent;
+  border-color: color-mix(in srgb, var(--border) 72%, transparent);
+  display: grid;
+  grid-template-columns: 68px minmax(0, 1fr);
+  width: 100%;
+}
+.dash-v2 .spec-label,
+.dash-v2 .spec-val {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dash-v2 .spec-label {
+  background: color-mix(in srgb, var(--muted) 50%, transparent);
+  font-size: 10.5px;
+  font-weight: 650;
+}
+.dash-v2 .spec-val {
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 650;
+}
+.dash-v2 .model-catalog-capabilities-compact {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 0;
+  min-width: 0;
+}
+.dash-v2 .model-catalog-capabilities-compact .badge {
+  border-radius: 5px;
+  font-size: 10px;
+  letter-spacing: 0;
+  line-height: 1.15;
+  min-height: 18px;
+  padding: 2px 5px;
+}
+.dash-v2 .pricing-compact-layout {
+  align-items: stretch;
+  display: grid;
+  gap: 5px;
+  max-width: 136px;
+}
+.dash-v2 .pricing-token-list {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+.dash-v2 .price-token {
+  align-items: stretch;
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
+  border-radius: 6px;
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr);
+  min-height: 24px;
+  overflow: hidden;
+  width: 100%;
+}
+.dash-v2 .price-token-label,
+.dash-v2 .price-token-value {
+  align-items: center;
+  display: inline-flex;
+  line-height: 1.2;
+  min-width: 0;
+}
+.dash-v2 .price-token-label {
+  background: color-mix(in srgb, var(--muted) 54%, transparent);
+  border-right: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  color: var(--muted-foreground);
+  font-size: 10.5px;
+  font-weight: 650;
+  justify-content: flex-start;
+  padding: 0 6px;
+}
+.dash-v2 .price-token-value {
+  color: var(--foreground);
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Consolas, "Liberation Mono", monospace;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 650;
+  justify-content: flex-end;
+  overflow-wrap: anywhere;
+  padding: 0 7px;
+  text-align: right;
+}
+.dash-v2 .route-cell-stack {
+  gap: 6px;
+  max-width: 184px;
+}
+.dash-v2 .route-assignment-list {
+  gap: 5px;
+}
+.dash-v2 .route-assignment-list .badge {
+  background: transparent;
+  border-color: var(--accent-border);
+  color: var(--accent-strong);
+}
+.dash-v2 .route-select-wrapper {
+  max-width: 164px;
+}
+.dash-v2 .route-select-wrapper.route-select-only {
+  margin-top: 0;
+}
+.dash-v2 .route-selector {
+  background-color: transparent;
+  border-style: solid;
+  color: var(--muted-foreground);
+  font-size: 11.5px;
+  height: 30px;
+  min-width: 0;
+}
+.dash-v2 .route-selector:hover:not(:disabled),
+.dash-v2 .route-selector:focus-visible {
+  background-color: var(--muted);
+  border-color: color-mix(in srgb, var(--accent) 48%, var(--border));
+  color: var(--foreground);
+}
+.dash-v2 .route-selector:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+.dash-v2 .route-disabled-note {
+  color: var(--muted-foreground);
+  font-size: 10.5px;
+  line-height: 1.35;
+}
+.dash-v2 .status-cell-stack {
+  align-items: flex-start;
+  display: grid;
+  gap: 7px;
+  justify-items: start;
+  min-height: 44px;
+}
+.dash-v2 .status-text {
+  align-items: center;
+  display: inline-flex;
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1.2;
+}
+.dash-v2 .status-text-enabled {
+  color: var(--success);
+}
+.dash-v2 .status-text-disabled {
+  color: var(--muted-foreground);
+}
+.dash-v2 .model-catalog-status-cell .switch {
+  height: 24px;
+  width: 44px;
+}
+.dash-v2 .model-catalog-status-cell input:checked + .slider::before {
+  transform: translateX(20px);
+}
+.dash-v2 .model-catalog-status-cell .switch-control {
+  min-height: 24px;
+}
+
+@media (max-width: 720px) {
+  .dash-v2 .catalog-search-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .dash-v2 .catalog-search-row .model-provider-catalog-count {
+    margin-left: 0;
+    white-space: normal;
+  }
+  .dash-v2 .model-provider-catalog-search-box {
+    flex-basis: auto;
+    max-width: none;
+    min-width: 0;
+    width: 100%;
+  }
+}
+
+/* ---- Composio / integration cards: flatter, cleaner, Linear/Vercel feel ---- */
+.dash-v2 .composio-card {
+  box-shadow: none;
+  border-radius: 10px;
+  padding: 16px;
+  gap: 13px;
+  transition: border-color 150ms ease, box-shadow 150ms ease;
+}
+.dash-v2 .composio-card:hover {
+  transform: none;
+  border-color: color-mix(in srgb, var(--border) 45%, var(--accent));
+  box-shadow: 0 2px 10px rgb(0 0 0 / 6%);
+}
+.dash-v2 .integration-logo {
+  border-radius: 9px;
+}
+.dash-v2 .composio-card h3 {
+  font-size: 14.5px;
+  font-weight: 650;
+}
+.dash-v2 .composio-card-title code {
+  font-size: 11.5px;
+}
+.dash-v2 .integration-card-description {
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+/* Facts: borderless stat row sitting under a hairline (no boxed dividers) */
+.dash-v2 .integration-card-facts {
+  border: 0;
+  border-top: 1px solid var(--border);
+  border-radius: 0;
+  overflow: visible;
+  padding-top: 13px;
+  column-gap: 14px;
+}
+.dash-v2 .integration-card-facts div {
+  background: transparent;
+  border-right: 0;
+  padding: 0;
+  gap: 3px;
+}
+.dash-v2 .integration-card-facts dt {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+.dash-v2 .integration-card-facts dd {
+  font-size: 14px;
+  font-weight: 600;
+}
+/* Categories as subtle tag pills */
+.dash-v2 .integration-card-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  min-width: 0;
+}
+.dash-v2 .integration-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--muted);
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+/* ---- Expandable lists: flat divided rows (no card-on-card) across
+        Witness, Memory facts, Episodes, and the Knowledge graph ---- */
+.dash-v2 .witness-list,
+.dash-v2 .memory-fact-list,
+.dash-v2 .episode-list,
+.dash-v2 .graph-list {
+  gap: 0;
+}
+.dash-v2 .witness-list > .ex-row,
+.dash-v2 .memory-fact-list > .ex-row,
+.dash-v2 .episode-list > .ex-row,
+.dash-v2 .graph-list > .ex-row {
+  border: 0;
+  border-radius: 0;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  overflow: visible;
+  /* grid item: let the track shrink so the summary text can ellipsis */
+  min-width: 0;
+}
+.dash-v2 .witness-list > .ex-row:last-child,
+.dash-v2 .memory-fact-list > .ex-row:last-child,
+.dash-v2 .episode-list > .ex-row:last-child,
+.dash-v2 .graph-list > .ex-row:last-child {
+  border-bottom: 0;
+}
+.dash-v2 .witness-list > .ex-row[open],
+.dash-v2 .memory-fact-list > .ex-row[open],
+.dash-v2 .episode-list > .ex-row[open],
+.dash-v2 .graph-list > .ex-row[open] {
+  background: color-mix(in srgb, var(--muted) 45%, transparent);
+}
+
+/* witness keeps its 2-line summary treatment below */
+/* 2-line collapsed summary: head row (title + badges + meta) then full summary
+   clamped to two lines so it no longer truncates after a few words */
+.dash-v2 .witness-summary-row {
+  display: block;
+  position: relative;
+  padding: 12px 30px 12px 14px;
+}
+.dash-v2 .witness-summary-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.dash-v2 .witness-summary-head .ex-row-title {
+  white-space: normal;
+}
+.dash-v2 .witness-summary-head .ex-row-meta {
+  margin-left: auto;
+}
+.dash-v2 .witness-summary-body {
+  margin: 6px 0 0;
+  color: var(--muted-foreground);
+  font-size: 12.5px;
+  line-height: 1.45;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.dash-v2 .witness-summary-row::after {
+  position: absolute;
+  right: 14px;
+  top: 16px;
+  margin: 0;
+}
+/* draft DM sits above the actions now; give it clear separation */
+.dash-v2 .ex-row-detail > .witness-message-preview {
+  margin-top: 14px;
+}
+
+/* ---- Consolidation recent runs: single compact line per run, flat divided
+        list (no card-on-card inside the panel) ---- */
+.dash-v2 .run-list {
+  gap: 0;
+}
+.dash-v2 .run-card {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  padding: 10px 14px;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+}
+.dash-v2 .run-card:last-child {
+  border-bottom: 0;
+}
+.dash-v2 .run-card > time {
+  flex: none;
+  color: var(--muted-foreground);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+.dash-v2 .run-card .run-summary {
+  flex: 1 1 auto;
+  margin: 0;
+  gap: 6px;
+}
+.dash-v2 .run-card .run-card-cost {
+  flex: none;
+  margin-left: auto;
+}
+.dash-v2 .run-card .run-errors {
+  flex-basis: 100%;
+}
+
+/* ---- Composio Catalog / Connected tabs + catalog controls on one row ---- */
+.dash-v2 .composio-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  /* the .composio-directory grid gap already spaces this from the panel */
+  margin-bottom: 0;
+}
+.dash-v2 .composio-tabs {
+  margin-bottom: 0;
+}
+.dash-v2 .composio-tabs .segmented-item {
+  border: 0;
+  background: transparent;
+  font-family: inherit;
+  font-size: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+/* re-apply the active pill (the reset above outranks the base .active rule) */
+.dash-v2 .composio-tabs .segmented-item.active {
+  background: var(--card);
+  color: var(--foreground);
+}
+.dash-v2 .composio-catalog-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.dash-v2 .composio-catalog-controls[hidden] {
+  display: none;
+}
+.dash-v2 .catalog-result-count {
+  color: var(--muted-foreground);
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+.dash-v2 .catalog-view-switch .segmented-item {
+  gap: 5px;
+}
+.dash-v2 .catalog-view-switch .segmented-item svg {
+  width: 14px;
+  height: 14px;
+}
+.dash-v2 .composio-tab-panel[hidden] {
+  display: none;
+}
+
+/* ---- Table request cells: truncate to one line instead of wrapping ---- */
+.dash-v2 .table td.truncate-cell {
+  max-width: 360px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  overflow-wrap: normal;
+}
+
+/* ---- Usage page has 5 stats: keep them on one row ---- */
+.dash-v2 .usage-summary {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+@media (max-width: 1180px) {
+  .dash-v2 .usage-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (max-width: 560px) {
+  .dash-v2 .usage-summary {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ---- Usage Window: compress to one compact row, drop the redundant title ---- */
+.dash-v2 .usage-window .data-toolbar {
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: 10px 18px;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+}
+.dash-v2 .usage-window .data-toolbar-head {
+  order: 2;
+  margin-left: auto;
+  align-self: center;
+  flex: 0 0 auto;
+}
+.dash-v2 .usage-window .data-toolbar-meta strong {
+  display: none;
+}
+.dash-v2 .usage-window .data-toolbar-meta span {
+  font-size: 12px;
+  text-transform: none;
+}
+.dash-v2 .usage-window .data-toolbar-form {
+  order: 1;
+  flex: 1 1 auto;
+  display: block;
+}
+.dash-v2 .usage-window .data-toolbar-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px 14px;
+}
+.dash-v2 .usage-window .data-toolbar-field {
+  flex: 0 1 auto;
+}
+.dash-v2 .usage-window .data-toolbar-actions .btn,
+.dash-v2 .usage-window .data-toolbar-actions .btn-ghost {
+  flex: 0 0 auto;
+}
+
+/* ---- Autonomy: workspace default as descriptive level cards ---- */
+/* the .detail-section body has no padding, so align the form with the header */
+.dash-v2 .autonomy-form {
+  padding: 14px 16px 16px;
+}
+.dash-v2 .autonomy-levels {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: stretch;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+@media (max-width: 820px) {
+  .dash-v2 .autonomy-levels {
+    grid-template-columns: 1fr;
+  }
+}
+.dash-v2 .autonomy-level-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--card);
+  cursor: pointer;
+  transition: border-color 150ms ease, background 150ms ease;
+}
+.dash-v2 .autonomy-level-card:hover {
+  border-color: color-mix(in srgb, var(--border) 45%, var(--accent));
+}
+.dash-v2 .autonomy-level-card:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-bg);
+}
+.dash-v2 .autonomy-level-card input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+.dash-v2 .autonomy-level-card:has(input:checked) {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+}
+.dash-v2 .autonomy-level-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.dash-v2 .autonomy-level-icon {
+  display: inline-flex;
+  flex: none;
+  color: var(--muted-foreground);
+}
+.dash-v2 .autonomy-level-icon svg {
+  width: 17px;
+  height: 17px;
+}
+.dash-v2 .autonomy-level-card:has(input:checked) .autonomy-level-icon {
+  color: var(--accent-strong);
+}
+.dash-v2 .autonomy-level-name {
+  margin-right: auto;
+  font-size: 13.5px;
+  font-weight: 650;
+  color: var(--foreground);
+}
+.dash-v2 .autonomy-level-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  opacity: 0;
+  transform: scale(0.7);
+  transition: opacity 120ms ease, transform 120ms ease;
+}
+.dash-v2 .autonomy-level-check svg {
+  width: 11px;
+  height: 11px;
+}
+.dash-v2 .autonomy-level-card:has(input:checked) .autonomy-level-check {
+  opacity: 1;
+  transform: scale(1);
+}
+.dash-v2 .autonomy-level-desc {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--muted-foreground);
+}

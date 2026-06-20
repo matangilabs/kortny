@@ -6,7 +6,7 @@
   <section class="page-heading">
     <div>
       <h1>Integrations</h1>
-      <p>Runtime providers and native tools available to the agent loop.</p>
+      <p>What Kortny can connect to, plus the built-in tools it can use directly.</p>
     </div>
     <div class="heading-actions">
       {% if dashboard_is_admin %}
@@ -42,14 +42,14 @@
 
   <nav class="integration-tabs" role="tablist" aria-label="Integration sections">
     <a class="active" href="#providers" role="tab">Providers</a>
-    <a href="#native-tools" role="tab">Native tools</a>
+    <a href="#native-tools" role="tab" title="Tools built into Kortny that it can use directly, without connecting an outside service.">Built-in tools</a>
   </nav>
 
   <section id="providers" class="integration-stack" aria-label="Configured integrations">
     <article class="card integration-list-card">
       <header>
         <h2>Providers</h2>
-        <p>Runtime services and adapters available to this deployment.</p>
+        <p>Outside services and connectors available to this deployment.</p>
       </header>
       <div class="provider-list">
         {% for integration in integrations.integrations %}
@@ -96,7 +96,7 @@
     <article class="card external-tool-card">
       <div>
         <h2>Composio App Catalog</h2>
-        <p>Browse and connect external app integrations from the dedicated Tools page. Scoped connection visibility stays local to Kortny.</p>
+        <p>Browse and connect external apps from the dedicated Tools page. Connection details stay private to your Kortny.</p>
       </div>
       <div class="external-tool-card-actions">
         <span class="badge badge-{{ integrations.composio_catalog.tone }}">{{ integrations.composio_catalog.status }}</span>
@@ -112,8 +112,8 @@
   <section id="native-tools" class="tool-registry" aria-label="Native tool registry">
     <div class="section-header-row">
       <div>
-        <h2>Native Tool Registry</h2>
-        <p>Provider-neutral JSON contracts registered by the worker agent executor.</p>
+        <h2>Built-in tools</h2>
+        <p>Tools that ship with Kortny and work without connecting an outside service.</p>
       </div>
       <span class="badge badge-neutral">Read-only</span>
     </div>
@@ -137,18 +137,16 @@
                     <span class="badge badge-{{ tool.tone }}">{{ tool.status }}</span>
                   </div>
                   <p>{{ tool.description }}</p>
-                  <div class="tool-card-inputs">
-                    <span>Required inputs</span>
-                    <div>
-                      {% if tool.required_args %}
+                  {% if tool.required_args %}
+                    <div class="tool-card-inputs">
+                      <span>Required inputs</span>
+                      <div>
                         {% for arg in tool.required_args %}
                           <code>{{ arg }}</code>
                         {% endfor %}
-                      {% else %}
-                        <small>None</small>
-                      {% endif %}
+                      </div>
                     </div>
-                  </div>
+                  {% endif %}
                   <details class="row-details tool-details">
                     <summary style="font-size:12px; font-weight:700; color:var(--muted-foreground); cursor:pointer; list-style:none;">All inputs &amp; notes</summary>
                     <div class="details-panel tool-details-panel">

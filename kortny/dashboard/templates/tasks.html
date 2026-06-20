@@ -38,4 +38,72 @@
 	      <span class="btn-ghost disabled" aria-disabled="true">Next</span>
 	    {% endif %}
 	  </nav>
+
+  <script>
+    // Page-local sort: operates only on the currently rendered page rows (no server round-trip).
+    (function () {
+      var table = document.querySelector('.task-table');
+      if (!table) return;
+
+      // Row click → navigate to data-href, but not when the click is on the inner <a>.
+      table.addEventListener('click', function (e) {
+        var row = e.target.closest('.task-row[data-href]');
+        if (!row) return;
+        if (e.target.closest('a')) return;
+        window.location.href = row.dataset.href;
+      });
+
+      // Sort on header click.
+      var currentKey = null;
+      var currentAsc = true;
+
+      table.querySelector('thead').addEventListener('click', function (e) {
+        var th = e.target.closest('th[data-sort]');
+        if (!th) return;
+
+        var key = th.dataset.sort;
+        if (key === currentKey) {
+          currentAsc = !currentAsc;
+        } else {
+          currentKey = key;
+          currentAsc = true;
+        }
+
+        // Update header classes.
+        table.querySelectorAll('th[data-sort]').forEach(function (h) {
+          h.classList.remove('sort-asc', 'sort-desc');
+        });
+        th.classList.add(currentAsc ? 'sort-asc' : 'sort-desc');
+
+        // Collect rows and sort.
+        var tbody = table.querySelector('tbody');
+        var rows = Array.from(tbody.querySelectorAll('tr.task-row'));
+
+        rows.sort(function (a, b) {
+          var av, bv;
+          if (key === 'turns') {
+            av = parseFloat(a.dataset.turns) || 0;
+            bv = parseFloat(b.dataset.turns) || 0;
+          } else if (key === 'cost') {
+            av = parseFloat(a.dataset.cost) || 0;
+            bv = parseFloat(b.dataset.cost) || 0;
+          } else if (key === 'time') {
+            av = Date.parse(a.dataset.time) || 0;
+            bv = Date.parse(b.dataset.time) || 0;
+          } else {
+            // Text sort: derive cell index from column order.
+            var cols = ['status', 'task', 'user', 'channel', 'model', 'turns', 'cost', 'time'];
+            var idx = cols.indexOf(key);
+            if (idx === -1) return 0;
+            av = (a.cells[idx] ? a.cells[idx].textContent.trim().toLowerCase() : '');
+            bv = (b.cells[idx] ? b.cells[idx].textContent.trim().toLowerCase() : '');
+            return currentAsc ? av.localeCompare(bv) : bv.localeCompare(av);
+          }
+          return currentAsc ? av - bv : bv - av;
+        });
+
+        rows.forEach(function (r) { tbody.appendChild(r); });
+      });
+    })();
+  </script>
 {% endblock %}

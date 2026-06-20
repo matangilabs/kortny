@@ -1,17 +1,36 @@
 {% for row in model_rows %}
   {% set route_disabled = (not row.model.is_enabled) or row.provider.status != "active" %}
-  <tr data-model-catalog-row>
+  {% set runtime_routable = row.model.capabilities_json.runtime_routable is not sameas false %}
+  {% set row_needs_attention = (row.latest_pricing is none) or (not row.model.is_enabled) or (not runtime_routable) %}
+  <tr
+    class="model-catalog-record {{ 'is-routed' if row.assignment_labels else 'is-unused' }} {{ 'is-disabled' if not row.model.is_enabled else 'is-enabled' }} {{ 'needs-attention' if row_needs_attention else '' }}"
+    data-model-catalog-row
+  >
     <!-- Model Column -->
     <td class="model-catalog-model-cell">
-      <div class="model-catalog-model-title">
-        <strong>{{ row.model.display_name }}</strong>
-        <span class="model-identifier-subtle">{{ row.model.model_identifier }}</span>
+      <div class="model-catalog-identity">
+        <span class="model-row-status-dot {{ 'status-enabled' if row.model.is_enabled else 'status-disabled' }}" aria-hidden="true"></span>
+        <div class="model-catalog-model-title">
+          <div class="model-catalog-title-line">
+            <strong>{{ row.model.display_name }}</strong>
+            <div class="model-catalog-capabilities-compact" aria-label="Model capabilities">
+              {% for label in row.capability_labels %}
+                {% if 'pending' not in label|lower and 'unknown' not in label|lower and 'not routable' not in label|lower %}
+                  <span class="badge badge-neutral badge-capability-{{ label|lower|replace(' ', '-')|replace('_', '-') }}">{{ label }}</span>
+                {% endif %}
+              {% endfor %}
+            </div>
+          </div>
+          {% if row.model.model_identifier and row.model.model_identifier != row.model.display_name %}
+            <span class="model-identifier-subtle">{{ row.model.model_identifier }}</span>
+          {% endif %}
+        </div>
       </div>
       <div class="model-catalog-meta-line">
-        <span class="badge badge-neutral">{{ row.mode_label }}</span>
-        <span>{{ row.source_label }}</span>
-        {% if row.model.capabilities_json.runtime_routable is sameas false %}
-          <span class="badge badge-warning">Not routable</span>
+        <span class="badge badge-neutral{{ ' catalog-muted' if 'unknown' in row.mode_label|lower else '' }}">{{ row.mode_label }}</span>
+        <span class="catalog-source-label">{{ row.source_label }}</span>
+        {% if not runtime_routable %}
+          <span class="badge badge-warning catalog-muted">Not routable</span>
         {% endif %}
       </div>
     </td>
@@ -21,37 +40,34 @@
       <div class="model-specs-container">
         <div class="spec-pill">
           <span class="spec-label">Context</span>
-          <span class="spec-val">{{ row.context_label }}</span>
+          <span class="spec-val{{ ' catalog-muted' if 'unknown' in row.context_label|lower else '' }}">{{ row.context_label }}</span>
         </div>
         <div class="spec-pill">
           <span class="spec-label">Output</span>
-          <span class="spec-val">{{ row.output_label }}</span>
+          <span class="spec-val{{ ' catalog-muted' if 'unknown' in row.output_label|lower else '' }}">{{ row.output_label }}</span>
         </div>
-      </div>
-      <div class="model-catalog-capabilities-compact">
-        {% for label in row.capability_labels %}
-          <span class="badge badge-neutral badge-capability-{{ label|lower|replace(' ', '-')|replace('_', '-') }}">{{ label }}</span>
-        {% endfor %}
       </div>
     </td>
 
     <!-- Pricing Column -->
     <td class="model-catalog-pricing-cell">
-      <div class="pricing-split-layout">
+      <div class="pricing-compact-layout">
         {% if "/" in row.pricing_label %}
           {% set parts = row.pricing_label.split(' / ') %}
-          <div class="price-split-row">
-            <span class="price-type-label">Input</span>
-            <span class="price-value-highlight">{{ parts[0].replace(' in', '') }}</span>
-          </div>
-          <div class="price-split-row">
-            <span class="price-type-label">Output</span>
-            <span class="price-value-highlight">{{ parts[1].replace(' out', '') }}</span>
+          <div class="pricing-token-list" aria-label="{{ row.pricing_label }}">
+            <span class="price-token">
+              <span class="price-token-label">Input</span>
+              <span class="price-token-value">{{ parts[0].replace(' in', '') }}</span>
+            </span>
+            <span class="price-token">
+              <span class="price-token-label">Output</span>
+              <span class="price-token-value">{{ parts[1].replace(' out', '') }}</span>
+            </span>
           </div>
         {% else %}
-          <span class="badge badge-warning">{{ row.pricing_label }}</span>
+          <span class="badge badge-warning catalog-muted">{{ row.pricing_label }}</span>
         {% endif %}
-        <span class="price-detail-label">{{ row.pricing_detail }}</span>
+        <span class="price-detail-label">{{ row.pricing_detail|replace('tokens · ', '· ') }}</span>
       </div>
     </td>
 
@@ -59,16 +75,14 @@
     <td class="model-catalog-route-cell">
       <div class="route-cell-stack">
         {% if row.assignment_labels %}
-          <div class="model-tag-list">
+          <div class="model-tag-list route-assignment-list" aria-label="Current tier routing">
             {% for label in row.assignment_labels %}
               <span class="badge badge-success">{{ label }}</span>
             {% endfor %}
           </div>
-        {% else %}
-          <span class="route-unused">Unused</span>
         {% endif %}
         
-        <div class="route-select-wrapper">
+        <div class="route-select-wrapper{{ ' route-select-only' if not row.assignment_labels else '' }}">
           <select 
             class="route-selector" 
             name="assign_route" 
@@ -78,19 +92,27 @@
             data-action-url="/admin/models/catalog/{{ row.model.id }}/assign-tier" 
             {{ "disabled" if route_disabled else "" }}
           >
-            <option value="" disabled selected>+ Route...</option>
+            <option value="" disabled selected>Route to tier...</option>
             {% for option in tier_options %}
               <option value="{{ option.tier }}-1">{{ option.label }} (Primary)</option>
               <option value="{{ option.tier }}-2">{{ option.label }} (Fallback P2)</option>
             {% endfor %}
           </select>
         </div>
+        {% if route_disabled %}
+          <span class="route-disabled-note">
+            {% if not row.model.is_enabled %}Enable model to route{% else %}Provider inactive{% endif %}
+          </span>
+        {% endif %}
       </div>
     </td>
 
     <!-- Status Column -->
     <td class="model-catalog-status-cell">
-      <div class="status-cell-center">
+      <div class="status-cell-stack">
+        <span class="status-text {{ 'status-text-enabled' if row.model.is_enabled else 'status-text-disabled' }}" id="status-badge-{{ row.model.id }}">
+          {{ "Enabled" if row.model.is_enabled else "Disabled" }}
+        </span>
         <div class="switch-control">
           <label class="switch" for="status-{{ row.model.id }}">
             <span class="sr-only">Toggle status for {{ row.model.display_name }}</span>

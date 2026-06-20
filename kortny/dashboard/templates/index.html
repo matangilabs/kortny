@@ -197,10 +197,10 @@
       const base = () => KC.baseOptions(p);
 
       KC.create(document.getElementById('ov-daily-cost'), Object.assign(base(), {
-        chart: Object.assign(base().chart, { type: 'area', height: 280 }),
+        chart: Object.assign(base().chart, { type: 'area', height: 230 }),
         series: [{ name: 'Cost', data: DATA.daily.cost }],
         colors: [p.accent],
-        stroke: { curve: 'smooth', width: 2.5 },
+        stroke: { curve: 'smooth', width: 2 },
         fill: { type: 'gradient', gradient: { shadeIntensity: 1, opacityFrom: 0.35, opacityTo: 0.02, stops: [0, 95] } },
         xaxis: { categories: DATA.daily.labels.map(shortDate), tickAmount: 7, axisBorder: { color: p.border }, axisTicks: { color: p.border } },
         yaxis: { labels: { formatter: money } },
@@ -209,10 +209,10 @@
       }));
 
       KC.create(document.getElementById('ov-task-volume'), Object.assign(base(), {
-        chart: Object.assign(base().chart, { type: 'bar', height: 280 }),
+        chart: Object.assign(base().chart, { type: 'bar', height: 230 }),
         series: [{ name: 'Tasks', data: DATA.tasks.total }, { name: 'Failed', data: DATA.tasks.failed }],
         colors: [p.accent, p.danger],
-        plotOptions: { bar: { columnWidth: '55%', borderRadius: 3 } },
+        plotOptions: { bar: { columnWidth: '45%', borderRadius: 2 } },
         xaxis: { categories: DATA.tasks.labels.map(shortDate), tickAmount: 7, axisBorder: { color: p.border }, axisTicks: { color: p.border } },
         yaxis: { labels: { formatter: int }, forceNiceScale: true },
         tooltip: Object.assign(base().tooltip, { y: { formatter: int } }),
@@ -221,22 +221,22 @@
 
       const ovModel = KC.topN(DATA.byModel.labels, DATA.byModel.cost, 8);
       KC.create(document.getElementById('ov-by-model'), Object.assign(base(), {
-        chart: Object.assign(base().chart, { type: 'donut', height: 280 }),
+        chart: Object.assign(base().chart, { type: 'donut', height: 250 }),
         series: ovModel.values,
         labels: ovModel.labels,
-        colors: KC.categoricalColors(p),
+        colors: ['#198567', '#3f9e83', '#6bb6a0', '#94c9b9', '#b7b9bd', '#d2d4d8', '#e6e7ea'],
         stroke: { colors: [p.card], width: 2 },
         legend: { position: 'bottom', fontSize: '12px', labels: { colors: p.muted }, itemMargin: { horizontal: 6, vertical: 2 } },
-        plotOptions: { pie: { donut: { size: '62%', labels: { show: true, total: { show: true, showAlways: true, label: 'Total', color: p.muted, formatter: (w) => money(w.globals.seriesTotals.reduce((a, b) => a + b, 0)) } } } } },
+        plotOptions: { pie: { donut: { size: '70%', labels: { show: true, value: { fontSize: '17px', fontWeight: 600 }, total: { show: true, showAlways: true, label: 'Total', fontSize: '12px', color: p.muted, formatter: (w) => money(w.globals.seriesTotals.reduce((a, b) => a + b, 0)) } } } } },
         tooltip: Object.assign(base().tooltip, { y: { formatter: moneyPrecise } }),
       }));
 
       const ovUser = KC.topN(DATA.byUser.labels, DATA.byUser.cost, 12);
       KC.create(document.getElementById('ov-by-user'), Object.assign(base(), {
-        chart: Object.assign(base().chart, { type: 'bar', height: Math.max(220, ovUser.labels.length * 34 + 40) }),
+        chart: Object.assign(base().chart, { type: 'bar', height: Math.max(200, ovUser.labels.length * 30 + 36) }),
         series: [{ name: 'Cost', data: ovUser.values }],
         colors: [p.accent],
-        plotOptions: { bar: { horizontal: true, borderRadius: 4, barHeight: '62%', distributed: true } },
+        plotOptions: { bar: { horizontal: true, borderRadius: 2, barHeight: '55%', distributed: false } },
         xaxis: { categories: ovUser.labels, labels: { formatter: money }, axisBorder: { color: p.border }, axisTicks: { color: p.border } },
         tooltip: Object.assign(base().tooltip, { y: { formatter: moneyPrecise } }),
         legend: { show: false },

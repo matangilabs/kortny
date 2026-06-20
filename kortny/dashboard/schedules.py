@@ -60,6 +60,7 @@ class ScheduleRow:
     can_cancel: bool
     is_system: bool = False
     purpose: str | None = None
+    inactive: bool = False
 
 
 @dataclass(frozen=True)
@@ -525,6 +526,7 @@ def _schedule_row(
         can_cancel=(not drive) and schedule.status in {"proposed", "active", "paused"},
         is_system=drive,
         purpose=system_drive_purpose(schedule) if drive else None,
+        inactive=schedule.status in {"cancelled", "completed"},
     )
 
 
@@ -871,7 +873,11 @@ def _datetime_label(value: datetime | None) -> str:
 def _budget_label(value: Decimal | None) -> str:
     if value is None:
         return "No cap"
-    return f"${value:,.4f}"
+    if value == 0:
+        return "$0.00"
+    if Decimal(0) < value < Decimal("0.01"):
+        return "<$0.01"
+    return f"${value:,.2f}"
 
 
 def _budget_form_value(value: Decimal | None) -> str:

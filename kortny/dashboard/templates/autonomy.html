@@ -7,11 +7,11 @@
   <section class="page-heading">
     <div>
       <h1>Autonomy</h1>
-      <p>How freely Kortny acts. Reads, sandbox runs, and local artifacts are always free. Conservative gates every write; balanced auto-runs external create/update with an audit trail and gates irreversible or outward actions; autonomous gates only irreversible and outward (delete, send, publish, deploy, payments) actions.</p>
+      <p>Control how much Kortny is allowed to do on its own — from asking first, to acting freely — per workspace or channel.</p>
     </div>
   </section>
 
-  {{ page_intro("The autonomy ladder decides what Kortny may do without asking. Reads, sandboxed code, and local artifacts always run free. External creates and updates run automatically with an audit entry (the implicit tier). Deletes, bulk mutations, and outward-facing actions — publishing, emailing, deploying — always require explicit approval in Slack, regardless of level. A deterministic classifier (SQL verb parsing, HTTP semantics, bulk-signal detection — no LLM) assesses every call. The level set here shifts where the implicit tier sits: conservative gates every write, balanced runs the ladder, autonomous reserves prompts for the irreversible. The audit trail below records every auto-approved write with its risk reasoning.") }}
+  {{ page_intro("The autonomy ladder decides what Kortny may do without asking. Reads, sandboxed code, and local artifacts always run free. External creates and updates run automatically with an audit entry (the implicit tier). Deletes, bulk mutations, and outward-facing actions — publishing, emailing, deploying — always require explicit approval in Slack, regardless of level. A deterministic classifier (SQL verb parsing, HTTP semantics, bulk-signal detection — no LLM) assesses every call. The level set here shifts where the implicit tier sits. The three levels: Conservative asks before every action that creates or changes anything. Balanced runs external creates and updates automatically with an audit trail, and still asks before anything irreversible or outward-facing. Autonomous only asks before the irreversible and outward — deleting, sending, publishing, deploying, payments. The audit trail below records every auto-approved write with its risk reasoning.") }}
 
   {% if notice %}
     <div class="notice notice-{{ notice_tone }}" role="status">{{ notice }}</div>
@@ -31,14 +31,37 @@
           {% endif %}
         </p>
       </header>
-      <form method="post" action="/autonomy/workspace" class="inline-form">
+      {% set level_meta = {
+        'conservative': 'Asks before every action that creates or changes anything in an outside tool.',
+        'balanced': 'Runs external creates and updates automatically with an audit entry. Still asks before anything irreversible or outward-facing.',
+        'autonomous': 'Only asks before irreversible or outward actions — deleting, sending, publishing, deploying, payments.',
+      } %}
+      <form method="post" action="/autonomy/workspace" class="autonomy-form">
         <input type="hidden" name="next" value="{{ autonomy_return_path }}">
-        <select class="input" name="level" aria-label="Workspace autonomy level">
+        <div class="autonomy-levels" role="radiogroup" aria-label="Workspace autonomy level">
           {% for level in autonomy.levels %}
-            <option value="{{ level }}" {{ "selected" if level == autonomy.workspace_level else "" }}>{{ level }}</option>
+            <label class="autonomy-level-card">
+              <input type="radio" name="level" value="{{ level }}" {{ "checked" if level == autonomy.workspace_level else "" }}>
+              <span class="autonomy-level-head">
+                <span class="autonomy-level-icon" aria-hidden="true">
+                  {% if level == 'conservative' %}
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10"></path></svg>
+                  {% elif level == 'balanced' %}
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m16 16 3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1Z"></path><path d="m2 16 3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1Z"></path><path d="M7 21h10"></path><path d="M12 3v18"></path><path d="M3 7h2c2 0 5-1 7-2 2 1 5 2 7 2h2"></path></svg>
+                  {% elif level == 'autonomous' %}
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
+                  {% endif %}
+                </span>
+                <span class="autonomy-level-name">{{ level|title }}</span>
+                <span class="autonomy-level-check" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
+                </span>
+              </span>
+              <span class="autonomy-level-desc">{{ level_meta.get(level, '') }}</span>
+            </label>
           {% endfor %}
-        </select>
-        <button type="submit" class="btn">Save default</button>
+        </div>
+        <button type="submit" class="btn autonomy-save">Save default</button>
       </form>
     </section>
 
@@ -109,7 +132,7 @@
     <section class="card detail-section" aria-label="Recent autonomy decisions">
       <header>
         <h2>Audit trail</h2>
-        <p>Recent auto-approved Tier-1 (external create/update) calls. Reads and explicit-approval prompts are not listed here.</p>
+        <p>Recent actions Kortny ran automatically that <span title="Actions that create or change things in outside tools, like posting to an external app or updating a record. Read-only, no-risk actions aren't listed here.">created or changed things in outside tools</span>. Read-only actions and anything that asked for approval are not listed here.</p>
       </header>
       {% if autonomy.audit_rows %}
         <div class="overflow-x-auto">
@@ -145,7 +168,7 @@
         </table>
         </div>
       {% else %}
-        <p class="empty-state">No auto-approved Tier-1 decisions recorded yet.</p>
+        <p class="empty-state">No auto-approved actions recorded yet.</p>
       {% endif %}
     </section>
   {% endif %}
