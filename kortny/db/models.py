@@ -2827,3 +2827,37 @@ class InteractiveAction(Base):
             "status",
         ),
     )
+
+
+class FileExtractionCache(Base):
+    """Content-addressed cache for extracted text from Slack files (HIG-279).
+
+    The SHA-256 of the raw file bytes is the primary key, so identical content
+    is extracted once and reused across retries, follow-up questions, and
+    multiple users referencing the same document.
+    """
+
+    __tablename__ = "file_extraction_cache"
+
+    content_sha256: Mapped[str] = mapped_column(String(64), primary_key=True)
+    backend: Mapped[str] = mapped_column(String, nullable=False)
+    extraction_supported: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    extracted_text: Mapped[str | None] = mapped_column(Text)
+    truncated: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    page_count: Mapped[int | None] = mapped_column(Integer)
+    byte_size: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    warnings: Mapped[list] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now()
+    )
+    last_accessed_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        Index("idx_file_extraction_cache_last_accessed", "last_accessed_at"),
+    )

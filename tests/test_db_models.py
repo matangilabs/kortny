@@ -50,6 +50,7 @@ def test_mvp_schema_declares_all_core_tables() -> None:
         "model_pricing",
         "assistant_thread_context",
         "composio_tool_cards",
+        "file_extraction_cache",
     }
 
 
