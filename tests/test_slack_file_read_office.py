@@ -41,7 +41,9 @@ def make_docx(tmp_path: Path, paragraph: str, table_rows: list[list[str]]) -> Pa
     return path
 
 
-def make_xlsx(tmp_path: Path, sheet_name: str, rows: Sequence[Sequence[object]]) -> Path:
+def make_xlsx(
+    tmp_path: Path, sheet_name: str, rows: Sequence[Sequence[object]]
+) -> Path:
     """Build a .xlsx with one sheet and given rows."""
     import openpyxl
 
