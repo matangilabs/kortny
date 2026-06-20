@@ -29,7 +29,12 @@ from kortny.documents.ir import (
     Table,
 )
 from kortny.documents.revision import (
+    ChangeChartType,
+    CompactStatCards,
     ContentFingerprint,
+    LlmPatchContext,
+    SetChartLabels,
+    SetTheme,
     SplitProse,
     SplitTable,
     VisualRevisionPatch,
@@ -39,6 +44,7 @@ from kortny.documents.revision import (
     content_fingerprint,
     content_preserved,
     map_pages_to_blocks,
+    propose_llm_patch,
     propose_overflow_patch,
     spec_hash,
 )
@@ -788,6 +794,350 @@ class TestApplyPatch:
 
 
 # ---------------------------------------------------------------------------
+# New op applier tests
+# ---------------------------------------------------------------------------
+
+
+class TestNewOpAppliers:
+    def test_set_chart_labels_fills_missing(self) -> None:
+        """SetChartLabels fills None title, x_axis_label, y_axis_label."""
+        spec = DocumentSpec(
+            doc_kind=DocKind.report,
+            title="Doc",
+            blocks=[
+                Chart(
+                    type="chart",
+                    chart_type="bar",
+                    title=None,
+                    x_label=None,
+                    y_label=None,
+                    series=[
+                        ChartSeries(name="Revenue", points=[ChartPoint(x="Q1", y=10.0)])
+                    ],
+                )
+            ],
+        )
+        patch = VisualRevisionPatch(
+            base_spec_hash=spec_hash(spec),
+            operations=[
+                SetChartLabels(
+                    block_index=0,
+                    title="Revenue by Quarter",
+                    x_axis_label="Quarter",
+                    y_axis_label="USD M",
+                )
+            ],
+            rationale="Fill missing labels",
+        )
+        result = apply_patch(spec, patch)
+        chart = result.blocks[0]
+        assert isinstance(chart, Chart)
+        assert chart.title == "Revenue by Quarter"
+        assert chart.x_label == "Quarter"
+        assert chart.y_label == "USD M"
+
+    def test_set_chart_labels_does_not_overwrite_existing(self) -> None:
+        """SetChartLabels must NOT overwrite existing non-empty labels."""
+        spec = DocumentSpec(
+            doc_kind=DocKind.report,
+            title="Doc",
+            blocks=[
+                Chart(
+                    type="chart",
+                    chart_type="bar",
+                    title="Existing Title",
+                    x_label="Existing X",
+                    y_label=None,
+                    series=[
+                        ChartSeries(name="S1", points=[ChartPoint(x="Q1", y=10.0)])
+                    ],
+                )
+            ],
+        )
+        patch = VisualRevisionPatch(
+            base_spec_hash=spec_hash(spec),
+            operations=[
+                SetChartLabels(
+                    block_index=0,
+                    title="New Title",
+                    x_axis_label="New X",
+                    y_axis_label="New Y",
+                )
+            ],
+            rationale="Try to overwrite",
+        )
+        result = apply_patch(spec, patch)
+        chart = result.blocks[0]
+        assert isinstance(chart, Chart)
+        assert chart.title == "Existing Title"  # NOT overwritten
+        assert chart.x_label == "Existing X"  # NOT overwritten
+        assert chart.y_label == "New Y"  # was None, so filled
+
+    def test_set_chart_labels_fills_empty_series_name(self) -> None:
+        """SetChartLabels fills empty series name positionally."""
+        spec = DocumentSpec(
+            doc_kind=DocKind.report,
+            title="Doc",
+            blocks=[
+                Chart(
+                    type="chart",
+                    chart_type="bar",
+                    series=[
+                        ChartSeries(name="", points=[ChartPoint(x="Q1", y=1.0)]),
+                        ChartSeries(
+                            name="Existing", points=[ChartPoint(x="Q1", y=2.0)]
+                        ),
+                    ],
+                )
+            ],
+        )
+        patch = VisualRevisionPatch(
+            base_spec_hash=spec_hash(spec),
+            operations=[
+                SetChartLabels(block_index=0, series_names=["Revenue", "Costs"])
+            ],
+            rationale="Fill series names",
+        )
+        result = apply_patch(spec, patch)
+        chart = result.blocks[0]
+        assert isinstance(chart, Chart)
+        assert chart.series[0].name == "Revenue"  # was empty, filled
+        assert chart.series[1].name == "Existing"  # was non-empty, NOT overwritten
+
+    def test_change_chart_type_bar_to_line(self) -> None:
+        """ChangeChartType: bar → line succeeds."""
+        spec = DocumentSpec(
+            doc_kind=DocKind.report,
+            title="Doc",
+            blocks=[
+                Chart(
+                    type="chart",
+                    chart_type="bar",
+                    series=[ChartSeries(name="S1", points=[ChartPoint(x="Q1", y=1.0)])],
+                )
+            ],
+        )
+        patch = VisualRevisionPatch(
+            base_spec_hash=spec_hash(spec),
+            operations=[ChangeChartType(block_index=0, chart_type="line")],
+            rationale="Switch to line",
+        )
+        result = apply_patch(spec, patch)
+        chart = result.blocks[0]
+        assert isinstance(chart, Chart)
+        assert chart.chart_type == "line"
+
+    def test_change_chart_type_pie_to_line_raises(self) -> None:
+        """ChangeChartType: pie → line raises ValueError (incompatible)."""
+        spec = DocumentSpec(
+            doc_kind=DocKind.report,
+            title="Doc",
+            blocks=[
+                Chart(
+                    type="chart",
+                    chart_type="pie",
+                    series=[ChartSeries(name="S1", points=[ChartPoint(x="A", y=1.0)])],
+                )
+            ],
+        )
+        patch = VisualRevisionPatch(
+            base_spec_hash=spec_hash(spec),
+            operations=[ChangeChartType(block_index=0, chart_type="line")],
+            rationale="Incompatible change",
+        )
+        with pytest.raises(ValueError, match="incompatible"):
+            apply_patch(spec, patch)
+
+    def test_compact_stat_cards_moves_notes_to_prose(self) -> None:
+        """CompactStatCards moves note text to a Prose block inserted after StatCards."""
+        spec = DocumentSpec(
+            doc_kind=DocKind.report,
+            title="Doc",
+            blocks=[
+                StatCards(
+                    type="stat_cards",
+                    cards=[
+                        StatCard(value="$1B", label="Revenue", note="YoY growth"),
+                        StatCard(value="42%", label="Growth", note=None),
+                    ],
+                )
+            ],
+        )
+        patch = VisualRevisionPatch(
+            base_spec_hash=spec_hash(spec),
+            operations=[CompactStatCards(block_index=0)],
+            rationale="Compact notes",
+        )
+        result = apply_patch(spec, patch)
+        assert len(result.blocks) == 2  # StatCards + Prose
+        stat_cards = result.blocks[0]
+        prose = result.blocks[1]
+        assert isinstance(stat_cards, StatCards)
+        assert isinstance(prose, Prose)
+        # Notes cleared on cards
+        for card in stat_cards.cards:
+            assert card.note is None
+        # Note text preserved verbatim in prose
+        assert "YoY growth" in prose.text
+
+    def test_set_theme_known_theme_succeeds(self) -> None:
+        """SetTheme with a known theme name updates spec.theme."""
+        spec = DocumentSpec(
+            doc_kind=DocKind.report,
+            title="Doc",
+            blocks=[Prose(type="prose", text="Hello.")],
+        )
+        patch = VisualRevisionPatch(
+            base_spec_hash=spec_hash(spec),
+            operations=[SetTheme(theme="pitch")],
+            rationale="Switch theme",
+        )
+        result = apply_patch(spec, patch)
+        assert result.theme == "pitch"
+
+    def test_set_theme_unknown_theme_raises(self) -> None:
+        """SetTheme with unknown theme raises ValueError."""
+        spec = DocumentSpec(
+            doc_kind=DocKind.report,
+            title="Doc",
+            blocks=[Prose(type="prose", text="Hello.")],
+        )
+        patch = VisualRevisionPatch(
+            base_spec_hash=spec_hash(spec),
+            operations=[SetTheme(theme="nonexistent_theme_xyz")],
+            rationale="Bad theme",
+        )
+        with pytest.raises(ValueError, match="unknown theme"):
+            apply_patch(spec, patch)
+
+
+# ---------------------------------------------------------------------------
+# content_preserved extension tests
+# ---------------------------------------------------------------------------
+
+
+class TestContentPreservedExtensions:
+    def test_set_chart_labels_fill_passes(self) -> None:
+        """After SetChartLabels fills missing labels, content_preserved → True."""
+        original = DocumentSpec(
+            doc_kind=DocKind.report,
+            title="Doc",
+            blocks=[
+                Chart(
+                    type="chart",
+                    chart_type="bar",
+                    title=None,
+                    x_label=None,
+                    y_label=None,
+                    series=[
+                        ChartSeries(name="Revenue", points=[ChartPoint(x="Q1", y=10.0)])
+                    ],
+                )
+            ],
+        )
+        patch = VisualRevisionPatch(
+            base_spec_hash=spec_hash(original),
+            operations=[
+                SetChartLabels(
+                    block_index=0,
+                    title="Revenue Chart",
+                    x_axis_label="Quarter",
+                    y_axis_label="USD M",
+                )
+            ],
+            rationale="Fill labels",
+        )
+        revised = apply_patch(original, patch)
+        ok, reasons = content_preserved(original, revised)
+        assert ok is True, f"Expected True, got reasons: {reasons}"
+
+    def test_removing_existing_chart_label_fails(self) -> None:
+        """Hand-built spec that removes an existing chart title → content_preserved False."""
+        original = DocumentSpec(
+            doc_kind=DocKind.report,
+            title="Doc",
+            blocks=[
+                Chart(
+                    type="chart",
+                    chart_type="bar",
+                    title="Important Title",
+                    series=[ChartSeries(name="S1", points=[ChartPoint(x="Q1", y=1.0)])],
+                )
+            ],
+        )
+        # Revised removes the title (set to None)
+        revised = DocumentSpec(
+            doc_kind=DocKind.report,
+            title="Doc",
+            blocks=[
+                Chart(
+                    type="chart",
+                    chart_type="bar",
+                    title=None,
+                    series=[ChartSeries(name="S1", points=[ChartPoint(x="Q1", y=1.0)])],
+                )
+            ],
+        )
+        ok, reasons = content_preserved(original, revised)
+        assert ok is False
+        assert any("missing atom" in r for r in reasons)
+
+    def test_compact_stat_cards_passes(self) -> None:
+        """After CompactStatCards, note text moved to Prose → content_preserved True."""
+        original = DocumentSpec(
+            doc_kind=DocKind.report,
+            title="Doc",
+            blocks=[
+                StatCards(
+                    type="stat_cards",
+                    cards=[
+                        StatCard(value="$1B", label="Revenue", note="YoY growth"),
+                    ],
+                )
+            ],
+        )
+        patch = VisualRevisionPatch(
+            base_spec_hash=spec_hash(original),
+            operations=[CompactStatCards(block_index=0)],
+            rationale="Compact",
+        )
+        revised = apply_patch(original, patch)
+        ok, reasons = content_preserved(original, revised)
+        assert ok is True, f"Expected True, got reasons: {reasons}"
+
+    def test_dropping_stat_note_entirely_fails(self) -> None:
+        """A spec that drops a stat note entirely (not moved to prose) → False."""
+        original = DocumentSpec(
+            doc_kind=DocKind.report,
+            title="Doc",
+            blocks=[
+                StatCards(
+                    type="stat_cards",
+                    cards=[
+                        StatCard(value="$1B", label="Revenue", note="YoY growth"),
+                    ],
+                )
+            ],
+        )
+        # Revised drops the note entirely (not moved anywhere)
+        revised = DocumentSpec(
+            doc_kind=DocKind.report,
+            title="Doc",
+            blocks=[
+                StatCards(
+                    type="stat_cards",
+                    cards=[
+                        StatCard(value="$1B", label="Revenue", note=None),
+                    ],
+                )
+            ],
+        )
+        ok, reasons = content_preserved(original, revised)
+        assert ok is False
+        assert any("missing atom" in r for r in reasons)
+
+
+# ---------------------------------------------------------------------------
 # propose_overflow_patch tests
 # ---------------------------------------------------------------------------
 
@@ -957,6 +1307,105 @@ class TestProposeOverflowPatch:
         result = propose_overflow_patch(spec, critique, page_map)
         assert result is not None
         assert result.base_spec_hash == spec_hash(spec)
+
+
+# ---------------------------------------------------------------------------
+# propose_llm_patch tests
+# ---------------------------------------------------------------------------
+
+
+class TestProposeLlmPatch:
+    def _labels_spec(self) -> DocumentSpec:
+        return DocumentSpec(
+            doc_kind=DocKind.report,
+            title="Doc",
+            blocks=[
+                Chart(
+                    type="chart",
+                    chart_type="bar",
+                    title=None,
+                    series=[
+                        ChartSeries(name="Revenue", points=[ChartPoint(x="Q1", y=1.0)])
+                    ],
+                )
+            ],
+        )
+
+    def test_valid_propose_fn_returns_patch(self) -> None:
+        """propose_fn returning a valid SetChartLabels patch → returned."""
+        spec = self._labels_spec()
+        critique = VisualCritique(
+            overall_score=5,
+            summary="Missing labels",
+            issues=[
+                VisualIssue(
+                    page=1,
+                    category="labels",
+                    severity="warning",
+                    message="no chart title",
+                )
+            ],
+        )
+        page_map: dict[int, list[int]] = {1: [0]}
+
+        def fake_propose(ctx: LlmPatchContext) -> VisualRevisionPatch | None:
+            return VisualRevisionPatch(
+                base_spec_hash=ctx.base_spec_hash,
+                operations=[SetChartLabels(block_index=0, title="Revenue Chart")],
+                rationale="Add title",
+            )
+
+        result = propose_llm_patch(spec, critique, page_map, propose_fn=fake_propose)
+        assert result is not None
+        assert len(result.operations) == 1
+        assert isinstance(result.operations[0], SetChartLabels)
+
+    def test_bad_hash_patch_rejected(self) -> None:
+        """propose_fn returning a patch with wrong base_spec_hash → None."""
+        spec = self._labels_spec()
+        critique = VisualCritique(
+            overall_score=5,
+            summary="Bad",
+            issues=[
+                VisualIssue(
+                    page=1, category="labels", severity="warning", message="no title"
+                )
+            ],
+        )
+        page_map: dict[int, list[int]] = {}
+
+        def fake_propose(ctx: LlmPatchContext) -> VisualRevisionPatch | None:
+            return VisualRevisionPatch(
+                base_spec_hash="badhashvalue",
+                operations=[SetChartLabels(block_index=0, title="Title")],
+                rationale="Bad hash patch",
+            )
+
+        result = propose_llm_patch(spec, critique, page_map, propose_fn=fake_propose)
+        assert result is None
+
+    def test_no_non_overflow_issues_returns_none(self) -> None:
+        """Critique with only overflow issues → no candidates → None."""
+        spec = self._labels_spec()
+        critique = VisualCritique(
+            overall_score=4,
+            summary="Overflow only",
+            issues=[
+                VisualIssue(
+                    page=1, category="overflow", severity="error", message="overflow"
+                )
+            ],
+        )
+        page_map: dict[int, list[int]] = {}
+        called = [False]
+
+        def fake_propose(ctx: LlmPatchContext) -> VisualRevisionPatch | None:
+            called[0] = True
+            return None
+
+        result = propose_llm_patch(spec, critique, page_map, propose_fn=fake_propose)
+        assert result is None
+        assert not called[0]  # propose_fn not called when no non-overflow issues
 
 
 # ---------------------------------------------------------------------------
@@ -1275,3 +1724,167 @@ class TestAttemptVisualRevision:
         )
         assert accepted.old_score == 5
         assert accepted.new_score == 9
+
+    def test_deterministic_overflow_takes_priority_over_llm(self) -> None:
+        """Overflow patch (deterministic) is proposed before calling llm_propose_fn."""
+        spec = _overflow_spec()
+        critique = _overflow_critique(score=5)
+
+        llm_called = [False]
+
+        def fake_llm_propose(ctx: LlmPatchContext) -> VisualRevisionPatch | None:
+            llm_called[0] = True
+            return None
+
+        outcome = attempt_visual_revision(
+            spec,
+            critique,
+            render=lambda s: _better_pdf(),
+            critique_fn=lambda pdf: VisualCritique(
+                overall_score=8, summary="Good", issues=[]
+            ),
+            llm_propose_fn=fake_llm_propose,
+        )
+        # Overflow patch should have been found and applied, so llm_propose_fn not called
+        assert outcome.status == "accepted"
+        assert not llm_called[0]
+
+    def test_llm_patch_applied_when_no_overflow(self) -> None:
+        """No overflow + llm_propose_fn proposing set_chart_labels + improved critique → accepted."""
+        spec = DocumentSpec(
+            doc_kind=DocKind.report,
+            title="Labels Doc",
+            blocks=[
+                Chart(
+                    type="chart",
+                    chart_type="bar",
+                    title=None,
+                    series=[
+                        ChartSeries(name="Revenue", points=[ChartPoint(x="Q1", y=1.0)])
+                    ],
+                )
+            ],
+        )
+        critique = VisualCritique(
+            overall_score=5,
+            summary="Missing labels",
+            issues=[
+                VisualIssue(
+                    page=1, category="labels", severity="warning", message="no title"
+                )
+            ],
+        )
+
+        def fake_llm_propose(ctx: LlmPatchContext) -> VisualRevisionPatch | None:
+            return VisualRevisionPatch(
+                base_spec_hash=ctx.base_spec_hash,
+                operations=[SetChartLabels(block_index=0, title="Revenue Chart")],
+                rationale="Add title",
+            )
+
+        outcome = attempt_visual_revision(
+            spec,
+            critique,
+            render=lambda s: _better_pdf(),
+            critique_fn=lambda pdf: VisualCritique(
+                overall_score=8, summary="Better", issues=[]
+            ),
+            llm_propose_fn=fake_llm_propose,
+        )
+        assert outcome.status == "accepted"
+        assert outcome.revised_spec is not None
+
+    def test_llm_patch_content_loss_rejected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """LLM patch that loses content (content_preserved forced False) → rejected."""
+        import kortny.documents.revision as rev_mod
+
+        spec = DocumentSpec(
+            doc_kind=DocKind.report,
+            title="Labels Doc",
+            blocks=[
+                Chart(
+                    type="chart",
+                    chart_type="bar",
+                    title=None,
+                    series=[
+                        ChartSeries(name="Revenue", points=[ChartPoint(x="Q1", y=1.0)])
+                    ],
+                )
+            ],
+        )
+        critique = VisualCritique(
+            overall_score=5,
+            summary="Missing labels",
+            issues=[
+                VisualIssue(
+                    page=1, category="labels", severity="warning", message="no title"
+                )
+            ],
+        )
+
+        monkeypatch.setattr(
+            rev_mod,
+            "content_preserved",
+            lambda orig, revised: (
+                False,
+                ["injected atom: ('chart_title', 'bad')"],
+            ),
+        )
+
+        def fake_llm_propose(ctx: LlmPatchContext) -> VisualRevisionPatch | None:
+            return VisualRevisionPatch(
+                base_spec_hash=ctx.base_spec_hash,
+                operations=[SetChartLabels(block_index=0, title="Revenue Chart")],
+                rationale="Add title",
+            )
+
+        outcome = attempt_visual_revision(
+            spec,
+            critique,
+            render=lambda s: _better_pdf(),
+            critique_fn=lambda pdf: VisualCritique(
+                overall_score=8, summary="Better", issues=[]
+            ),
+            llm_propose_fn=fake_llm_propose,
+        )
+        assert outcome.status == "rejected"
+        assert "content not preserved" in outcome.reason
+
+    def test_no_llm_propose_fn_no_overflow_is_noop(self) -> None:
+        """llm_propose_fn=None + no overflow → noop (no LLM call possible)."""
+        spec = DocumentSpec(
+            doc_kind=DocKind.report,
+            title="Labels Doc",
+            blocks=[
+                Chart(
+                    type="chart",
+                    chart_type="bar",
+                    title=None,
+                    series=[
+                        ChartSeries(name="Revenue", points=[ChartPoint(x="Q1", y=1.0)])
+                    ],
+                )
+            ],
+        )
+        critique = VisualCritique(
+            overall_score=5,
+            summary="Missing labels",
+            issues=[
+                VisualIssue(
+                    page=1, category="labels", severity="warning", message="no title"
+                )
+            ],
+        )
+
+        outcome = attempt_visual_revision(
+            spec,
+            critique,
+            render=lambda s: _better_pdf(),
+            critique_fn=lambda pdf: VisualCritique(
+                overall_score=8, summary="Better", issues=[]
+            ),
+            llm_propose_fn=None,
+        )
+        assert outcome.status == "noop"

@@ -10,6 +10,7 @@ The module exposes:
 - A category-aware candidate selector (``candidate_blocks_for_issue``)
 - A patch schema and applier (``VisualRevisionPatch``, ``apply_patch``)
 - A heuristic overflow-patch proposer (``propose_overflow_patch``)
+- An LLM-driven patch proposer (``propose_llm_patch``)
 """
 
 from __future__ import annotations
@@ -34,15 +35,18 @@ from kortny.documents.ir import (
     Block,
     Callout,
     Chart,
+    ChartSeries,
     CoverHeader,
     DocumentSpec,
     Heading,
     Prose,
     PullQuote,
     SectionDivider,
+    StatCard,
     StatCards,
     Table,
 )
+from kortny.documents.themes import theme_names
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -162,10 +166,17 @@ def content_fingerprint(spec: DocumentSpec) -> ContentFingerprint:
 
 # Categories where new atoms in revised are not considered injections (renames
 # are allowed by critique_and_fix, and "(cont.)" captions are a known extension).
+# Chart label categories are added here because SetChartLabels only fills
+# previously-None fields; new label atoms that were absent (None) in original
+# are safe additions, while Rule 2 still catches any removal of existing labels.
 _SAFE_ADDED_CATEGORIES: frozenset[str] = frozenset(
     {
         "doc_title",  # always present
         "table_col",  # critique_and_fix may rename blank/duplicate cols
+        "chart_title",  # SetChartLabels fills previously-None title
+        "chart_x_label",  # SetChartLabels fills previously-None x_label
+        "chart_y_label",  # SetChartLabels fills previously-None y_label
+        "chart_series_name",  # SetChartLabels fills previously-empty series names
     }
 )
 
@@ -203,6 +214,10 @@ def content_preserved(
     may be covered by a window of consecutive prose atoms in *revised* whose
     joined-and-normalised text equals the original prose value.
 
+    ``CompactStatCards`` moves ``stat_note`` text into a ``Prose`` block; a
+    ``stat_note`` atom missing from revised is allowed when its value appears
+    as a ``prose`` atom in revised.
+
     Parameters
     ----------
     original:
@@ -236,6 +251,11 @@ def content_preserved(
         # Allow prose atoms that have been split across multiple consecutive prose blocks
         if category == "prose" and _covers_original_prose(value, rev_prose_values):
             continue
+        # Allow stat_note atoms that have been moved to prose blocks (CompactStatCards)
+        if category == "stat_note" and any(
+            v == value for c, v in rev_atoms if c == "prose"
+        ):
+            continue
         reasons.append(f"missing atom: {atom!r}")
 
     if reasons:
@@ -267,6 +287,12 @@ def content_preserved(
             if any(
                 norm_value in orig_prose_val for orig_prose_val in orig_prose_values_set
             ):
+                continue
+            # Also allow prose that matches a moved stat_note value (CompactStatCards)
+            orig_stat_note_values = {
+                _normalize(v) for c, v in orig_atoms if c == "stat_note"
+            }
+            if norm_value in orig_stat_note_values:
                 continue
         reasons.append(f"injected atom: {atom!r}")
         return False, reasons
@@ -406,7 +432,48 @@ class SplitProse(BaseModel):
     block_index: int
 
 
-RevisionOp = Annotated[SplitTable | SplitProse, Field(discriminator="op")]
+class SetChartLabels(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    op: Literal["set_chart_labels"] = "set_chart_labels"
+    block_index: int
+    title: str | None = None
+    x_axis_label: str | None = None
+    y_axis_label: str | None = None
+    series_names: list[str] | None = None
+
+
+class ChangeChartType(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    op: Literal["change_chart_type"] = "change_chart_type"
+    block_index: int
+    chart_type: str
+
+
+class CompactStatCards(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    op: Literal["compact_stat_cards"] = "compact_stat_cards"
+    block_index: int
+
+
+class SetTheme(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    op: Literal["set_theme"] = "set_theme"
+    theme: str
+
+
+RevisionOp = Annotated[
+    SplitTable
+    | SplitProse
+    | SetChartLabels
+    | ChangeChartType
+    | CompactStatCards
+    | SetTheme,
+    Field(discriminator="op"),
+]
 
 
 class VisualRevisionPatch(BaseModel):
@@ -477,11 +544,30 @@ def apply_patch(spec: DocumentSpec, patch: VisualRevisionPatch) -> DocumentSpec:
     if patch.base_spec_hash != spec_hash(spec):
         raise ValueError("patch base_spec_hash mismatch")
 
-    # Work on a mutable list copy of the blocks (as dicts for safe manipulation)
+    # Work on a mutable list copy of the blocks
     blocks: list[Block] = list(spec.blocks)
+    spec_dict = spec.model_dump(mode="json")
 
-    # Sort ops descending by block_index so earlier splits don't shift later indices
-    sorted_ops = sorted(patch.operations, key=lambda op: op.block_index, reverse=True)
+    # Separate spec-level ops (no block_index) from block-level ops
+    spec_level_ops: list[SetTheme] = []
+    block_level_ops: list[
+        SplitTable | SplitProse | SetChartLabels | ChangeChartType | CompactStatCards
+    ] = []
+    for op in patch.operations:
+        if isinstance(op, SetTheme):
+            spec_level_ops.append(op)
+        else:
+            block_level_ops.append(op)
+
+    # Apply spec-level ops first
+    for op in spec_level_ops:
+        known = theme_names()
+        if op.theme not in known:
+            raise ValueError(f"SetTheme: unknown theme {op.theme!r}; known: {known}")
+        spec_dict["theme"] = op.theme
+
+    # Sort block ops descending by block_index so earlier splits don't shift later indices
+    sorted_ops = sorted(block_level_ops, key=lambda o: o.block_index, reverse=True)
 
     for op in sorted_ops:
         idx = op.block_index
@@ -507,6 +593,99 @@ def apply_patch(spec: DocumentSpec, patch: VisualRevisionPatch) -> DocumentSpec:
             split_prose = _split_prose_block(target)
             blocks = blocks[:idx] + split_prose + blocks[idx + 1 :]
 
+        elif isinstance(op, SetChartLabels):
+            if not isinstance(target, Chart):
+                raise ValueError(
+                    f"SetChartLabels op at index {idx} targets a {type(target).__name__}, not a Chart"
+                )
+            # ONLY fill missing (None or empty string) fields — never overwrite existing non-empty labels
+            new_title = (
+                target.title
+                if (target.title is not None and target.title != "")
+                else op.title
+            )
+            new_x_label = (
+                target.x_label
+                if (target.x_label is not None and target.x_label != "")
+                else op.x_axis_label
+            )
+            new_y_label = (
+                target.y_label
+                if (target.y_label is not None and target.y_label != "")
+                else op.y_axis_label
+            )
+            # For series_names, only fill series whose name is empty/None positionally
+            new_series: list[ChartSeries] = []
+            for i, series in enumerate(target.series):
+                if (
+                    op.series_names is not None
+                    and i < len(op.series_names)
+                    and (series.name is None or series.name == "")
+                ):
+                    new_series.append(
+                        ChartSeries(name=op.series_names[i], points=list(series.points))
+                    )
+                else:
+                    new_series.append(series)
+            updated_chart_dict = target.model_dump(mode="json")
+            updated_chart_dict["title"] = new_title
+            updated_chart_dict["x_label"] = new_x_label
+            updated_chart_dict["y_label"] = new_y_label
+            updated_chart_dict["series"] = [
+                s.model_dump(mode="json") for s in new_series
+            ]
+            updated_chart = Chart.model_validate(updated_chart_dict)
+            blocks = blocks[:idx] + [updated_chart] + blocks[idx + 1 :]
+
+        elif isinstance(op, ChangeChartType):
+            if not isinstance(target, Chart):
+                raise ValueError(
+                    f"ChangeChartType op at index {idx} targets a {type(target).__name__}, not a Chart"
+                )
+            # Compatibility: {bar, line, area} are mutually compatible; pie is NOT
+            _BAR_LINE_AREA = {"bar", "line", "area"}
+            if target.chart_type in _BAR_LINE_AREA and op.chart_type == "pie":
+                raise ValueError(
+                    f"ChangeChartType: cannot change chart from {target.chart_type!r} to 'pie' (incompatible)"
+                )
+            if target.chart_type == "pie" and op.chart_type in _BAR_LINE_AREA:
+                raise ValueError(
+                    f"ChangeChartType: cannot change chart from 'pie' to {op.chart_type!r} (incompatible)"
+                )
+            updated_dict = target.model_dump(mode="json")
+            updated_dict["chart_type"] = op.chart_type
+            try:
+                updated_chart = Chart.model_validate(updated_dict)
+            except Exception as e:
+                raise ValueError(
+                    f"ChangeChartType: invalid chart_type {op.chart_type!r}: {e}"
+                ) from e
+            blocks = blocks[:idx] + [updated_chart] + blocks[idx + 1 :]
+
+        elif isinstance(op, CompactStatCards):
+            if not isinstance(target, StatCards):
+                raise ValueError(
+                    f"CompactStatCards op at index {idx} targets a {type(target).__name__}, not a StatCards"
+                )
+            # Collect all note texts and clear notes on cards
+            note_parts: list[str] = []
+            new_cards: list[StatCard] = []
+            for card in target.cards:
+                if card.note is not None and card.note.strip():
+                    note_parts.append(card.note)
+                new_cards.append(
+                    StatCard(value=card.value, label=card.label, note=None)
+                )
+            updated_stat_cards = StatCards(type="stat_cards", cards=new_cards)
+            # Insert Prose block AFTER the StatCards block with the combined notes (if any)
+            if note_parts:
+                notes_prose = Prose(type="prose", text="\n\n".join(note_parts))
+                blocks = (
+                    blocks[:idx] + [updated_stat_cards, notes_prose] + blocks[idx + 1 :]
+                )
+            else:
+                blocks = blocks[:idx] + [updated_stat_cards] + blocks[idx + 1 :]
+
         else:
             # This branch is unreachable with the current discriminated union but
             # provides a runtime safety net for ops loaded from untrusted JSON.
@@ -514,7 +693,6 @@ def apply_patch(spec: DocumentSpec, patch: VisualRevisionPatch) -> DocumentSpec:
             raise ValueError(f"unknown op: {op_name}")
 
     # Rebuild the spec without mutating the original
-    spec_dict = spec.model_dump(mode="json")
     spec_dict["blocks"] = [
         b.model_dump(mode="json") if hasattr(b, "model_dump") else b for b in blocks
     ]
@@ -566,6 +744,84 @@ def propose_overflow_patch(
 
 
 # ---------------------------------------------------------------------------
+# 5b. propose_llm_patch
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class LlmPatchContext:
+    """Context passed to an LLM proposer for non-overflow revision issues."""
+
+    base_spec_hash: str
+    issues: list[VisualIssue]  # non-overflow issues only
+    candidates: dict[int, dict]  # block_index -> block JSON for each candidate block
+
+
+def propose_llm_patch(
+    spec: DocumentSpec,
+    critique: VisualCritique,
+    page_map: dict[int, list[int]],
+    *,
+    propose_fn: Callable[[LlmPatchContext], VisualRevisionPatch | None],
+) -> VisualRevisionPatch | None:
+    """Propose a patch for non-overflow issues using an LLM proposer callable.
+
+    Filters critique issues to non-overflow, builds a context with candidate
+    block JSON, calls *propose_fn*, validates the returned patch's hash, and
+    does a light whitelist check on op types.
+
+    Returns ``None`` when there are no non-overflow issues, when *propose_fn*
+    returns ``None``, or when the returned patch fails validation.
+    """
+    non_overflow = [i for i in critique.issues if i.category != "overflow"]
+    if not non_overflow:
+        return None
+
+    # Collect candidate block indices across all non-overflow issues
+    candidate_indices: set[int] = set()
+    for issue in non_overflow:
+        for idx in candidate_blocks_for_issue(issue, page_map, spec):
+            candidate_indices.add(idx)
+
+    candidates: dict[int, dict] = {}
+    for idx in candidate_indices:
+        if 0 <= idx < len(spec.blocks):
+            block = spec.blocks[idx]
+            candidates[idx] = (
+                block.model_dump(mode="json") if hasattr(block, "model_dump") else {}
+            )
+
+    context = LlmPatchContext(
+        base_spec_hash=spec_hash(spec),
+        issues=non_overflow,
+        candidates=candidates,
+    )
+
+    result = propose_fn(context)
+    if result is None:
+        return None
+
+    # Sanity check: base_spec_hash must match
+    if result.base_spec_hash != spec_hash(spec):
+        return None
+
+    # Light whitelist check on op types (apply_patch enforces fully)
+    _WHITELISTED_OP_TYPES = (
+        SplitTable,
+        SplitProse,
+        SetChartLabels,
+        ChangeChartType,
+        CompactStatCards,
+        SetTheme,
+    )
+    for op in result.operations:
+        if not isinstance(op, _WHITELISTED_OP_TYPES):
+            return None
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # 6. Revision outcome types
 # ---------------------------------------------------------------------------
 
@@ -607,11 +863,14 @@ def attempt_visual_revision(
     trigger_below: int = 7,
     min_improvement: int = 1,
     original_pdf: bytes | None = None,
+    llm_propose_fn: Callable[[LlmPatchContext], VisualRevisionPatch | None]
+    | None = None,
 ) -> RevisionOutcome:
-    """Attempt a single deterministic visual-revision cycle.
+    """Attempt a single visual-revision cycle (deterministic or LLM-driven).
 
-    Proposes an overflow patch, applies it, re-renders, re-critiques, and
-    accepts or rejects the candidate based on quality gates.
+    First proposes a deterministic overflow patch; if none is found, falls back
+    to *llm_propose_fn* when provided.  Applies the patch, re-renders,
+    re-critiques, and accepts or rejects the candidate based on quality gates.
 
     Never raises — all exceptions are caught and returned as a rejected
     ``RevisionOutcome``.
@@ -635,6 +894,9 @@ def attempt_visual_revision(
     original_pdf:
         Optional original PDF bytes for page→block mapping.  When omitted,
         an empty page map is used.
+    llm_propose_fn:
+        Optional callable that proposes a patch for non-overflow issues via LLM.
+        Called only when the deterministic overflow proposer returns ``None``.
     """
     started_event = RevisionEvent(
         kind="visual_revision_started",
@@ -665,20 +927,25 @@ def attempt_visual_revision(
         else:
             page_map = {}
 
-        # Propose patch
+        # Propose patch — deterministic overflow first, then LLM fallback
         patch = propose_overflow_patch(spec, original_critique, page_map)
         if patch is None:
-            noop_event = RevisionEvent(
-                kind="visual_revision_noop",
-                detail="no actionable deterministic fix",
-                old_score=original_critique.overall_score,
-            )
-            events.append(noop_event)
-            return RevisionOutcome(
-                status="noop",
-                reason="no actionable deterministic fix",
-                events=events,
-            )
+            if llm_propose_fn is not None:
+                patch = propose_llm_patch(
+                    spec, original_critique, page_map, propose_fn=llm_propose_fn
+                )
+            if patch is None:
+                noop_event = RevisionEvent(
+                    kind="visual_revision_noop",
+                    detail="no actionable deterministic fix",
+                    old_score=original_critique.overall_score,
+                )
+                events.append(noop_event)
+                return RevisionOutcome(
+                    status="noop",
+                    reason="no actionable deterministic fix",
+                    events=events,
+                )
 
         # Apply patch
         try:
@@ -832,11 +1099,16 @@ def attempt_visual_revision(
 # ---------------------------------------------------------------------------
 
 __all__ = [
+    "ChangeChartType",
+    "CompactStatCards",
     "ContentFingerprint",
+    "LlmPatchContext",
     "RevisionEvent",
     "RevisionOutcome",
     "RevisionOp",
     "RevisionStatus",
+    "SetChartLabels",
+    "SetTheme",
     "SplitProse",
     "SplitTable",
     "VisualRevisionPatch",
@@ -846,6 +1118,7 @@ __all__ = [
     "content_fingerprint",
     "content_preserved",
     "map_pages_to_blocks",
+    "propose_llm_patch",
     "propose_overflow_patch",
     "spec_hash",
 ]
