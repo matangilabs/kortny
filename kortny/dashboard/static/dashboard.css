@@ -10428,7 +10428,7 @@ details[open] > summary::after {
   box-shadow: none;
   padding: 13px 14px;
 }
-.dash-v2 .metric-card span {
+.dash-v2 .metric-card > span {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -10451,6 +10451,17 @@ details[open] > summary::after {
   font-size: 11.5px;
   color: var(--muted-foreground);
 }
+/* sub-stat spans inside <small> must stay inline + normal case (not the
+   block uppercase label styling) */
+.dash-v2 .metric-card small span {
+  display: inline;
+  margin: 0;
+  font-size: inherit;
+  font-weight: inherit;
+  letter-spacing: normal;
+  text-transform: none;
+  color: inherit;
+}
 .dash-v2 .metric-card .metric-time {
   font-size: 13px;
   font-weight: 600;
@@ -10460,18 +10471,18 @@ details[open] > summary::after {
 }
 
 /* Status by a small dot + colored value, not a pink fill */
-.dash-v2 .metric-card.metric-danger span::before,
-.dash-v2 .metric-card.metric-warning span::before,
-.dash-v2 .metric-card.metric-success span::before {
+.dash-v2 .metric-card.metric-danger > span::before,
+.dash-v2 .metric-card.metric-warning > span::before,
+.dash-v2 .metric-card.metric-success > span::before {
   content: "";
   width: 6px;
   height: 6px;
   border-radius: 50%;
   flex: none;
 }
-.dash-v2 .metric-card.metric-danger span::before { background: var(--destructive); }
-.dash-v2 .metric-card.metric-warning span::before { background: var(--warning); }
-.dash-v2 .metric-card.metric-success span::before { background: var(--success); }
+.dash-v2 .metric-card.metric-danger > span::before { background: var(--destructive); }
+.dash-v2 .metric-card.metric-warning > span::before { background: var(--warning); }
+.dash-v2 .metric-card.metric-success > span::before { background: var(--success); }
 .dash-v2 .metric-card.metric-danger strong { color: var(--destructive); }
 
 /* Cards/charts: flat with a crisp hairline; quieter headers */
@@ -10582,16 +10593,6 @@ details[open] > summary::after {
    tags (provenance, review status, "not current") are de-emphasized via
    .badge-faint so rows read calmly. Plus a one-line legend above the list.
    ========================================================================= */
-.dash-v2 .graph-badge-legend {
-  margin: 0 0 12px;
-  font-size: 12px;
-  line-height: 1.5;
-  color: var(--muted-foreground);
-}
-.dash-v2 .graph-badge-legend strong {
-  color: var(--foreground);
-  font-weight: 600;
-}
 .dash-v2 .badge.badge-faint {
   background: transparent;
   border: 1px solid var(--border);
@@ -10996,6 +10997,16 @@ details[open] > summary::after {
   font-size: 11.5px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+}
+.dash-v2 .ex-row-confidence {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.dash-v2 .ex-row-confidence svg {
+  width: 13px;
+  height: 13px;
+  opacity: 0.75;
 }
 /* push everything after a flagged element to the right */
 .dash-v2 .ex-row-spacer {
@@ -11767,6 +11778,8 @@ details[open] > summary::after {
   border-bottom: 1px solid var(--border);
   background: transparent;
   overflow: visible;
+  /* grid item: let the track shrink so the summary text can ellipsis */
+  min-width: 0;
 }
 .dash-v2 .witness-list > .ex-row:last-child,
 .dash-v2 .memory-fact-list > .ex-row:last-child,

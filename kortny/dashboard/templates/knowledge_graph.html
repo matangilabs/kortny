@@ -220,10 +220,6 @@
       <a class="btn-ghost" href="{{ graph.reset_url }}">Reset</a>
     </form>
 
-    <p class="graph-badge-legend">
-      Each row leads with its <strong>type</strong> and <strong>lifecycle state</strong>. Dimmer tags show where the fact came from and its review status — hover any tag for an explanation.
-    </p>
-
     {% if graph.active_view == "entities" %}
       <div class="graph-list" role="list" aria-label="Knowledge graph entities">
         {% for row in graph.entities %}
@@ -238,7 +234,10 @@
                 <span class="badge badge-faint" title="Superseded or aged out — kept for history, not used to answer questions.">not current</span>
               {% endif %}
               <span class="ex-row-summary-text">{{ row.entity.display_name }}</span>
-              <span class="ex-row-meta">{{ row.confidence_label }}</span>
+              <span class="ex-row-meta ex-row-confidence" title="Confidence">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 14 4-4"></path><path d="M3.34 19a10 10 0 1 1 17.32 0"></path></svg>
+                {{ row.confidence_label }}
+              </span>
             </summary>
             <div class="ex-row-detail">
               <div class="ex-row-detail-grid">
@@ -316,7 +315,10 @@
                 <span class="badge badge-faint" title="Superseded or aged out — kept for history, not used to answer questions.">not current</span>
               {% endif %}
               <span class="ex-row-summary-text">{{ row.source_label }} → {{ row.target_label }}</span>
-              <span class="ex-row-meta">{{ row.confidence_label }}</span>
+              <span class="ex-row-meta ex-row-confidence" title="Confidence">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 14 4-4"></path><path d="M3.34 19a10 10 0 1 1 17.32 0"></path></svg>
+                {{ row.confidence_label }}
+              </span>
             </summary>
             <div class="ex-row-detail">
               <div class="ex-row-detail-grid">
