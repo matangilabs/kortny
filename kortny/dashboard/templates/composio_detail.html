@@ -70,7 +70,7 @@
         {% if detail.toolkit.categories %}
           <div class="catalog-tags">
             {% for category in detail.toolkit.categories %}
-              <span class="catalog-pill catalog-pill-category">{{ category }}</span>
+              <a class="catalog-pill catalog-pill-category" href="/composio?q={{ category|urlencode }}">{{ category }}</a>
             {% endfor %}
           </div>
         {% endif %}
@@ -97,28 +97,6 @@
         <div>
           <dt>Who can use it</dt>
           <dd>{{ active_connection.scope_label if active_connection else "Personal by default" }}</dd>
-        </div>
-        <div>
-          <dt>Available tools</dt>
-          <dd>
-            {% if detail.toolkit %}
-              {{ detail.toolkit.tools_count|number }}
-            {% else %}
-              Unknown
-            {% endif %}
-          </dd>
-        </div>
-        <div>
-          <dt>Sign-in type</dt>
-          <dd>
-            {% if detail.toolkit and detail.toolkit.no_auth %}
-              No account needed
-            {% elif detail.toolkit and detail.toolkit.auth_schemes %}
-              {{ detail.toolkit.auth_schemes|join(" / ")|replace("_", " ")|title }}
-            {% else %}
-              Composio account
-            {% endif %}
-          </dd>
         </div>
       </dl>
     </aside>
@@ -184,7 +162,7 @@
           </form>
         </div>
       {% elif not detail.configured %}
-        <p>Add `COMPOSIO_API_KEY` before connecting {{ integration_name }}.</p>
+        <p>Add <code>COMPOSIO_API_KEY</code> before connecting {{ integration_name }}.</p>
       {% else %}
         <div class="connect-card-body">
           <form class="connect-quick-form" method="post" action="/composio/{{ detail.slug }}/connect">

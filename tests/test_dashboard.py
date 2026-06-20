@@ -2082,9 +2082,9 @@ def test_dashboard_composio_page_renders_catalog_shell(
 
     assert response.status_code == 200
     assert "Composio" in response.text
-    assert "Integration Catalog" in response.text
+    assert "Search integrations" in response.text
     assert "Catalog not available" in response.text
-    assert "Composio catalog results" in response.text
+    assert "Composio integration catalog" in response.text
     assert 'href="/composio" aria-current="page"' in response.text
     assert "composio-dashboard-secret" not in response.text
 
@@ -2211,7 +2211,7 @@ def test_dashboard_composio_page_pins_connected_toolkits_missing_from_page(
         "<h3>GitHub</h3>"
     )
     assert "Connected Apps" in response.text
-    assert "Includes 1 connected app" in response.text
+    assert "Connected (1)" in response.text
 
 
 def test_dashboard_composio_page_exposes_cursor_pagination(
