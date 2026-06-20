@@ -38,8 +38,11 @@ from kortny.documents import (
 )
 from kortny.documents.critique import (
     DocumentIssue,
+    DocumentVisualCritic,
+    VisualCritique,
     critique_and_fix,
     validate_render,
+    visual_critique,
 )
 from kortny.tasks import TaskService
 from kortny.tools.types import (
@@ -213,6 +216,8 @@ class DocumentStudioTool:
         task_id: uuid.UUID | None = None,
         task_service: TaskEventSink | None = None,
         slack_client: Any | None = None,
+        visual_critic: DocumentVisualCritic | None = None,
+        visual_critic_max_pages: int = 8,
     ) -> None:
         if (session is None) != (task_id is None):
             raise ValueError("session and task_id must be provided together")
@@ -222,6 +227,8 @@ class DocumentStudioTool:
         self.task_id = task_id
         self.task_service = task_service
         self.slack_client = slack_client
+        self.visual_critic = visual_critic
+        self.visual_critic_max_pages = visual_critic_max_pages
 
     def invoke(self, args: JsonObject) -> ToolResult:
         """Validate the spec, render the chosen format, record the artifact."""
@@ -300,6 +307,18 @@ class DocumentStudioTool:
                 details={"issues": [i.model_dump() for i in render_issues]},
             )
 
+        # VLM visual critic — read-only telemetry (HIG-244 slice 1).
+        # Only runs for PDF; never blocks delivery; failures silently return None.
+        visual_score: int | None = None
+        visual_critique_payload: dict[str, object] | None = None
+        if fmt == "pdf" and self.visual_critic is not None:
+            _vc: VisualCritique | None = visual_critique(
+                data, self.visual_critic, max_pages=self.visual_critic_max_pages
+            )
+            if _vc is not None:
+                visual_score = _vc.overall_score
+                visual_critique_payload = _vc.model_dump()
+
         self.working_dir.mkdir(parents=True, exist_ok=True)
         output_path = self.working_dir / filename
         output_path.write_bytes(data)
@@ -328,6 +347,7 @@ class DocumentStudioTool:
                     doc_group_id=doc_group_id,
                     doc_version=doc_version,
                     spec_json=spec_json,
+                    visual_critique_payload=visual_critique_payload,
                 ).id
             )
 
@@ -343,6 +363,7 @@ class DocumentStudioTool:
                 "artifact_id": artifact_id,
                 "doc_group_id": str(doc_group_id),
                 "doc_version": doc_version,
+                "visual_score": visual_score,
                 "critique": {
                     "autofixes": sum(1 for i in issues if i.autofix == "applied"),
                     "warnings": sum(1 for i in issues if i.severity == "warning"),
@@ -441,6 +462,7 @@ class DocumentStudioTool:
         doc_group_id: uuid.UUID,
         doc_version: int,
         spec_json: dict[str, Any],
+        visual_critique_payload: dict[str, object] | None = None,
     ) -> Artifact:
         assert self.session is not None
         assert self.task_id is not None
@@ -459,16 +481,19 @@ class DocumentStudioTool:
         self.session.flush()
 
         if self.task_service is not None:
+            event_payload: dict[str, object] = {
+                "artifact_id": str(artifact.id),
+                "filename": filename,
+                "mime_type": mime_type,
+                "size_bytes": size_bytes,
+                "storage_path": str(path),
+            }
+            if visual_critique_payload is not None:
+                event_payload["visual_critique"] = visual_critique_payload
             self.task_service.append_event(
                 self.task_id,
                 TaskEventType.artifact_created,
-                {
-                    "artifact_id": str(artifact.id),
-                    "filename": filename,
-                    "mime_type": mime_type,
-                    "size_bytes": size_bytes,
-                    "storage_path": str(path),
-                },
+                event_payload,
             )
         return artifact
 

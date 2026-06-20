@@ -21,7 +21,10 @@ invalid file, is a recoverable error the agent can correct.
 from __future__ import annotations
 
 import io
+import logging
+import tempfile
 import zipfile
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
@@ -74,6 +77,81 @@ class CritiqueResult:
             "warnings": sum(1 for i in self.issues if i.severity == "warning"),
             "codes": sorted({i.code for i in self.issues}),
         }
+
+
+logger = logging.getLogger(__name__)
+
+
+class VisualIssue(BaseModel):
+    page: int  # 1-based page number
+    category: Literal[
+        "overflow",
+        "alignment",
+        "labels",
+        "whitespace",
+        "contrast",
+        "hierarchy",
+        "typography",
+        "other",
+    ]
+    severity: Severity
+    message: str
+
+
+class VisualCritique(BaseModel):
+    overall_score: int  # 0–10 (10 = perfect)
+    summary: str
+    issues: list[VisualIssue]
+
+
+DocumentVisualCritic = Callable[[Sequence[bytes]], VisualCritique]
+
+
+def visual_critique(
+    pdf_bytes: bytes,
+    critic: DocumentVisualCritic | None,
+    *,
+    max_pages: int,
+) -> VisualCritique | None:
+    """Rasterize *pdf_bytes* and run the visual critic callable.
+
+    Returns the :class:`VisualCritique` produced by *critic*, or ``None`` when:
+    - *critic* is ``None`` (no vision model configured), or
+    - rasterisation fails, or
+    - the critic callable raises.
+
+    Never raises — failures are logged and swallowed so the caller's render
+    path is unaffected.
+    """
+    if critic is None:
+        return None
+    import pathlib  # noqa: PLC0415
+
+    tmp_path: pathlib.Path | None = None
+    try:
+        from kortny.pdf_raster import rasterize_pdf_pages  # noqa: PLC0415
+
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tf:
+            tf.write(pdf_bytes)
+            tmp_path = pathlib.Path(tf.name)
+        page_pngs = rasterize_pdf_pages(tmp_path, max_pages=max_pages)
+    except Exception:
+        logger.exception("visual_critique: rasterisation failed")
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
+        return None
+
+    if tmp_path is not None:
+        tmp_path.unlink(missing_ok=True)
+
+    if not page_pngs:
+        return None
+
+    try:
+        return critic(page_pngs)
+    except Exception:
+        logger.exception("visual_critique: critic callable failed")
+        return None
 
 
 def critique_and_fix(spec: DocumentSpec) -> CritiqueResult:
@@ -409,6 +487,10 @@ def _validate_ooxml(data: bytes, fmt: str) -> list[DocumentIssue]:
 __all__ = [
     "CritiqueResult",
     "DocumentIssue",
+    "DocumentVisualCritic",
+    "VisualCritique",
+    "VisualIssue",
     "critique_and_fix",
     "validate_render",
+    "visual_critique",
 ]

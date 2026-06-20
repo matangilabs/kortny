@@ -346,3 +346,130 @@ def _create_task(session: Session) -> Task:
         slack_user_id="U123",
         input="make a document",
     )
+
+
+# --------------------------------------------------------------------------- #
+# Visual critic integration
+# --------------------------------------------------------------------------- #
+
+
+from collections.abc import Sequence as _Sequence  # noqa: E402
+
+from kortny.documents.critique import VisualCritique as _VisualCritique  # noqa: E402
+from kortny.documents.critique import VisualIssue as _VisualIssue  # noqa: E402
+
+
+def _fake_visual_critic(pages: _Sequence[bytes]) -> _VisualCritique:
+    return _VisualCritique(
+        overall_score=8,
+        summary="Good layout.",
+        issues=[
+            _VisualIssue(
+                page=1,
+                category="whitespace",
+                severity="info",
+                message="Slight extra whitespace at footer.",
+            )
+        ],
+    )
+
+
+@pytest.mark.skipif(_TYPST_MISSING, reason="typst binary not installed")
+def test_visual_score_in_output_with_fake_critic(tmp_path: Path) -> None:
+    """visual_score appears in ToolResult when visual_critic is provided."""
+    result = DocumentStudioTool(
+        working_dir=tmp_path,
+        visual_critic=_fake_visual_critic,
+    ).invoke(_args())
+    assert result.output["visual_score"] == 8
+
+
+@pytest.mark.skipif(_TYPST_MISSING, reason="typst binary not installed")
+def test_visual_score_none_without_critic(tmp_path: Path) -> None:
+    """visual_score is None when no visual_critic is configured (default)."""
+    result = DocumentStudioTool(working_dir=tmp_path).invoke(_args())
+    assert result.output["visual_score"] is None
+
+
+@pytest.mark.skipif(_TYPST_MISSING, reason="typst binary not installed")
+def test_visual_score_none_for_non_pdf(tmp_path: Path) -> None:
+    """visual_critic is not invoked for non-PDF formats."""
+    called: list[bool] = []
+
+    def counting_critic(pages: _Sequence[bytes]) -> _VisualCritique:
+        called.append(True)
+        return _VisualCritique(overall_score=9, summary="ok", issues=[])
+
+    result = DocumentStudioTool(
+        working_dir=tmp_path,
+        visual_critic=counting_critic,
+    ).invoke(_args(format="pptx"))
+    assert result.output["visual_score"] is None
+    assert not called
+
+
+@pytest.mark.skipif(
+    TEST_POSTGRES_URL is None,
+    reason="KORTNY_TEST_POSTGRES_URL is required for DB-backed tests",
+)
+@pytest.mark.skipif(_TYPST_MISSING, reason="typst binary not installed")
+def test_artifact_event_includes_visual_critique(
+    db_session: Session, tmp_path: Path
+) -> None:
+    """artifact_created event payload includes visual_critique when critic fires."""
+    task = _create_task(db_session)
+    task_service = TaskService(db_session)
+
+    with task_workspace(task.id, base_dir=tmp_path) as workspace:
+        DocumentStudioTool(
+            working_dir=workspace.path,
+            session=db_session,
+            task_id=task.id,
+            task_service=task_service,
+            visual_critic=_fake_visual_critic,
+        ).invoke(_args())
+
+        event = db_session.scalar(
+            select(TaskEvent).where(
+                TaskEvent.task_id == task.id,
+                TaskEvent.type == TaskEventType.artifact_created,
+            )
+        )
+
+    assert event is not None
+    vc = event.payload.get("visual_critique")
+    assert vc is not None
+    assert vc["overall_score"] == 8
+    assert vc["summary"] == "Good layout."
+    assert len(vc["issues"]) == 1
+
+
+@pytest.mark.skipif(
+    TEST_POSTGRES_URL is None,
+    reason="KORTNY_TEST_POSTGRES_URL is required for DB-backed tests",
+)
+@pytest.mark.skipif(_TYPST_MISSING, reason="typst binary not installed")
+def test_artifact_event_no_visual_critique_key_when_no_critic(
+    db_session: Session, tmp_path: Path
+) -> None:
+    """artifact_created event payload omits visual_critique when critic is None."""
+    task = _create_task(db_session)
+    task_service = TaskService(db_session)
+
+    with task_workspace(task.id, base_dir=tmp_path) as workspace:
+        DocumentStudioTool(
+            working_dir=workspace.path,
+            session=db_session,
+            task_id=task.id,
+            task_service=task_service,
+        ).invoke(_args())
+
+        event = db_session.scalar(
+            select(TaskEvent).where(
+                TaskEvent.task_id == task.id,
+                TaskEvent.type == TaskEventType.artifact_created,
+            )
+        )
+
+    assert event is not None
+    assert "visual_critique" not in event.payload
