@@ -20,6 +20,7 @@ from pypdf import PdfReader
 from slack_sdk.errors import SlackApiError
 from sqlalchemy.orm import Session
 
+from kortny.pdf_raster import rasterize_pdf_pages
 from kortny.tools.types import JsonObject, JsonSchema, ToolResult
 
 logger = logging.getLogger(__name__)
@@ -33,10 +34,6 @@ SLACK_FILE_ID_RE = re.compile(r"^F[A-Z0-9]+$")
 # typically extract 0 characters; native PDFs may have a handful of whitespace
 # characters; anything below this threshold triggers OCR when available.
 SCANNED_PDF_TEXT_THRESHOLD = 16
-
-# pypdfium2 render scale: ~150 DPI (72 DPI native × scale 2.0 ≈ 144 DPI).
-# High enough for legible OCR; low enough to keep PNG sizes manageable.
-PDF_RASTERIZE_SCALE = 2.0
 
 # A callable that takes a sequence of page-image PNG bytes and returns
 # transcribed Markdown.  Injected into SlackFileReadTool so the tool stays
@@ -598,29 +595,13 @@ def _is_scanned_pdf(extraction: TextExtraction) -> bool:
 
 
 def _rasterize_pdf_pages(path: Path, *, max_pages: int) -> list[bytes]:
-    """Render up to *max_pages* pages of a PDF to PNG bytes.
+    """Render up to *max_pages* pages of a PDF to PNG bytes for OCR.
 
-    Uses pypdfium2 at PDF_RASTERIZE_SCALE (≈150 DPI) for legible OCR output.
-    Returns a list of raw PNG bytes, one entry per rendered page.
+    Thin wrapper over the shared ``kortny.pdf_raster.rasterize_pdf_pages`` so the
+    tests' monkeypatch target stays stable; the rasterization itself lives in one
+    place (also used by the Document Studio visual critic).
     """
-    import pypdfium2  # noqa: PLC0415
-
-    doc = pypdfium2.PdfDocument(str(path))
-    page_count = len(doc)
-    pages_to_render = min(page_count, max_pages)
-    result: list[bytes] = []
-    try:
-        for i in range(pages_to_render):
-            page = doc[i]
-            bitmap = page.render(scale=PDF_RASTERIZE_SCALE)
-            pil_image = bitmap.to_pil()
-            buf = BytesIO()
-            pil_image.save(buf, format="PNG")
-            result.append(buf.getvalue())
-            page.close()
-    finally:
-        doc.close()
-    return result
+    return rasterize_pdf_pages(path, max_pages=max_pages)
 
 
 def _extract_pdf_text(path: Path) -> str:
