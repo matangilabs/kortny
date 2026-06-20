@@ -37,13 +37,6 @@
       <div class="run-list">
         {% for run in consolidation.runs %}
           <article class="run-card">
-            <div class="run-card-head">
-              <div class="run-card-id">
-                <span class="badge badge-{{ run.status_tone }}">{{ run.status }}</span>
-                <time datetime="{{ run.started_at.isoformat() }}">{{ run.started_at.strftime('%Y-%m-%d %H:%M') }}</time>
-              </div>
-              <span class="run-card-cost">{{ run.cost_label }}</span>
-            </div>
             {% set counters = [
               ('promoted', run.promoted, 'New facts added to long-term memory'),
               ('updated', run.updated, 'Existing facts revised with newer information'),
@@ -57,6 +50,8 @@
               ('conflicts', run.conflict_count, 'Contradictions with confirmed facts — review below'),
             ] %}
             {% set ns = namespace(any=false) %}
+            <span class="badge badge-{{ run.status_tone }}">{{ run.status }}</span>
+            <time datetime="{{ run.started_at.isoformat() }}">{{ run.started_at.strftime('%Y-%m-%d %H:%M') }}</time>
             <div class="run-summary">
               {% for label, val, hint in counters %}
                 {% if val %}
@@ -68,6 +63,7 @@
                 <span class="run-chip run-chip-muted">No memory changes this run</span>
               {% endif %}
             </div>
+            <span class="run-card-cost">{{ run.cost_label }}</span>
             {% if run.pass_errors %}
               <div class="run-errors">
                 {% for error in run.pass_errors %}

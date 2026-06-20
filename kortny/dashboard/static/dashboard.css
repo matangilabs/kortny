@@ -11806,3 +11806,33 @@ details[open] > summary::after {
 .dash-v2 .ex-row-detail > .witness-message-preview {
   margin-top: 14px;
 }
+
+/* ---- Consolidation recent runs: single compact line per run ---- */
+.dash-v2 .run-list {
+  gap: 8px;
+}
+.dash-v2 .run-card {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  padding: 9px 14px;
+}
+.dash-v2 .run-card > time {
+  flex: none;
+  color: var(--muted-foreground);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+.dash-v2 .run-card .run-summary {
+  flex: 1 1 auto;
+  margin: 0;
+  gap: 6px;
+}
+.dash-v2 .run-card .run-card-cost {
+  flex: none;
+  margin-left: auto;
+}
+.dash-v2 .run-card .run-errors {
+  flex-basis: 100%;
+}
