@@ -12,11 +12,11 @@
 
 {% macro hint_chip(read_only, destructive) %}
   {% if read_only %}
-    <span class="mcp-hint-chip mcp-hint-read" title="readOnlyHint=true">read-only</span>
+    <span class="mcp-hint-chip mcp-hint-read" title="Read-only: the tool only reads data, so it needs no approval.">read-only</span>
   {% elif destructive %}
-    <span class="mcp-hint-chip mcp-hint-destructive" title="destructiveHint=true">destructive</span>
+    <span class="mcp-hint-chip mcp-hint-destructive" title="Destructive: running this tool can change or delete data.">destructive</span>
   {% else %}
-    <span class="mcp-hint-chip mcp-hint-unknown" title="No annotation">write</span>
+    <span class="mcp-hint-chip mcp-hint-unknown" title="Write: running this tool may change something.">write</span>
   {% endif %}
 {% endmacro %}
 
@@ -132,8 +132,8 @@
                       <th>Tool</th>
                       <th>Description</th>
                       <th>Quality</th>
-                      <th>Side-effect</th>
-                      <th>Pin</th>
+                      <th title="Side-effect: whether running the tool changes anything, or only reads data.">Side-effect</th>
+                      <th title="Pin: whether the tool is manually locked on or off, regardless of any change to the server's tool list.">Pin</th>
                       <th>Runtime name</th>
                       <th>Enabled</th>
                     </tr>
@@ -149,16 +149,16 @@
                         <td>{{ hint_chip(tool.read_only_hint, tool.destructive_hint) }}</td>
                         <td>
                           {% if tool.drifted %}
-                            <span class="badge badge-danger" title="Schema changed since approval — the read-only approval bypass is revoked until you re-pin.">drifted</span>
+                            <span class="badge badge-danger" title="Drifted: the server's tool list changed since it was registered, so the no-approval bypass is revoked until you re-pin.">drifted</span>
                             <form method="post" action="/mcp/{{ server.server_id }}/tools/{{ tool.tool_id }}/repin"
                                   onsubmit="return confirm('Re-pin \'{{ tool.name }}\' as approved? Only do this after reviewing the schema change.');">
                               <input type="hidden" name="next" value="{{ mcp_return_path }}" />
                               <button class="btn-ghost btn-ghost-sm" type="submit">Re-pin</button>
                             </form>
                           {% elif tool.pin_status == 'active' %}
-                            <span class="badge badge-success" title="Pinned — schema unchanged since approval.">pinned</span>
+                            <span class="badge badge-success" title="Pinned: manually locked on regardless of changes to the server's tool list.">pinned</span>
                           {% else %}
-                            <span class="badge badge-neutral" title="Not yet pinned this workspace.">unpinned</span>
+                            <span class="badge badge-neutral" title="Unpinned: not manually locked in this workspace yet.">unpinned</span>
                           {% endif %}
                         </td>
                         <td><code class="mcp-runtime-name">mcp__{{ server.name }}__{{ tool.name }}</code></td>

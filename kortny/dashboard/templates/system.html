@@ -6,14 +6,14 @@
   <section class="page-heading">
     <div>
       <h1>System</h1>
-      <p>Setup readiness, dependency health, and redacted runtime configuration.</p>
+      <p>Is everything set up and healthy? Dependency checks and current configuration, with secrets hidden.</p>
     </div>
     <span class="status-chip badge-{{ system.overall_tone }}">{{ system.overall_label }}</span>
   </section>
 
   <section class="summary-grid system-summary" aria-label="System overview">
     {% for metric in system.metrics %}
-      <div class="card metric-card metric-{{ metric.tone }}">
+      <div class="card metric-card metric-{{ metric.tone }}{{ ' metric-stamp' if metric.label == 'Last Task' else '' }}">
         <span>{{ metric.label }}</span>
         <strong>{{ metric.value }}</strong>
         {% if metric.detail %}

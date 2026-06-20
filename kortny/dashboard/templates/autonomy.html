@@ -7,11 +7,11 @@
   <section class="page-heading">
     <div>
       <h1>Autonomy</h1>
-      <p>How freely Kortny acts. Reads, sandbox runs, and local artifacts are always free. Conservative gates every write; balanced auto-runs external create/update with an audit trail and gates irreversible or outward actions; autonomous gates only irreversible and outward (delete, send, publish, deploy, payments) actions.</p>
+      <p>Control how much Kortny is allowed to do on its own — from asking first, to acting freely — per workspace or channel.</p>
     </div>
   </section>
 
-  {{ page_intro("The autonomy ladder decides what Kortny may do without asking. Reads, sandboxed code, and local artifacts always run free. External creates and updates run automatically with an audit entry (the implicit tier). Deletes, bulk mutations, and outward-facing actions — publishing, emailing, deploying — always require explicit approval in Slack, regardless of level. A deterministic classifier (SQL verb parsing, HTTP semantics, bulk-signal detection — no LLM) assesses every call. The level set here shifts where the implicit tier sits: conservative gates every write, balanced runs the ladder, autonomous reserves prompts for the irreversible. The audit trail below records every auto-approved write with its risk reasoning.") }}
+  {{ page_intro("The autonomy ladder decides what Kortny may do without asking. Reads, sandboxed code, and local artifacts always run free. External creates and updates run automatically with an audit entry (the implicit tier). Deletes, bulk mutations, and outward-facing actions — publishing, emailing, deploying — always require explicit approval in Slack, regardless of level. A deterministic classifier (SQL verb parsing, HTTP semantics, bulk-signal detection — no LLM) assesses every call. The level set here shifts where the implicit tier sits. The three levels: Conservative asks before every action that creates or changes anything. Balanced runs external creates and updates automatically with an audit trail, and still asks before anything irreversible or outward-facing. Autonomous only asks before the irreversible and outward — deleting, sending, publishing, deploying, payments. The audit trail below records every auto-approved write with its risk reasoning.") }}
 
   {% if notice %}
     <div class="notice notice-{{ notice_tone }}" role="status">{{ notice }}</div>
@@ -109,7 +109,7 @@
     <section class="card detail-section" aria-label="Recent autonomy decisions">
       <header>
         <h2>Audit trail</h2>
-        <p>Recent auto-approved Tier-1 (external create/update) calls. Reads and explicit-approval prompts are not listed here.</p>
+        <p>Recent actions Kortny ran automatically that <span title="Actions that create or change things in outside tools, like posting to an external app or updating a record. Read-only, no-risk actions aren't listed here.">created or changed things in outside tools</span>. Read-only actions and anything that asked for approval are not listed here.</p>
       </header>
       {% if autonomy.audit_rows %}
         <div class="overflow-x-auto">
@@ -145,7 +145,7 @@
         </table>
         </div>
       {% else %}
-        <p class="empty-state">No auto-approved Tier-1 decisions recorded yet.</p>
+        <p class="empty-state">No auto-approved actions recorded yet.</p>
       {% endif %}
     </section>
   {% endif %}

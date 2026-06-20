@@ -7,7 +7,7 @@
   <section class="page-heading">
     <div>
       <h1>Knowledge Graph</h1>
-      <p>Inspect scoped workspace entities, relationships, and the evidence Kortny uses for runtime context.</p>
+      <p>The people, projects, and decisions Kortny has learned from your conversations, and how they connect. Each item links back to the evidence behind it.</p>
     </div>
     <div class="heading-actions">
       <form method="post" action="/knowledge-graph/refresh" onsubmit="return confirm('Queue background graph refresh assessments for known active channels?');">
@@ -28,7 +28,7 @@
     <div class="card metric-card metric-success">
       <span>Entities</span>
       <strong>{{ graph.entity_count|number }}</strong>
-      <small>{{ graph.current_entity_count|number }} current · {{ graph.candidate_entity_count|number }} candidates</small>
+      <small><span title="Confirmed and actively used.">{{ graph.current_entity_count|number }} current</span> · <span title="Newly noticed, not yet corroborated.">{{ graph.candidate_entity_count|number }} candidates</span></small>
     </div>
     <div class="card metric-card">
       <span>Channels</span>
@@ -41,9 +41,9 @@
       <small>{{ graph.evidence_count|number }} evidence rows</small>
     </div>
     <div class="card metric-card {% if graph.stale_entity_count + graph.stale_edge_count > 0 or graph.unbacked_current_entity_count + graph.unbacked_current_edge_count > 0 %}metric-warning{% else %}metric-success{% endif %}">
-      <span>Health</span>
-      <strong>{{ (graph.runtime_eligible_entity_count + graph.runtime_eligible_edge_count)|number }}</strong>
-      <small>runtime eligible · {{ (graph.stale_entity_count + graph.stale_edge_count)|number }} stale · {{ (graph.unbacked_current_entity_count + graph.unbacked_current_edge_count)|number }} gaps</small>
+      <span title="A quick read on how usable the graph is right now.">Health</span>
+      <strong title="Currently used to answer questions.">{{ (graph.runtime_eligible_entity_count + graph.runtime_eligible_edge_count)|number }}</strong>
+      <small><span title="Currently used to answer questions.">in use</span> · <span title="Needs refreshing.">{{ (graph.stale_entity_count + graph.stale_edge_count)|number }} stale</span> · <span title="Items missing the supporting evidence link.">{{ (graph.unbacked_current_entity_count + graph.unbacked_current_edge_count)|number }} gaps</span></small>
     </div>
   </section>
 
@@ -220,55 +220,68 @@
       <a class="btn-ghost" href="{{ graph.reset_url }}">Reset</a>
     </form>
 
+    <p class="graph-badge-legend">
+      Each row leads with its <strong>type</strong> and <strong>lifecycle state</strong>. Dimmer tags show where the fact came from and its review status — hover any tag for an explanation.
+    </p>
+
     {% if graph.active_view == "entities" %}
       <div class="graph-list" role="list" aria-label="Knowledge graph entities">
         {% for row in graph.entities %}
-          <article class="graph-row" role="listitem">
-            <div class="graph-main">
-              <div class="graph-title">
-                <code class="inline-code">{{ row.entity.canonical_key }}</code>
-                <span class="badge badge-accent">{{ row.entity.entity_type }}</span>
-                <span class="badge badge-{{ row.tone }}">{{ row.entity.lifecycle_state }}</span>
-                <span class="badge badge-{{ row.provenance_tone }}">{{ row.provenance_label }}</span>
-                <span class="badge badge-neutral">{{ row.review_status }}</span>
-                {% if not row.entity.is_current %}
-                  <span class="badge badge-neutral">not current</span>
-                {% endif %}
-              </div>
-              {% if row.entity.display_name %}
-                <p class="graph-label">{{ row.entity.display_name }}</p>
+          <details class="ex-row" role="listitem">
+            <summary class="ex-row-summary">
+              <code class="inline-code">{{ row.entity.canonical_key }}</code>
+              <span class="badge badge-accent">{{ row.entity.entity_type }}</span>
+              <span class="badge badge-{{ row.tone }}">{{ row.entity.lifecycle_state }}</span>
+              <span class="badge badge-faint" title="Where this fact came from — the source Kortny learned it from.">{{ row.provenance_label }}</span>
+              <span class="badge badge-faint" title="Whether an operator has reviewed this entry yet.">{{ row.review_status }}</span>
+              {% if not row.entity.is_current %}
+                <span class="badge badge-faint" title="Superseded or aged out — kept for history, not used to answer questions.">not current</span>
               {% endif %}
-              <div class="graph-meta">
-                <span>{{ row.scope.name }}{% if row.scope.secondary %} - {{ row.scope.secondary }}{% endif %}</span>
-                <span>{{ row.entity.visibility_scope_type }}</span>
-                <span>{{ row.entity.source_type }}</span>
-                <span>{{ row.confidence_label }} confidence</span>
-                <span>Updated {{ row.entity.updated_at|datetime }}</span>
-              </div>
-              <p class="graph-attrs">{{ row.attrs_preview }}</p>
-            </div>
-            <aside class="graph-side">
-              <section class="graph-panel">
-                <h3>Evidence</h3>
-                <strong>{{ row.evidence_count|number }} rows</strong>
-                {% for evidence in row.evidence %}
-                  <div class="graph-evidence">
-                    <span>{{ evidence.source_label }}</span>
-                    <p>{{ evidence.snippet }}</p>
-                  </div>
-                {% else %}
-                  <span class="identity-id">No evidence rows loaded</span>
-                {% endfor %}
-              </section>
-              <section class="graph-panel">
-                <h3>Connections</h3>
-                <div class="graph-connection-grid">
-                  <span>{{ row.source_edge_count|number }} outgoing</span>
-                  <span>{{ row.target_edge_count|number }} incoming</span>
+              <span class="ex-row-summary-text">{{ row.entity.display_name }}</span>
+              <span class="ex-row-meta">{{ row.confidence_label }}</span>
+            </summary>
+            <div class="ex-row-detail">
+              <div class="ex-row-detail-grid">
+                <div class="ex-field">
+                  <span class="ex-field-label">Scope</span>
+                  <span>{{ row.scope.name }}{% if row.scope.secondary %} · {{ row.scope.secondary }}{% endif %}</span>
                 </div>
-              </section>
-              <section class="graph-panel graph-actions">
-                <h3>Review</h3>
+                <div class="ex-field">
+                  <span class="ex-field-label">Visibility</span>
+                  <span>{{ row.entity.visibility_scope_type }}</span>
+                </div>
+                <div class="ex-field">
+                  <span class="ex-field-label">Source</span>
+                  <span>{{ row.entity.source_type }}</span>
+                </div>
+                <div class="ex-field">
+                  <span class="ex-field-label">Confidence</span>
+                  <span>{{ row.confidence_label }}</span>
+                </div>
+                <div class="ex-field">
+                  <span class="ex-field-label">Updated</span>
+                  <span>{{ row.entity.updated_at|datetime }}</span>
+                </div>
+                <div class="ex-field">
+                  <span class="ex-field-label">Connections</span>
+                  <span>{{ row.source_edge_count|number }} outgoing · {{ row.target_edge_count|number }} incoming</span>
+                </div>
+                <div class="ex-field">
+                  <span class="ex-field-label">Evidence</span>
+                  <span>{{ row.evidence_count|number }} rows</span>
+                </div>
+              </div>
+              {% if row.evidence %}
+                <div style="margin-top: 10px;">
+                  {% for evidence in row.evidence %}
+                    <div class="graph-evidence">
+                      <span>{{ evidence.source_label }}</span>
+                      <p>{{ evidence.snippet }}</p>
+                    </div>
+                  {% endfor %}
+                </div>
+              {% endif %}
+              <div class="ex-row-actions">
                 {% if row.entity.lifecycle_state in ["candidate", "active", "stale"] %}
                   <form method="post" action="/knowledge-graph/entities/{{ row.entity.id }}/confirm" onsubmit="return confirm('Confirm this graph entity for scoped runtime context?');">
                     <input type="hidden" name="next" value="{{ graph_return_path }}">
@@ -283,9 +296,9 @@
                 {% else %}
                   <span class="identity-id">No active controls</span>
                 {% endif %}
-              </section>
-            </aside>
-          </article>
+              </div>
+            </div>
+          </details>
         {% else %}
           <p class="empty attention-empty">No graph entities match these filters.</p>
         {% endfor %}
@@ -293,46 +306,64 @@
     {% else %}
       <div class="graph-list" role="list" aria-label="Knowledge graph relationships">
         {% for row in graph.edges %}
-          <article class="graph-row" role="listitem">
-            <div class="graph-main">
-              <div class="graph-title">
-                <code class="inline-code">{{ row.edge.relationship_type }}</code>
-                <span class="badge badge-{{ row.tone }}">{{ row.edge.lifecycle_state }}</span>
-                <span class="badge badge-{{ row.provenance_tone }}">{{ row.provenance_label }}</span>
-                <span class="badge badge-neutral">{{ row.review_status }}</span>
-                {% if not row.edge.is_current %}
-                  <span class="badge badge-neutral">not current</span>
-                {% endif %}
+          <details class="ex-row" role="listitem">
+            <summary class="ex-row-summary">
+              <code class="inline-code">{{ row.edge.relationship_type }}</code>
+              <span class="badge badge-{{ row.tone }}">{{ row.edge.lifecycle_state }}</span>
+              <span class="badge badge-faint" title="Where this relationship came from — the source Kortny learned it from.">{{ row.provenance_label }}</span>
+              <span class="badge badge-faint" title="Whether an operator has reviewed this entry yet.">{{ row.review_status }}</span>
+              {% if not row.edge.is_current %}
+                <span class="badge badge-faint" title="Superseded or aged out — kept for history, not used to answer questions.">not current</span>
+              {% endif %}
+              <span class="ex-row-summary-text">{{ row.source_label }} → {{ row.target_label }}</span>
+              <span class="ex-row-meta">{{ row.confidence_label }}</span>
+            </summary>
+            <div class="ex-row-detail">
+              <div class="ex-row-detail-grid">
+                <div class="ex-field">
+                  <span class="ex-field-label">From</span>
+                  <span>{{ row.source_label }}</span>
+                </div>
+                <div class="ex-field">
+                  <span class="ex-field-label">To</span>
+                  <span>{{ row.target_label }}</span>
+                </div>
+                <div class="ex-field">
+                  <span class="ex-field-label">Scope</span>
+                  <span>{{ row.scope.name }}{% if row.scope.secondary %} · {{ row.scope.secondary }}{% endif %}</span>
+                </div>
+                <div class="ex-field">
+                  <span class="ex-field-label">Visibility</span>
+                  <span>{{ row.edge.visibility_scope_type }}</span>
+                </div>
+                <div class="ex-field">
+                  <span class="ex-field-label">Source</span>
+                  <span>{{ row.edge.source_type }}</span>
+                </div>
+                <div class="ex-field">
+                  <span class="ex-field-label">Confidence</span>
+                  <span>{{ row.confidence_label }}</span>
+                </div>
+                <div class="ex-field">
+                  <span class="ex-field-label">Updated</span>
+                  <span>{{ row.edge.updated_at|datetime }}</span>
+                </div>
+                <div class="ex-field">
+                  <span class="ex-field-label">Evidence</span>
+                  <span>{{ row.evidence_count|number }} rows</span>
+                </div>
               </div>
-              <div class="graph-edge-line">
-                <span>{{ row.source_label }}</span>
-                <span aria-hidden="true">-&gt;</span>
-                <span>{{ row.target_label }}</span>
-              </div>
-              <div class="graph-meta">
-                <span>{{ row.scope.name }}{% if row.scope.secondary %} - {{ row.scope.secondary }}{% endif %}</span>
-                <span>{{ row.edge.visibility_scope_type }}</span>
-                <span>{{ row.edge.source_type }}</span>
-                <span>{{ row.confidence_label }} confidence</span>
-                <span>Updated {{ row.edge.updated_at|datetime }}</span>
-              </div>
-              <p class="graph-attrs">{{ row.attrs_preview }}</p>
-            </div>
-            <aside class="graph-side">
-              <section class="graph-panel">
-                <h3>Evidence</h3>
-                <strong>{{ row.evidence_count|number }} rows</strong>
-                {% for evidence in row.evidence %}
-                  <div class="graph-evidence">
-                    <span>{{ evidence.source_label }}</span>
-                    <p>{{ evidence.snippet }}</p>
-                  </div>
-                {% else %}
-                  <span class="identity-id">No evidence rows loaded</span>
-                {% endfor %}
-              </section>
-              <section class="graph-panel graph-actions">
-                <h3>Review</h3>
+              {% if row.evidence %}
+                <div style="margin-top: 10px;">
+                  {% for evidence in row.evidence %}
+                    <div class="graph-evidence">
+                      <span>{{ evidence.source_label }}</span>
+                      <p>{{ evidence.snippet }}</p>
+                    </div>
+                  {% endfor %}
+                </div>
+              {% endif %}
+              <div class="ex-row-actions">
                 {% if row.edge.lifecycle_state in ["candidate", "active", "stale"] %}
                   <form method="post" action="/knowledge-graph/edges/{{ row.edge.id }}/confirm" onsubmit="return confirm('Confirm this graph relationship for scoped runtime context?');">
                     <input type="hidden" name="next" value="{{ graph_return_path }}">
@@ -347,9 +378,9 @@
                 {% else %}
                   <span class="identity-id">No active controls</span>
                 {% endif %}
-              </section>
-            </aside>
-          </article>
+              </div>
+            </div>
+          </details>
         {% else %}
           <p class="empty attention-empty">No graph relationships match these filters.</p>
         {% endfor %}

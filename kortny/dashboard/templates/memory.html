@@ -7,7 +7,7 @@
   <section class="page-heading">
     <div>
       <h1>Memory</h1>
-      <p>Inspect durable facts, manage lifecycle state, and review episodic task memory.</p>
+      <p>What Kortny has learned about your team, and a log of the work it remembers doing.</p>
     </div>
     <a class="btn-ghost" href="{{ '/tasks' if dashboard_is_admin else '/me/tasks' }}">View Tasks</a>
   </section>
@@ -63,8 +63,8 @@
     {% endif %}
     <section class="card detail-section">
       <header>
-        <h2>Workspace State</h2>
-        <p>Facts Kortny can recall, filtered by scope, status, and text search.</p>
+        <h2>Facts Kortny knows</h2>
+        <p>Things Kortny has learned and can recall. Filter by where they apply (whole workspace, a channel, or a person), status, and text search.</p>
       </header>
       <form class="filters panel-filters memory-filters" method="get" action="{{ memory_base_path }}">
         <input type="hidden" name="view" value="facts">
@@ -84,12 +84,12 @@
         <label>
           Status
           <select class="input" name="status">
-            <option value="active" {{ "selected" if memory.status_filter == "active" else "" }}>Active</option>
-            <option value="proposed" {{ "selected" if memory.status_filter == "proposed" else "" }}>Proposed</option>
+            <option value="active" title="Confirmed and in use." {{ "selected" if memory.status_filter == "active" else "" }}>Active</option>
+            <option value="proposed" title="Waiting for confirmation before Kortny uses it." {{ "selected" if memory.status_filter == "proposed" else "" }}>Proposed</option>
             <option value="all" {{ "selected" if memory.status_filter == "all" else "" }}>All statuses</option>
-            <option value="superseded" {{ "selected" if memory.status_filter == "superseded" else "" }}>Superseded</option>
-            <option value="forgotten" {{ "selected" if memory.status_filter == "forgotten" else "" }}>Forgotten</option>
-            <option value="rejected" {{ "selected" if memory.status_filter == "rejected" else "" }}>Rejected</option>
+            <option value="superseded" title="Replaced by newer information." {{ "selected" if memory.status_filter == "superseded" else "" }}>Superseded</option>
+            <option value="forgotten" title="Aged out or manually retired; no longer used." {{ "selected" if memory.status_filter == "forgotten" else "" }}>Forgotten</option>
+            <option value="rejected" title="A proposed fact someone declined." {{ "selected" if memory.status_filter == "rejected" else "" }}>Rejected</option>
           </select>
         </label>
         <label>
@@ -104,86 +104,119 @@
         <button class="btn" type="submit">Apply</button>
         <a class="btn-ghost" href="{{ memory.reset_url }}">Reset</a>
       </form>
-      <div class="memory-fact-list" role="list" aria-label="Workspace state facts">
+      <div class="ex-list memory-fact-list" role="list" aria-label="Workspace state facts">
         {% for row in memory.facts %}
-          <article class="memory-fact-row" role="listitem">
-            <div class="memory-fact-main">
-              <div class="memory-fact-title">
-                <code class="inline-code">{{ row.fact.key }}</code>
-                <span class="badge badge-{{ row.tone }}">{{ row.fact.status }}</span>
-              </div>
-              <p class="memory-fact-value">{{ row.value_summary }}</p>
-              <div class="memory-fact-meta">
-                <span class="identity-name">{{ row.scope.name }}</span>
-                <span>{{ row.fact.scope_type }}{% if row.scope.secondary %} - {{ row.scope.secondary }}{% endif %}</span>
-                <span>Updated {{ row.fact.updated_at|datetime }}</span>
-                {% if row.source_task %}
-                  <a href="{{ '/tasks' if dashboard_is_admin else '/me/tasks' }}/{{ row.source_task.id }}">Source task</a>
-                {% elif row.fact.source_url %}
-                  <a href="{{ row.fact.source_url }}">Source</a>
-                {% else %}
-                  <span>{{ row.fact.source_kind }}</span>
-                {% endif %}
-              </div>
-            </div>
-
-            <aside class="memory-fact-side">
-              <section class="memory-fact-panel">
-                <h3>Audit</h3>
-                <div class="memory-audit">
-                  {% if row.proposed_by %}
-                    <span>Proposed by {{ row.proposed_by.name }}</span>
-                  {% endif %}
-                  {% if row.confirmed_by %}
-                    <span>Confirmed by {{ row.confirmed_by.name }}</span>
-                  {% endif %}
-                  {% if row.fact.confirmed_at %}
-                    <span>Confirmed {{ row.fact.confirmed_at|datetime }}</span>
-                  {% endif %}
-                  {% if row.fact.superseded_at %}
-                    <span>Superseded {{ row.fact.superseded_at|datetime }}</span>
-                  {% endif %}
-                  {% if row.fact.superseded_by_id %}
-                    <span>Replacement {{ row.fact.superseded_by_id }}</span>
-                  {% endif %}
-                  {% if row.fact.forgotten_at %}
-                    <span>Forgotten {{ row.fact.forgotten_at|datetime }}</span>
-                  {% endif %}
-                  {% if row.forgotten_by %}
-                    <span>Forgotten by {{ row.forgotten_by.name }}</span>
-                  {% endif %}
-                  {% if row.rejected_by %}
-                    <span>Rejected by {{ row.rejected_by.name }}</span>
-                  {% endif %}
+          <details class="ex-row" role="listitem">
+            <summary class="ex-row-summary">
+              <code class="inline-code">{{ row.fact.key }}</code>
+              <span class="badge badge-{{ row.tone }}">{{ row.fact.status }}</span>
+              <span class="ex-row-summary-text">{{ row.value_summary }}</span>
+              <span class="ex-row-meta">{{ row.scope.name }} · {{ row.fact.updated_at|datetime }}</span>
+            </summary>
+            <div class="ex-row-detail">
+              <div class="ex-row-detail-grid">
+                <div class="ex-field">
+                  <span class="ex-field-label">Value</span>
+                  <span>{{ row.value_summary }}</span>
                 </div>
-              </section>
-
+                <div class="ex-field">
+                  <span class="ex-field-label">Scope</span>
+                  <span>{{ row.fact.scope_type }}{% if row.scope.secondary %} — {{ row.scope.secondary }}{% endif %}</span>
+                </div>
+                <div class="ex-field">
+                  <span class="ex-field-label">Target</span>
+                  <span class="identity-name">{{ row.scope.name }}</span>
+                </div>
+                <div class="ex-field">
+                  <span class="ex-field-label">Updated</span>
+                  <span>{{ row.fact.updated_at|datetime }}</span>
+                </div>
+                {% if row.proposed_by %}
+                  <div class="ex-field">
+                    <span class="ex-field-label">Proposed by</span>
+                    <span>{{ row.proposed_by.name }}</span>
+                  </div>
+                {% endif %}
+                {% if row.confirmed_by %}
+                  <div class="ex-field">
+                    <span class="ex-field-label">Confirmed by</span>
+                    <span>{{ row.confirmed_by.name }}</span>
+                  </div>
+                {% endif %}
+                {% if row.fact.confirmed_at %}
+                  <div class="ex-field">
+                    <span class="ex-field-label">Confirmed</span>
+                    <span>{{ row.fact.confirmed_at|datetime }}</span>
+                  </div>
+                {% endif %}
+                {% if row.fact.superseded_at %}
+                  <div class="ex-field">
+                    <span class="ex-field-label">Superseded</span>
+                    <span>{{ row.fact.superseded_at|datetime }}</span>
+                  </div>
+                {% endif %}
+                {% if row.fact.superseded_by_id %}
+                  <div class="ex-field">
+                    <span class="ex-field-label">Replacement ID</span>
+                    <span>{{ row.fact.superseded_by_id }}</span>
+                  </div>
+                {% endif %}
+                {% if row.fact.forgotten_at %}
+                  <div class="ex-field">
+                    <span class="ex-field-label">Forgotten</span>
+                    <span>{{ row.fact.forgotten_at|datetime }}</span>
+                  </div>
+                {% endif %}
+                {% if row.forgotten_by %}
+                  <div class="ex-field">
+                    <span class="ex-field-label">Forgotten by</span>
+                    <span>{{ row.forgotten_by.name }}</span>
+                  </div>
+                {% endif %}
+                {% if row.rejected_by %}
+                  <div class="ex-field">
+                    <span class="ex-field-label">Rejected by</span>
+                    <span>{{ row.rejected_by.name }}</span>
+                  </div>
+                {% endif %}
+                <div class="ex-field">
+                  <span class="ex-field-label">Source</span>
+                  <span>
+                    {% if row.source_task %}
+                      <a href="{{ '/tasks' if dashboard_is_admin else '/me/tasks' }}/{{ row.source_task.id }}">Source task</a>
+                    {% elif row.fact.source_url %}
+                      <a href="{{ row.fact.source_url }}">Source</a>
+                    {% else %}
+                      {{ row.fact.source_kind }}
+                    {% endif %}
+                  </span>
+                </div>
+              </div>
               {% if memory_actions_enabled %}
-                <section class="memory-fact-panel memory-fact-actions">
-                  <h3>Actions</h3>
+                <div class="ex-row-actions">
                   {% if row.fact.status == "active" %}
-                  <form method="post" action="/memory/facts/{{ row.fact.id }}/forget" onsubmit="return confirm('Forget this memory fact? Kortny will stop using it, but the audit history will remain.');">
-                    <input type="hidden" name="next" value="{{ memory_return_path }}">
-                    <button class="btn-ghost btn-danger" type="submit">Forget</button>
-                  </form>
-                  <details class="memory-supersede">
-                    <summary>Supersede</summary>
-                    <form method="post" action="/memory/facts/{{ row.fact.id }}/supersede" onsubmit="return confirm('Supersede this memory fact with the replacement value?');">
+                    <form method="post" action="/memory/facts/{{ row.fact.id }}/forget" onsubmit="return confirm('Forget this memory fact? Kortny will stop using it, but the audit history will remain.');">
                       <input type="hidden" name="next" value="{{ memory_return_path }}">
-                      <label>
-                        Replacement value
-                        <textarea class="input memory-textarea" name="value_text" rows="3" required>{{ row.value_summary }}</textarea>
-                      </label>
-                      <button class="btn" type="submit">Save Replacement</button>
+                      <button class="btn-ghost btn-danger" type="submit">Forget</button>
                     </form>
-                  </details>
+                    <details class="memory-supersede">
+                      <summary>Supersede</summary>
+                      <form method="post" action="/memory/facts/{{ row.fact.id }}/supersede" onsubmit="return confirm('Supersede this memory fact with the replacement value?');">
+                        <input type="hidden" name="next" value="{{ memory_return_path }}">
+                        <label>
+                          Replacement value
+                          <textarea class="input memory-textarea" name="value_text" rows="3" required>{{ row.value_summary }}</textarea>
+                        </label>
+                        <button class="btn" type="submit">Save Replacement</button>
+                      </form>
+                    </details>
                   {% else %}
                     <span class="identity-id">No active controls</span>
                   {% endif %}
-                </section>
+                </div>
               {% endif %}
-            </aside>
-          </article>
+            </div>
+          </details>
         {% else %}
           <p class="empty attention-empty">No facts match these filters.</p>
         {% endfor %}
@@ -193,7 +226,7 @@
     <section class="card detail-section">
       <header>
         <h2>Episodes</h2>
-        <p>Task memories retained for follow-up context and future retrieval.</p>
+        <p title="An episode is a short summary of one task Kortny ran, kept so it can recall what happened later.">A log of past tasks Kortny remembers, kept so it has context for follow-up work.</p>
       </header>
       <form class="filters panel-filters memory-filters" method="get" action="{{ memory_base_path }}">
         <input type="hidden" name="view" value="episodes">
@@ -221,40 +254,26 @@
         <button class="btn" type="submit">Apply</button>
         <a class="btn-ghost" href="{{ memory.reset_url }}">Reset</a>
       </form>
-      <div class="episode-list">
+      <div class="episode-list ex-list">
         {% for row in memory.episodes %}
-          <article class="episode-row">
-            <div class="episode-main">
-              <div class="episode-title">
-                <span class="badge badge-{{ row.tone }}">{{ row.episode.outcome }}</span>
-                {% if row.task %}
-                  <a href="{{ '/tasks' if dashboard_is_admin else '/me/tasks' }}/{{ row.task.id }}">{{ row.task.input }}</a>
-                {% else %}
-                  <strong>{{ row.episode.task_id }}</strong>
-                {% endif %}
-              </div>
+          <details class="ex-row">
+            <summary class="ex-row-summary">
+              <span class="badge badge-{{ row.tone }}">{{ row.episode.outcome }}</span>
+              <span class="ex-row-summary-text">{{ row.task.input if row.task else row.episode.task_id }}</span>
+              <span class="ex-row-meta">{{ row.episode.created_at|datetime }}</span>
+            </summary>
+            <div class="ex-row-detail">
               <p>{{ row.episode.summary }}</p>
-              <div class="episode-meta">
-                <span>{{ row.channel.name }}</span>
-                <span>{{ row.user.name }}</span>
-                <span>{{ row.episode.created_at|datetime }}</span>
+              <div class="ex-row-detail-grid">
+                <div class="ex-field"><span class="ex-field-label">Channel</span><span>{{ row.channel.name }}</span></div>
+                <div class="ex-field"><span class="ex-field-label">User</span><span>{{ row.user.name }}</span></div>
+                <div class="ex-field"><span class="ex-field-label">Tools</span><span>{{ row.tools_label }}</span></div>
+                <div class="ex-field"><span class="ex-field-label">Artifacts</span><span>{{ row.artifacts_label }}</span></div>
+                <div class="ex-field"><span class="ex-field-label">Sources</span><span>{{ row.source_refs_label }}</span></div>
+                {% if row.task %}<div class="ex-field"><span class="ex-field-label">Task</span><a href="{{ '/tasks' if dashboard_is_admin else '/me/tasks' }}/{{ row.task.id }}">Open task</a></div>{% endif %}
               </div>
             </div>
-            <dl class="episode-stats">
-              <div>
-                <dt>Tools</dt>
-                <dd>{{ row.tools_label }}</dd>
-              </div>
-              <div>
-                <dt>Artifacts</dt>
-                <dd>{{ row.artifacts_label }}</dd>
-              </div>
-              <div>
-                <dt>Sources</dt>
-                <dd>{{ row.source_refs_label }}</dd>
-              </div>
-            </dl>
-          </article>
+          </details>
         {% else %}
           <p class="empty attention-empty">No episodes match these filters.</p>
         {% endfor %}

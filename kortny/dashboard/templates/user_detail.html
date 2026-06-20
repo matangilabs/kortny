@@ -62,7 +62,7 @@
         <caption>Recent tasks for this user.</caption>
         <thead>
           <tr>
-            <th>Created</th>
+            <th class="nowrap">Created</th>
             <th>Channel</th>
             <th>Status</th>
             <th>Request</th>
@@ -75,7 +75,7 @@
         <tbody>
           {% for row in detail.tasks %}
             <tr>
-              <td>{{ row.task.created_at|datetime }}</td>
+              <td class="nowrap">{{ row.task.created_at|datetime }}</td>
               <td>
                 <span class="identity-name">{{ row.channel.name }}</span>
                 {% if row.channel.secondary %}<span class="identity-id">{{ row.channel.secondary }}</span>{% endif %}
@@ -105,7 +105,7 @@
         <caption>Recent LLM usage for this user.</caption>
         <thead>
           <tr>
-            <th>Created</th>
+            <th class="nowrap">Created</th>
             <th>Provider</th>
             <th>Model</th>
             <th>Tier</th>
@@ -118,7 +118,7 @@
         <tbody>
           {% for usage in detail.usage %}
             <tr>
-              <td>{{ usage.created_at|datetime }}</td>
+              <td class="nowrap">{{ usage.created_at|datetime }}</td>
               <td>{{ usage.provider.value }}</td>
               <td>{{ usage.model }}</td>
               <td>{{ usage.model_tier or "-" }}</td>
@@ -145,7 +145,7 @@
         <caption>Artifacts created by this user.</caption>
         <thead>
           <tr>
-            <th>Created</th>
+            <th class="nowrap">Created</th>
             <th>Filename</th>
             <th>MIME</th>
             <th class="num">Bytes</th>
@@ -156,7 +156,7 @@
         <tbody>
           {% for row in detail.artifacts %}
             <tr>
-              <td>{{ row.artifact.created_at|datetime }}</td>
+              <td class="nowrap">{{ row.artifact.created_at|datetime }}</td>
               <td>{{ row.artifact.filename }}</td>
               <td>{{ row.artifact.mime_type or "-" }}</td>
               <td class="num">{{ row.artifact.size_bytes|number }}</td>

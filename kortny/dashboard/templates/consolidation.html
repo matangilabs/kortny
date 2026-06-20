@@ -7,7 +7,7 @@
   <section class="page-heading">
     <div>
       <h1>Consolidation</h1>
-      <p>Sleep-time memory runs: episode promotion, candidate adjudication, duplicate merge, aging, fact reconciliation, and hygiene.</p>
+      <p>How Kortny turns recent activity into lasting memory. Each run distills the day's tasks and observations into durable facts, merges duplicates, and files away what changed.</p>
     </div>
   </section>
 
@@ -18,7 +18,7 @@
       <span>Total runs</span>
       <strong>{{ consolidation.total_runs }}</strong>
     </div>
-    <div class="card metric-card">
+    <div class="card metric-card metric-stamp">
       <span>Last run</span>
       <strong>{{ consolidation.last_run_at.strftime('%Y-%m-%d %H:%M UTC') if consolidation.last_run_at else 'never' }}</strong>
     </div>
@@ -44,18 +44,30 @@
               </div>
               <span class="run-card-cost">{{ run.cost_label }}</span>
             </div>
-            <dl class="run-stats">
-              <div><dt>Promoted</dt><dd>{{ run.promoted }}</dd></div>
-              <div><dt>Updated</dt><dd>{{ run.updated }}</dd></div>
-              <div><dt>Merged</dt><dd>{{ run.merged }}</dd></div>
-              <div><dt>Invalidated</dt><dd>{{ run.invalidated }}</dd></div>
-              <div><dt>Archived</dt><dd>{{ run.archived }}</dd></div>
-              <div><dt>Purged obs.</dt><dd>{{ run.purged_observations }}</dd></div>
-              <div><dt>Profiles</dt><dd>{{ run.profiles_refreshed }}</dd></div>
-              <div><dt>Style cards</dt><dd>{{ run.style_cards_derived }}</dd></div>
-              <div><dt>Embedded</dt><dd>{{ run.embedded }}</dd></div>
-              <div><dt>Conflicts</dt><dd>{{ run.conflict_count }}</dd></div>
-            </dl>
+            {% set counters = [
+              ('promoted', run.promoted, 'New facts added to long-term memory'),
+              ('updated', run.updated, 'Existing facts revised with newer information'),
+              ('merged', run.merged, 'Duplicate facts combined into one'),
+              ('invalidated', run.invalidated, 'Facts marked no longer true'),
+              ('archived', run.archived, 'Old facts retired from active memory'),
+              ('purged obs.', run.purged_observations, 'Raw observations deleted after processing'),
+              ('profiles', run.profiles_refreshed, 'Channel profiles refreshed'),
+              ('style cards', run.style_cards_derived, 'Channel writing-style cards derived'),
+              ('embedded', run.embedded, 'Items indexed for semantic search'),
+              ('conflicts', run.conflict_count, 'Contradictions with confirmed facts — review below'),
+            ] %}
+            {% set ns = namespace(any=false) %}
+            <div class="run-summary">
+              {% for label, val, hint in counters %}
+                {% if val %}
+                  {% set ns.any = true %}
+                  <span class="run-chip{% if label == 'conflicts' %} run-chip-warn{% endif %}" title="{{ hint }}"><strong>{{ val }}</strong> {{ label }}</span>
+                {% endif %}
+              {% endfor %}
+              {% if not ns.any %}
+                <span class="run-chip run-chip-muted">No memory changes this run</span>
+              {% endif %}
+            </div>
             {% if run.pass_errors %}
               <div class="run-errors">
                 {% for error in run.pass_errors %}

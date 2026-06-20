@@ -5301,8 +5301,13 @@ def _notice_tone(value: str) -> str:
 
 def _money(value: Decimal | int | float | str | None) -> str:
     if value is None:
-        return "$0.000000"
-    return f"${Decimal(value):,.6f}"
+        return "$0.00"
+    amount = Decimal(value)
+    if amount == 0:
+        return "$0.00"
+    if Decimal(0) < amount < Decimal("0.01"):
+        return "<$0.01"
+    return f"${amount:,.2f}"
 
 
 def _number(value: object) -> str:
@@ -5319,7 +5324,18 @@ def _number(value: object) -> str:
 def _datetime(value: object) -> str:
     if value is None:
         return "-"
-    return str(value).replace("+00:00", " UTC")
+    if isinstance(value, datetime):
+        dt: datetime | None = value
+    else:
+        text = str(value)
+        try:
+            dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            dt = None
+    if dt is None:
+        return str(value).replace("+00:00", " UTC")
+    suffix = " UTC" if dt.tzinfo is not None else ""
+    return f"{dt:%Y-%m-%d %H:%M}{suffix}"
 
 
 def _json(value: object) -> str:

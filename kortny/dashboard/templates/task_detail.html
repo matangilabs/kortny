@@ -35,7 +35,7 @@
 	    </dl>
 	    {% if detail.task.error %}
 	      <div class="notice notice-danger task-error-summary" role="alert">
-	        Failure details are recorded in the task payload and timeline.
+	        <strong>Error:</strong> {{ detail.task.error }}
 	      </div>
 	    {% endif %}
 	  </section>
@@ -61,15 +61,12 @@
 
   {% if detail.planned_trace.present %}
     {% set trace = detail.planned_trace %}
-    <details open>
-    <summary style="cursor:pointer; padding: 10px 0; font-weight: 700; font-size: 14px; color: var(--muted-foreground); list-style: none; display: flex; align-items: center; gap: 6px; margin-bottom: 4px;">
-      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex-shrink:0"><rect width="16" height="16" x="4" y="4" rx="2"/><rect width="6" height="6" x="9" y="9" rx="1"/></svg>
-      Legacy Planned Trace
-    </summary>
+    <details class="page-intro">
+    <summary>Planning trace (legacy runs only)</summary>
     <section class="planned-trace-panel" aria-labelledby="planned-trace-heading">
       <header class="planned-trace-header">
         <div>
-          <span class="detail-label">Legacy planned workflow</span>
+          <span class="detail-label">Planning trace (legacy runs only)</span>
           <h2 id="planned-trace-heading">Planned Trace</h2>
           <p>
             Branch execution, budgets, tool usage, and final-response handling for this task.
@@ -291,11 +288,11 @@
 
     <section class="card detail-section">
       <header>
-        <h2>Raw Agent Result</h2>
-        <p>Pre-humanizer task summary saved by the worker.</p>
+        <h2>Internal draft (before formatting)</h2>
+        <p>Internal draft saved by the worker before formatting.</p>
       </header>
       <div class="pre-wrap">
-        <button class="pre-copy-btn" type="button" aria-label="Copy raw agent result">
+        <button class="pre-copy-btn" type="button" aria-label="Copy internal draft">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
           <span class="pre-copy-label">Copy</span>
         </button>

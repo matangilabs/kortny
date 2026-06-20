@@ -82,7 +82,7 @@
       <span class="skill-card-byline" title="Source">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
         By {{ 'Kortny' if entry.provenance == 'kortny' else entry.provenance | replace('user:', '') }}
-        {% if entry.license_name %}<span class="badge badge-neutral" title="License">{{ entry.license_name }}</span>{% endif %}
+        {% if entry.license_name and entry.license_name|length <= 16 %}<span class="badge badge-neutral" title="License">{{ entry.license_name }}</span>{% endif %}
       </span>
       {% if entry.is_enabled %}
         <form class="skill-enable-form" method="post" action="/skills/{{ entry.skill_id }}/enable">
