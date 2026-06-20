@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import mimetypes
 import re
 import zipfile
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
 from html import unescape
 from html.parser import HTMLParser
 from io import BytesIO
@@ -21,10 +22,26 @@ from sqlalchemy.orm import Session
 
 from kortny.tools.types import JsonObject, JsonSchema, ToolResult
 
+logger = logging.getLogger(__name__)
+
 DEFAULT_MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024
 DEFAULT_EXTRACTED_TEXT_MAX_CHARS = 100_000
 SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 SLACK_FILE_ID_RE = re.compile(r"^F[A-Z0-9]+$")
+
+# Minimum character count to consider a PDF "text-bearing".  Scanned PDFs
+# typically extract 0 characters; native PDFs may have a handful of whitespace
+# characters; anything below this threshold triggers OCR when available.
+SCANNED_PDF_TEXT_THRESHOLD = 16
+
+# pypdfium2 render scale: ~150 DPI (72 DPI native × scale 2.0 ≈ 144 DPI).
+# High enough for legible OCR; low enough to keep PNG sizes manageable.
+PDF_RASTERIZE_SCALE = 2.0
+
+# A callable that takes a sequence of page-image PNG bytes and returns
+# transcribed Markdown.  Injected into SlackFileReadTool so the tool stays
+# testable without a real LLM.
+PdfPageOcr = Callable[[Sequence[bytes]], str]
 
 # Zip-bomb guard constants for Office files (.docx/.xlsx/.pptx are ZIP archives)
 MAX_OFFICE_UNCOMPRESSED_BYTES = 200 * 1024 * 1024  # 200 MB
@@ -86,6 +103,8 @@ class SlackFileReadTool:
         timeout: float = 30.0,
         transport: httpx.BaseTransport | None = None,
         session: Session | None = None,
+        pdf_ocr: PdfPageOcr | None = None,
+        pdf_ocr_max_pages: int = 20,
     ) -> None:
         if not bot_token.strip():
             raise ValueError("SLACK_BOT_TOKEN is required for slack_file_read")
@@ -102,6 +121,8 @@ class SlackFileReadTool:
         self.timeout = timeout
         self.transport = transport
         self._session: Session | None = session
+        self._pdf_ocr: PdfPageOcr | None = pdf_ocr
+        self._pdf_ocr_max_pages: int = pdf_ocr_max_pages
 
     def invoke(self, args: JsonObject) -> ToolResult:
         """Download the file, extract supported text, and return metadata."""
@@ -160,6 +181,16 @@ class SlackFileReadTool:
                 mime_type=mime_type,
                 max_chars=self.extracted_text_max_chars,
             )
+            # Scanned-PDF OCR path (HIG-279 slice 3b-2).
+            # A PDF whose text layer is empty/near-empty is likely a scan.
+            # If a vision-OCR callable is wired in, rasterize pages and
+            # transcribe them; the OCR result is what gets cached so
+            # subsequent reads are free (no re-rasterisation).
+            if _is_pdf(output_path, mime_type) and _is_scanned_pdf(extraction):
+                extraction = self._ocr_scanned_pdf(
+                    output_path,
+                    max_chars=self.extracted_text_max_chars,
+                )
             if self._session is not None:
                 from kortny.tools.file_extraction_cache import (
                     FileExtractionCacheRepository,
@@ -225,6 +256,77 @@ class SlackFileReadTool:
             mime_type=_optional_string(raw_file.get("mimetype")),
             size_bytes=_optional_int(raw_file.get("size")),
             download_url=download_url,
+        )
+
+    def _ocr_scanned_pdf(self, path: Path, *, max_chars: int) -> TextExtraction:
+        """Rasterize a scanned PDF and transcribe it via the injected OCR callable.
+
+        Returns a ``TextExtraction`` with ``backend="vision_ocr"`` on success,
+        or a recoverable unsupported extraction when OCR is not wired in or
+        rasterisation/transcription fails.  Never raises.
+        """
+        if self._pdf_ocr is None:
+            # No vision model configured — tell the agent how to fix it.
+            return TextExtraction(
+                supported=False,
+                recoverable=True,
+                backend="pdf_textlayer",
+                warnings=("scanned_pdf_needs_vision_model",),
+            )
+
+        try:
+            page_pngs = _rasterize_pdf_pages(path, max_pages=self._pdf_ocr_max_pages)
+        except Exception:
+            logger.exception("pdf_ocr: rasterisation failed for %s", path)
+            return TextExtraction(
+                supported=False,
+                recoverable=True,
+                backend="pdf_textlayer",
+                warnings=("pdf_ocr_rasterize_error",),
+            )
+
+        if not page_pngs:
+            return TextExtraction(
+                supported=False,
+                recoverable=True,
+                backend="pdf_textlayer",
+                warnings=("pdf_ocr_no_pages",),
+            )
+
+        try:
+            import pypdfium2  # noqa: PLC0415
+
+            doc = pypdfium2.PdfDocument(str(path))
+            total_pages = len(doc)
+            doc.close()
+        except Exception:
+            total_pages = len(page_pngs)
+
+        truncated_pages = total_pages > self._pdf_ocr_max_pages
+        actual_page_count = min(total_pages, self._pdf_ocr_max_pages)
+
+        try:
+            ocr_text = self._pdf_ocr(page_pngs)
+        except Exception:
+            logger.exception("pdf_ocr: transcription failed for %s", path)
+            return TextExtraction(
+                supported=False,
+                recoverable=True,
+                backend="pdf_textlayer",
+                warnings=("pdf_ocr_transcription_error",),
+            )
+
+        warnings: tuple[str, ...] = ()
+        if truncated_pages:
+            warnings = (f"pdf_ocr_truncated_at_{actual_page_count}_pages",)
+
+        text = ocr_text[:max_chars]
+        return TextExtraction(
+            supported=True,
+            text=text,
+            truncated=len(ocr_text) > max_chars,
+            backend="vision_ocr",
+            warnings=warnings,
         )
 
     def _download(self, url: str) -> tuple[bytes, str | None]:
@@ -483,6 +585,42 @@ def _extract_text(
             return bomb
         return _extract_pptx_text(path, max_chars=max_chars)
     return TextExtraction(supported=False)
+
+
+def _is_scanned_pdf(extraction: TextExtraction) -> bool:
+    """Return True if the extraction looks like it came from a scanned PDF.
+
+    A PDF whose text layer is empty or has fewer than SCANNED_PDF_TEXT_THRESHOLD
+    characters after stripping whitespace is treated as scanned/image-only.
+    """
+    text = extraction.text or ""
+    return len(text.strip()) < SCANNED_PDF_TEXT_THRESHOLD
+
+
+def _rasterize_pdf_pages(path: Path, *, max_pages: int) -> list[bytes]:
+    """Render up to *max_pages* pages of a PDF to PNG bytes.
+
+    Uses pypdfium2 at PDF_RASTERIZE_SCALE (≈150 DPI) for legible OCR output.
+    Returns a list of raw PNG bytes, one entry per rendered page.
+    """
+    import pypdfium2  # noqa: PLC0415
+
+    doc = pypdfium2.PdfDocument(str(path))
+    page_count = len(doc)
+    pages_to_render = min(page_count, max_pages)
+    result: list[bytes] = []
+    try:
+        for i in range(pages_to_render):
+            page = doc[i]
+            bitmap = page.render(scale=PDF_RASTERIZE_SCALE)
+            pil_image = bitmap.to_pil()
+            buf = BytesIO()
+            pil_image.save(buf, format="PNG")
+            result.append(buf.getvalue())
+            page.close()
+    finally:
+        doc.close()
+    return result
 
 
 def _extract_pdf_text(path: Path) -> str:

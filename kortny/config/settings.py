@@ -486,6 +486,12 @@ class Settings(BaseSettings):
         default="image/png,image/jpeg,image/webp",
         validation_alias="KORTNY_VISION_ALLOWED_IMAGE_MIMES",
     )
+    # Maximum number of pages to OCR when a scanned/image-only PDF is detected.
+    # Pages beyond this cap are skipped and a truncation warning is recorded.
+    pdf_ocr_max_pages: int = Field(
+        default=20,
+        validation_alias="KORTNY_PDF_OCR_MAX_PAGES",
+    )
 
     observability_enabled: bool = Field(
         default=True, validation_alias="OBSERVABILITY_ENABLED"

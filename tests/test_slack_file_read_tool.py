@@ -5,8 +5,8 @@ from typing import Any
 
 import httpx
 import pytest
-from reportlab.lib.pagesizes import letter  # type: ignore[import-untyped]
-from reportlab.pdfgen import canvas  # type: ignore[import-untyped]
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfgen import canvas
 
 from kortny.tools import SlackFileReadError, SlackFileReadTool
 

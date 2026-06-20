@@ -26,6 +26,7 @@ dependencies = [
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
     "pypdf>=6.13.3",
+    "pypdfium2>=5.10.1",
     "python-docx>=1.2.0",
     "python-dotenv>=1.0",
     "python-multipart>=0.0.32",
@@ -132,6 +133,16 @@ ignore_missing_imports = true
 [[tool.mypy.overrides]]
 # python-pptx ships no py.typed marker.
 module = ["pptx.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# pypdfium2 ships no py.typed marker (used for PDF rasterization / OCR).
+module = ["pypdfium2.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# reportlab ships no py.typed marker.
+module = ["reportlab.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

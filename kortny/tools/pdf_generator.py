@@ -10,10 +10,10 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from pypdf import PdfReader
-from reportlab.lib.pagesizes import letter  # type: ignore[import-untyped]
-from reportlab.lib.styles import getSampleStyleSheet  # type: ignore[import-untyped]
-from reportlab.lib.units import inch  # type: ignore[import-untyped]
-from reportlab.platypus import (  # type: ignore[import-untyped]
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.units import inch
+from reportlab.platypus import (
     Paragraph,
     SimpleDocTemplate,
     Spacer,

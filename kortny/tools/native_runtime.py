@@ -60,7 +60,7 @@ from kortny.tools.slack_channel_history import (
     ObservationChannelHistoryCache,
     SlackChannelHistoryTool,
 )
-from kortny.tools.slack_file_read import SlackFileReadTool
+from kortny.tools.slack_file_read import PdfPageOcr, SlackFileReadTool
 from kortny.tools.slack_identity_info import SlackChannelInfoTool, SlackUserInfoTool
 from kortny.tools.types import Tool
 from kortny.tools.web_search import WebSearchTool
@@ -202,7 +202,129 @@ def _build_slack_file_read_tool(context: NativeToolBuildContext) -> Tool:
         working_dir=context.working_dir,
         max_file_size_bytes=context.settings.slack_file_read_max_bytes,
         session=context.session,
+        pdf_ocr=_build_pdf_ocr_callable(context),
+        pdf_ocr_max_pages=context.settings.pdf_ocr_max_pages,
     )
+
+
+def _build_pdf_ocr_callable(
+    context: NativeToolBuildContext,
+) -> PdfPageOcr | None:
+    """Build the PDF OCR callable if a vision-capable model is configured.
+
+    Returns None when no vision model is available so the tool gracefully
+    falls back to the scanned_pdf_needs_vision_model warning path.
+
+    The returned callable batches page PNG bytes within
+    ``vision_max_images_per_request`` (default 5) so it never exceeds the
+    per-request image-count guard enforced inside ``LLMService.complete``.
+    """
+    from kortny.llm import ChatMessage, LLMService
+    from kortny.llm.litellm_catalog import model_supports_vision
+    from kortny.llm.routing import ModelRouter as _ModelRouter
+    from kortny.llm.routing import ModelRouteTier
+    from kortny.llm.runtime_config import (
+        create_provider_for_selection,
+        select_runtime_model,
+    )
+    from kortny.llm.types import ImagePart
+
+    settings = context.settings
+    session = context.session
+    task = context.task
+    task_service = context.task_service
+
+    # Resolve the vision-tier model the same way the coordinator does.
+    vision_route = _ModelRouter(settings).route_for_tier(
+        ModelRouteTier.vision,
+        reason="pdf_ocr (HIG-279 slice 3b-2)",
+    )
+
+    # Resolve through DB config so DB-overridden provider/model is respected.
+    runtime_selection = select_runtime_model(
+        session=session,
+        settings=settings,
+        installation_id=task.installation_id,
+        model_route=vision_route,
+    )
+    # After select_runtime_model the model may differ (DB override); use the
+    # resolved model and provider_kind for the vision-capability check.
+    resolved_model = runtime_selection.model.model
+    provider_kind = runtime_selection.model.provider_kind
+
+    if not model_supports_vision(provider_kind, resolved_model):
+        return None
+
+    # Build the provider now so the callable doesn't re-resolve on every call.
+    provider = create_provider_for_selection(
+        settings=settings, selection=runtime_selection
+    )
+    provider_name = runtime_selection.provider_name
+
+    batch_size = settings.vision_max_images_per_request
+
+    def pdf_ocr(page_pngs: Sequence[bytes]) -> str:
+        llm = LLMService(
+            session=session,
+            provider=provider,
+            provider_name=provider_name,
+            task_service=task_service,
+            model_route=runtime_selection.model_route,
+            settings=settings,
+        )
+
+        system_prompt = (
+            "You are a faithful document transcriber. "
+            "Convert the provided scanned page image(s) to Markdown, "
+            "preserving all headings, tables, lists, and reading order exactly. "
+            "Output only the transcription — no commentary, preamble, or meta-text."
+        )
+
+        parts: list[str] = []
+        page_list = list(page_pngs)
+        # Batch pages within the per-request image-count guard.
+        for batch_start in range(0, len(page_list), batch_size):
+            batch = page_list[batch_start : batch_start + batch_size]
+            images = tuple(
+                ImagePart(
+                    data=png,
+                    mime="image/png",
+                    source="pdf_page",
+                    alt=f"Page {batch_start + idx + 1}",
+                )
+                for idx, png in enumerate(batch)
+            )
+            messages = [
+                ChatMessage(role="system", content=system_prompt),
+                ChatMessage(
+                    role="user",
+                    content=(
+                        "Transcribe the scanned document page(s) shown "
+                        "in the attached image(s) to Markdown."
+                    ),
+                    images=images,
+                ),
+            ]
+            completion = llm.complete(
+                task_id=task.id,
+                messages=messages,
+                prompt_name="kortny.pdf_ocr",
+                prompt_source="code",
+            )
+            if completion.content:
+                # Label each batch so the agent can orient within long docs.
+                batch_end = batch_start + len(batch)
+                header = (
+                    f"## Pages {batch_start + 1}–{batch_end}\n\n"
+                    if len(page_list) > batch_size
+                    else ""
+                )
+                parts.append(header + completion.content)
+
+        return "\n\n".join(parts)
+
+    ocr_callable: PdfPageOcr = pdf_ocr
+    return ocr_callable
 
 
 def _build_describe_tools_tool(
