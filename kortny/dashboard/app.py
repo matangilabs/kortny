@@ -162,6 +162,7 @@ from kortny.llm.litellm_catalog import (
     model_candidate_for_identifier,
 )
 from kortny.llm.provider_config import (
+    CONFIG_TIERS,
     ENV_CREDENTIAL_SOURCE,
     SECRET_CREDENTIAL_SOURCE,
     bootstrap_llm_provider_config_from_env,
@@ -199,14 +200,7 @@ SESSION_DASHBOARD_INSTALLATION_ID_KEY = "dashboard_installation_id"
 SESSION_DASHBOARD_SLACK_USER_ID_KEY = "dashboard_slack_user_id"
 MODEL_PRICE_PER_MTOK_MIN = Decimal("0")
 MODEL_PRICE_PER_MTOK_MAX = Decimal("999999.999999")
-MODEL_TIER_VALUES = {
-    "cheap_fast",
-    "standard",
-    "analysis",
-    "document",
-    "high_reasoning",
-    "humanizer",
-}
+MODEL_TIER_VALUES: frozenset[str] = frozenset(tier.value for tier in CONFIG_TIERS)
 
 templates = Jinja2Templates(directory=TEMPLATE_DIR)
 

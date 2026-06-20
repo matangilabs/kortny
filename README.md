@@ -154,6 +154,7 @@ Worth knowing:
 - `KORTNY_PUBLIC_BASE_URL` + `KORTNY_PREVIEW_SIGNING_SECRET` enable shareable preview links for sandbox-built dashboards and sites.
 - `NETLIFY_AUTH_TOKEN` / `VERCEL_TOKEN` enable one-approval site deploys.
 - Change `DASHBOARD_PASSWORD` and `DASHBOARD_SESSION_SECRET` before exposing the dashboard beyond localhost (it binds to `127.0.0.1` by default).
+- Image understanding routes to a dedicated vision model. Set `LLM_VISION_MODEL` to a vision-capable model (a current Claude model or `openai/gpt-4o`); tasks with image uploads are routed to it automatically based on the uploaded file types. It falls back to `LLM_MODEL` when unset, and if neither is vision-capable an image request fails with a clear message instead of guessing.
 
 </details>
 

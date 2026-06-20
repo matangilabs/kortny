@@ -58,6 +58,9 @@ class Settings(BaseSettings):
     llm_humanizer_model: str | None = Field(
         default=None, validation_alias="LLM_HUMANIZER_MODEL"
     )
+    llm_vision_model: str | None = Field(
+        default=None, validation_alias="LLM_VISION_MODEL"
+    )
     llm_config_force_env: bool = Field(
         default=False, validation_alias="LLM_CONFIG_FORCE_ENV"
     )
@@ -461,6 +464,29 @@ class Settings(BaseSettings):
         validation_alias="SLACK_FILE_READ_MAX_BYTES",
     )
 
+    # --- Vision (HIG-279) ----------------------------------------------------
+    vision_enabled: bool = Field(
+        default=True,
+        validation_alias="KORTNY_VISION_ENABLED",
+    )
+    vision_max_images_per_request: int = Field(
+        default=5,
+        validation_alias="KORTNY_VISION_MAX_IMAGES_PER_REQUEST",
+    )
+    vision_max_image_bytes: int = Field(
+        default=10_485_760,  # 10 MB
+        validation_alias="KORTNY_VISION_MAX_IMAGE_BYTES",
+    )
+    vision_max_total_image_bytes: int = Field(
+        default=26_214_400,  # 25 MB
+        validation_alias="KORTNY_VISION_MAX_TOTAL_IMAGE_BYTES",
+    )
+    # Comma-separated list of allowed MIME types for image attachments.
+    vision_allowed_image_mimes: str = Field(
+        default="image/png,image/jpeg,image/webp",
+        validation_alias="KORTNY_VISION_ALLOWED_IMAGE_MIMES",
+    )
+
     observability_enabled: bool = Field(
         default=True, validation_alias="OBSERVABILITY_ENABLED"
     )
@@ -508,6 +534,7 @@ class Settings(BaseSettings):
         "llm_document_model",
         "llm_high_reasoning_model",
         "llm_humanizer_model",
+        "llm_vision_model",
         "otel_exporter_otlp_endpoint",
         "otel_exporter_otlp_headers",
         "langfuse_host",
@@ -557,6 +584,7 @@ class Settings(BaseSettings):
         "llm_document_model",
         "llm_high_reasoning_model",
         "llm_humanizer_model",
+        "llm_vision_model",
     )
     @classmethod
     def _strip_optional_model(cls, value: str | None) -> str | None:

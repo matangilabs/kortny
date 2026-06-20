@@ -59,6 +59,7 @@ from kortny.agent.idempotency import (
     PriorAttemptStatus,
     find_prior_attempt,
 )
+from kortny.agent.image_attachments import ImageAttachmentResolver
 from kortny.agent.planner import (
     ExecutionPlanner,
     make_fallback_recovery_plan,
@@ -351,6 +352,7 @@ class AgentCoordinator:
         trifecta_gate_enabled: bool = True,
         status_reporter: StatusReporter | None = None,
         agent_display_name: str = "Kortny",
+        image_resolver: ImageAttachmentResolver | None = None,
     ) -> None:
         if max_turns < 1:
             raise ValueError("max_turns must be at least 1")
@@ -403,6 +405,7 @@ class AgentCoordinator:
                 capability_overview=capability_overview,
                 embedding_index=embedding_index,
                 skill_direct_threshold=skill_direct_threshold,
+                image_resolver=image_resolver,
             )
             self.context_engine = DefaultContextEngine(self.context_assembler)
 
@@ -430,6 +433,7 @@ class AgentCoordinator:
         try:
             self.status_reporter.report(STATUS_GETTING_STARTED, phase=PHASE_STARTING)
             context_package = self._initial_context(task_obj)
+            self._arm_trifecta_if_images(task_obj, context_package)
             self._record_skill_ranking(task_obj, context_package)
             messages = [
                 self._personalize(message) for message in context_package.messages
@@ -2010,6 +2014,42 @@ class AgentCoordinator:
             tool_call_id=tool_call.id,
             tool=tool_call.name,
             step_id=step_id,
+        )
+
+    def _arm_trifecta_if_images(
+        self,
+        task_obj: Task,
+        package: ContextPackage,
+    ) -> None:
+        """Arm the trifecta gate when the context package carries attached images.
+
+        Images attached directly to the user message bypass the tool-result path
+        but may contain typographic prompt-injection (instructions rendered in
+        pixels). Arming here ensures any subsequent outward/write tool call is
+        escalated to user approval for the rest of the task (HIG-279 slice 2B).
+        Deterministic — no LLM; mirrors the initial_context arming for synthetic
+        tasks and the tool-result arming for web_search / slack_file_read.
+        """
+
+        has_images = any(getattr(m, "images", ()) for m in package.messages)
+        if not has_images:
+            return
+        state = self._trifecta_state(task_obj)
+        if not state.arm("attached_image"):
+            return
+        self._append_log(
+            task_obj,
+            TRIFECTA_GATE_MESSAGE,
+            {
+                "event": "armed",
+                "armed_by": "attached_image",
+            },
+        )
+        log_observation(
+            logger,
+            "trifecta_gate_armed",
+            task=task_obj,
+            armed_by="attached_image",
         )
 
     def _resolve_autonomy_level(self, task: Task) -> AutonomyLevel:

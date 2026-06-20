@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from kortny.agent.capabilities import CapabilityOverview, build_capability_overview
 from kortny.agent.coordinator import DEFAULT_SYSTEM_PROMPT, AgentRunResult
 from kortny.agent.execution import ExecutionGuardrailLimits
+from kortny.agent.image_attachments import SlackImageAttachmentResolver
 from kortny.agent.runtime import CustomAgentRuntime
 from kortny.agent.thread_context import ThreadTranscriptProvider
 from kortny.approvals import (
@@ -979,6 +980,7 @@ class AgentTaskExecutor:
             provider_name=provider_name,
             task_service=task_service,
             model_route=model_route,
+            settings=settings,
         )
 
     def _select_runtime_model(
@@ -1276,6 +1278,7 @@ class AgentTaskExecutor:
                 settings=settings, task=task, session=session
             ),
             agent_display_name=settings.agent_display_name,
+            image_resolver=self._build_image_resolver(settings),
         ).run(task)
 
     def _build_status_reporter(
@@ -1951,6 +1954,28 @@ class AgentTaskExecutor:
         if self.slack_client is not None and hasattr(self.slack_client, "files_info"):
             return self.slack_client
         return WebClient(token=settings.slack_bot_token)
+
+    def _build_image_resolver(
+        self, settings: Settings
+    ) -> SlackImageAttachmentResolver | None:
+        """Return a resolver for Slack image attachments, or None if disabled.
+
+        Returns ``None`` when vision is disabled so the context assembler
+        produces byte-identical output to pre-HIG-279 builds.
+        """
+        if not settings.vision_enabled:
+            return None
+        allowed_mimes = frozenset(
+            m.strip()
+            for m in settings.vision_allowed_image_mimes.split(",")
+            if m.strip()
+        )
+        return SlackImageAttachmentResolver(
+            client=self._build_slack_file_client(settings),
+            bot_token=settings.slack_bot_token,
+            max_image_bytes=settings.vision_max_image_bytes,
+            allowed_mimes=allowed_mimes,
+        )
 
     def _build_slack_identity_client(self, settings: Settings) -> Any:
         if self.slack_client is not None and (

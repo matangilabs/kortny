@@ -90,8 +90,8 @@ def test_env_bootstrap_seeds_provider_models_tiers_and_audit(
     assert result.created is True
     assert result.skipped_reason is None
     assert result.provider_account_id is not None
-    assert result.model_count == 5
-    assert result.tier_assignment_count == 6
+    assert result.model_count == 6
+    assert result.tier_assignment_count == 7
     assert provider is not None
     assert provider.provider_kind == "openrouter"
     assert provider.status == "active"
@@ -104,6 +104,7 @@ def test_env_bootstrap_seeds_provider_models_tiers_and_audit(
         "anthropic/claude-sonnet-4.6",
         "anthropic/claude-opus-4.8",
         "openai/gpt-5.1",
+        "fallback/model",
     }
     assert all(model.source == "env_bootstrap" for model in models)
     assert all(model.is_enabled for model in models)
@@ -120,6 +121,9 @@ def test_env_bootstrap_seeds_provider_models_tiers_and_audit(
         # standard (it is a stylistic rewrite, the cheapest cognitive task), so
         # an unset LLM_HUMANIZER_MODEL seeds the cheap model, not standard.
         "humanizer": "deepseek/deepseek-v4-flash",
+        # HIG-279: vision tier falls back to llm_model when LLM_VISION_MODEL is
+        # unset; in this test fixture that is "fallback/model".
+        "vision": "fallback/model",
     }
     assert audit is not None
     assert audit.action == "bootstrap"
@@ -588,6 +592,16 @@ def create_provider_model_assignment(
     )
     session.add(assignment)
     return catalog
+
+
+def test_config_tiers_includes_vision() -> None:
+    """CONFIG_TIERS must include the vision tier — regression guard for HIG-279."""
+    from kortny.llm.provider_config import CONFIG_TIERS
+    from kortny.llm.routing import ModelRouteTier
+
+    tier_values = {tier.value for tier in CONFIG_TIERS}
+    assert "vision" in tier_values
+    assert ModelRouteTier.vision in CONFIG_TIERS
 
 
 def build_settings(**overrides: Any) -> Settings:

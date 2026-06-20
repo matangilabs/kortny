@@ -1,13 +1,14 @@
 """Provider-neutral LLM types.
 
 These intentionally stay close to OpenAI/OpenRouter chat completion shapes so
-the same boundary can later be adapted to ADK with LiteLLM.
+the same boundary forwards cleanly through LiteLLM.
 """
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Protocol
 
@@ -24,6 +25,28 @@ class ToolCall:
 
 
 @dataclass(frozen=True, slots=True)
+class ImagePart:
+    """An image attached to a chat message (HIG-279 vision).
+
+    Carries raw bytes (never base64) so a ``ChatMessage`` is always log-safe;
+    base64 encoding happens only at the provider serialization boundary.
+    """
+
+    data: bytes = field(repr=False, compare=False)
+    mime: str
+    source: str  # short provenance label for traces/audit, e.g. "slack_file:F123" — never the bytes
+    alt: str | None = None  # optional caption; untrusted, never an instruction
+
+    @property
+    def byte_size(self) -> int:
+        return len(self.data)
+
+    @property
+    def sha256_prefix(self) -> str:
+        return hashlib.sha256(self.data).hexdigest()[:12]
+
+
+@dataclass(frozen=True, slots=True)
 class ChatMessage:
     """A provider-neutral chat message."""
 
@@ -31,6 +54,7 @@ class ChatMessage:
     content: str | None
     tool_call_id: str | None = None
     tool_calls: tuple[ToolCall, ...] = ()
+    images: tuple[ImagePart, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
