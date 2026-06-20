@@ -2145,8 +2145,13 @@ def test_dashboard_composio_page_sorts_connected_toolkits_first(
     response = test_client.get("/composio")
 
     assert response.status_code == 200
-    assert response.text.index("<h3>Notion</h3>") < response.text.index(
-        "<h3>GitHub</h3>"
+    # Connected toolkits now render in their own Connected tab panel (after the
+    # catalog grid), not pinned into the catalog grid.
+    assert response.text.index('data-composio-panel="connected"') < response.text.index(
+        "<h3>Notion</h3>"
+    )
+    assert response.text.index("<h3>GitHub</h3>") < response.text.index(
+        'data-composio-panel="connected"'
     )
 
 
@@ -2207,8 +2212,13 @@ def test_dashboard_composio_page_pins_connected_toolkits_missing_from_page(
     response = test_client.get("/composio")
 
     assert response.status_code == 200
-    assert response.text.index("<h3>Alpha Vantage</h3>") < response.text.index(
-        "<h3>GitHub</h3>"
+    # Connected toolkits render in the Connected tab panel; non-connected ones
+    # (GitHub) stay in the catalog grid that precedes it.
+    assert response.text.index('data-composio-panel="connected"') < response.text.index(
+        "<h3>Alpha Vantage</h3>"
+    )
+    assert response.text.index("<h3>GitHub</h3>") < response.text.index(
+        'data-composio-panel="connected"'
     )
     assert "Connected Apps" in response.text
     assert "Connected (1)" in response.text

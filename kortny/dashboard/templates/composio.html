@@ -121,58 +121,66 @@
 
     {% if catalog.toolkits %}
       {% set connected_toolkits = catalog.toolkits | selectattr('connected') | list %}
+      <div class="composio-toolbar">
+        <nav class="segmented-nav composio-tabs" role="tablist" aria-label="Composio view">
+          <button type="button" class="segmented-item active" data-composio-tab="catalog" role="tab" aria-selected="true">Catalog</button>
+          {% if connected_toolkits %}
+            <button type="button" class="segmented-item" data-composio-tab="connected" role="tab" aria-selected="false">Connected ({{ catalog.connected_toolkit_count|number }})</button>
+          {% endif %}
+        </nav>
+        <div class="composio-catalog-controls" aria-label="Catalog view controls">
+          <span class="catalog-result-count">
+            {% if catalog.total_items is not none %}
+              <span id="catalog-loaded-label">{{ catalog.visible_count|number }} shown of {{ catalog.total_items|number }}</span>
+            {% else %}
+              <span id="catalog-loaded-label">{{ catalog.visible_count|number }} shown</span>
+            {% endif %}
+          </span>
+          <nav class="segmented-nav catalog-view-switch" role="group" aria-label="Catalog layout">
+            <a class="segmented-item {{ 'active' if catalog_view == 'card' else '' }}" href="{{ catalog_card_view_url }}" aria-current="{{ 'true' if catalog_view == 'card' else 'false' }}" title="Card view">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></svg>
+              Cards
+            </a>
+            <a class="segmented-item {{ 'active' if catalog_view == 'list' else '' }}" href="{{ catalog_list_view_url }}" aria-current="{{ 'true' if catalog_view == 'list' else 'false' }}" title="List view">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+              List
+            </a>
+          </nav>
+        </div>
+      </div>
+
+      <div class="composio-tab-panel" data-composio-panel="catalog" role="tabpanel">
+        <div id="catalog-results" class="composio-catalog-results" data-view="{{ catalog_view }}">
+          {% for toolkit in catalog.toolkits if not toolkit.connected %}{{ toolkit_card(toolkit, detail_base_url) }}{% endfor %}
+        </div>
+        <div
+          id="catalog-load-state"
+          class="catalog-load-state"
+          data-next-url="{{ catalog_next_url or '' }}"
+          data-total-items="{{ catalog.total_items if catalog.total_items is not none else '' }}"
+          data-view="{{ catalog_view }}"
+          aria-live="polite"
+        >
+          <span class="catalog-load-status">
+            {% if catalog_next_url %}
+              Loading more integrations
+            {% else %}
+              All integrations loaded
+            {% endif %}
+          </span>
+          {% if catalog_next_url %}
+            <a class="btn-ghost catalog-load-fallback" href="{{ catalog_next_url }}">Load more</a>
+          {% endif %}
+        </div>
+      </div>
+
       {% if connected_toolkits %}
-        <div class="section-header-row">
-          <div>
-            <h2>Connected ({{ catalog.connected_toolkit_count|number }})</h2>
-            <p>Apps with a live account Kortny can use.</p>
+        <div class="composio-tab-panel" data-composio-panel="connected" role="tabpanel" hidden>
+          <div class="composio-catalog-results composio-connected-grid" data-view="card">
+            {% for toolkit in connected_toolkits %}{{ toolkit_card(toolkit, detail_base_url) }}{% endfor %}
           </div>
         </div>
-        <div class="composio-catalog-results composio-connected-grid" data-view="card">
-          {% for toolkit in connected_toolkits %}{{ toolkit_card(toolkit, detail_base_url) }}{% endfor %}
-        </div>
       {% endif %}
-      <div class="section-header-row">
-        <div>
-          <h2>Browse catalog</h2>
-          <p>Search and connect from the full Composio catalog.</p>
-        </div>
-      </div>
-      <div class="catalog-view-toolbar" aria-label="Catalog view controls">
-        <div class="catalog-result-count">
-          {% if catalog.total_items is not none %}
-            <span id="catalog-loaded-label">{{ catalog.visible_count|number }} shown of {{ catalog.total_items|number }}</span>
-          {% else %}
-            <span id="catalog-loaded-label">{{ catalog.visible_count|number }} shown</span>
-          {% endif %}
-        </div>
-        <div class="segmented-control catalog-view-switch" role="group" aria-label="Catalog layout">
-          <a class="segmented-item {{ 'active' if catalog_view == 'card' else '' }}" href="{{ catalog_card_view_url }}" aria-current="{{ 'true' if catalog_view == 'card' else 'false' }}">Cards</a>
-          <a class="segmented-item {{ 'active' if catalog_view == 'list' else '' }}" href="{{ catalog_list_view_url }}" aria-current="{{ 'true' if catalog_view == 'list' else 'false' }}">List</a>
-        </div>
-      </div>
-      <div id="catalog-results" class="composio-catalog-results" data-view="{{ catalog_view }}">
-        {% for toolkit in catalog.toolkits if not toolkit.connected %}{{ toolkit_card(toolkit, detail_base_url) }}{% endfor %}
-      </div>
-      <div
-        id="catalog-load-state"
-        class="catalog-load-state"
-        data-next-url="{{ catalog_next_url or '' }}"
-        data-total-items="{{ catalog.total_items if catalog.total_items is not none else '' }}"
-        data-view="{{ catalog_view }}"
-        aria-live="polite"
-      >
-        <span class="catalog-load-status">
-          {% if catalog_next_url %}
-            Loading more integrations
-          {% else %}
-            All integrations loaded
-          {% endif %}
-        </span>
-        {% if catalog_next_url %}
-          <a class="btn-ghost catalog-load-fallback" href="{{ catalog_next_url }}">Load more</a>
-        {% endif %}
-      </div>
     {% elif catalog.configured and catalog.enabled and not catalog.error %}
       <p class="empty-state">No Composio toolkits matched the current search.</p>
     {% else %}
@@ -185,6 +193,33 @@
 
   <script>
     (() => {
+      // Catalog / Connected tabs (client-side; Catalog is the default panel).
+      const tabBar = document.querySelector(".composio-tabs");
+      if (tabBar) {
+        const tabs = tabBar.querySelectorAll("[data-composio-tab]");
+        const panels = document.querySelectorAll("[data-composio-panel]");
+        const catalogControls = document.querySelector(".composio-catalog-controls");
+        tabBar.addEventListener("click", (event) => {
+          const btn = event.target.closest("[data-composio-tab]");
+          if (!btn) {
+            return;
+          }
+          const key = btn.dataset.composioTab;
+          tabs.forEach((tab) => {
+            const active = tab === btn;
+            tab.classList.toggle("active", active);
+            tab.setAttribute("aria-selected", active ? "true" : "false");
+          });
+          panels.forEach((panel) => {
+            panel.hidden = panel.dataset.composioPanel !== key;
+          });
+          // The result count + Cards/List switch only apply to the catalog tab.
+          if (catalogControls) {
+            catalogControls.hidden = key !== "catalog";
+          }
+        });
+      }
+
       const results = document.getElementById("catalog-results");
       const loadState = document.getElementById("catalog-load-state");
       if (!results || !loadState) {

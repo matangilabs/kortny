@@ -11859,3 +11859,53 @@ details[open] > summary::after {
 .dash-v2 .run-card .run-errors {
   flex-basis: 100%;
 }
+
+/* ---- Composio Catalog / Connected tabs + catalog controls on one row ---- */
+.dash-v2 .composio-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  /* the .composio-directory grid gap already spaces this from the panel */
+  margin-bottom: 0;
+}
+.dash-v2 .composio-tabs {
+  margin-bottom: 0;
+}
+.dash-v2 .composio-tabs .segmented-item {
+  border: 0;
+  background: transparent;
+  font-family: inherit;
+  font-size: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+/* re-apply the active pill (the reset above outranks the base .active rule) */
+.dash-v2 .composio-tabs .segmented-item.active {
+  background: var(--card);
+  color: var(--foreground);
+}
+.dash-v2 .composio-catalog-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.dash-v2 .composio-catalog-controls[hidden] {
+  display: none;
+}
+.dash-v2 .catalog-result-count {
+  color: var(--muted-foreground);
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+.dash-v2 .catalog-view-switch .segmented-item {
+  gap: 5px;
+}
+.dash-v2 .catalog-view-switch .segmented-item svg {
+  width: 14px;
+  height: 14px;
+}
+.dash-v2 .composio-tab-panel[hidden] {
+  display: none;
+}
