@@ -201,6 +201,7 @@ def _build_slack_file_read_tool(context: NativeToolBuildContext) -> Tool:
         bot_token=context.settings.slack_bot_token,
         working_dir=context.working_dir,
         max_file_size_bytes=context.settings.slack_file_read_max_bytes,
+        session=context.session,
     )
 
 

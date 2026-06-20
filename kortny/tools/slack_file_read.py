@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import mimetypes
 import re
 import zipfile
@@ -16,6 +17,7 @@ from urllib.parse import unquote, urlparse
 import httpx
 from pypdf import PdfReader
 from slack_sdk.errors import SlackApiError
+from sqlalchemy.orm import Session
 
 from kortny.tools.types import JsonObject, JsonSchema, ToolResult
 
@@ -83,6 +85,7 @@ class SlackFileReadTool:
         extracted_text_max_chars: int = DEFAULT_EXTRACTED_TEXT_MAX_CHARS,
         timeout: float = 30.0,
         transport: httpx.BaseTransport | None = None,
+        session: Session | None = None,
     ) -> None:
         if not bot_token.strip():
             raise ValueError("SLACK_BOT_TOKEN is required for slack_file_read")
@@ -98,6 +101,7 @@ class SlackFileReadTool:
         self.extracted_text_max_chars = extracted_text_max_chars
         self.timeout = timeout
         self.transport = transport
+        self._session: Session | None = session
 
     def invoke(self, args: JsonObject) -> ToolResult:
         """Download the file, extract supported text, and return metadata."""
@@ -137,12 +141,34 @@ class SlackFileReadTool:
         output_path = self.working_dir / filename
         output_path.write_bytes(content)
 
-        extraction = _extract_text(
-            output_path,
-            content=content,
-            mime_type=mime_type,
-            max_chars=self.extracted_text_max_chars,
-        )
+        content_sha256 = hashlib.sha256(content).hexdigest()
+        extraction_cache_status: str | None = None
+        extraction: TextExtraction | None = None
+
+        if self._session is not None:
+            from kortny.tools.file_extraction_cache import FileExtractionCacheRepository
+
+            repo = FileExtractionCacheRepository(self._session)
+            extraction = repo.get(content_sha256)
+            if extraction is not None:
+                extraction_cache_status = "hit"
+
+        if extraction is None:
+            extraction = _extract_text(
+                output_path,
+                content=content,
+                mime_type=mime_type,
+                max_chars=self.extracted_text_max_chars,
+            )
+            if self._session is not None:
+                from kortny.tools.file_extraction_cache import (
+                    FileExtractionCacheRepository,
+                )
+
+                repo = FileExtractionCacheRepository(self._session)
+                repo.put(content_sha256, extraction, byte_size=len(content))
+                extraction_cache_status = "miss"
+
         output: JsonObject = {
             "file_id": metadata.file_id,
             "filename": filename,
@@ -158,6 +184,8 @@ class SlackFileReadTool:
             output["extracted_text_truncated"] = extraction.truncated
         if extraction.warnings:
             output["warnings"] = list(extraction.warnings)
+        if extraction_cache_status is not None:
+            output["extraction_cache"] = extraction_cache_status
 
         return ToolResult(output=output)
 
