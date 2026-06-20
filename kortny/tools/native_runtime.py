@@ -5,7 +5,10 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from kortny.documents.critique import DocumentVisualCritic
 
 from sqlalchemy.orm import Session
 
@@ -171,6 +174,137 @@ def _build_pdf_generator_tool(context: NativeToolBuildContext) -> Tool:
     )
 
 
+def _build_document_visual_critic(
+    context: NativeToolBuildContext,
+) -> DocumentVisualCritic | None:
+    """Build the document visual-critic callable (HIG-244 VLM critic).
+
+    Returns None when:
+    - No vision-capable model is configured, or
+    - ``doc_visual_critic_enabled`` is False.
+
+    The returned callable takes ``Sequence[bytes]`` (page PNGs) and returns a
+    :class:`~kortny.documents.critique.VisualCritique`.  Pages are batched
+    within ``vision_max_images_per_request``.  Multi-batch results are merged:
+    issues from all batches are combined; overall_score is the minimum across
+    batches (most conservative).
+    """
+    from kortny.documents.critique import (  # noqa: PLC0415
+        VisualCritique,
+        VisualIssue,
+    )
+    from kortny.llm import ChatMessage, LLMService  # noqa: PLC0415
+    from kortny.llm.litellm_catalog import model_supports_vision  # noqa: PLC0415
+    from kortny.llm.routing import ModelRouter as _ModelRouter  # noqa: PLC0415
+    from kortny.llm.routing import ModelRouteTier  # noqa: PLC0415
+    from kortny.llm.runtime_config import (  # noqa: PLC0415
+        create_provider_for_selection,
+        select_runtime_model,
+    )
+    from kortny.llm.types import ImagePart  # noqa: PLC0415
+
+    settings = context.settings
+    if not settings.doc_visual_critic_enabled:
+        return None
+
+    session = context.session
+    task = context.task
+    task_service = context.task_service
+
+    vision_route = _ModelRouter(settings).route_for_tier(
+        ModelRouteTier.vision,
+        reason="document_visual_critic (HIG-244)",
+    )
+    runtime_selection = select_runtime_model(
+        session=session,
+        settings=settings,
+        installation_id=task.installation_id,
+        model_route=vision_route,
+    )
+    resolved_model = runtime_selection.model.model
+    provider_kind = runtime_selection.model.provider_kind
+
+    if not model_supports_vision(provider_kind, resolved_model):
+        return None
+
+    provider = create_provider_for_selection(
+        settings=settings, selection=runtime_selection
+    )
+    provider_name = runtime_selection.provider_name
+    batch_size = settings.vision_max_images_per_request
+
+    _CRITIQUE_SYSTEM = (
+        "You are a meticulous document-design reviewer. "
+        "You will be shown rendered page images of a document. "
+        "Score the overall visual quality 0-10 (10 = flawless, publication-ready; "
+        "0 = completely broken layout). "
+        "List concrete visual defects: overflowing text/elements, misalignment, "
+        "unlabelled charts or axes, cramped or excessive whitespace, low contrast, "
+        "weak visual hierarchy, typographic issues (wrong size, poor readability). "
+        "Judge the RENDERED appearance, not the correctness of the content. "
+        "Respond ONLY with valid JSON matching the provided schema."
+    )
+
+    def visual_critic(page_pngs: Sequence[bytes]) -> VisualCritique:
+        llm = LLMService(
+            session=session,
+            provider=provider,
+            provider_name=provider_name,
+            task_service=task_service,
+            model_route=runtime_selection.model_route,
+            settings=settings,
+        )
+
+        page_list = list(page_pngs)
+        all_issues: list[VisualIssue] = []
+        min_score: int = 10
+        last_summary = ""
+
+        for batch_start in range(0, len(page_list), batch_size):
+            batch = page_list[batch_start : batch_start + batch_size]
+            images = tuple(
+                ImagePart(
+                    data=png,
+                    mime="image/png",
+                    source="doc_page",
+                    alt=f"Page {batch_start + idx + 1}",
+                )
+                for idx, png in enumerate(batch)
+            )
+            messages = [
+                ChatMessage(role="system", content=_CRITIQUE_SYSTEM),
+                ChatMessage(
+                    role="user",
+                    content=(
+                        "Review the document page(s) shown. "
+                        "Provide a visual-quality critique as JSON."
+                    ),
+                    images=images,
+                ),
+            ]
+            completion = llm.complete(
+                task_id=task.id,
+                messages=messages,
+                response_format={"type": "json_object"},
+                prompt_name="kortny.document_visual_critic",
+                prompt_source="code",
+            )
+            if completion.content:
+                batch_critique = VisualCritique.model_validate_json(completion.content)
+                all_issues.extend(batch_critique.issues)
+                min_score = min(min_score, batch_critique.overall_score)
+                last_summary = batch_critique.summary
+
+        return VisualCritique(
+            overall_score=min_score,
+            summary=last_summary,
+            issues=all_issues,
+        )
+
+    critic: DocumentVisualCritic = visual_critic
+    return critic
+
+
 def _build_document_studio_tool(context: NativeToolBuildContext) -> Tool:
     raw_paths = context.settings.document_font_paths
     font_paths = tuple(p for p in raw_paths.split(":") if p)
@@ -181,6 +315,8 @@ def _build_document_studio_tool(context: NativeToolBuildContext) -> Tool:
         task_id=context.task.id,
         task_service=context.task_service,
         slack_client=context.slack_action_client,
+        visual_critic=_build_document_visual_critic(context),
+        visual_critic_max_pages=context.settings.doc_visual_critic_max_pages,
     )
 
 

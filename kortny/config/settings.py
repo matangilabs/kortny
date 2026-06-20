@@ -493,6 +493,16 @@ class Settings(BaseSettings):
         validation_alias="KORTNY_PDF_OCR_MAX_PAGES",
     )
 
+    # --- Document Studio VLM visual critic (HIG-244 slice 1) ------------------
+    doc_visual_critic_enabled: bool = Field(
+        default=False,
+        validation_alias="KORTNY_DOC_VISUAL_CRITIC_ENABLED",
+    )
+    doc_visual_critic_max_pages: int = Field(
+        default=8,
+        validation_alias="KORTNY_DOC_VISUAL_CRITIC_MAX_PAGES",
+    )
+
     observability_enabled: bool = Field(
         default=True, validation_alias="OBSERVABILITY_ENABLED"
     )
