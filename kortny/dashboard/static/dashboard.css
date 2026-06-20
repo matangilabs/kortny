@@ -11750,23 +11750,38 @@ details[open] > summary::after {
   white-space: nowrap;
 }
 
-/* ---- Witness candidates: flat divided rows (no card-on-card) + 2-line summary ---- */
-.dash-v2 .witness-list {
+/* ---- Expandable lists: flat divided rows (no card-on-card) across
+        Witness, Memory facts, Episodes, and the Knowledge graph ---- */
+.dash-v2 .witness-list,
+.dash-v2 .memory-fact-list,
+.dash-v2 .episode-list,
+.dash-v2 .graph-list {
   gap: 0;
 }
-.dash-v2 .witness-list .ex-row {
+.dash-v2 .witness-list > .ex-row,
+.dash-v2 .memory-fact-list > .ex-row,
+.dash-v2 .episode-list > .ex-row,
+.dash-v2 .graph-list > .ex-row {
   border: 0;
   border-radius: 0;
   border-bottom: 1px solid var(--border);
   background: transparent;
   overflow: visible;
 }
-.dash-v2 .witness-list .ex-row:last-child {
+.dash-v2 .witness-list > .ex-row:last-child,
+.dash-v2 .memory-fact-list > .ex-row:last-child,
+.dash-v2 .episode-list > .ex-row:last-child,
+.dash-v2 .graph-list > .ex-row:last-child {
   border-bottom: 0;
 }
-.dash-v2 .witness-list .ex-row[open] {
+.dash-v2 .witness-list > .ex-row[open],
+.dash-v2 .memory-fact-list > .ex-row[open],
+.dash-v2 .episode-list > .ex-row[open],
+.dash-v2 .graph-list > .ex-row[open] {
   background: color-mix(in srgb, var(--muted) 45%, transparent);
 }
+
+/* witness keeps its 2-line summary treatment below */
 /* 2-line collapsed summary: head row (title + badges + meta) then full summary
    clamped to two lines so it no longer truncates after a few words */
 .dash-v2 .witness-summary-row {
@@ -11807,16 +11822,24 @@ details[open] > summary::after {
   margin-top: 14px;
 }
 
-/* ---- Consolidation recent runs: single compact line per run ---- */
+/* ---- Consolidation recent runs: single compact line per run, flat divided
+        list (no card-on-card inside the panel) ---- */
 .dash-v2 .run-list {
-  gap: 8px;
+  gap: 0;
 }
 .dash-v2 .run-card {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 6px 12px;
-  padding: 9px 14px;
+  padding: 10px 14px;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+}
+.dash-v2 .run-card:last-child {
+  border-bottom: 0;
 }
 .dash-v2 .run-card > time {
   flex: none;
