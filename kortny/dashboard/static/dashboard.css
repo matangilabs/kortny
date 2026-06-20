@@ -11974,3 +11974,98 @@ details[open] > summary::after {
 .dash-v2 .usage-window .data-toolbar-actions .btn-ghost {
   flex: 0 0 auto;
 }
+
+/* ---- Autonomy: workspace default as descriptive level cards ---- */
+/* the .detail-section body has no padding, so align the form with the header */
+.dash-v2 .autonomy-form {
+  padding: 14px 16px 16px;
+}
+.dash-v2 .autonomy-levels {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: stretch;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+@media (max-width: 820px) {
+  .dash-v2 .autonomy-levels {
+    grid-template-columns: 1fr;
+  }
+}
+.dash-v2 .autonomy-level-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--card);
+  cursor: pointer;
+  transition: border-color 150ms ease, background 150ms ease;
+}
+.dash-v2 .autonomy-level-card:hover {
+  border-color: color-mix(in srgb, var(--border) 45%, var(--accent));
+}
+.dash-v2 .autonomy-level-card:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-bg);
+}
+.dash-v2 .autonomy-level-card input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+.dash-v2 .autonomy-level-card:has(input:checked) {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+}
+.dash-v2 .autonomy-level-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.dash-v2 .autonomy-level-icon {
+  display: inline-flex;
+  flex: none;
+  color: var(--muted-foreground);
+}
+.dash-v2 .autonomy-level-icon svg {
+  width: 17px;
+  height: 17px;
+}
+.dash-v2 .autonomy-level-card:has(input:checked) .autonomy-level-icon {
+  color: var(--accent-strong);
+}
+.dash-v2 .autonomy-level-name {
+  margin-right: auto;
+  font-size: 13.5px;
+  font-weight: 650;
+  color: var(--foreground);
+}
+.dash-v2 .autonomy-level-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  opacity: 0;
+  transform: scale(0.7);
+  transition: opacity 120ms ease, transform 120ms ease;
+}
+.dash-v2 .autonomy-level-check svg {
+  width: 11px;
+  height: 11px;
+}
+.dash-v2 .autonomy-level-card:has(input:checked) .autonomy-level-check {
+  opacity: 1;
+  transform: scale(1);
+}
+.dash-v2 .autonomy-level-desc {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--muted-foreground);
+}
