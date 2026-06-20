@@ -108,7 +108,10 @@
               {% if row.candidate.automation_kind %}
                 <span class="badge badge-neutral">{{ row.candidate.automation_kind|replace("_", " ")|title }}</span>
               {% endif %}
-              <span class="badge badge-neutral">{{ row.confidence_label }} confidence</span>
+              <span class="badge badge-neutral badge-confidence" title="Confidence">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 14 4-4"></path><path d="M3.34 19a10 10 0 1 1 17.32 0"></path></svg>
+                {{ row.confidence_label }} confidence
+              </span>
               {% if (row.candidate.reinforcement_count or 1) > 1 %}
                 <span class="badge badge-accent" title="Times this opportunity has been re-observed across Witness scans">Observed {{ row.candidate.reinforcement_count }}x</span>
               {% endif %}

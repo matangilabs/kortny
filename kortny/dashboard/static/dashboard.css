@@ -11008,6 +11008,16 @@ details[open] > summary::after {
   height: 13px;
   opacity: 0.75;
 }
+.dash-v2 .badge-confidence {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.dash-v2 .badge-confidence svg {
+  width: 12px;
+  height: 12px;
+  opacity: 0.8;
+}
 /* push everything after a flagged element to the right */
 .dash-v2 .ex-row-spacer {
   margin-left: auto;
