@@ -11749,3 +11749,60 @@ details[open] > summary::after {
   font-weight: 500;
   white-space: nowrap;
 }
+
+/* ---- Witness candidates: flat divided rows (no card-on-card) + 2-line summary ---- */
+.dash-v2 .witness-list {
+  gap: 0;
+}
+.dash-v2 .witness-list .ex-row {
+  border: 0;
+  border-radius: 0;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  overflow: visible;
+}
+.dash-v2 .witness-list .ex-row:last-child {
+  border-bottom: 0;
+}
+.dash-v2 .witness-list .ex-row[open] {
+  background: color-mix(in srgb, var(--muted) 45%, transparent);
+}
+/* 2-line collapsed summary: head row (title + badges + meta) then full summary
+   clamped to two lines so it no longer truncates after a few words */
+.dash-v2 .witness-summary-row {
+  display: block;
+  position: relative;
+  padding: 12px 30px 12px 14px;
+}
+.dash-v2 .witness-summary-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.dash-v2 .witness-summary-head .ex-row-title {
+  white-space: normal;
+}
+.dash-v2 .witness-summary-head .ex-row-meta {
+  margin-left: auto;
+}
+.dash-v2 .witness-summary-body {
+  margin: 6px 0 0;
+  color: var(--muted-foreground);
+  font-size: 12.5px;
+  line-height: 1.45;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.dash-v2 .witness-summary-row::after {
+  position: absolute;
+  right: 14px;
+  top: 16px;
+  margin: 0;
+}
+/* draft DM sits above the actions now; give it clear separation */
+.dash-v2 .ex-row-detail > .witness-message-preview {
+  margin-top: 14px;
+}

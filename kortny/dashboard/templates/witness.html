@@ -100,41 +100,24 @@
     <div class="ex-list witness-list" role="list" aria-label="Witness opportunity candidates">
       {% for row in witness.rows %}
         <details class="ex-row" role="listitem">
-          <summary class="ex-row-summary">
-            <span class="ex-row-title">{{ row.candidate.title }}</span>
-            <span class="badge badge-{{ row.tone }}">{{ row.status_label }}</span>
-            <span class="badge badge-accent">{{ row.type_label }}</span>
-            {% if row.candidate.automation_kind %}
-              <span class="badge badge-neutral">{{ row.candidate.automation_kind|replace("_", " ")|title }}</span>
-            {% endif %}
-            <span class="badge badge-neutral">{{ row.confidence_label }} confidence</span>
-            {% if (row.candidate.reinforcement_count or 1) > 1 %}
-              <span class="badge badge-accent" title="Times this opportunity has been re-observed across Witness scans">Observed {{ row.candidate.reinforcement_count }}x</span>
-            {% endif %}
-            <span class="ex-row-summary-text">{{ row.candidate.summary }}</span>
-            <span class="ex-row-meta">Updated {{ row.candidate.updated_at|datetime }}</span>
+          <summary class="ex-row-summary witness-summary-row">
+            <div class="witness-summary-head">
+              <span class="ex-row-title">{{ row.candidate.title }}</span>
+              <span class="badge badge-{{ row.tone }}">{{ row.status_label }}</span>
+              <span class="badge badge-accent">{{ row.type_label }}</span>
+              {% if row.candidate.automation_kind %}
+                <span class="badge badge-neutral">{{ row.candidate.automation_kind|replace("_", " ")|title }}</span>
+              {% endif %}
+              <span class="badge badge-neutral">{{ row.confidence_label }} confidence</span>
+              {% if (row.candidate.reinforcement_count or 1) > 1 %}
+                <span class="badge badge-accent" title="Times this opportunity has been re-observed across Witness scans">Observed {{ row.candidate.reinforcement_count }}x</span>
+              {% endif %}
+              <span class="ex-row-meta">Updated {{ row.candidate.updated_at|datetime }}</span>
+            </div>
+            <p class="witness-summary-body">{{ row.candidate.summary }}</p>
           </summary>
           <div class="ex-row-detail">
             <p>{{ row.candidate.summary }}</p>
-            {% if row.candidate.suggested_message %}
-              <div class="witness-message-preview">
-                <span>Draft DM</span>
-                <p>{{ row.candidate.suggested_message }}</p>
-              </div>
-            {% endif %}
-            {% set last_action = row.candidate.feedback_json.get("last_action") if row.candidate.feedback_json else none %}
-            {% if last_action and last_action.action and last_action.action.startswith("autopilot_") %}
-              <div class="witness-message-preview">
-                <span>Autopilot</span>
-                <p>
-                  {{ last_action.action|replace("_", " ")|title }}
-                  {% if last_action.reason %}- {{ last_action.reason }}{% endif %}
-                  {% if last_action.generated_task_id %}
-                    <a href="/tasks/{{ last_action.generated_task_id }}">View task</a>
-                  {% endif %}
-                </p>
-              </div>
-            {% endif %}
             <div class="ex-row-detail-grid">
               <div class="ex-field">
                 <span class="ex-field-label">Scope</span>
@@ -209,6 +192,25 @@
                     <span>{{ evidence.snippet }}</span>
                   </div>
                 {% endfor %}
+              </div>
+            {% endif %}
+            {% if row.candidate.suggested_message %}
+              <div class="witness-message-preview">
+                <span>Draft DM</span>
+                <p>{{ row.candidate.suggested_message }}</p>
+              </div>
+            {% endif %}
+            {% set last_action = row.candidate.feedback_json.get("last_action") if row.candidate.feedback_json else none %}
+            {% if last_action and last_action.action and last_action.action.startswith("autopilot_") %}
+              <div class="witness-message-preview">
+                <span>Autopilot</span>
+                <p>
+                  {{ last_action.action|replace("_", " ")|title }}
+                  {% if last_action.reason %}- {{ last_action.reason }}{% endif %}
+                  {% if last_action.generated_task_id %}
+                    <a href="/tasks/{{ last_action.generated_task_id }}">View task</a>
+                  {% endif %}
+                </p>
               </div>
             {% endif %}
             <div class="ex-row-actions">
