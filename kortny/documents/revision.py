@@ -18,12 +18,18 @@ import hashlib
 import io
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from kortny.documents.critique import VisualCritique, VisualIssue
+from kortny.documents.critique import (
+    VisualCritique,
+    VisualIssue,
+    critique_and_fix,
+    validate_render,
+)
 from kortny.documents.ir import (
     Block,
     Callout,
@@ -560,16 +566,282 @@ def propose_overflow_patch(
 
 
 # ---------------------------------------------------------------------------
+# 6. Revision outcome types
+# ---------------------------------------------------------------------------
+
+RevisionStatus = Literal["accepted", "rejected", "noop"]
+
+
+class RevisionEvent(BaseModel):
+    kind: Literal[
+        "visual_revision_started",
+        "visual_revision_candidate_rejected",
+        "visual_revision_accepted",
+        "visual_revision_noop",
+    ]
+    detail: str
+    old_score: int | None = None
+    new_score: int | None = None
+
+
+class RevisionOutcome(BaseModel):
+    status: RevisionStatus
+    revised_spec: DocumentSpec | None = None
+    revised_pdf: bytes | None = Field(default=None, repr=False, exclude=True)
+    new_critique: VisualCritique | None = None
+    reason: str
+    events: list[RevisionEvent] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# 7. attempt_visual_revision
+# ---------------------------------------------------------------------------
+
+
+def attempt_visual_revision(
+    spec: DocumentSpec,
+    original_critique: VisualCritique,
+    *,
+    render: Callable[[DocumentSpec], bytes],
+    critique_fn: Callable[[bytes], VisualCritique | None],
+    trigger_below: int = 7,
+    min_improvement: int = 1,
+    original_pdf: bytes | None = None,
+) -> RevisionOutcome:
+    """Attempt a single deterministic visual-revision cycle.
+
+    Proposes an overflow patch, applies it, re-renders, re-critiques, and
+    accepts or rejects the candidate based on quality gates.
+
+    Never raises — all exceptions are caught and returned as a rejected
+    ``RevisionOutcome``.
+
+    Parameters
+    ----------
+    spec:
+        The ``DocumentSpec`` to revise.
+    original_critique:
+        The ``VisualCritique`` that motivated the revision attempt.
+    render:
+        Callable that renders a ``DocumentSpec`` to PDF bytes.  May raise.
+    critique_fn:
+        Callable that critiques PDF bytes, returning a ``VisualCritique`` or
+        ``None`` on failure.
+    trigger_below:
+        Only attempt revision when ``original_critique.overall_score`` is
+        strictly below this threshold.  Default 7.
+    min_improvement:
+        Minimum score improvement required to accept the candidate.  Default 1.
+    original_pdf:
+        Optional original PDF bytes for page→block mapping.  When omitted,
+        an empty page map is used.
+    """
+    started_event = RevisionEvent(
+        kind="visual_revision_started",
+        detail=f"Starting visual revision (score={original_critique.overall_score})",
+        old_score=original_critique.overall_score,
+    )
+    events: list[RevisionEvent] = [started_event]
+
+    try:
+        # Gate 1: only revise if score is below threshold
+        if original_critique.overall_score >= trigger_below:
+            noop_event = RevisionEvent(
+                kind="visual_revision_noop",
+                detail="score already acceptable",
+                old_score=original_critique.overall_score,
+            )
+            events.append(noop_event)
+            return RevisionOutcome(
+                status="noop",
+                reason="score already acceptable",
+                events=events,
+            )
+
+        # Build page map
+        page_map: dict[int, list[int]]
+        if original_pdf is not None:
+            page_map = map_pages_to_blocks(original_pdf, spec)
+        else:
+            page_map = {}
+
+        # Propose patch
+        patch = propose_overflow_patch(spec, original_critique, page_map)
+        if patch is None:
+            noop_event = RevisionEvent(
+                kind="visual_revision_noop",
+                detail="no actionable deterministic fix",
+                old_score=original_critique.overall_score,
+            )
+            events.append(noop_event)
+            return RevisionOutcome(
+                status="noop",
+                reason="no actionable deterministic fix",
+                events=events,
+            )
+
+        # Apply patch
+        try:
+            candidate = apply_patch(spec, patch)
+        except Exception as e:
+            reject_event = RevisionEvent(
+                kind="visual_revision_candidate_rejected",
+                detail=f"patch apply failed: {e}",
+                old_score=original_critique.overall_score,
+            )
+            events.append(reject_event)
+            return RevisionOutcome(
+                status="rejected",
+                reason=f"patch apply failed: {e}",
+                events=events,
+            )
+
+        # Gate a: structural errors
+        fix_result = critique_and_fix(candidate)
+        if fix_result.has_errors:
+            reject_event = RevisionEvent(
+                kind="visual_revision_candidate_rejected",
+                detail="candidate has structural errors",
+                old_score=original_critique.overall_score,
+            )
+            events.append(reject_event)
+            return RevisionOutcome(
+                status="rejected",
+                reason="candidate has structural errors",
+                events=events,
+            )
+
+        # Gate b: render succeeds
+        try:
+            candidate_pdf = render(candidate)
+        except Exception as e:
+            reject_event = RevisionEvent(
+                kind="visual_revision_candidate_rejected",
+                detail=f"candidate render failed: {e}",
+                old_score=original_critique.overall_score,
+            )
+            events.append(reject_event)
+            return RevisionOutcome(
+                status="rejected",
+                reason=f"candidate render failed: {e}",
+                events=events,
+            )
+
+        # Gate c: render validation — reject if any error-severity issue
+        render_issues = validate_render(candidate_pdf, "pdf")
+        error_render_issues = [i for i in render_issues if i.severity == "error"]
+        if error_render_issues:
+            reject_event = RevisionEvent(
+                kind="visual_revision_candidate_rejected",
+                detail="candidate failed render validation",
+                old_score=original_critique.overall_score,
+            )
+            events.append(reject_event)
+            return RevisionOutcome(
+                status="rejected",
+                reason="candidate failed render validation",
+                events=events,
+            )
+
+        # Gate d: content preservation
+        ok, reasons = content_preserved(spec, candidate)
+        if not ok:
+            reject_event = RevisionEvent(
+                kind="visual_revision_candidate_rejected",
+                detail=f"content not preserved: {'; '.join(reasons)}",
+                old_score=original_critique.overall_score,
+            )
+            events.append(reject_event)
+            return RevisionOutcome(
+                status="rejected",
+                reason=f"content not preserved: {'; '.join(reasons)}",
+                events=events,
+            )
+
+        # Gate e: critique candidate
+        new_critique = critique_fn(candidate_pdf)
+        if new_critique is None:
+            reject_event = RevisionEvent(
+                kind="visual_revision_candidate_rejected",
+                detail="could not critique candidate",
+                old_score=original_critique.overall_score,
+            )
+            events.append(reject_event)
+            return RevisionOutcome(
+                status="rejected",
+                reason="could not critique candidate",
+                events=events,
+            )
+
+        # Gate f: improvement check
+        # Count error-severity issues in both critiques (VisualIssue uses severity str)
+        # Note: VisualIssue.severity is Severity (Literal["error","warning","info"])
+        orig_error_count = len(
+            [i for i in original_critique.issues if i.severity == "error"]
+        )
+        new_error_count = len([i for i in new_critique.issues if i.severity == "error"])
+        score_improved = (
+            new_critique.overall_score
+            >= original_critique.overall_score + min_improvement
+        )
+        tiebreak_ok = (
+            new_critique.overall_score == original_critique.overall_score
+            and new_error_count < orig_error_count
+        )
+        if not (score_improved or tiebreak_ok):
+            reject_event = RevisionEvent(
+                kind="visual_revision_candidate_rejected",
+                detail=f"no improvement: old={original_critique.overall_score} new={new_critique.overall_score}",
+                old_score=original_critique.overall_score,
+                new_score=new_critique.overall_score,
+            )
+            events.append(reject_event)
+            return RevisionOutcome(
+                status="rejected",
+                reason=f"no improvement: old={original_critique.overall_score} new={new_critique.overall_score}",
+                events=events,
+            )
+
+        # All gates passed — accept
+        accept_event = RevisionEvent(
+            kind="visual_revision_accepted",
+            detail=f"accepted: old={original_critique.overall_score} new={new_critique.overall_score}",
+            old_score=original_critique.overall_score,
+            new_score=new_critique.overall_score,
+        )
+        events.append(accept_event)
+        return RevisionOutcome(
+            status="accepted",
+            revised_spec=candidate,
+            revised_pdf=candidate_pdf,
+            new_critique=new_critique,
+            reason=f"accepted: old={original_critique.overall_score} new={new_critique.overall_score}",
+            events=events,
+        )
+
+    except Exception as e:
+        return RevisionOutcome(
+            status="rejected",
+            reason=f"unexpected error: {e}",
+            events=events,
+        )
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
 __all__ = [
     "ContentFingerprint",
+    "RevisionEvent",
+    "RevisionOutcome",
     "RevisionOp",
+    "RevisionStatus",
     "SplitProse",
     "SplitTable",
     "VisualRevisionPatch",
     "apply_patch",
+    "attempt_visual_revision",
     "candidate_blocks_for_issue",
     "content_fingerprint",
     "content_preserved",

@@ -34,6 +34,7 @@ from kortny.documents.revision import (
     SplitTable,
     VisualRevisionPatch,
     apply_patch,
+    attempt_visual_revision,
     candidate_blocks_for_issue,
     content_fingerprint,
     content_preserved,
@@ -956,3 +957,321 @@ class TestProposeOverflowPatch:
         result = propose_overflow_patch(spec, critique, page_map)
         assert result is not None
         assert result.base_spec_hash == spec_hash(spec)
+
+
+# ---------------------------------------------------------------------------
+# attempt_visual_revision tests
+# ---------------------------------------------------------------------------
+
+
+def _overflow_spec() -> DocumentSpec:
+    """A spec with a large table that triggers an overflow patch."""
+    return DocumentSpec(
+        doc_kind=DocKind.report,
+        title="Overflow Doc",
+        blocks=[
+            Table(
+                type="table",
+                caption="Big Table",
+                columns=["A", "B"],
+                rows=[[f"r{i}a", f"r{i}b"] for i in range(20)],
+            )
+        ],
+    )
+
+
+def _overflow_critique(score: int = 5) -> VisualCritique:
+    """A VisualCritique with an overflow issue at score *score*."""
+    return VisualCritique(
+        overall_score=score,
+        summary="Overflow detected",
+        issues=[
+            VisualIssue(
+                page=1,
+                category="overflow",
+                severity="error",
+                message="table overflow",
+            )
+        ],
+    )
+
+
+def _good_pdf() -> bytes:
+    """Fake PDF bytes that pass validate_render (starts with %PDF)."""
+    return b"%PDF-1.4 fake pdf bytes for testing purposes only"
+
+
+def _better_pdf() -> bytes:
+    """Second distinct fake PDF bytes (distinct from _good_pdf to be sure)."""
+    return b"%PDF-1.4 revised candidate pdf for testing purposes"
+
+
+class TestAttemptVisualRevision:
+    def test_noop_score_acceptable(self) -> None:
+        """Score >= trigger_below → noop immediately."""
+        spec = _overflow_spec()
+        critique = _overflow_critique(score=7)  # trigger_below=7, score==7 → noop
+
+        outcome = attempt_visual_revision(
+            spec,
+            critique,
+            render=lambda s: _good_pdf(),
+            critique_fn=lambda pdf: _overflow_critique(score=8),
+            trigger_below=7,
+        )
+        assert outcome.status == "noop"
+        assert "acceptable" in outcome.reason
+
+    def test_noop_no_overflow_patch(self) -> None:
+        """No overflow issues → propose_overflow_patch returns None → noop."""
+        spec = DocumentSpec(
+            doc_kind=DocKind.report,
+            title="Clean Doc",
+            blocks=[Prose(type="prose", text="Short clean text.")],
+        )
+        critique = VisualCritique(
+            overall_score=4,
+            summary="Alignment issue only",
+            issues=[
+                VisualIssue(
+                    page=1,
+                    category="alignment",
+                    severity="warning",
+                    message="slight misalignment",
+                )
+            ],
+        )
+        outcome = attempt_visual_revision(
+            spec,
+            critique,
+            render=lambda s: _good_pdf(),
+            critique_fn=lambda pdf: VisualCritique(
+                overall_score=8, summary="Good", issues=[]
+            ),
+        )
+        assert outcome.status == "noop"
+        assert "no actionable" in outcome.reason
+
+    def test_happy_path_accepted(self) -> None:
+        """Overflow table spec → patch applied → render → better critique → accepted."""
+        spec = _overflow_spec()
+        critique = _overflow_critique(score=5)
+
+        call_count = [0]
+
+        def fake_render(s: DocumentSpec) -> bytes:
+            call_count[0] += 1
+            return _better_pdf()
+
+        def fake_critique(pdf: bytes) -> VisualCritique:
+            return VisualCritique(overall_score=8, summary="Better now", issues=[])
+
+        outcome = attempt_visual_revision(
+            spec,
+            critique,
+            render=fake_render,
+            critique_fn=fake_critique,
+        )
+        assert outcome.status == "accepted"
+        assert outcome.revised_spec is not None
+        # revised_spec should have more blocks (split table)
+        assert len(outcome.revised_spec.blocks) > len(spec.blocks)
+        assert outcome.revised_pdf == _better_pdf()
+        assert outcome.new_critique is not None
+        assert outcome.new_critique.overall_score == 8
+        kinds = [e.kind for e in outcome.events]
+        assert "visual_revision_accepted" in kinds
+
+    def test_reject_no_improvement_same_score_fewer_errors(self) -> None:
+        """Same score but fewer error-severity issues → accepted (tiebreak)."""
+        spec = _overflow_spec()
+        # original has 1 error-severity issue
+        critique = VisualCritique(
+            overall_score=5,
+            summary="Overflow",
+            issues=[
+                VisualIssue(
+                    page=1, category="overflow", severity="error", message="overflow"
+                ),
+            ],
+        )
+
+        def fake_critique(pdf: bytes) -> VisualCritique:
+            # Same score but 0 error-severity issues → tiebreak accepts
+            return VisualCritique(
+                overall_score=5,
+                summary="Better alignment but same score",
+                issues=[
+                    VisualIssue(
+                        page=1,
+                        category="alignment",
+                        severity="warning",
+                        message="minor",
+                    )
+                ],
+            )
+
+        outcome = attempt_visual_revision(
+            spec,
+            critique,
+            render=lambda s: _better_pdf(),
+            critique_fn=fake_critique,
+        )
+        assert outcome.status == "accepted"
+
+    def test_reject_no_improvement(self) -> None:
+        """Same score AND same number of error-severity issues → rejected."""
+        spec = _overflow_spec()
+        critique = VisualCritique(
+            overall_score=5,
+            summary="Overflow",
+            issues=[
+                VisualIssue(
+                    page=1, category="overflow", severity="error", message="overflow"
+                ),
+            ],
+        )
+
+        def fake_critique(pdf: bytes) -> VisualCritique:
+            # Same score, same number of errors → no improvement
+            return VisualCritique(
+                overall_score=5,
+                summary="Still bad",
+                issues=[
+                    VisualIssue(
+                        page=1,
+                        category="overflow",
+                        severity="error",
+                        message="still overflow",
+                    ),
+                ],
+            )
+
+        outcome = attempt_visual_revision(
+            spec,
+            critique,
+            render=lambda s: _better_pdf(),
+            critique_fn=fake_critique,
+        )
+        assert outcome.status == "rejected"
+        assert "no improvement" in outcome.reason
+
+    def test_reject_content_not_preserved(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Monkeypatched content_preserved returns False → rejected."""
+        import kortny.documents.revision as rev_mod
+
+        spec = _overflow_spec()
+        critique = _overflow_critique(score=5)
+
+        monkeypatch.setattr(
+            rev_mod,
+            "content_preserved",
+            lambda orig, revised: (False, ["missing atom: ('table_cell', 'r0a')"]),
+        )
+
+        outcome = attempt_visual_revision(
+            spec,
+            critique,
+            render=lambda s: _better_pdf(),
+            critique_fn=lambda pdf: VisualCritique(
+                overall_score=9, summary="Good", issues=[]
+            ),
+        )
+        assert outcome.status == "rejected"
+        assert "content not preserved" in outcome.reason
+
+    def test_reject_render_fail(self) -> None:
+        """Render raises → rejected, no exception propagates out."""
+        spec = _overflow_spec()
+        critique = _overflow_critique(score=5)
+
+        def exploding_render(s: DocumentSpec) -> bytes:
+            raise RuntimeError("renderer exploded")
+
+        outcome = attempt_visual_revision(
+            spec,
+            critique,
+            render=exploding_render,
+            critique_fn=lambda pdf: VisualCritique(
+                overall_score=9, summary="Good", issues=[]
+            ),
+        )
+        assert outcome.status == "rejected"
+        assert "render failed" in outcome.reason
+
+    def test_reject_validate_render_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """validate_render returns an error-severity issue → rejected."""
+        import kortny.documents.revision as rev_mod
+        from kortny.documents.critique import DocumentIssue
+
+        spec = _overflow_spec()
+        critique = _overflow_critique(score=5)
+
+        monkeypatch.setattr(
+            rev_mod,
+            "validate_render",
+            lambda data, fmt: [
+                DocumentIssue(
+                    code="invalid_pdf", severity="error", message="Not a PDF."
+                )
+            ],
+        )
+
+        outcome = attempt_visual_revision(
+            spec,
+            critique,
+            render=lambda s: _better_pdf(),
+            critique_fn=lambda pdf: VisualCritique(
+                overall_score=9, summary="Good", issues=[]
+            ),
+        )
+        assert outcome.status == "rejected"
+        assert "render validation" in outcome.reason
+
+    def test_events_noop_score(self) -> None:
+        """Noop (high score) path: events contain started + noop."""
+        spec = _overflow_spec()
+        critique = _overflow_critique(score=9)  # well above trigger_below=7
+
+        outcome = attempt_visual_revision(
+            spec,
+            critique,
+            render=lambda s: _good_pdf(),
+            critique_fn=lambda pdf: VisualCritique(
+                overall_score=9, summary="Good", issues=[]
+            ),
+        )
+        assert outcome.status == "noop"
+        kinds = [e.kind for e in outcome.events]
+        assert "visual_revision_started" in kinds
+        assert "visual_revision_noop" in kinds
+        # started event should have old_score set
+        started = next(e for e in outcome.events if e.kind == "visual_revision_started")
+        assert started.old_score == 9
+
+    def test_events_accepted(self) -> None:
+        """Accepted path: events contain started + accepted with old/new scores."""
+        spec = _overflow_spec()
+        critique = _overflow_critique(score=5)
+
+        outcome = attempt_visual_revision(
+            spec,
+            critique,
+            render=lambda s: _better_pdf(),
+            critique_fn=lambda pdf: VisualCritique(
+                overall_score=9, summary="Good", issues=[]
+            ),
+        )
+        assert outcome.status == "accepted"
+        kinds = [e.kind for e in outcome.events]
+        assert "visual_revision_started" in kinds
+        assert "visual_revision_accepted" in kinds
+        accepted = next(
+            e for e in outcome.events if e.kind == "visual_revision_accepted"
+        )
+        assert accepted.old_score == 5
+        assert accepted.new_score == 9
