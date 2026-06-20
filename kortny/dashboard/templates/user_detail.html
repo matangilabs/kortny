@@ -81,7 +81,7 @@
                 {% if row.channel.secondary %}<span class="identity-id">{{ row.channel.secondary }}</span>{% endif %}
               </td>
               <td><span class="badge status-{{ row.task.status.value }}">{{ row.task.status.value }}</span></td>
-              <td class="truncate-cell">{{ row.task.input }}</td>
+              <td class="truncate-cell" title="{{ row.task.input }}">{{ row.task.input }}</td>
               <td class="num">{{ row.usage_count|number }}</td>
               <td class="num">{{ row.artifact_count|number }}</td>
               <td class="num">{{ row.task.total_cost_usd|money }}</td>

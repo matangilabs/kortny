@@ -11909,3 +11909,12 @@ details[open] > summary::after {
 .dash-v2 .composio-tab-panel[hidden] {
   display: none;
 }
+
+/* ---- Table request cells: truncate to one line instead of wrapping ---- */
+.dash-v2 .table td.truncate-cell {
+  max-width: 360px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  overflow-wrap: normal;
+}
