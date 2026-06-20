@@ -13,6 +13,50 @@
   {% set toolbar = users_toolbar %}
   {% include "_data_toolbar.html" with context %}
 
+  <section class="summary-grid" aria-label="Users overview">
+    <div class="card metric-card metric-success">
+      <span>Active users</span>
+      <strong>{{ directory.users|length|number }}</strong>
+      <small>with activity in this window</small>
+    </div>
+    <div class="card metric-card">
+      <span>Total tasks</span>
+      <strong>{{ directory.total_tasks|number }}</strong>
+      <small>across all users</small>
+    </div>
+    <div class="card metric-card {{ 'metric-warning' if directory.total_failures else 'metric-success' }}">
+      <span>Failure rate</span>
+      <strong>{{ '%.1f'|format(directory.failure_rate * 100) }}%</strong>
+      <small>{{ directory.total_failures|number }} of {{ directory.total_tasks|number }} failed</small>
+    </div>
+    <div class="card metric-card">
+      <span>Total spend</span>
+      <strong>{{ directory.total_cost_usd|money }}</strong>
+      <small>LLM cost this window</small>
+    </div>
+  </section>
+
+  <section class="usage-charts-grid" aria-label="Users charts">
+    <article class="card usage-chart-card">
+      <header>
+        <h2>Tasks by User</h2>
+        <p>Per-user volume and reliability (failed share in red).</p>
+      </header>
+      <div class="usage-chart-body">
+        <div id="chart-user-tasks" class="usage-chart-canvas"></div>
+      </div>
+    </article>
+    <article class="card usage-chart-card">
+      <header>
+        <h2>Spend by User</h2>
+        <p>Cost concentration across users.</p>
+      </header>
+      <div class="usage-chart-body">
+        <div id="chart-user-cost" class="usage-chart-canvas"></div>
+      </div>
+    </article>
+  </section>
+
 	  <section class="card">
     <header>
       <h2>User Activity</h2>
@@ -57,4 +101,52 @@
       </table>
     </div>
   </section>
+
+  <script type="application/json" id="users-data">
+    {
+      "byUser": {
+        "labels": [{% for u in directory.users %}{{ u.user.name|tojson }}{% if not loop.last %}, {% endif %}{% endfor %}],
+        "cost": [{% for u in directory.users %}{{ u.total_cost_usd }}{% if not loop.last %}, {% endif %}{% endfor %}],
+        "succeeded": [{% for u in directory.users %}{{ u.task_count - u.failed_task_count }}{% if not loop.last %}, {% endif %}{% endfor %}],
+        "failed": [{% for u in directory.users %}{{ u.failed_task_count }}{% if not loop.last %}, {% endif %}{% endfor %}]
+      }
+    }
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/apexcharts@3.49.1/dist/apexcharts.min.js"></script>
+  <script src="{{ url_for('static', path='/charts.js') }}"></script>
+  <script>
+    (function () {
+      const dataEl = document.getElementById('users-data');
+      const KC = window.KortnyCharts;
+      if (!dataEl || !KC || typeof ApexCharts === 'undefined') return;
+      let DATA;
+      try { DATA = JSON.parse(dataEl.textContent); } catch (_e) { return; }
+      const p = KC.palette();
+      const { money, moneyPrecise, int, shortDate } = KC.fmt;
+      const base = () => KC.baseOptions(p);
+
+      KC.create(document.getElementById('chart-user-tasks'), Object.assign(base(), {
+        chart: Object.assign(base().chart, { type: 'bar', height: Math.max(220, DATA.byUser.labels.length * 34 + 60), stacked: true }),
+        series: [{ name: 'Succeeded', data: DATA.byUser.succeeded }, { name: 'Failed', data: DATA.byUser.failed }],
+        colors: [p.accent, p.danger],
+        plotOptions: { bar: { horizontal: true, borderRadius: 3, barHeight: '62%' } },
+        xaxis: { categories: DATA.byUser.labels, labels: { formatter: int }, axisBorder: { color: p.border }, axisTicks: { color: p.border } },
+        yaxis: { labels: { style: { colors: p.muted } } },
+        tooltip: Object.assign(base().tooltip, { y: { formatter: int } }),
+        legend: { position: 'top', horizontalAlign: 'right', labels: { colors: p.muted } },
+      }));
+
+      const u = KC.topN(DATA.byUser.labels, DATA.byUser.cost, 8);
+      KC.create(document.getElementById('chart-user-cost'), Object.assign(base(), {
+        chart: Object.assign(base().chart, { type: 'donut', height: 280 }),
+        series: u.values,
+        labels: u.labels,
+        colors: KC.categoricalColors(p),
+        stroke: { colors: [p.card], width: 2 },
+        legend: { position: 'bottom', fontSize: '12px', labels: { colors: p.muted }, itemMargin: { horizontal: 6, vertical: 2 } },
+        plotOptions: { pie: { donut: { size: '62%', labels: { show: true, total: { show: true, showAlways: true, label: 'Total', color: p.muted, formatter: (w) => money(w.globals.seriesTotals.reduce((a, b) => a + b, 0)) } } } } },
+        tooltip: Object.assign(base().tooltip, { y: { formatter: moneyPrecise } }),
+      }));
+    })();
+  </script>
 {% endblock %}

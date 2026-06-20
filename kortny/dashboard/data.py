@@ -437,6 +437,22 @@ class UserDirectory:
     end: datetime | None
     users: tuple[UserListItem, ...]
 
+    @property
+    def total_tasks(self) -> int:
+        return sum(u.task_count for u in self.users)
+
+    @property
+    def total_failures(self) -> int:
+        return sum(u.failed_task_count for u in self.users)
+
+    @property
+    def total_cost_usd(self) -> Decimal:
+        return sum((u.total_cost_usd for u in self.users), Decimal(0))
+
+    @property
+    def failure_rate(self) -> float:
+        return (self.total_failures / self.total_tasks) if self.total_tasks else 0.0
+
 
 @dataclass(frozen=True)
 class UserTaskRow:
