@@ -96,7 +96,9 @@
         </div>
       </dl>
       {% if toolkit.categories %}
-        <p class="integration-card-categories">{{ toolkit.categories[:3]|join(" / ") }}</p>
+        <div class="integration-card-tags">
+          {% for cat in toolkit.categories[:3] %}<span class="integration-tag">{{ cat }}</span>{% endfor %}
+        </div>
       {% endif %}
     </a>
   {% endmacro %}
