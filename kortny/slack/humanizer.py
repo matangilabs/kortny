@@ -845,6 +845,11 @@ def sanitize_humanized_response(text: str | None, *, fallback: str) -> str:
         return safe_fallback
     if _looks_like_humanizer_leak(normalized):
         return safe_fallback
+    # Defense-in-depth: if _json_message failed to extract a message string AND
+    # the normalized output still looks like a raw humanizer JSON blob (fenced or
+    # bare), fall back to the safe raw answer rather than posting JSON to Slack.
+    if message is None and _looks_like_raw_humanizer_json(normalized):
+        return safe_fallback
     if len(normalized) > MAX_HUMANIZED_CHARS:
         normalized = normalized[: MAX_HUMANIZED_CHARS - 1].rstrip() + "."
     return normalized
@@ -897,9 +902,53 @@ def strip_internal_response_preamble(text: str) -> str:
     return raw
 
 
+def _strip_json_code_fence(text: str) -> str:
+    """Strip a markdown code fence wrapper from JSON model output.
+
+    Some models return ``{"message":...}`` wrapped in a fenced code block even
+    when ``response_format=json_object`` is set. This helper removes the fence
+    so the inner JSON can be parsed normally.
+
+    Handles:
+    - ` ```json\\n{...}\\n``` `
+    - ` ```\\n{...}\\n``` `
+    - leading / trailing whitespace around the fence
+    - plain JSON with no fence (returned unchanged)
+    """
+
+    stripped = text.strip()
+    if not stripped.startswith("```"):
+        return text
+    lines = stripped.splitlines()
+    if len(lines) < 3:  # noqa: PLR2004
+        return text
+    # Remove the opening fence line (```json or ```)
+    inner_lines = lines[1:]
+    # Remove the closing ``` line (last non-empty line that is just ```)
+    if inner_lines and inner_lines[-1].strip() == "```":
+        inner_lines = inner_lines[:-1]
+    return "\n".join(inner_lines)
+
+
+def _looks_like_raw_humanizer_json(text: str) -> bool:
+    """Return True if text looks like a raw (possibly fenced) humanizer JSON blob.
+
+    Used as a defense-in-depth guard in ``sanitize_humanized_response``: if the
+    message parse returned None AND the normalized text still smells like the
+    raw ``{"message":...,"presentation":...}`` object, fall back to the safe
+    raw answer rather than posting the JSON blob to Slack.
+    """
+
+    stripped = _strip_json_code_fence(text).strip()
+    if not stripped.startswith("{"):
+        return False
+    lower = stripped.lower()
+    return '"message"' in lower or '"presentation"' in lower
+
+
 def _json_message(text: str) -> str | None:
     try:
-        payload = json.loads(text)
+        payload = json.loads(_strip_json_code_fence(text))
     except json.JSONDecodeError:
         return None
     if not isinstance(payload, dict):
@@ -920,7 +969,7 @@ def _parse_presentation_hint(text: str | None) -> PresentationHint | None:
     if text is None:
         return None
     try:
-        payload = json.loads(text)
+        payload = json.loads(_strip_json_code_fence(text))
     except json.JSONDecodeError:
         return None
     if not isinstance(payload, dict):
