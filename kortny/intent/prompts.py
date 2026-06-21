@@ -19,6 +19,7 @@ Return exactly one JSON object matching this schema:
   "response_depth": "quick_response" | "standard_tool_task" | "deep_workflow",
   "time_sensitivity": "interactive" | "relaxed",
   "toolkit_affinity": string[],
+  "needs_connection": string[],
   "primary_intent": {
     "type": "task_request" | "follow_up" | "memory_candidate" | "clarification" | "cancel_or_retry" | "third_person_reference" | "ambient_observation" | "ignore",
     "objective": string,
@@ -70,6 +71,8 @@ Time sensitivity (time_sensitivity):
 - relaxed: the user signals it can wait, framed as background, scheduled, digest, or "whenever you get a chance" work. Examples: "whenever you get a chance, summarize last week", "add this to tomorrow's digest", "no rush, but research X".
 
 Toolkit affinity (toolkit_affinity): lowercase names of integrations, MCP servers, or toolkits the user named or strongly implied, as a deduplicated array. Use the integration name, not the verb. Examples: "create a Linear issue" => ["linear"]; "check GitHub PRs and post to Slack" => ["github", "slack"]; "what's the weather" => [].
+
+Needs connection (needs_connection): capability categories the user asked for that are NOT available in connected_integrations. When the user asks for a capability that has no matching connected toolkit (e.g. "check my calendar" but no calendar is connected), put that category here (e.g. ["calendar"]) instead of in likely_tools. Never put a capability in likely_tools if its toolkit is not in connected_integrations. If connected_integrations is empty, needs_connection should be empty (fall back to literal interpretation).
 
 Connected integrations (connected_integrations in the request): the integrations actually connected and runnable for this user right now, as ground truth. Use them to route work-surface questions to real surfaces instead of guessing from the literal words. When the user asks about "my work / my plate / my tasks / what should I focus on / what's open", do NOT default to schedule or calendar — resolve it against the connected work trackers and the channel's topic. If an issue tracker (linear, jira, github, asana, notion) is connected, put it in likely_tools and toolkit_affinity; if a calendar/email tool is connected and nothing else fits, use that. Never route to a tool that is not in connected_integrations, and never imply a connected integration is unavailable. If connected_integrations is empty, fall back to literal interpretation.
 
