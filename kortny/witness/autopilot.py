@@ -20,6 +20,7 @@ from kortny.db.models import (
     SlackChannelMembership,
     Task,
     TaskEventType,
+    TaskStatus,
     WitnessDeliveryLog,
     WitnessOpportunityCandidate,
 )
@@ -57,6 +58,7 @@ WITNESS_DRAFT_TASK_SOURCE = "witness_draft"
 DEFAULT_WITNESS_AUTOPILOT_LIMIT = 1
 DEFAULT_WITNESS_AUTOPILOT_MIN_CONFIDENCE = Decimal("0.600")
 DEFAULT_WITNESS_AUTOPILOT_COOLDOWN = timedelta(hours=24)
+AUTOPILOT_REEXECUTE_COOLDOWN = timedelta(days=7)
 MAX_AUTOPILOT_TASK_INPUT_CHARS = 1800
 
 # Draft tier (HIG-230): sliding 24h budget per channel; drafts count against
@@ -341,6 +343,7 @@ class WitnessAutopilot:
                 source_task=source_task,
                 now=now,
             )
+            candidate.automated_task_id = task.id
             candidate.status = "accepted"
             candidate.cooldown_until = None
             candidate.last_suggested_at = now
@@ -1094,6 +1097,16 @@ def _autopilot_preflight_defer_reason(
         channel_id=channel_id,
     ):
         return "Candidate channel is not recorded as an active Kortny membership."
+    if candidate.automated_task_id is not None:
+        recently_executed_task = session.scalar(
+            select(Task).where(
+                Task.id == candidate.automated_task_id,
+                Task.status == TaskStatus.succeeded,
+                Task.created_at >= _coerce_utc(None) - AUTOPILOT_REEXECUTE_COOLDOWN,
+            )
+        )
+        if recently_executed_task is not None:
+            return "Equivalent opportunity already executed by autopilot in the last 7 days."
     return None
 
 
