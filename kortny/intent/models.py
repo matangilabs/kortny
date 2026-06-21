@@ -114,6 +114,9 @@ class IntentDecision(BaseModel):
     response_depth: ResponseDepth = "standard_tool_task"
     time_sensitivity: TimeSensitivity = "interactive"
     toolkit_affinity: tuple[str, ...] = ()
+    # Capability categories the user asked for that are NOT in connected_integrations
+    # (HIG-274). Signal for the agent/caller; does not change execution.
+    needs_connection: tuple[str, ...] = ()
     depth_source: DepthSource = "default"
     primary_intent: IntentFragment | None = None
     secondary_intents: list[IntentFragment] = Field(default_factory=list)
@@ -121,6 +124,24 @@ class IntentDecision(BaseModel):
     @field_validator("toolkit_affinity", mode="before")
     @classmethod
     def normalize_toolkit_affinity(cls, value: object) -> tuple[str, ...]:
+        if value is None:
+            return ()
+        if isinstance(value, str | bytes):
+            return ()
+        if not isinstance(value, list | tuple):
+            return ()
+        cleaned: list[str] = []
+        for item in value:
+            if not isinstance(item, str):
+                continue
+            normalized = " ".join(item.split()).strip()
+            if normalized and normalized not in cleaned:
+                cleaned.append(normalized)
+        return tuple(cleaned)
+
+    @field_validator("needs_connection", mode="before")
+    @classmethod
+    def normalize_needs_connection(cls, value: object) -> tuple[str, ...]:
         if value is None:
             return ()
         if isinstance(value, str | bytes):
