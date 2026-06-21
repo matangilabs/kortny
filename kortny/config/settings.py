@@ -101,6 +101,12 @@ class Settings(BaseSettings):
     planned_workflow_cost_ceiling_usd: float = Field(
         default=0.75, validation_alias="KORTNY_PLANNED_WORKFLOW_COST_CEILING_USD"
     )
+    ambient_task_cost_ceiling_usd: float = Field(
+        default=0.25, validation_alias="KORTNY_AMBIENT_TASK_COST_CEILING_USD"
+    )
+    consolidator_run_cost_ceiling_usd: float = Field(
+        default=2.00, validation_alias="KORTNY_CONSOLIDATOR_RUN_COST_CEILING_USD"
+    )
     planned_workflow_max_branch_model_calls: int = Field(
         default=3,
         validation_alias="KORTNY_PLANNED_WORKFLOW_MAX_BRANCH_MODEL_CALLS",

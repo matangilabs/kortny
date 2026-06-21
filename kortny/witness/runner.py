@@ -58,6 +58,7 @@ from kortny.slack import blockkit
 from kortny.slack.formatting import normalize_user_facing_text
 from kortny.slack.outbox import SlackSideEffectOutbox
 from kortny.tasks import TaskService
+from kortny.tasks.identity import TaskIdentity
 from kortny.witness.autopilot import (
     DEFAULT_WITNESS_AUTOPILOT_LIMIT,
     DEFAULT_WITNESS_AUTOPILOT_MIN_CONFIDENCE,
@@ -1403,16 +1404,31 @@ class WitnessRunner:
             if membership.channel_name
             else membership.channel_id
         )
+        scan_input = f"Run Witness opportunity scan for {channel_label}."
+        scan_source_id = (
+            f"witness:{profile.id}:{profile.profile_version}:{int(now.timestamp())}"
+        )
         return task_service.create_task(
             installation_id=profile.installation_id,
-            slack_event_id=(
-                f"witness:{profile.id}:{profile.profile_version}:{int(now.timestamp())}"
-            ),
+            slack_event_id=scan_source_id,
             slack_channel_id=membership.channel_id,
             slack_thread_ts=membership.channel_id,
             slack_message_ts=None,
             slack_user_id=membership.added_by_user_id or "witness_runner",
-            input=f"Run Witness opportunity scan for {channel_label}.",
+            input=scan_input,
+            identity=TaskIdentity.synthetic(
+                source="witness_runner",
+                source_id=scan_source_id,
+                input_text=scan_input,
+                payload={
+                    "source_surface": "witness_runner",
+                    "runtime_cost_ceiling_usd": str(
+                        self.settings.ambient_task_cost_ceiling_usd
+                        if self.settings is not None
+                        else 0.25
+                    ),
+                },
+            ),
             source_surface="witness_runner",
         )
 

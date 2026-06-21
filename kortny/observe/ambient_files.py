@@ -307,6 +307,9 @@ class AmbientFileAnalysisService:
                     "file_ids": [candidate.file_id for candidate in candidates],
                     "message_ts": observation.message_ts,
                     "observation_id": str(observation.id),
+                    "runtime_cost_ceiling_usd": str(
+                        self.settings.ambient_task_cost_ceiling_usd
+                    ),
                 },
             ),
             source_surface=AMBIENT_SOURCE_SURFACE,

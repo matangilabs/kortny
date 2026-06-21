@@ -846,6 +846,11 @@ class WitnessAutopilot:
                     "result itself is the answer."
                 ),
                 "created_at": now.isoformat(),
+                "runtime_cost_ceiling_usd": str(
+                    self.settings.ambient_task_cost_ceiling_usd
+                    if self.settings is not None
+                    else 0.25
+                ),
             },
         )
         return TaskService(self.session).create_task(

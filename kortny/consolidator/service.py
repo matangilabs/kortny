@@ -46,6 +46,7 @@ from kortny.db.models import (
     KnowledgeGraphEntity,
     ObservationEvent,
     Task,
+    TaskEventType,
     TaskStatus,
 )
 from kortny.db.models import (
@@ -64,6 +65,7 @@ from kortny.llm.runtime_config import (
     create_provider_for_selection,
     select_runtime_model,
 )
+from kortny.llm.service import TaskCostBudgetExceeded
 from kortny.memory.service import ConfirmationPoster
 from kortny.slack import SlackPoster
 from kortny.slack.posting import SlackPostingClient
@@ -425,6 +427,26 @@ class ConsolidationService:
         for pass_name, pass_fn in passes:
             try:
                 counters[pass_name] = pass_fn()
+            except TaskCostBudgetExceeded as budget_exc:
+                # Pre-call raise: no new usage row was written for this pass.
+                # Roll back any partial flush from the current pass, persist a
+                # budget-stop marker, then abort remaining passes so the run
+                # does not keep spending once the ceiling is breached.
+                self.session.rollback()
+                pass_errors[pass_name] = "budget_exceeded"
+                run.counters_json = {**counters, "pass_errors": dict(pass_errors)}
+                task_service.append_event(
+                    task,
+                    TaskEventType.log,
+                    {
+                        "message": "consolidator_budget_exceeded",
+                        "pass": pass_name,
+                        "ceiling_usd": str(budget_exc.ceiling),
+                        "current_usd": str(budget_exc.current),
+                    },
+                )
+                self.session.commit()
+                break  # stop further passes for this run
             except Exception as exc:
                 logger.exception(
                     "consolidation pass failed installation_id=%s pass=%s",
@@ -500,6 +522,15 @@ class ConsolidationService:
                 source=CONSOLIDATION_TASK_SOURCE,
                 source_id=str(run_id),
                 input_text=task_input,
+                payload=(
+                    {
+                        "runtime_cost_ceiling_usd": str(
+                            self.settings.consolidator_run_cost_ceiling_usd
+                        )
+                    }
+                    if self.settings is not None
+                    else {}
+                ),
             ),
             source_surface=CONSOLIDATION_TASK_SOURCE,
         )

@@ -87,6 +87,7 @@ from kortny.db.models import Task, TaskEvent, TaskEventType
 from kortny.embeddings import EmbeddingIndex
 from kortny.llm import ChatMessage, Completion, ToolCall
 from kortny.llm.routing import latest_intent_decision
+from kortny.llm.service import TaskCostBudgetExceeded
 from kortny.observability import (
     log_observation,
     record_span_exception,
@@ -503,69 +504,91 @@ class AgentCoordinator:
 
         for turn in range(1, self.max_turns + 1):
             self.task_service.raise_if_cancelled(task_obj, phase=f"before_turn_{turn}")
-            # Re-read the registry each turn so tools loaded at runtime by
-            # find_tools (HIG-269) become callable on the next turn. In the
-            # default pipeline mode the registry never mutates, so this is a
-            # no-op and behavior is unchanged.
-            schemas = self.registry.schemas()
-            completion = self._complete_turn(task_obj, messages, schemas, turn)
-            self.task_service.raise_if_cancelled(
-                task_obj, phase=f"after_turn_{turn}_completion"
-            )
-            messages.append(
-                ChatMessage(
-                    role="assistant",
-                    content=completion.content,
-                    tool_calls=completion.tool_calls,
-                )
-            )
-
-            if not completion.tool_calls:
-                if not (completion.content or "").strip() and turn < self.max_turns:
-                    self._append_log(
-                        task_obj,
-                        "agent_empty_response_retry",
-                        {
-                            "turn": turn,
-                            "message_count": len(messages),
-                            "tool_count": len(schemas),
-                        },
-                    )
-                    messages.append(
-                        ChatMessage(role="system", content=EMPTY_RESPONSE_REPAIR_PROMPT)
-                    )
-                    continue
-                self.status_reporter.report(STATUS_WRITING, phase=PHASE_WRITING)
-                result = self._finish_with_text(
-                    task_obj,
-                    completion.content,
-                    turn,
-                    plan=plan,
-                )
-                return result
-
             try:
-                turn_artifacts = self._invoke_tool_calls(
-                    task_obj=task_obj,
-                    messages=messages,
-                    completion=completion,
-                    schemas=schemas,
-                    turn=turn,
-                    plan=plan,
+                # Re-read the registry each turn so tools loaded at runtime by
+                # find_tools (HIG-269) become callable on the next turn. In the
+                # default pipeline mode the registry never mutates, so this is a
+                # no-op and behavior is unchanged.
+                schemas = self.registry.schemas()
+                completion = self._complete_turn(task_obj, messages, schemas, turn)
+                self.task_service.raise_if_cancelled(
+                    task_obj, phase=f"after_turn_{turn}_completion"
                 )
-            except _ExecutionBudgetExhausted as exhausted:
-                # Ran out of tool-call budget mid-work: close with a partial
-                # answer from what was gathered, not a failure notice (HIG-220).
-                return self._finish_with_partial(
-                    task_obj, messages, turn, plan=plan, reason=exhausted.reason
+                messages.append(
+                    ChatMessage(
+                        role="assistant",
+                        content=completion.content,
+                        tool_calls=completion.tool_calls,
+                    )
                 )
-            artifact_count += turn_artifacts
-            if turn_artifacts:
-                return self._finish_with_artifacts(
+
+                if not completion.tool_calls:
+                    if not (completion.content or "").strip() and turn < self.max_turns:
+                        self._append_log(
+                            task_obj,
+                            "agent_empty_response_retry",
+                            {
+                                "turn": turn,
+                                "message_count": len(messages),
+                                "tool_count": len(schemas),
+                            },
+                        )
+                        messages.append(
+                            ChatMessage(
+                                role="system", content=EMPTY_RESPONSE_REPAIR_PROMPT
+                            )
+                        )
+                        continue
+                    self.status_reporter.report(STATUS_WRITING, phase=PHASE_WRITING)
+                    result = self._finish_with_text(
+                        task_obj,
+                        completion.content,
+                        turn,
+                        plan=plan,
+                    )
+                    return result
+
+                try:
+                    turn_artifacts = self._invoke_tool_calls(
+                        task_obj=task_obj,
+                        messages=messages,
+                        completion=completion,
+                        schemas=schemas,
+                        turn=turn,
+                        plan=plan,
+                    )
+                except _ExecutionBudgetExhausted as exhausted:
+                    # Ran out of tool-call budget mid-work: close with a partial
+                    # answer from what was gathered, not a failure notice (HIG-220).
+                    return self._finish_with_partial(
+                        task_obj, messages, turn, plan=plan, reason=exhausted.reason
+                    )
+                artifact_count += turn_artifacts
+                if turn_artifacts:
+                    return self._finish_with_artifacts(
+                        task_obj,
+                        turn=turn,
+                        artifact_count=artifact_count,
+                        plan=plan,
+                    )
+            except TaskCostBudgetExceeded as budget_exc:
+                self._append_log(
                     task_obj,
+                    "agent_cost_budget_exceeded",
+                    {
+                        "ceiling_usd": str(budget_exc.ceiling),
+                        "current_usd": str(budget_exc.current),
+                        "turn": turn,
+                    },
+                )
+                return self._finish(
+                    task_obj,
+                    summary="stopped: cost ceiling reached",
                     turn=turn,
-                    artifact_count=artifact_count,
+                    artifact_count=0,
+                    reason="cost_ceiling_exceeded",
                     plan=plan,
+                    partial=True,
                 )
 
         # Turn budget exhausted: synthesize a partial answer rather than
