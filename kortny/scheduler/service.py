@@ -211,6 +211,9 @@ class ScheduleMaterializer:
             identity_payload["planned_cost_ceiling_usd"] = str(
                 schedule.planned_cost_ceiling_usd
             )
+            identity_payload["runtime_cost_ceiling_usd"] = str(
+                schedule.planned_cost_ceiling_usd
+            )
 
         identity = TaskIdentity.scheduled(
             schedule_id=str(schedule.id),

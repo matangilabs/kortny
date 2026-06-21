@@ -54,6 +54,23 @@ UTILITY_PROMPT_OUTPUT_CLAMP: dict[str, int] = {
 }
 
 
+class TaskCostBudgetExceeded(Exception):
+    """Raised when a task's cumulative LLM cost meets or exceeds its runtime cost ceiling.
+
+    Raised PRE-call inside LLMService.complete() so no additional provider spend
+    occurs after the ceiling is breached.
+    """
+
+    def __init__(self, task_id: uuid.UUID, ceiling: Decimal, current: Decimal) -> None:
+        self.task_id = task_id
+        self.ceiling = ceiling
+        self.current = current
+        super().__init__(
+            f"task {task_id}: cost ceiling {ceiling} USD reached "
+            f"(current {current} USD); aborting LLM call"
+        )
+
+
 class ModelPricingNotFoundError(LookupError):
     """Raised when no model pricing row can price an LLM call."""
 
@@ -181,6 +198,21 @@ class LLMService:
                     self.provider_name.value,
                     self.provider.model,
                 )
+
+        # --- Runtime cost ceiling guard (PRE-call) ----------------------------
+        # Read the task row once to check whether a cost ceiling is set in
+        # identity_payload.  Raises TaskCostBudgetExceeded before touching the
+        # provider if the cumulative spend already meets or exceeds the ceiling.
+        # Interactive tasks without a ceiling skip the ceiling check entirely
+        # (the lookup still happens — acceptable overhead for ambient/batch tasks
+        # that carry the ceiling, and negligible for the common interactive path).
+        _task_obj = self.task_service._resolve_task(task_id)
+        _ceiling_raw = _task_obj.identity_payload.get("runtime_cost_ceiling_usd")
+        if _ceiling_raw:
+            _ceiling = Decimal(str(_ceiling_raw))
+            _current = _task_obj.total_cost_usd
+            if _current >= _ceiling:
+                raise TaskCostBudgetExceeded(task_id, _ceiling, _current)
 
         prompt_name = prompt_name or _default_prompt_name(
             tools=tools,

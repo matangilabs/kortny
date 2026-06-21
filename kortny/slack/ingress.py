@@ -1068,6 +1068,15 @@ class SlackIngress:
                 payload={
                     "channel_id": membership.channel_id,
                     "membership_id": str(membership.id),
+                    **(
+                        {
+                            "runtime_cost_ceiling_usd": str(
+                                self.settings.ambient_task_cost_ceiling_usd
+                            )
+                        }
+                        if self.settings is not None
+                        else {}
+                    ),
                 },
             ),
             source_surface=source,

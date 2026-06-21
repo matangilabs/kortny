@@ -226,6 +226,10 @@ class ExecutionBudgetState:
     tool_call_signature_counts: dict[str, int] = field(default_factory=dict)
     tool_name_counts: dict[str, int] = field(default_factory=dict)
     recoverable_error_counts: dict[str, int] = field(default_factory=dict)
+    # Cost tracking fields (coordinator logging/telemetry only — enforcement is
+    # in LLMService.complete() via the task's identity_payload ceiling).
+    max_cost_usd: Decimal | None = None
+    accumulated_cost_usd: Decimal = field(default_factory=lambda: Decimal("0"))
 
     def record_tool_attempt(
         self,
