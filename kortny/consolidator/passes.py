@@ -37,6 +37,7 @@ from kortny.db.models import (
     SlackChannelMembership,
     Task,
     TaskEventType,
+    TaskStatus,
     WorkspaceState,
 )
 from kortny.embeddings import (
@@ -53,7 +54,11 @@ from kortny.llm import ChatMessage, LLMService
 from kortny.observe.assessment import (
     CHANNEL_ASSESSMENT_REQUESTED_MESSAGE,
     CHANNEL_ASSESSMENT_SUPPRESS_SLACK_POST_KEY,
+    assessment_event_id_for_membership,
+    assessment_identity_source_id,
+    build_channel_assessment_input,
     build_channel_graph_refresh_input,
+    channel_assessment_request_event,
 )
 from kortny.tasks import TaskService
 from kortny.tasks.identity import TaskIdentity
@@ -71,6 +76,7 @@ CANDIDATE_ARCHIVE_MIN_AGE = timedelta(days=7)
 CANDIDATE_CONSENSUS_THRESHOLD = 2
 STALE_ARCHIVE_AFTER = timedelta(days=90)
 PROFILE_REFRESH_AFTER = timedelta(days=7)
+PROFILE_STALE_AFTER = timedelta(days=30)
 DEFAULT_OBSERVATION_RETENTION_DAYS = 90
 MERGE_SIMILARITY_THRESHOLD = 0.92
 MERGE_PAIR_CAP = 20
@@ -585,12 +591,16 @@ class HygieneCounters:
     purged_observations: int = 0
     expired_facts: int = 0
     profiles_refreshed: int = 0
+    profiles_marked_stale: int = 0
+    assessments_requeued: int = 0
 
     def to_payload(self) -> dict[str, int]:
         return {
             "purged_observations": self.purged_observations,
             "expired_facts": self.expired_facts,
             "profiles_refreshed": self.profiles_refreshed,
+            "profiles_marked_stale": self.profiles_marked_stale,
+            "assessments_requeued": self.assessments_requeued,
         }
 
 
@@ -604,14 +614,24 @@ def run_hygiene(
     """Pass 6: retention purge, fact TTL purge, stale profile refresh."""
 
     effective_now = now or datetime.now(UTC)
+    effective_task_service = task_service or TaskService(session)
     purged = _purge_observations(
         session, installation_id=installation_id, now=effective_now
     )
     expired = _expire_facts(session, installation_id=installation_id, now=effective_now)
+    marked_stale = _mark_stale_profiles(
+        session, installation_id=installation_id, now=effective_now
+    )
     refreshed = _refresh_stale_profiles(
         session,
         installation_id=installation_id,
-        task_service=task_service or TaskService(session),
+        task_service=effective_task_service,
+        now=effective_now,
+    )
+    requeued = _requeue_failed_assessments(
+        session,
+        installation_id=installation_id,
+        task_service=effective_task_service,
         now=effective_now,
     )
     session.flush()
@@ -619,6 +639,8 @@ def run_hygiene(
         purged_observations=purged,
         expired_facts=expired,
         profiles_refreshed=refreshed,
+        profiles_marked_stale=marked_stale,
+        assessments_requeued=requeued,
     )
 
 
@@ -694,6 +716,33 @@ def _expire_facts(
     return len(rows)
 
 
+def _mark_stale_profiles(
+    session: Session,
+    *,
+    installation_id: uuid.UUID,
+    now: datetime,
+) -> int:
+    """Hygiene step: mark active profiles whose last_profiled_at is older than
+    PROFILE_STALE_AFTER as 'stale' so the witness runner ignores them while
+    the consolidator re-queues a refresh task."""
+
+    stale_cutoff = now - PROFILE_STALE_AFTER
+    rows = list(
+        session.scalars(
+            select(ObserveChannelProfile).where(
+                ObserveChannelProfile.installation_id == installation_id,
+                ObserveChannelProfile.profile_status == "active",
+                ObserveChannelProfile.last_profiled_at.is_not(None),
+                ObserveChannelProfile.last_profiled_at < stale_cutoff,
+            )
+        )
+    )
+    for profile in rows:
+        profile.profile_status = "stale"
+        profile.updated_at = now
+    return len(rows)
+
+
 def _refresh_stale_profiles(
     session: Session,
     *,
@@ -705,7 +754,7 @@ def _refresh_stale_profiles(
         session.scalars(
             select(ObserveChannelProfile).where(
                 ObserveChannelProfile.installation_id == installation_id,
-                ObserveChannelProfile.profile_status == "active",
+                ObserveChannelProfile.profile_status.in_(["active", "stale"]),
                 (ObserveChannelProfile.last_profiled_at.is_(None))
                 | (
                     ObserveChannelProfile.last_profiled_at < now - PROFILE_REFRESH_AFTER
@@ -776,6 +825,109 @@ def _refresh_stale_profiles(
         )
         refreshed += 1
     return refreshed
+
+
+def _requeue_failed_assessments(
+    session: Session,
+    *,
+    installation_id: uuid.UUID,
+    task_service: TaskService,
+    now: datetime,
+) -> int:
+    """Re-queue channel assessment tasks for memberships whose assessment has
+    failed (but is not dead-lettered) and whose retry window has passed."""
+
+    _active_statuses = frozenset(
+        {
+            TaskStatus.pending,
+            TaskStatus.running,
+            TaskStatus.waiting_approval,
+            TaskStatus.crashed,
+        }
+    )
+
+    memberships = list(
+        session.scalars(
+            select(SlackChannelMembership).where(
+                SlackChannelMembership.installation_id == installation_id,
+                SlackChannelMembership.membership_status == "active",
+                SlackChannelMembership.onboarding_status == "posted",
+                SlackChannelMembership.metadata_json["assessment_status"].as_string()
+                == "failed",
+            )
+        )
+    )
+
+    requeued = 0
+    for membership in memberships:
+        metadata = membership.metadata_json or {}
+
+        # Skip dead-lettered memberships.
+        if metadata.get("assessment_dead_lettered_at"):
+            continue
+
+        # Skip if still inside the backoff window.
+        next_attempt_raw = metadata.get("assessment_next_attempt_at")
+        if next_attempt_raw:
+            try:
+                next_attempt = datetime.fromisoformat(str(next_attempt_raw))
+                if next_attempt.tzinfo is None:
+                    next_attempt = next_attempt.replace(tzinfo=UTC)
+                if next_attempt > now:
+                    continue
+            except (ValueError, TypeError):
+                pass
+
+        # Skip if the previous task is still in-flight.
+        task_id_raw = metadata.get("assessment_task_id")
+        if task_id_raw:
+            try:
+                existing_task_id = uuid.UUID(str(task_id_raw))
+                existing_task = session.get(Task, existing_task_id)
+                if (
+                    existing_task is not None
+                    and TaskStatus(existing_task.status) in _active_statuses
+                ):
+                    continue
+            except (ValueError, AttributeError):
+                pass
+
+        # Attempt number is the current failure count (pre-increment).
+        attempt = int(metadata.get("assessment_failure_count") or 0)
+
+        task_input = build_channel_assessment_input(channel_id=membership.channel_id)
+        task = task_service.create_task(
+            installation_id=installation_id,
+            slack_event_id=assessment_event_id_for_membership(membership.id, attempt),
+            slack_channel_id=membership.channel_id,
+            slack_thread_ts=membership.onboarding_message_ts,
+            slack_message_ts=membership.onboarding_message_ts,
+            slack_user_id=membership.added_by_user_id or "consolidator",
+            input=task_input,
+            identity=TaskIdentity.synthetic(
+                source="channel_assessment",
+                source_id=assessment_identity_source_id(membership.id, attempt),
+                input_text=task_input,
+                payload={
+                    "channel_id": membership.channel_id,
+                    "membership_id": str(membership.id),
+                },
+            ),
+            source_surface=PROFILE_REFRESH_SOURCE,
+        )
+        if channel_assessment_request_event(session, task) is None:
+            task_service.append_event(
+                task,
+                TaskEventType.log,
+                {
+                    "message": CHANNEL_ASSESSMENT_REQUESTED_MESSAGE,
+                    "source": PROFILE_REFRESH_SOURCE,
+                    "channel_id": membership.channel_id,
+                    "membership_id": str(membership.id),
+                },
+            )
+        requeued += 1
+    return requeued
 
 
 @dataclass(frozen=True, slots=True)

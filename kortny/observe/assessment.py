@@ -59,16 +59,29 @@ def build_channel_graph_refresh_input(*, channel_id: str) -> str:
     )
 
 
-def assessment_event_id_for_membership(membership_id: uuid.UUID) -> str:
-    """Stable synthetic Slack event ID for one channel assessment task."""
+def assessment_event_id_for_membership(
+    membership_id: uuid.UUID, attempt: int = 0
+) -> str:
+    """Stable synthetic Slack event ID for one channel assessment task.
 
-    return f"observe:{membership_id}:channel_assessment"
+    Attempt 0 is the initial queue; attempt N (>=1) disambiguates retries so
+    that repeated failures each produce a fresh, dedup-safe identity.
+    """
+
+    if attempt == 0:
+        return f"observe:{membership_id}:channel_assessment"
+    return f"observe:{membership_id}:channel_assessment:attempt:{attempt}"
 
 
-def assessment_identity_source_id(membership_id: uuid.UUID) -> str:
-    """Stable synthetic task identity source id for one channel assessment."""
+def assessment_identity_source_id(membership_id: uuid.UUID, attempt: int = 0) -> str:
+    """Stable synthetic task identity source id for one channel assessment.
 
-    return str(membership_id)
+    Attempt 0 is the initial queue; attempt N (>=1) disambiguates retries.
+    """
+
+    if attempt == 0:
+        return str(membership_id)
+    return f"{membership_id}:attempt:{attempt}"
 
 
 def is_channel_assessment_task(session: Session, task: Task) -> bool:
