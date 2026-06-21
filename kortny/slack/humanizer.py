@@ -73,6 +73,9 @@ message; never put Block Kit JSON or the presentation object inside the message
 string. Skip presentation for plain conversation.
 
 Rules:
+- Write the message in English. Only reply in another language if the user's most
+  recent message is written in that language; otherwise always English. Never
+  switch languages on your own.
 - Use only facts, actions, artifacts, failures, uncertainties, links, and the raw
   answer present in the ResponseRecord, bounded by the evidence and outcome in
   SynthesisContext.
