@@ -135,10 +135,13 @@ class WitnessOpportunityService:
 
         for candidate_input in valid_candidates[:MAX_PROFILE_OPPORTUNITIES]:
             candidate_type = candidate_input.candidate_type
+            # ponytail: keyed on title only so LLM paraphrase variations collapse to one candidate.
+            # Existing rows with the old title:summary formula won't dedup against new-formula rows
+            # but will age out naturally via cooldown and archival.
             dedupe_key = _dedupe_key(
                 channel_id=membership.channel_id,
                 candidate_type=candidate_type,
-                opportunity=f"{candidate_input.title}:{candidate_input.summary}",
+                opportunity=candidate_input.title,
             )
             existing = self._find_existing(
                 installation_id=task.installation_id,
@@ -298,10 +301,13 @@ class WitnessOpportunityService:
 
         for candidate_input in valid_candidates:
             candidate_type = candidate_input.candidate_type
+            # ponytail: keyed on title only so LLM paraphrase variations collapse to one candidate.
+            # Existing rows with the old title:summary formula won't dedup against new-formula rows
+            # but will age out naturally via cooldown and archival.
             dedupe_key = _dedupe_key(
                 channel_id=channel_id,
                 candidate_type=candidate_type,
-                opportunity=f"{candidate_input.title}:{candidate_input.summary}",
+                opportunity=candidate_input.title,
             )
             existing = self._find_existing(
                 installation_id=task.installation_id,
