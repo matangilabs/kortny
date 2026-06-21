@@ -4,7 +4,7 @@ Unit tests (always run, no container): verify the sync facade over the async
 MCP client, lifecycle correctness, and the disabled-by-default behaviour,
 using a fake in-process MCP server.
 
-Live smoke (skipped unless KORTNY_BROWSER_MCP_URL is set): opens a real
+Live smoke (skipped unless KORTNY_BROWSER_URL is set): opens a real
 session against the Playwright-MCP container.
 """
 
@@ -55,16 +55,16 @@ def make_settings(**overrides: str) -> Settings:
 
 def test_open_browser_session_returns_none_when_disabled() -> None:
     settings = make_settings()
-    # browser_mcp_url not set -> None
-    assert settings.browser_mcp_url is None
+    # browser_url not set -> None
+    assert settings.browser_url is None
     assert settings.browser_enabled is False
     result = open_browser_session(settings)
     assert result is None
 
 
 def test_open_browser_session_returns_session_when_url_is_set() -> None:
-    settings = make_settings(KORTNY_BROWSER_MCP_URL="http://playwright-mcp:8931/mcp")
-    assert settings.browser_mcp_url == "http://playwright-mcp:8931/mcp"
+    settings = make_settings(KORTNY_BROWSER_URL="http://browser:8931/mcp")
+    assert settings.browser_url == "http://browser:8931/mcp"
     assert settings.browser_enabled is True
 
 
@@ -78,12 +78,12 @@ def test_settings_browser_idle_timeout_custom() -> None:
     assert settings.browser_session_idle_timeout_seconds == 60
 
 
-def test_settings_blank_browser_mcp_url_normalizes_to_none(
+def test_settings_blank_browser_url_normalizes_to_none(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("KORTNY_BROWSER_MCP_URL", "")
+    monkeypatch.setenv("KORTNY_BROWSER_URL", "")
     settings = make_settings()
-    assert settings.browser_mcp_url is None
+    assert settings.browser_url is None
 
 
 # ---------------------------------------------------------------------------
@@ -367,15 +367,15 @@ class TestBrowserMcpSessionUnit:
 
 
 # ---------------------------------------------------------------------------
-# Live smoke test (skipped unless KORTNY_BROWSER_MCP_URL is set)
+# Live smoke test (skipped unless KORTNY_BROWSER_URL is set)
 # ---------------------------------------------------------------------------
 
-_LIVE_BROWSER_URL = os.environ.get("KORTNY_BROWSER_MCP_URL")
+_LIVE_BROWSER_URL = os.environ.get("KORTNY_BROWSER_URL")
 
 
 @pytest.mark.skipif(
     not _LIVE_BROWSER_URL,
-    reason="KORTNY_BROWSER_MCP_URL not set; skipping live Playwright-MCP smoke test",
+    reason="KORTNY_BROWSER_URL not set; skipping live Playwright-MCP smoke test",
 )
 def test_live_browser_navigate_and_snapshot() -> None:
     assert _LIVE_BROWSER_URL is not None

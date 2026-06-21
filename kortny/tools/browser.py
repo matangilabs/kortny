@@ -70,7 +70,7 @@ class _BrowserSessionHolder:
         if session is None:
             raise RecoverableToolError(
                 code="browser_unavailable",
-                message="Browser is not enabled on this Kortny instance (KORTNY_BROWSER_MCP_URL is not set).",
+                message="Browser is not enabled on this Kortny instance (KORTNY_BROWSER_URL is not set).",
                 hint="Ask the workspace admin to configure the browser integration.",
             )
         session.open()

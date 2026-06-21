@@ -41,6 +41,7 @@ _BASE_SETTINGS: dict[str, str] = {
     "COMPOSIO_API_KEY": "composio-key",
     "POSTGRES_URL": "postgresql://kortny:kortny@localhost/kortny",
     "ENCRYPTION_KEY": "ci-only-test-key",
+    "KORTNY_BROWSER_URL": "",
 }
 
 
@@ -120,7 +121,7 @@ def _make_holder_with_fake(
     fake: FakeBrowserSession,
     url: str = "http://fake:8931/mcp",
 ) -> _BrowserSessionHolder:
-    settings = make_settings(KORTNY_BROWSER_MCP_URL=url)
+    settings = make_settings(KORTNY_BROWSER_URL=url)
     with patch("kortny.tools.browser.open_browser_session", return_value=fake):
         holder = _BrowserSessionHolder(settings)
         # Eagerly open so the fake is wired in before the test calls invoke.
@@ -352,7 +353,7 @@ def test_screenshot_is_error_raises_recoverable() -> None:
 
 
 def test_session_opened_once_across_multiple_tools() -> None:
-    settings = make_settings(KORTNY_BROWSER_MCP_URL="http://fake:8931/mcp")
+    settings = make_settings(KORTNY_BROWSER_URL="http://fake:8931/mcp")
     fake = FakeBrowserSession(text_result="nav-result")
 
     with patch("kortny.tools.browser.open_browser_session", return_value=fake):
@@ -429,14 +430,14 @@ def test_browser_tools_arm_trifecta() -> None:
 
 
 def test_build_browser_tools_disabled_when_no_url() -> None:
-    settings = make_settings()  # no KORTNY_BROWSER_MCP_URL
+    settings = make_settings()  # no KORTNY_BROWSER_URL
     tools, holder = build_browser_tools(settings)
     assert tools == ()
     assert holder is None
 
 
 def test_build_browser_tools_enabled_when_url_set() -> None:
-    settings = make_settings(KORTNY_BROWSER_MCP_URL="http://fake:8931/mcp")
+    settings = make_settings(KORTNY_BROWSER_URL="http://fake:8931/mcp")
     with patch("kortny.tools.browser.open_browser_session") as mock_open:
         mock_open.return_value = FakeBrowserSession()
         tools, holder = build_browser_tools(settings)
@@ -450,7 +451,7 @@ def test_build_browser_tools_enabled_when_url_set() -> None:
 
 
 def test_holder_close_closes_session() -> None:
-    settings = make_settings(KORTNY_BROWSER_MCP_URL="http://fake:8931/mcp")
+    settings = make_settings(KORTNY_BROWSER_URL="http://fake:8931/mcp")
     fake = FakeBrowserSession()
 
     with patch("kortny.tools.browser.open_browser_session", return_value=fake):
@@ -462,13 +463,13 @@ def test_holder_close_closes_session() -> None:
 
 
 def test_holder_close_before_open_is_safe() -> None:
-    settings = make_settings(KORTNY_BROWSER_MCP_URL="http://fake:8931/mcp")
+    settings = make_settings(KORTNY_BROWSER_URL="http://fake:8931/mcp")
     holder = _BrowserSessionHolder(settings)
     holder.close()  # should not raise even if session was never opened
 
 
 def test_holder_close_is_idempotent() -> None:
-    settings = make_settings(KORTNY_BROWSER_MCP_URL="http://fake:8931/mcp")
+    settings = make_settings(KORTNY_BROWSER_URL="http://fake:8931/mcp")
     fake = FakeBrowserSession()
 
     with patch("kortny.tools.browser.open_browser_session", return_value=fake):

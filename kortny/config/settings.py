@@ -550,13 +550,11 @@ class Settings(BaseSettings):
     encryption_key: str | None = Field(default=None, validation_alias="ENCRYPTION_KEY")
 
     # --- Browser automation (HIG-282) -----------------------------------------
-    # When set, KORTNY_BROWSER_MCP_URL points at a running Playwright-MCP server
-    # (e.g. http://playwright-mcp:8931/mcp). The worker opens one persistent MCP
+    # When set, KORTNY_BROWSER_URL points at a running Playwright-MCP server
+    # (e.g. http://browser:8931/mcp). The worker opens one persistent MCP
     # session per task and exposes browser tools through the normal tool pipeline.
     # Leave unset to disable browser entirely (default).
-    browser_mcp_url: str | None = Field(
-        default=None, validation_alias="KORTNY_BROWSER_MCP_URL"
-    )
+    browser_url: str | None = Field(default=None, validation_alias="KORTNY_BROWSER_URL")
     browser_session_idle_timeout_seconds: int = Field(
         default=120, validation_alias="KORTNY_BROWSER_SESSION_IDLE_TIMEOUT_SECONDS"
     )
@@ -564,7 +562,7 @@ class Settings(BaseSettings):
     @field_validator(
         "brave_search_api_key",
         "encryption_key",
-        "browser_mcp_url",
+        "browser_url",
         "llm_cheap_model",
         "llm_standard_model",
         "llm_analysis_model",
@@ -654,8 +652,8 @@ class Settings(BaseSettings):
 
     @property
     def browser_enabled(self) -> bool:
-        """True when KORTNY_BROWSER_MCP_URL is configured."""
-        return self.browser_mcp_url is not None
+        """True when KORTNY_BROWSER_URL is configured."""
+        return self.browser_url is not None
 
     @field_validator("slack_file_read_max_bytes")
     @classmethod

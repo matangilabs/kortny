@@ -71,7 +71,7 @@ class BrowserMcpSession:
         idle_timeout_seconds: int = 120,
     ) -> None:
         if not url or not url.strip():
-            raise BrowserSessionError("browser_mcp_url cannot be empty")
+            raise BrowserSessionError("browser_url cannot be empty")
         self._url = url.strip()
         self._idle_timeout_seconds = idle_timeout_seconds
         self._lock = threading.Lock()
@@ -332,10 +332,10 @@ def _parse_tool_result(result: mcp_types.CallToolResult) -> BrowserToolResult:
 def open_browser_session(settings: Settings) -> BrowserMcpSession | None:
     """Return an open BrowserMcpSession if browser is enabled, else None.
 
-    When KORTNY_BROWSER_MCP_URL is unset, this returns None and callers
+    When KORTNY_BROWSER_URL is unset, this returns None and callers
     should no-op gracefully (browser tools unavailable).
     """
-    url = settings.browser_mcp_url
+    url = settings.browser_url
     if not url:
         return None
     session = BrowserMcpSession(
