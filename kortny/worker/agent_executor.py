@@ -2805,6 +2805,7 @@ class AgentTaskExecutor:
                     critique_fn=_critique_fn,
                     original_pdf=v1_pdf_bytes,
                     llm_propose_fn=llm_propose_fn,
+                    max_iterations=settings.document_visual_revision_max_iterations,
                 )
 
                 for rev_event in outcome.events:

@@ -854,6 +854,248 @@ class RevisionOutcome(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+@dataclass
+class _SingleAttemptResult:
+    """Result of one revision attempt within the multi-iteration loop."""
+
+    status: Literal["accepted", "rejected", "noop"]
+    revised_spec: DocumentSpec | None
+    revised_pdf: bytes | None
+    new_critique: VisualCritique | None
+    reason: str
+    events: list[RevisionEvent]
+    patch_signature: frozenset[tuple[str, int]] | None  # None if no patch applied
+
+
+def _single_revision_attempt(
+    current_spec: DocumentSpec,
+    current_critique: VisualCritique,
+    *,
+    render: Callable[[DocumentSpec], bytes],
+    critique_fn: Callable[[bytes], VisualCritique | None],
+    llm_propose_fn: Callable[[LlmPatchContext], VisualRevisionPatch | None] | None,
+    current_pdf: bytes | None,
+    trigger_below: int,
+    min_improvement: int,
+) -> _SingleAttemptResult:
+    """Execute one revision cycle; never raises."""
+    events: list[RevisionEvent] = []
+
+    try:
+        # Build page map for this iteration (fall back to empty map on parse failure)
+        page_map: dict[int, list[int]]
+        if current_pdf is not None:
+            try:
+                page_map = map_pages_to_blocks(current_pdf, current_spec)
+            except Exception:  # noqa: BLE001 — page map is best-effort
+                page_map = {}
+        else:
+            page_map = {}
+
+        # Propose patch — deterministic overflow first, then LLM fallback
+        patch = propose_overflow_patch(current_spec, current_critique, page_map)
+        if patch is None:
+            if llm_propose_fn is not None:
+                patch = propose_llm_patch(
+                    current_spec, current_critique, page_map, propose_fn=llm_propose_fn
+                )
+            if patch is None:
+                noop_event = RevisionEvent(
+                    kind="visual_revision_noop",
+                    detail="no actionable deterministic fix",
+                    old_score=current_critique.overall_score,
+                )
+                events.append(noop_event)
+                return _SingleAttemptResult(
+                    status="noop",
+                    revised_spec=None,
+                    revised_pdf=None,
+                    new_critique=None,
+                    reason="no actionable deterministic fix",
+                    events=events,
+                    patch_signature=None,
+                )
+
+        # Compute patch signature before apply
+        sig_set: set[tuple[str, int]] = set()
+        for op in patch.operations:
+            if isinstance(op, SetTheme):
+                sig_set.add(("set_theme", -1))
+            else:
+                sig_set.add((op.op, op.block_index))
+        patch_signature: frozenset[tuple[str, int]] = frozenset(sig_set)
+
+        # Apply patch
+        try:
+            candidate = apply_patch(current_spec, patch)
+        except Exception as e:
+            reject_event = RevisionEvent(
+                kind="visual_revision_candidate_rejected",
+                detail=f"patch apply failed: {e}",
+                old_score=current_critique.overall_score,
+            )
+            events.append(reject_event)
+            return _SingleAttemptResult(
+                status="rejected",
+                revised_spec=None,
+                revised_pdf=None,
+                new_critique=None,
+                reason=f"patch apply failed: {e}",
+                events=events,
+                patch_signature=patch_signature,
+            )
+
+        # Gate a: structural errors
+        fix_result = critique_and_fix(candidate)
+        if fix_result.has_errors:
+            reject_event = RevisionEvent(
+                kind="visual_revision_candidate_rejected",
+                detail="candidate has structural errors",
+                old_score=current_critique.overall_score,
+            )
+            events.append(reject_event)
+            return _SingleAttemptResult(
+                status="rejected",
+                revised_spec=None,
+                revised_pdf=None,
+                new_critique=None,
+                reason="candidate has structural errors",
+                events=events,
+                patch_signature=patch_signature,
+            )
+
+        # Gate b: render succeeds
+        try:
+            candidate_pdf = render(candidate)
+        except Exception as e:
+            reject_event = RevisionEvent(
+                kind="visual_revision_candidate_rejected",
+                detail=f"candidate render failed: {e}",
+                old_score=current_critique.overall_score,
+            )
+            events.append(reject_event)
+            return _SingleAttemptResult(
+                status="rejected",
+                revised_spec=None,
+                revised_pdf=None,
+                new_critique=None,
+                reason=f"candidate render failed: {e}",
+                events=events,
+                patch_signature=patch_signature,
+            )
+
+        # Gate c: render validation — reject if any error-severity issue
+        render_issues = validate_render(candidate_pdf, "pdf")
+        error_render_issues = [i for i in render_issues if i.severity == "error"]
+        if error_render_issues:
+            reject_event = RevisionEvent(
+                kind="visual_revision_candidate_rejected",
+                detail="candidate failed render validation",
+                old_score=current_critique.overall_score,
+            )
+            events.append(reject_event)
+            return _SingleAttemptResult(
+                status="rejected",
+                revised_spec=None,
+                revised_pdf=None,
+                new_critique=None,
+                reason="candidate failed render validation",
+                events=events,
+                patch_signature=patch_signature,
+            )
+
+        # Gate d: content preservation (compare current_spec vs candidate)
+        ok, reasons = content_preserved(current_spec, candidate)
+        if not ok:
+            reject_event = RevisionEvent(
+                kind="visual_revision_candidate_rejected",
+                detail=f"content not preserved: {'; '.join(reasons)}",
+                old_score=current_critique.overall_score,
+            )
+            events.append(reject_event)
+            return _SingleAttemptResult(
+                status="rejected",
+                revised_spec=None,
+                revised_pdf=None,
+                new_critique=None,
+                reason=f"content not preserved: {'; '.join(reasons)}",
+                events=events,
+                patch_signature=patch_signature,
+            )
+
+        # Gate e: critique candidate
+        new_critique = critique_fn(candidate_pdf)
+        if new_critique is None:
+            reject_event = RevisionEvent(
+                kind="visual_revision_candidate_rejected",
+                detail="could not critique candidate",
+                old_score=current_critique.overall_score,
+            )
+            events.append(reject_event)
+            return _SingleAttemptResult(
+                status="rejected",
+                revised_spec=None,
+                revised_pdf=None,
+                new_critique=None,
+                reason="could not critique candidate",
+                events=events,
+                patch_signature=patch_signature,
+            )
+
+        # Gate f: improvement check
+        orig_error_count = len(
+            [i for i in current_critique.issues if i.severity == "error"]
+        )
+        new_error_count = len([i for i in new_critique.issues if i.severity == "error"])
+        score_improved = (
+            new_critique.overall_score
+            >= current_critique.overall_score + min_improvement
+        )
+        tiebreak_ok = (
+            new_critique.overall_score == current_critique.overall_score
+            and new_error_count < orig_error_count
+        )
+        if not (score_improved or tiebreak_ok):
+            reject_event = RevisionEvent(
+                kind="visual_revision_candidate_rejected",
+                detail=f"no improvement: old={current_critique.overall_score} new={new_critique.overall_score}",
+                old_score=current_critique.overall_score,
+                new_score=new_critique.overall_score,
+            )
+            events.append(reject_event)
+            return _SingleAttemptResult(
+                status="rejected",
+                revised_spec=None,
+                revised_pdf=None,
+                new_critique=None,
+                reason=f"no improvement: old={current_critique.overall_score} new={new_critique.overall_score}",
+                events=events,
+                patch_signature=patch_signature,
+            )
+
+        # All gates passed — accepted
+        return _SingleAttemptResult(
+            status="accepted",
+            revised_spec=candidate,
+            revised_pdf=candidate_pdf,
+            new_critique=new_critique,
+            reason=f"accepted: old={current_critique.overall_score} new={new_critique.overall_score}",
+            events=events,
+            patch_signature=patch_signature,
+        )
+
+    except Exception as e:
+        return _SingleAttemptResult(
+            status="rejected",
+            revised_spec=None,
+            revised_pdf=None,
+            new_critique=None,
+            reason=f"unexpected error: {e}",
+            events=events,
+            patch_signature=None,
+        )
+
+
 def attempt_visual_revision(
     spec: DocumentSpec,
     original_critique: VisualCritique,
@@ -865,15 +1107,18 @@ def attempt_visual_revision(
     original_pdf: bytes | None = None,
     llm_propose_fn: Callable[[LlmPatchContext], VisualRevisionPatch | None]
     | None = None,
+    max_iterations: int = 2,
+    early_stop_at: int = 8,
 ) -> RevisionOutcome:
-    """Attempt a single visual-revision cycle (deterministic or LLM-driven).
+    """Attempt up to *max_iterations* visual-revision cycles.
 
-    First proposes a deterministic overflow patch; if none is found, falls back
-    to *llm_propose_fn* when provided.  Applies the patch, re-renders,
-    re-critiques, and accepts or rejects the candidate based on quality gates.
+    Each cycle proposes a deterministic overflow patch or falls back to
+    *llm_propose_fn*.  The loop stops early when the score reaches
+    *early_stop_at*, when an oscillating patch signature is detected, or when
+    a cycle produces no improvement.
 
-    Never raises — all exceptions are caught and returned as a rejected
-    ``RevisionOutcome``.
+    Never raises — all exceptions are caught and the best-so-far result is
+    returned.
 
     Parameters
     ----------
@@ -887,210 +1132,153 @@ def attempt_visual_revision(
         Callable that critiques PDF bytes, returning a ``VisualCritique`` or
         ``None`` on failure.
     trigger_below:
-        Only attempt revision when ``original_critique.overall_score`` is
-        strictly below this threshold.  Default 7.
+        Only attempt revision when the current score is strictly below this
+        threshold.  Default 7.
     min_improvement:
-        Minimum score improvement required to accept the candidate.  Default 1.
+        Minimum score improvement required to accept a candidate.  Default 1.
     original_pdf:
-        Optional original PDF bytes for page→block mapping.  When omitted,
-        an empty page map is used.
+        Optional original PDF bytes for page→block mapping on iteration 1.
+        When omitted, an empty page map is used.
     llm_propose_fn:
-        Optional callable that proposes a patch for non-overflow issues via LLM.
-        Called only when the deterministic overflow proposer returns ``None``.
+        Optional callable that proposes a patch for non-overflow issues via
+        LLM.  Called only when the deterministic overflow proposer returns
+        ``None``.
+    max_iterations:
+        Maximum number of revision cycles to attempt.  Default 2.
+    early_stop_at:
+        Stop iterating once the current score reaches this threshold.
+        Default 8.
     """
     started_event = RevisionEvent(
         kind="visual_revision_started",
         detail=f"Starting visual revision (score={original_critique.overall_score})",
         old_score=original_critique.overall_score,
     )
-    events: list[RevisionEvent] = [started_event]
+    all_events: list[RevisionEvent] = [started_event]
+
+    current_spec = spec
+    current_pdf = original_pdf
+    current_critique = original_critique
+    accepted_any = False
+    seen_patch_signatures: set[frozenset[tuple[str, int]]] = set()
+    score_history: list[int] = [original_critique.overall_score]
 
     try:
-        # Gate 1: only revise if score is below threshold
-        if original_critique.overall_score >= trigger_below:
+        for _iteration in range(max_iterations):
+            # Early stop: score already good enough
+            if current_critique.overall_score >= early_stop_at:
+                noop_event = RevisionEvent(
+                    kind="visual_revision_noop",
+                    detail="score already acceptable",
+                    old_score=current_critique.overall_score,
+                )
+                all_events.append(noop_event)
+                break
+
+            # After accepting at least one iteration: stop if now strictly above trigger_below
+            if accepted_any and current_critique.overall_score > trigger_below:
+                break
+
+            # Gate: only start if score is below trigger_below
+            if not accepted_any and current_critique.overall_score >= trigger_below:
+                noop_event = RevisionEvent(
+                    kind="visual_revision_noop",
+                    detail="score already acceptable",
+                    old_score=current_critique.overall_score,
+                )
+                all_events.append(noop_event)
+                return RevisionOutcome(
+                    status="noop",
+                    reason="score already acceptable",
+                    events=all_events,
+                )
+
+            result = _single_revision_attempt(
+                current_spec,
+                current_critique,
+                render=render,
+                critique_fn=critique_fn,
+                llm_propose_fn=llm_propose_fn,
+                current_pdf=current_pdf,
+                trigger_below=trigger_below,
+                min_improvement=min_improvement,
+            )
+            all_events.extend(result.events)
+
+            if result.status == "accepted":
+                # Oscillation guard: stop if this patch signature was already accepted
+                if (
+                    result.patch_signature is not None
+                    and result.patch_signature in seen_patch_signatures
+                ):
+                    break
+                if result.patch_signature is not None:
+                    seen_patch_signatures.add(result.patch_signature)
+                current_spec = result.revised_spec  # type: ignore[assignment]
+                current_pdf = result.revised_pdf
+                current_critique = result.new_critique  # type: ignore[assignment]
+                accepted_any = True
+                score_history.append(current_critique.overall_score)
+                # continue iterating
+            else:
+                # noop or rejected: no further progress this run
+                if not accepted_any:
+                    # Preserve exact first-iteration semantics for the return
+                    return RevisionOutcome(
+                        status=result.status,
+                        reason=result.reason,
+                        events=all_events,
+                    )
+                # We had accepted some previously; stop
+                break
+
+        # After loop
+        if accepted_any:
+            score_chain = " -> ".join(str(s) for s in score_history)
+            accepted_event = RevisionEvent(
+                kind="visual_revision_accepted",
+                detail=f"accepted over {len(score_history) - 1} iteration(s): {score_chain}",
+                old_score=score_history[0],
+                new_score=score_history[-1],
+            )
+            all_events.append(accepted_event)
+            return RevisionOutcome(
+                status="accepted",
+                revised_spec=current_spec,
+                revised_pdf=current_pdf,
+                new_critique=current_critique,
+                reason=f"improved over {len(score_history) - 1} iteration(s): {score_chain}",
+                events=all_events,
+            )
+        else:
+            # No iteration ever accepted; only reach here when score >= early_stop_at on iter 0
             noop_event = RevisionEvent(
                 kind="visual_revision_noop",
                 detail="score already acceptable",
                 old_score=original_critique.overall_score,
             )
-            events.append(noop_event)
+            all_events.append(noop_event)
             return RevisionOutcome(
                 status="noop",
                 reason="score already acceptable",
-                events=events,
+                events=all_events,
             )
-
-        # Build page map
-        page_map: dict[int, list[int]]
-        if original_pdf is not None:
-            page_map = map_pages_to_blocks(original_pdf, spec)
-        else:
-            page_map = {}
-
-        # Propose patch — deterministic overflow first, then LLM fallback
-        patch = propose_overflow_patch(spec, original_critique, page_map)
-        if patch is None:
-            if llm_propose_fn is not None:
-                patch = propose_llm_patch(
-                    spec, original_critique, page_map, propose_fn=llm_propose_fn
-                )
-            if patch is None:
-                noop_event = RevisionEvent(
-                    kind="visual_revision_noop",
-                    detail="no actionable deterministic fix",
-                    old_score=original_critique.overall_score,
-                )
-                events.append(noop_event)
-                return RevisionOutcome(
-                    status="noop",
-                    reason="no actionable deterministic fix",
-                    events=events,
-                )
-
-        # Apply patch
-        try:
-            candidate = apply_patch(spec, patch)
-        except Exception as e:
-            reject_event = RevisionEvent(
-                kind="visual_revision_candidate_rejected",
-                detail=f"patch apply failed: {e}",
-                old_score=original_critique.overall_score,
-            )
-            events.append(reject_event)
-            return RevisionOutcome(
-                status="rejected",
-                reason=f"patch apply failed: {e}",
-                events=events,
-            )
-
-        # Gate a: structural errors
-        fix_result = critique_and_fix(candidate)
-        if fix_result.has_errors:
-            reject_event = RevisionEvent(
-                kind="visual_revision_candidate_rejected",
-                detail="candidate has structural errors",
-                old_score=original_critique.overall_score,
-            )
-            events.append(reject_event)
-            return RevisionOutcome(
-                status="rejected",
-                reason="candidate has structural errors",
-                events=events,
-            )
-
-        # Gate b: render succeeds
-        try:
-            candidate_pdf = render(candidate)
-        except Exception as e:
-            reject_event = RevisionEvent(
-                kind="visual_revision_candidate_rejected",
-                detail=f"candidate render failed: {e}",
-                old_score=original_critique.overall_score,
-            )
-            events.append(reject_event)
-            return RevisionOutcome(
-                status="rejected",
-                reason=f"candidate render failed: {e}",
-                events=events,
-            )
-
-        # Gate c: render validation — reject if any error-severity issue
-        render_issues = validate_render(candidate_pdf, "pdf")
-        error_render_issues = [i for i in render_issues if i.severity == "error"]
-        if error_render_issues:
-            reject_event = RevisionEvent(
-                kind="visual_revision_candidate_rejected",
-                detail="candidate failed render validation",
-                old_score=original_critique.overall_score,
-            )
-            events.append(reject_event)
-            return RevisionOutcome(
-                status="rejected",
-                reason="candidate failed render validation",
-                events=events,
-            )
-
-        # Gate d: content preservation
-        ok, reasons = content_preserved(spec, candidate)
-        if not ok:
-            reject_event = RevisionEvent(
-                kind="visual_revision_candidate_rejected",
-                detail=f"content not preserved: {'; '.join(reasons)}",
-                old_score=original_critique.overall_score,
-            )
-            events.append(reject_event)
-            return RevisionOutcome(
-                status="rejected",
-                reason=f"content not preserved: {'; '.join(reasons)}",
-                events=events,
-            )
-
-        # Gate e: critique candidate
-        new_critique = critique_fn(candidate_pdf)
-        if new_critique is None:
-            reject_event = RevisionEvent(
-                kind="visual_revision_candidate_rejected",
-                detail="could not critique candidate",
-                old_score=original_critique.overall_score,
-            )
-            events.append(reject_event)
-            return RevisionOutcome(
-                status="rejected",
-                reason="could not critique candidate",
-                events=events,
-            )
-
-        # Gate f: improvement check
-        # Count error-severity issues in both critiques (VisualIssue uses severity str)
-        # Note: VisualIssue.severity is Severity (Literal["error","warning","info"])
-        orig_error_count = len(
-            [i for i in original_critique.issues if i.severity == "error"]
-        )
-        new_error_count = len([i for i in new_critique.issues if i.severity == "error"])
-        score_improved = (
-            new_critique.overall_score
-            >= original_critique.overall_score + min_improvement
-        )
-        tiebreak_ok = (
-            new_critique.overall_score == original_critique.overall_score
-            and new_error_count < orig_error_count
-        )
-        if not (score_improved or tiebreak_ok):
-            reject_event = RevisionEvent(
-                kind="visual_revision_candidate_rejected",
-                detail=f"no improvement: old={original_critique.overall_score} new={new_critique.overall_score}",
-                old_score=original_critique.overall_score,
-                new_score=new_critique.overall_score,
-            )
-            events.append(reject_event)
-            return RevisionOutcome(
-                status="rejected",
-                reason=f"no improvement: old={original_critique.overall_score} new={new_critique.overall_score}",
-                events=events,
-            )
-
-        # All gates passed — accept
-        accept_event = RevisionEvent(
-            kind="visual_revision_accepted",
-            detail=f"accepted: old={original_critique.overall_score} new={new_critique.overall_score}",
-            old_score=original_critique.overall_score,
-            new_score=new_critique.overall_score,
-        )
-        events.append(accept_event)
-        return RevisionOutcome(
-            status="accepted",
-            revised_spec=candidate,
-            revised_pdf=candidate_pdf,
-            new_critique=new_critique,
-            reason=f"accepted: old={original_critique.overall_score} new={new_critique.overall_score}",
-            events=events,
-        )
 
     except Exception as e:
+        if accepted_any:
+            score_chain = " -> ".join(str(s) for s in score_history)
+            return RevisionOutcome(
+                status="accepted",
+                revised_spec=current_spec,
+                revised_pdf=current_pdf,
+                new_critique=current_critique,
+                reason=f"improved (partial, error mid-loop: {e}): {score_chain}",
+                events=all_events,
+            )
         return RevisionOutcome(
             status="rejected",
             reason=f"unexpected error: {e}",
-            events=events,
+            events=all_events,
         )
 
 

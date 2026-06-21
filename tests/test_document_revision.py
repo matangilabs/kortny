@@ -1888,3 +1888,329 @@ class TestAttemptVisualRevision:
             llm_propose_fn=None,
         )
         assert outcome.status == "noop"
+
+    def test_two_iteration_improvement(self) -> None:
+        """Two iterations: iter1 5→7, iter2 7→8 (different patches each round) → accepted, score 8."""
+        # Spec with two independent large tables, each fixable in a separate iteration.
+        spec = DocumentSpec(
+            doc_kind=DocKind.report,
+            title="Two Iteration Doc",
+            blocks=[
+                Table(
+                    type="table",
+                    caption="Table A",
+                    columns=["A", "B"],
+                    rows=[[f"r{i}a", f"r{i}b"] for i in range(20)],
+                ),
+                Table(
+                    type="table",
+                    caption="Table B",
+                    columns=["X", "Y"],
+                    rows=[[f"s{i}x", f"s{i}y"] for i in range(20)],
+                ),
+            ],
+        )
+
+        critique_calls: list[int] = []
+        score_sequence = [7, 8]  # iter1 produces score 7, iter2 produces score 8
+
+        def fake_critique(pdf: bytes) -> VisualCritique:
+            score = score_sequence[min(len(critique_calls), len(score_sequence) - 1)]
+            critique_calls.append(score)
+            issues = []
+            if score < 8:
+                # Still has an overflow issue to fix in the next iteration
+                issues = [
+                    VisualIssue(
+                        page=1,
+                        category="overflow",
+                        severity="error",
+                        message="table overflow",
+                    )
+                ]
+            return VisualCritique(
+                overall_score=score, summary=f"score {score}", issues=issues
+            )
+
+        outcome = attempt_visual_revision(
+            spec,
+            VisualCritique(
+                overall_score=5,
+                summary="initial",
+                issues=[
+                    VisualIssue(
+                        page=1,
+                        category="overflow",
+                        severity="error",
+                        message="overflow",
+                    )
+                ],
+            ),
+            render=lambda s: _better_pdf(),
+            critique_fn=fake_critique,
+            max_iterations=3,
+            early_stop_at=9,
+        )
+        assert outcome.status == "accepted"
+        assert outcome.new_critique is not None
+        assert outcome.new_critique.overall_score == 8
+        # Events should have started + accepted (outer), and candidate rejection/noop per iteration
+        kinds = [e.kind for e in outcome.events]
+        assert "visual_revision_started" in kinds
+        assert "visual_revision_accepted" in kinds
+        accepted_ev = next(
+            e for e in outcome.events if e.kind == "visual_revision_accepted"
+        )
+        assert accepted_ev.old_score == 5
+        assert accepted_ev.new_score == 8
+        # "2 iteration" in reason
+        assert "2 iteration" in outcome.reason
+        assert "5" in outcome.reason
+        assert "8" in outcome.reason
+
+    def test_early_stop_at_threshold(self) -> None:
+        """Once score reaches early_stop_at=8, loop stops even if iterations remain."""
+        spec = _overflow_spec()
+
+        critique_calls: list[int] = []
+
+        def fake_critique(pdf: bytes) -> VisualCritique:
+            critique_calls.append(1)
+            return VisualCritique(overall_score=8, summary="great", issues=[])
+
+        outcome = attempt_visual_revision(
+            spec,
+            _overflow_critique(score=5),
+            render=lambda s: _better_pdf(),
+            critique_fn=fake_critique,
+            max_iterations=5,
+            early_stop_at=8,
+        )
+        assert outcome.status == "accepted"
+        assert outcome.new_critique is not None
+        assert outcome.new_critique.overall_score == 8
+        # Should stop after first iteration reaching early_stop_at
+        # Only one critique call (iter 1 produces 8 → loop stops before iter 2)
+        assert len(critique_calls) == 1
+
+    def test_max_iterations_cap(self) -> None:
+        """Never more than max_iterations critique calls."""
+        spec = _overflow_spec()
+        critique_calls: list[VisualCritique] = []
+
+        # Each call returns score 6, still has overflow → would loop forever without cap
+        def fake_critique(pdf: bytes) -> VisualCritique:
+            c = VisualCritique(
+                overall_score=6,
+                summary="still bad",
+                issues=[
+                    VisualIssue(
+                        page=1,
+                        category="overflow",
+                        severity="error",
+                        message="overflow",
+                    )
+                ],
+            )
+            critique_calls.append(c)
+            return c
+
+        attempt_visual_revision(
+            spec,
+            _overflow_critique(score=5),
+            render=lambda s: _better_pdf(),
+            critique_fn=fake_critique,
+            max_iterations=2,
+        )
+        # At most 2 critique calls (one per iteration)
+        assert len(critique_calls) <= 2
+
+    def test_no_progress_stop(self) -> None:
+        """Iter1 accepts (5→7); iter2 produces no improvement → returns iter1 result."""
+        spec = _overflow_spec()
+
+        call_count = [0]
+
+        def fake_critique(pdf: bytes) -> VisualCritique:
+            call_count[0] += 1
+            if call_count[0] == 1:
+                # Iter 1: improvement to 7
+                return VisualCritique(
+                    overall_score=7,
+                    summary="better",
+                    issues=[
+                        VisualIssue(
+                            page=1,
+                            category="overflow",
+                            severity="error",
+                            message="overflow",
+                        )
+                    ],
+                )
+            else:
+                # Iter 2: no improvement (score stays at 7)
+                return VisualCritique(
+                    overall_score=7,
+                    summary="same",
+                    issues=[
+                        VisualIssue(
+                            page=1,
+                            category="overflow",
+                            severity="error",
+                            message="overflow",
+                        )
+                    ],
+                )
+
+        outcome = attempt_visual_revision(
+            spec,
+            _overflow_critique(score=5),
+            render=lambda s: _better_pdf(),
+            critique_fn=fake_critique,
+            max_iterations=3,
+            trigger_below=7,
+        )
+        # Should have accepted iter1's result
+        assert outcome.status == "accepted"
+        assert outcome.new_critique is not None
+        assert outcome.new_critique.overall_score == 7
+
+    def test_oscillation_guard(self) -> None:
+        """A patch targeting the same (op, block_index) set as a previous accepted patch → loop stops."""
+        # Use a spec with one large table (block 0) that keeps overflowing
+        spec = _overflow_spec()
+
+        call_count = [0]
+
+        def fake_critique(pdf: bytes) -> VisualCritique:
+            call_count[0] += 1
+            # Always return improving score, always with overflow (to keep proposing)
+            # but since the patch targets the same block, oscillation guard triggers
+            score = min(5 + call_count[0], 8)
+            return VisualCritique(
+                overall_score=score,
+                summary=f"score {score}",
+                issues=[
+                    VisualIssue(
+                        page=1,
+                        category="overflow",
+                        severity="error",
+                        message="overflow",
+                    )
+                ],
+            )
+
+        # We need the render to return something that still has the big table
+        # so the overflow patch keeps targeting block 0.
+        # But after iter1, the spec has been split. So overflow patch on iter2
+        # would target a DIFFERENT block (the split chunks). To test oscillation,
+        # we need to force the same patch signature.
+        #
+        # The cleanest way: monkeypatch propose_overflow_patch to always return
+        # a patch for block_index=0, so the signature repeats.
+        from unittest.mock import patch as mock_patch
+
+        from kortny.documents.revision import SplitTable as _SplitTable
+        from kortny.documents.revision import VisualRevisionPatch as _VRP
+        from kortny.documents.revision import spec_hash as _spec_hash
+
+        def always_same_patch(s: Any, c: Any, pm: Any) -> _VRP:
+            return _VRP(
+                base_spec_hash=_spec_hash(s),
+                operations=[_SplitTable(block_index=0, max_rows_per_table=12)],
+                rationale="overflow fix",
+            )
+
+        with mock_patch(
+            "kortny.documents.revision.propose_overflow_patch",
+            side_effect=always_same_patch,
+        ):
+            outcome = attempt_visual_revision(
+                spec,
+                _overflow_critique(score=5),
+                render=lambda s: _better_pdf(),
+                critique_fn=fake_critique,
+                max_iterations=5,
+                early_stop_at=10,
+            )
+
+        # Oscillation guard should have stopped after iter 2 (iter 1 accepted with sig {(split_table, 0)},
+        # iter 2 would try the same sig → break before accepting)
+        assert outcome.status == "accepted"
+        # Only 1 critique call because iter1 accepts, iter2 detects oscillation before critique
+        # Actually oscillation guard runs AFTER accept_if_improved, so critique may be called twice.
+        # The guard: if result.status == "accepted" and patch_signature in seen → break (without appending to accepted).
+        # So iter1: accepted, sig added. Iter2: accepted result comes back from _single_revision_attempt,
+        # but outer loop sees sig already in seen → breaks.
+        assert call_count[0] <= 2
+
+    def test_max_iterations_1_reproduces_current_behavior(self) -> None:
+        """max_iterations=1 must reproduce the EXACT current single-attempt behavior."""
+        spec = _overflow_spec()
+        critique = _overflow_critique(score=5)
+
+        outcome = attempt_visual_revision(
+            spec,
+            critique,
+            render=lambda s: _better_pdf(),
+            critique_fn=lambda pdf: VisualCritique(
+                overall_score=8, summary="Better now", issues=[]
+            ),
+            max_iterations=1,
+        )
+        # Same as test_happy_path_accepted
+        assert outcome.status == "accepted"
+        assert outcome.revised_spec is not None
+        assert len(outcome.revised_spec.blocks) > len(spec.blocks)
+        assert outcome.revised_pdf == _better_pdf()
+        assert outcome.new_critique is not None
+        assert outcome.new_critique.overall_score == 8
+        kinds = [e.kind for e in outcome.events]
+        assert "visual_revision_accepted" in kinds
+        accepted = next(
+            e for e in outcome.events if e.kind == "visual_revision_accepted"
+        )
+        assert accepted.old_score == 5
+        assert accepted.new_score == 8
+
+    def test_never_raises_render_failure_mid_loop(self) -> None:
+        """A render failure on iteration 2 (after iter1 accepted) → returns iter1 best, no raise."""
+        spec = _overflow_spec()
+
+        call_count = [0]
+
+        def fake_critique(pdf: bytes) -> VisualCritique:
+            call_count[0] += 1
+            return VisualCritique(
+                overall_score=7,
+                summary="ok",
+                issues=[
+                    VisualIssue(
+                        page=1,
+                        category="overflow",
+                        severity="error",
+                        message="overflow",
+                    )
+                ],
+            )
+
+        render_count = [0]
+
+        def fake_render(s: DocumentSpec) -> bytes:
+            render_count[0] += 1
+            if render_count[0] >= 2:
+                raise RuntimeError("render exploded on iter 2")
+            return _better_pdf()
+
+        outcome = attempt_visual_revision(
+            spec,
+            _overflow_critique(score=5),
+            render=fake_render,
+            critique_fn=fake_critique,
+            max_iterations=3,
+        )
+        # Must not raise; should return whatever was accepted before the failure
+        # Iter 1 accepted (render_count=1 succeeds), iter 2 render fails → returns iter1 best
+        assert outcome.status == "accepted"
+        assert outcome.new_critique is not None
+        assert outcome.new_critique.overall_score == 7

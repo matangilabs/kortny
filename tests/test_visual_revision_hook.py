@@ -655,6 +655,66 @@ def test_llm_proposer_wired_calls_llm_propose_fn(
     assert captured["llm_propose_fn"] is mock_proposer
 
 
+def test_max_iterations_passed_from_settings(
+    db_session: Session, tmp_path: Path
+) -> None:
+    """max_iterations from settings is forwarded to attempt_visual_revision."""
+    settings = _make_settings(
+        KORTNY_DOCUMENT_VISUAL_REVISION_ENABLED=True,
+        KORTNY_DOCUMENT_VISUAL_REVISION_MAX_ITERATIONS=3,
+    )
+    task = _make_task(db_session, event_id="EvMaxIter")
+
+    pdf_file = tmp_path / "report.pdf"
+    pdf_file.write_bytes(b"%PDF-1.4 fake")
+    _add_artifact_with_critique(db_session, task, pdf_path=pdf_file, score=4)
+    db_session.flush()
+
+    mock_critic = MagicMock(
+        return_value=VisualCritique(overall_score=4, summary="poor", issues=[])
+    )
+    noop_outcome = RevisionOutcome(
+        status="noop",
+        reason="no actionable deterministic fix",
+        events=[
+            RevisionEvent(
+                kind="visual_revision_noop",
+                detail="no actionable deterministic fix",
+                old_score=4,
+            )
+        ],
+    )
+
+    captured: dict[str, Any] = {}
+
+    def _capture_attempt_visual_revision(*args: Any, **kwargs: Any) -> RevisionOutcome:
+        captured.update(kwargs)
+        return noop_outcome
+
+    task_svc = TaskService(db_session)
+    executor = _make_executor()
+
+    with (
+        patch(
+            "kortny.worker.agent_executor._build_document_visual_critic",
+            return_value=mock_critic,
+        ),
+        patch(
+            "kortny.worker.agent_executor.attempt_visual_revision",
+            side_effect=_capture_attempt_visual_revision,
+        ),
+    ):
+        executor._maybe_revise_documents(
+            settings=settings,
+            session=db_session,
+            task=task,
+            task_service=task_svc,
+            working_dir=tmp_path,
+        )
+
+    assert captured.get("max_iterations") == 3
+
+
 def test_llm_proposer_none_still_works(db_session: Session, tmp_path: Path) -> None:
     """When _build_revision_patch_proposer returns None, _maybe_revise_documents does not raise."""
     settings = _make_settings(KORTNY_DOCUMENT_VISUAL_REVISION_ENABLED=True)
