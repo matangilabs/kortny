@@ -27,7 +27,20 @@ from kortny.tools.catalog import NATIVE_TOOL_METADATA
 # Native tools whose results introduce untrusted, attacker-influenceable content
 # into the context. ``web_search`` returns arbitrary web pages; ``slack_file_read``
 # returns file bodies a third party may have uploaded.
-_UNTRUSTED_NATIVE_TOOLS = frozenset({"web_search", "slack_file_read"})
+_UNTRUSTED_NATIVE_TOOLS = frozenset(
+    {
+        "web_search",
+        "slack_file_read",
+        # Browser tools: every visited page is untrusted content (prompt-injection vector).
+        "browser_navigate",
+        "browser_snapshot",
+        "browser_click",
+        "browser_type",
+        "browser_take_screenshot",
+        "browser_wait_for",
+        "browser_navigate_back",
+    }
+)
 
 # Runtime-name prefixes for external providers. Every Composio/MCP tool result
 # is third-party content by construction.

@@ -125,7 +125,14 @@ def test_native_tool_surfaces_are_derived_from_metadata() -> None:
         for name, metadata in NATIVE_TOOL_METADATA.items()
         if metadata.side_effect == "write" and metadata.approval == "none"
     )
-    assert native_tool_names_by_approval("self_gated") == frozenset({"remember_fact"})
+    assert native_tool_names_by_approval("self_gated") == frozenset(
+        {
+            "remember_fact",
+            # Browser interaction tools: write page state / can trigger egress.
+            "browser_click",
+            "browser_type",
+        }
+    )
     # Sandbox tools are auto-approved (isolated container); only memory
     # deletion and outward-facing deployment still require user approval.
     assert native_tool_names_by_approval("user_approval") == frozenset(
