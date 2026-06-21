@@ -502,6 +502,14 @@ class Settings(BaseSettings):
         default=8,
         validation_alias="KORTNY_DOC_VISUAL_CRITIC_MAX_PAGES",
     )
+    document_visual_revision_enabled: bool = Field(
+        default=False,
+        validation_alias="KORTNY_DOCUMENT_VISUAL_REVISION_ENABLED",
+    )
+    document_visual_revision_max_iterations: int = Field(
+        default=2,
+        validation_alias="KORTNY_DOCUMENT_VISUAL_REVISION_MAX_ITERATIONS",
+    )
 
     observability_enabled: bool = Field(
         default=True, validation_alias="OBSERVABILITY_ENABLED"

@@ -49,6 +49,11 @@ from kortny.db.models import (
 )
 from kortny.db.models import LLMProvider as DbLLMProvider
 from kortny.documents import theme_names
+from kortny.documents.critique import VisualCritique
+from kortny.documents.critique import visual_critique as _run_visual_critique
+from kortny.documents.ir import DocumentSpec
+from kortny.documents.render import render_spec_pdf
+from kortny.documents.revision import attempt_visual_revision
 from kortny.embeddings import EmbeddingBackend, EmbeddingIndex, create_embedding_backend
 from kortny.evals.retrieval.catalog_retriever import build_catalog_retrieve_fn
 from kortny.execution import task_workspace
@@ -159,6 +164,8 @@ from kortny.tools.document_studio import DocumentStudioTool
 from kortny.tools.find_tools import FindToolsTool
 from kortny.tools.native_runtime import (
     NativeToolBuildContext,
+    _build_document_visual_critic,  # noqa: PLC2701
+    _build_revision_patch_proposer,  # noqa: PLC2701
     build_native_inventory_tools,
     build_native_tools,
     native_tool_classes_by_name,
@@ -396,6 +403,13 @@ class AgentTaskExecutor:
                     task=task,
                     task_service=task_service,
                     result_summary=agent_result.result_summary,
+                )
+                self._maybe_revise_documents(
+                    settings=settings,
+                    session=session,
+                    task=task,
+                    task_service=task_service,
+                    working_dir=workspace.path,
                 )
                 self._mark_channel_assessment_completed(
                     settings=settings,
@@ -2694,6 +2708,202 @@ class AgentTaskExecutor:
                 "profile_version": profile.profile_version,
             },
         )
+
+    def _maybe_revise_documents(
+        self,
+        *,
+        settings: Settings,
+        session: Session,
+        task: Task,
+        task_service: TaskService,
+        working_dir: Path,
+    ) -> None:
+        """Best-effort post-completion visual-revision hook (HIG-244 slice 2-ii).
+
+        When ``document_visual_revision_enabled`` is True, queries for v1 PDF
+        artifacts with a visual-critique score below 7 and attempts one
+        deterministic revision cycle per qualifying artifact.  A revised PDF is
+        written to disk, recorded as a new ``Artifact`` (doc_version=2), and
+        posted to Slack.  All errors are swallowed and recorded as TaskEvent
+        log entries so they never mask the primary task outcome.
+        """
+        if not settings.document_visual_revision_enabled:
+            return
+
+        try:
+            qualifying = list(
+                session.scalars(
+                    select(Artifact).where(
+                        Artifact.task_id == task.id,
+                        Artifact.mime_type == "application/pdf",
+                        Artifact.spec_json.is_not(None),
+                        Artifact.doc_version == 1,
+                        Artifact.storage_path.is_not(None),
+                    )
+                )
+            )
+            if not qualifying:
+                return
+
+            # Build the critic once for this hook invocation.
+            native_context = NativeToolBuildContext(
+                settings=settings,
+                session=session,
+                task=task,
+                task_service=task_service,
+                working_dir=working_dir,
+                web_search_tool=None,
+                slack_history_client=None,
+                slack_file_client=None,
+                slack_identity_client=None,
+                slack_action_client=None,
+                memory_service=WorkspaceStateService(session),
+            )
+            critic = _build_document_visual_critic(native_context)
+            if critic is None:
+                return
+            llm_propose_fn = _build_revision_patch_proposer(native_context)
+
+            max_pages = settings.doc_visual_critic_max_pages
+            font_paths = [p for p in settings.document_font_paths.split(":") if p]
+
+            def _critique_fn(pdf_bytes: bytes) -> VisualCritique | None:
+                return _run_visual_critique(pdf_bytes, critic, max_pages=max_pages)
+
+            def _render_fn(s: DocumentSpec) -> bytes:
+                return render_spec_pdf(s, font_paths=font_paths)
+
+            for artifact in qualifying:
+                # Find the matching artifact_created event to read the v1 score.
+                v1_event = session.scalar(
+                    select(TaskEvent).where(
+                        TaskEvent.task_id == task.id,
+                        TaskEvent.type == TaskEventType.artifact_created,
+                        TaskEvent.payload["artifact_id"].as_string()
+                        == str(artifact.id),
+                    )
+                )
+                if v1_event is None:
+                    continue
+                v1_score: int = v1_event.payload.get("visual_critique", {}).get(
+                    "overall_score", 10
+                )
+                if v1_score >= 7:
+                    continue
+
+                v1_critique = VisualCritique.model_validate(
+                    v1_event.payload["visual_critique"]
+                )
+                assert artifact.storage_path is not None
+                v1_pdf_bytes = Path(artifact.storage_path).read_bytes()
+                spec = DocumentSpec.model_validate(artifact.spec_json)
+
+                outcome = attempt_visual_revision(
+                    spec,
+                    v1_critique,
+                    render=_render_fn,
+                    critique_fn=_critique_fn,
+                    original_pdf=v1_pdf_bytes,
+                    llm_propose_fn=llm_propose_fn,
+                    max_iterations=settings.document_visual_revision_max_iterations,
+                )
+
+                for rev_event in outcome.events:
+                    task_service.append_event(
+                        task,
+                        TaskEventType.log,
+                        {
+                            "message": rev_event.kind,
+                            "detail": rev_event.detail,
+                            "old_score": rev_event.old_score,
+                            "new_score": rev_event.new_score,
+                            "artifact_id": str(artifact.id),
+                        },
+                    )
+
+                if outcome.status != "accepted":
+                    continue
+
+                assert outcome.revised_pdf is not None
+                assert outcome.revised_spec is not None
+
+                v2_filename = artifact.filename
+                v2_path = working_dir / f"v2_{artifact.id}_{v2_filename}"
+                v2_path.write_bytes(outcome.revised_pdf)
+
+                v2_artifact = Artifact(
+                    task_id=task.id,
+                    filename=artifact.filename,
+                    mime_type=artifact.mime_type,
+                    size_bytes=len(outcome.revised_pdf),
+                    storage_path=str(v2_path),
+                    doc_group_id=artifact.doc_group_id,
+                    doc_version=(artifact.doc_version or 1) + 1,
+                    spec_json=outcome.revised_spec.model_dump(mode="json"),
+                )
+                session.add(v2_artifact)
+                session.flush()
+
+                task_service.append_event(
+                    task,
+                    TaskEventType.artifact_created,
+                    {
+                        "artifact_id": str(v2_artifact.id),
+                        "filename": v2_artifact.filename,
+                        "mime_type": v2_artifact.mime_type,
+                        "size_bytes": v2_artifact.size_bytes,
+                        "storage_path": str(v2_path),
+                        "visual_critique": (
+                            outcome.new_critique.model_dump()
+                            if outcome.new_critique is not None
+                            else None
+                        ),
+                        "doc_version": v2_artifact.doc_version,
+                        "revision_of": str(artifact.id),
+                    },
+                )
+
+                client = self.slack_client
+                if client is None:
+                    client = cast(
+                        SlackPostingClient,
+                        WebClient(token=settings.slack_bot_token),
+                    )
+                poster = SlackPoster(
+                    session=session,
+                    client=client,
+                    task_service=task_service,
+                    egress_url_allowlist=parse_egress_allowlist(
+                        settings.egress_url_allowlist
+                    ),
+                )
+                thread = SlackThread.from_task(task)
+                poster.upload_file(
+                    thread,
+                    v2_path,
+                    artifact=v2_artifact,
+                    initial_comment="Here is a visually revised version of the document.",
+                    title=v2_artifact.filename,
+                )
+
+        except Exception as exc:
+            task_service.append_event(
+                task,
+                TaskEventType.log,
+                {
+                    "message": "visual_revision_hook_failed",
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                },
+            )
+            log_observation(
+                logger,
+                "visual_revision_hook_failed",
+                level=logging.WARNING,
+                task=task,
+                error_type=type(exc).__name__,
+                error_summary=str(exc)[:500],
+            )
 
     def _reinforce_runtime_graph_context(
         self,

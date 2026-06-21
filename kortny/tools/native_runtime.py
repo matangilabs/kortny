@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from kortny.documents.critique import DocumentVisualCritic
+    from kortny.documents.revision import LlmPatchContext, VisualRevisionPatch
 
 from sqlalchemy.orm import Session
 
@@ -303,6 +304,114 @@ def _build_document_visual_critic(
 
     critic: DocumentVisualCritic = visual_critic
     return critic
+
+
+def _build_revision_patch_proposer(
+    context: NativeToolBuildContext,
+) -> Callable[[LlmPatchContext], VisualRevisionPatch | None] | None:
+    """Build the LLM-driven revision patch proposer callable (HIG-244 slice 3b).
+
+    Returns None when no analysis-tier model is configured or on any setup
+    error.  The returned callable accepts an ``LlmPatchContext`` and returns a
+    ``VisualRevisionPatch`` or ``None`` on any failure (never raises).
+    """
+    import json  # noqa: PLC0415
+
+    from kortny.documents.revision import (  # noqa: PLC0415
+        VisualRevisionPatch,
+    )
+    from kortny.llm import ChatMessage, LLMService  # noqa: PLC0415
+    from kortny.llm.routing import ModelRouter as _ModelRouter  # noqa: PLC0415
+    from kortny.llm.routing import ModelRouteTier  # noqa: PLC0415
+    from kortny.llm.runtime_config import (  # noqa: PLC0415
+        create_provider_for_selection,
+        select_runtime_model,
+    )
+
+    settings = context.settings
+    session = context.session
+    task = context.task
+    task_service = context.task_service
+
+    try:
+        text_route = _ModelRouter(settings).route_for_tier(
+            ModelRouteTier.analysis,
+            reason="revision_patch_proposer (HIG-244)",
+        )
+        runtime_selection = select_runtime_model(
+            session=session,
+            settings=settings,
+            installation_id=task.installation_id,
+            model_route=text_route,
+        )
+    except Exception:
+        return None
+
+    try:
+        provider = create_provider_for_selection(
+            settings=settings, selection=runtime_selection
+        )
+    except Exception:
+        return None
+
+    provider_name = runtime_selection.provider_name
+
+    _PROPOSER_SYSTEM = (
+        "You are a document-layout fixer. "
+        "Choose ONLY from these operations to fix the presentation defects listed:\n"
+        "- set_chart_labels: fill MISSING chart title/axis labels/series names "
+        "(never overwrite existing)\n"
+        "- change_chart_type: switch between bar, line, area only (never to/from pie)\n"
+        "- compact_stat_cards: move stat card notes to a prose block below\n"
+        "- set_theme: change the document theme (known themes only)\n"
+        "- split_table: split an overflowing table into smaller chunks\n"
+        "- split_prose: split an overflowing prose block at natural boundaries\n\n"
+        "Rules:\n"
+        "1. Do NOT invent or change any text content — only fix presentation/layout.\n"
+        "2. Output a single VisualRevisionPatch JSON with base_spec_hash set to "
+        "the provided value.\n"
+        "3. Only reference block_index values that appear in the candidate blocks.\n"
+        "4. If no fix is possible, output an empty operations list."
+    )
+
+    def revision_proposer(ctx: LlmPatchContext) -> VisualRevisionPatch | None:
+        try:
+            issue_lines = "\n".join(
+                f"- [{issue.category}] {issue.severity}: {issue.message} "
+                f"(page {issue.page})"
+                for issue in ctx.issues
+            )
+            user_content = (
+                f"{issue_lines}\n\n"
+                f"Candidate blocks:\n{json.dumps(ctx.candidates, indent=2)}\n\n"
+                f"base_spec_hash: {ctx.base_spec_hash}"
+            )
+            messages = [
+                ChatMessage(role="system", content=_PROPOSER_SYSTEM),
+                ChatMessage(role="user", content=user_content),
+            ]
+            llm = LLMService(
+                session=session,
+                provider=provider,
+                provider_name=provider_name,
+                task_service=task_service,
+                model_route=runtime_selection.model_route,
+                settings=settings,
+            )
+            completion = llm.complete(
+                task_id=task.id,
+                messages=messages,
+                response_format={"type": "json_object"},
+                prompt_name="kortny.revision_patch_proposer",
+                prompt_source="code",
+            )
+            if not completion.content:
+                return None
+            return VisualRevisionPatch.model_validate_json(completion.content)
+        except Exception:
+            return None
+
+    return revision_proposer
 
 
 def _build_document_studio_tool(context: NativeToolBuildContext) -> Tool:
