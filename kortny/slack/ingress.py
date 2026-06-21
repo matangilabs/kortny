@@ -7,6 +7,7 @@ import re
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Protocol, cast
 
 from sqlalchemy import select
@@ -1040,17 +1041,56 @@ class SlackIngress:
     ) -> Task | None:
         membership = membership_result.membership
         metadata = membership.metadata_json or {}
-        if metadata.get("assessment_task_id"):
+
+        # Dead-lettered channels never retry.
+        if metadata.get("assessment_dead_lettered_at"):
             return None
+
+        # Respect the exponential backoff window after a failure.
+        next_attempt_raw = metadata.get("assessment_next_attempt_at")
+        if next_attempt_raw:
+            try:
+                next_attempt = datetime.fromisoformat(str(next_attempt_raw))
+                if next_attempt.tzinfo is None:
+                    next_attempt = next_attempt.replace(tzinfo=UTC)
+                if next_attempt > datetime.now(UTC):
+                    return None
+            except (ValueError, TypeError):
+                pass
+
+        # Skip while an existing task is still in-flight.
+        task_id_raw = metadata.get("assessment_task_id")
+        if task_id_raw:
+            try:
+                existing_task_id = uuid.UUID(str(task_id_raw))
+                existing_task = self.session.get(Task, existing_task_id)
+                if existing_task is not None:
+                    _active_statuses = frozenset(
+                        {
+                            DbTaskStatus.pending,
+                            DbTaskStatus.running,
+                            DbTaskStatus.waiting_approval,
+                            DbTaskStatus.crashed,
+                        }
+                    )
+                    if DbTaskStatus(existing_task.status) in _active_statuses:
+                        return None
+            except (ValueError, AttributeError):
+                pass
+
         if membership.onboarding_status != "posted":
             return None
         if not membership.onboarding_message_ts:
             return None
 
+        # Attempt number is the current failure count — matches what
+        # mark_assessment_failed will increment to after this attempt.
+        attempt = int(metadata.get("assessment_failure_count") or 0)
+
         task_input = build_channel_assessment_input(channel_id=membership.channel_id)
         task = self.task_service.create_task(
             installation_id=installation.id,
-            slack_event_id=assessment_event_id_for_membership(membership.id),
+            slack_event_id=assessment_event_id_for_membership(membership.id, attempt),
             slack_channel_id=membership.channel_id,
             slack_thread_ts=membership.onboarding_message_ts,
             slack_message_ts=membership.onboarding_message_ts,
@@ -1063,7 +1103,7 @@ class SlackIngress:
             input=task_input,
             identity=TaskIdentity.synthetic(
                 source="channel_assessment",
-                source_id=assessment_identity_source_id(membership.id),
+                source_id=assessment_identity_source_id(membership.id, attempt),
                 input_text=task_input,
                 payload={
                     "channel_id": membership.channel_id,

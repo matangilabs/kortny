@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -14,6 +14,10 @@ from sqlalchemy.orm import Session
 from kortny.db.models import Installation, SlackChannelMembership
 
 ONBOARDING_TRIGGER_SOURCES = frozenset({"member_joined_channel", "app_mention"})
+
+ASSESSMENT_MAX_FAILURES = 3
+ASSESSMENT_BACKOFF_BASE = timedelta(minutes=5)
+ASSESSMENT_BACKOFF_CAP = timedelta(hours=24)
 SOURCE_PRIORITY = {
     "message_observation": 0,
     "channel_history": 1,
@@ -166,14 +170,28 @@ class SlackChannelMembershipService:
         error_type: str,
         error: str,
     ) -> None:
-        """Record that the channel assessment task failed."""
+        """Record that the channel assessment task failed.
+
+        Increments the failure count, computes the next retry window with
+        exponential backoff, and marks the membership as dead-lettered after
+        ASSESSMENT_MAX_FAILURES consecutive failures.
+        """
 
         now = datetime.now(UTC)
         metadata = dict(membership.metadata_json or {})
+        count = int(metadata.get("assessment_failure_count") or 0) + 1
+        backoff = min(
+            ASSESSMENT_BACKOFF_BASE * (2 ** (count - 1)), ASSESSMENT_BACKOFF_CAP
+        )
         metadata["assessment_status"] = "failed"
         metadata["assessment_failed_at"] = now.isoformat()
         metadata["assessment_error_type"] = error_type
         metadata["assessment_error"] = error[:1000]
+        metadata["assessment_failure_count"] = count
+        metadata["assessment_next_attempt_at"] = (now + backoff).isoformat()
+        metadata["assessment_last_error"] = error[:500]
+        if count >= ASSESSMENT_MAX_FAILURES:
+            metadata["assessment_dead_lettered_at"] = now.isoformat()
         membership.metadata_json = metadata
         membership.updated_at = now
         self.session.flush()
