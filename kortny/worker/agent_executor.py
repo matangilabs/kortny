@@ -309,6 +309,10 @@ class AgentTaskExecutor:
         # ``execute`` finally so per-task resources (e.g. MCP sessions and their
         # subprocesses) never leak. Reset at the start of every ``execute``.
         self._active_external_providers: list[ExternalToolProvider] = []
+        # Per-task browser session holder. Closed in the ``execute`` finally
+        # block alongside external providers so the Playwright-MCP session is
+        # never leaked between tasks.
+        self._active_browser_session_holder: Any | None = None
         # Embedding backend is loaded once per executor process (model load is
         # expensive); the per-task EmbeddingIndex wraps it with the live session.
         self._embedding_backend: EmbeddingBackend | None = None
@@ -326,6 +330,7 @@ class AgentTaskExecutor:
     ) -> TaskExecutionResult:
         settings = self.settings or load_settings()
         self._active_external_providers = []
+        self._active_browser_session_holder = None
         self._capability_overview = None
         try:
             logger.info("agent executor started task_id=%s", task.id)
@@ -523,6 +528,7 @@ class AgentTaskExecutor:
             raise
         finally:
             self._close_external_tool_providers()
+            self._close_browser_session()
 
     def _close_external_tool_providers(self) -> None:
         """Close any external tool providers created for the in-flight task.
@@ -545,6 +551,17 @@ class AgentTaskExecutor:
                     "failed to close external tool provider provider=%s",
                     getattr(provider, "provider_name", type(provider).__name__),
                 )
+
+    def _close_browser_session(self) -> None:
+        """Best-effort close of the per-task browser session holder."""
+        holder = self._active_browser_session_holder
+        self._active_browser_session_holder = None
+        if holder is None:
+            return
+        try:
+            holder.close()
+        except Exception:
+            logger.exception("failed to close browser session")
 
     def _run_channel_graph_refresh_pipeline(
         self,
@@ -1634,6 +1651,13 @@ class AgentTaskExecutor:
             memory_service=memory_service,
         )
         native_tools = list(build_native_tools(native_context))
+        # Browser tools — lifecycle-managed separately (holder closed at task end).
+        from kortny.tools.browser import build_browser_tools  # noqa: PLC0415
+
+        browser_tools, browser_holder = build_browser_tools(settings)
+        if browser_holder is not None:
+            self._active_browser_session_holder = browser_holder
+        native_tools = native_tools + list(browser_tools)
         raw_intent_decision = _latest_intent_decision(session, task)
         effective_decision = effective_intent_decision(raw_intent_decision)
         native_scope = NativeToolScopePolicy().apply(

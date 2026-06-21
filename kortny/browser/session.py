@@ -17,8 +17,10 @@ dispatch via asyncio.run_coroutine_threadsafe(...).result(timeout=...).
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import threading
+from dataclasses import dataclass
 from typing import Any
 
 from mcp import types as mcp_types
@@ -30,6 +32,21 @@ from kortny.config import Settings
 
 class BrowserSessionError(RuntimeError):
     """Raised on browser session transport or protocol failures."""
+
+
+@dataclass(frozen=True, slots=True)
+class BrowserToolResult:
+    """Structured result from a Playwright-MCP tool call.
+
+    Attributes:
+        text: Concatenated text from all TextContent blocks.
+        images: Decoded image bytes paired with MIME type, one per ImageContent.
+        is_error: True when the MCP server flagged the call as an error.
+    """
+
+    text: str
+    images: tuple[tuple[bytes, str], ...] = ()
+    is_error: bool = False
 
 
 class BrowserMcpSession:
@@ -84,8 +101,13 @@ class BrowserMcpSession:
         arguments: dict[str, Any],
         *,
         timeout_seconds: int | None = None,
-    ) -> str:
-        """Call a Playwright-MCP tool and return the text result.
+    ) -> BrowserToolResult:
+        """Call a Playwright-MCP tool and return a structured result.
+
+        Returns a BrowserToolResult with:
+          - text: concatenated TextContent blocks
+          - images: base64-decoded ImageContent bytes + mime type
+          - is_error: whether the MCP server flagged this as an error
 
         Raises BrowserSessionError on transport/protocol failure or if the
         session is not open / already closed.
@@ -211,12 +233,14 @@ class BrowserMcpSession:
                 await transport_cm.__aexit__(None, None, None)
         self._session = None
 
-    async def _async_call_tool(self, name: str, arguments: dict[str, Any]) -> str:
+    async def _async_call_tool(
+        self, name: str, arguments: dict[str, Any]
+    ) -> BrowserToolResult:
         session = self._session
         if session is None:
             raise BrowserSessionError("Browser session is not connected")
         result = await session.call_tool(name, arguments)
-        return _extract_text(result)
+        return _parse_tool_result(result)
 
     async def _async_list_tools(self) -> list[str]:
         session = self._session
@@ -280,16 +304,29 @@ class BrowserMcpSession:
             )
 
 
-def _extract_text(result: mcp_types.CallToolResult) -> str:
-    """Normalize MCP tool result content to text."""
-    parts: list[str] = []
+def _parse_tool_result(result: mcp_types.CallToolResult) -> BrowserToolResult:
+    """Parse MCP CallToolResult into a structured BrowserToolResult.
+
+    - TextContent blocks are joined into a single ``text`` string.
+    - ImageContent blocks are base64-decoded to raw bytes and paired with
+      their MIME type; each becomes one entry in ``images``.
+    - ``is_error`` mirrors ``result.isError``.
+    """
+    text_parts: list[str] = []
+    images: list[tuple[bytes, str]] = []
+
     for block in result.content:
         if isinstance(block, mcp_types.TextContent):
-            parts.append(block.text)
-        else:
-            block_type = getattr(block, "type", "content")
-            parts.append(f"[{block_type} content block]")
-    return "\n".join(p for p in parts if p)
+            text_parts.append(block.text)
+        elif isinstance(block, mcp_types.ImageContent):
+            raw = base64.b64decode(block.data)
+            images.append((raw, block.mimeType))
+
+    return BrowserToolResult(
+        text="\n".join(p for p in text_parts if p),
+        images=tuple(images),
+        is_error=bool(result.isError),
+    )
 
 
 def open_browser_session(settings: Settings) -> BrowserMcpSession | None:
@@ -312,5 +349,6 @@ def open_browser_session(settings: Settings) -> BrowserMcpSession | None:
 __all__ = [
     "BrowserMcpSession",
     "BrowserSessionError",
+    "BrowserToolResult",
     "open_browser_session",
 ]

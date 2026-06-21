@@ -10,6 +10,7 @@ session against the Playwright-MCP container.
 
 from __future__ import annotations
 
+import base64
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -21,6 +22,7 @@ import pytest
 from kortny.browser.session import (
     BrowserMcpSession,
     BrowserSessionError,
+    BrowserToolResult,
     open_browser_session,
 )
 from kortny.config import Settings
@@ -88,11 +90,22 @@ def test_settings_blank_browser_mcp_url_normalizes_to_none(
 # Fake MCP server helpers for unit tests
 # ---------------------------------------------------------------------------
 
+# Minimal 1x1 white PNG in base64 for image content tests.
+_FAKE_PNG_BYTES = (
+    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01"
+    b"\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde\x00\x00"
+    b"\x00\x0cIDATx\x9cc\xf8\x0f\x00\x00\x01\x01\x00\x05\x18"
+    b"\xd8N\x00\x00\x00\x00IEND\xaeB`\x82"
+)
+_FAKE_PNG_B64 = base64.b64encode(_FAKE_PNG_BYTES).decode()
+
 
 def _make_fake_mcp_session(
     tool_names: list[str] | None = None,
     tool_result_text: str = "fake-result",
     call_tool_error: Exception | None = None,
+    include_image: bool = False,
+    is_error: bool = False,
 ) -> tuple[AsyncMock, AsyncMock]:
     """Return (fake_session, fake_session_cm) for patching into ClientSession."""
     if tool_names is None:
@@ -108,9 +121,17 @@ def _make_fake_mcp_session(
         fake_tool_list.tools.append(tool_mock)
 
     fake_result = MagicMock()
+    content_blocks: list[Any] = []
     text_content = MagicMock(spec=mcp_types.TextContent)
     text_content.text = tool_result_text
-    fake_result.content = [text_content]
+    content_blocks.append(text_content)
+    if include_image:
+        img_content = MagicMock(spec=mcp_types.ImageContent)
+        img_content.data = _FAKE_PNG_B64
+        img_content.mimeType = "image/png"
+        content_blocks.append(img_content)
+    fake_result.content = content_blocks
+    fake_result.isError = is_error
 
     fake_session = AsyncMock()
     fake_session.initialize = AsyncMock(return_value=MagicMock())
@@ -150,7 +171,8 @@ class TestBrowserMcpSessionUnit:
     ) -> BrowserMcpSession:
         return BrowserMcpSession(url, idle_timeout_seconds=10)
 
-    def test_call_tool_round_trips_arguments(self) -> None:
+    def test_call_tool_returns_browser_tool_result(self) -> None:
+        """call_tool now returns BrowserToolResult, not a plain string."""
         fake_session, fake_session_cm = _make_fake_mcp_session(
             tool_result_text="Example Domain"
         )
@@ -168,10 +190,86 @@ class TestBrowserMcpSessionUnit:
                     "browser_navigate", {"url": "https://example.com"}
                 )
 
-        assert result == "Example Domain"
+        assert isinstance(result, BrowserToolResult)
+        assert result.text == "Example Domain"
+        assert result.images == ()
+        assert result.is_error is False
         fake_session.call_tool.assert_called_once_with(
             "browser_navigate", {"url": "https://example.com"}
         )
+
+    def test_call_tool_decodes_image_content(self) -> None:
+        """ImageContent blocks are base64-decoded and returned in .images."""
+        fake_session, fake_session_cm = _make_fake_mcp_session(
+            tool_result_text="screenshot taken",
+            include_image=True,
+        )
+
+        with (
+            patch(
+                "kortny.browser.session.streamablehttp_client",
+                new=_fake_streamablehttp_client,
+            ),
+            patch("kortny.browser.session.ClientSession", return_value=fake_session_cm),
+        ):
+            session = self._make_session()
+            with session:
+                result = session.call_tool("browser_take_screenshot", {})
+
+        assert isinstance(result, BrowserToolResult)
+        assert result.text == "screenshot taken"
+        assert len(result.images) == 1
+        img_bytes, mime = result.images[0]
+        assert img_bytes == _FAKE_PNG_BYTES
+        assert mime == "image/png"
+        assert result.is_error is False
+
+    def test_call_tool_mixed_content_text_and_image(self) -> None:
+        """Mixed content: text joined, images decoded, is_error reflected."""
+        fake_session, fake_session_cm = _make_fake_mcp_session(
+            tool_result_text="some text",
+            include_image=True,
+            is_error=False,
+        )
+
+        with (
+            patch(
+                "kortny.browser.session.streamablehttp_client",
+                new=_fake_streamablehttp_client,
+            ),
+            patch("kortny.browser.session.ClientSession", return_value=fake_session_cm),
+        ):
+            session = self._make_session()
+            with session:
+                result = session.call_tool("browser_take_screenshot", {})
+
+        assert result.text == "some text"
+        assert len(result.images) == 1
+        assert result.images[0][0] == _FAKE_PNG_BYTES
+        assert result.images[0][1] == "image/png"
+
+    def test_call_tool_is_error_flag(self) -> None:
+        """is_error=True on the MCP result is propagated to BrowserToolResult."""
+        fake_session, fake_session_cm = _make_fake_mcp_session(
+            tool_result_text="something went wrong",
+            is_error=True,
+        )
+
+        with (
+            patch(
+                "kortny.browser.session.streamablehttp_client",
+                new=_fake_streamablehttp_client,
+            ),
+            patch("kortny.browser.session.ClientSession", return_value=fake_session_cm),
+        ):
+            session = self._make_session()
+            with session:
+                result = session.call_tool(
+                    "browser_navigate", {"url": "https://bad.url"}
+                )
+
+        assert result.is_error is True
+        assert result.text == "something went wrong"
 
     def test_list_tools_returns_tool_names(self) -> None:
         tool_names = ["browser_navigate", "browser_snapshot", "browser_click"]
@@ -286,6 +384,6 @@ def test_live_browser_navigate_and_snapshot() -> None:
     try:
         session.call_tool("browser_navigate", {"url": "https://example.com"})
         snapshot = session.call_tool("browser_snapshot", {})
-        assert "Example Domain" in snapshot
+        assert "Example Domain" in snapshot.text
     finally:
         session.close()
