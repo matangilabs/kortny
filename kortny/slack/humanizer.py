@@ -841,17 +841,25 @@ def sanitize_humanized_response(text: str | None, *, fallback: str) -> str:
     if text is None:
         return safe_fallback
     message = _json_message(text)
-    normalized = (
-        (message if message is not None else text).strip().strip('"').strip("'").strip()
-    )
+    if message is not None:
+        # Layer 1 succeeded: we have a clean extracted message.
+        normalized = message.strip()
+        if not normalized:
+            return safe_fallback
+        if _looks_like_humanizer_leak(normalized):
+            return safe_fallback
+        if len(normalized) > MAX_HUMANIZED_CHARS:
+            normalized = normalized[: MAX_HUMANIZED_CHARS - 1].rstrip() + "."
+        return normalized
+    # No message extracted — check whether the raw text is a scratchpad/blob.
+    # If it looks like a humanizer scratchpad or a raw JSON blob, fall back
+    # rather than posting internal reasoning or raw JSON to Slack.
+    if _looks_like_humanizer_scratchpad(text) or _looks_like_raw_humanizer_json(text):
+        return safe_fallback
+    normalized = text.strip().strip('"').strip("'").strip()
     if not normalized:
         return safe_fallback
     if _looks_like_humanizer_leak(normalized):
-        return safe_fallback
-    # Defense-in-depth: if _json_message failed to extract a message string AND
-    # the normalized output still looks like a raw humanizer JSON blob (fenced or
-    # bare), fall back to the safe raw answer rather than posting JSON to Slack.
-    if message is None and _looks_like_raw_humanizer_json(normalized):
         return safe_fallback
     if len(normalized) > MAX_HUMANIZED_CHARS:
         normalized = normalized[: MAX_HUMANIZED_CHARS - 1].rstrip() + "."
@@ -933,6 +941,74 @@ def _strip_json_code_fence(text: str) -> str:
     return "\n".join(inner_lines)
 
 
+_HUMANIZER_SCRATCHPAD_PHRASES = frozenset(
+    {
+        "now craft message",
+        "now build presentation",
+        "now output the json",
+        "final structure:",
+        "we'll produce",
+        "let's produce",
+        "here's the json",
+        "the json object",
+    }
+)
+
+
+def _looks_like_humanizer_scratchpad(text: str) -> bool:
+    """Return True if text looks like a humanizer reasoning scratchpad.
+
+    Reasoning-heavy models (e.g. deepseek) sometimes emit their full chain-of-
+    thought before the final JSON, producing a blob that mixes internal
+    annotations with the real answer.  This predicate recognises those patterns
+    so ``sanitize_humanized_response`` can fall back safely.
+    """
+
+    lower = text.lower()
+    # Echoed template or explicit scratchpad phrases.
+    if '{"message"' in lower and '"presentation"' in lower:
+        return True
+    if '{"message": "..."' in lower:
+        return True
+    if any(phrase in lower for phrase in _HUMANIZER_SCRATCHPAD_PHRASES):
+        return True
+    # Starts with a structural token AND contains message/presentation keys —
+    # a strong signal the model preambled before the real JSON.
+    first_char = text.strip()[:1]
+    return first_char in (":", "{", "`") and (
+        '"message"' in lower or '"presentation"' in lower
+    )
+
+
+def _extract_last_json_object(text: str) -> dict[str, object] | None:
+    """Find the last top-level JSON object in *text* that has a non-empty message.
+
+    Uses ``json.JSONDecoder.raw_decode`` so nested braces and braces inside
+    strings are handled correctly (no brace-counting heuristics).  Returns the
+    last dict that contains a non-empty string ``"message"`` field, or None if
+    none is found.
+    """
+
+    decoder = json.JSONDecoder()
+    candidates: list[dict[str, object]] = []
+    idx = 0
+    while idx < len(text):
+        brace = text.find("{", idx)
+        if brace == -1:
+            break
+        try:
+            obj, end = decoder.raw_decode(text, brace)
+        except json.JSONDecodeError:
+            idx = brace + 1
+            continue
+        if isinstance(obj, dict):
+            msg = obj.get("message")
+            if isinstance(msg, str) and msg.strip():
+                candidates.append(obj)
+        idx = end
+    return candidates[-1] if candidates else None
+
+
 def _looks_like_raw_humanizer_json(text: str) -> bool:
     """Return True if text looks like a raw (possibly fenced) humanizer JSON blob.
 
@@ -950,15 +1026,25 @@ def _looks_like_raw_humanizer_json(text: str) -> bool:
 
 
 def _json_message(text: str) -> str | None:
+    stripped = _strip_json_code_fence(text)
     try:
-        payload = json.loads(_strip_json_code_fence(text))
+        payload = json.loads(stripped)
     except json.JSONDecodeError:
+        pass
+    else:
+        if not isinstance(payload, dict):
+            return None
+        message = payload.get("message")
+        if isinstance(message, str) and message.strip():
+            return message
         return None
-    if not isinstance(payload, dict):
-        return None
-    message = payload.get("message")
-    if isinstance(message, str) and message.strip():
-        return message
+    # Layer 2: scan for the last valid JSON object with a message field.
+    # Handles scratchpad leaks where the real JSON is buried after reasoning.
+    obj = _extract_last_json_object(stripped)
+    if obj is not None:
+        msg = obj.get("message")
+        if isinstance(msg, str) and msg.strip():
+            return msg
     return None
 
 
@@ -971,13 +1057,20 @@ def _parse_presentation_hint(text: str | None) -> PresentationHint | None:
 
     if text is None:
         return None
+    stripped = _strip_json_code_fence(text)
     try:
-        payload = json.loads(_strip_json_code_fence(text))
+        payload = json.loads(stripped)
     except json.JSONDecodeError:
-        return None
-    if not isinstance(payload, dict):
-        return None
-    return parse_presentation(payload.get("presentation"))
+        pass
+    else:
+        if not isinstance(payload, dict):
+            return None
+        return parse_presentation(payload.get("presentation"))
+    # Layer 2: scan for the last valid JSON object with a presentation field.
+    obj = _extract_last_json_object(stripped)
+    if obj is not None:
+        return parse_presentation(obj.get("presentation"))
+    return None
 
 
 def _looks_like_humanizer_leak(text: str) -> bool:

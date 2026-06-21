@@ -13,7 +13,9 @@ import pytest
 
 from kortny.slack.humanizer import (
     HUMANIZER_LEAK_MARKERS,
+    _extract_last_json_object,
     _json_message,
+    _looks_like_humanizer_scratchpad,
     _looks_like_raw_humanizer_json,
     _parse_presentation_hint,
     _strip_json_code_fence,
@@ -222,3 +224,139 @@ def test_sanitize_defense_in_depth_empty_message_falls_back() -> None:
     bad_payload = '{"message": "", "presentation": {"version": 1, "elements": []}}'
     result = sanitize_humanized_response(bad_payload, fallback="raw fallback answer")
     assert result == "raw fallback answer"
+
+
+# --------------------------------------------------------------------------- #
+# Scratchpad / reasoning-model leak — _extract_last_json_object,
+# _looks_like_humanizer_scratchpad, and end-to-end sanitize
+# --------------------------------------------------------------------------- #
+
+# Faithful fixture derived from the real /tmp/leak_local.txt scratchpad.
+# The model echoed the template, wrote reasoning paragraphs, then emitted the
+# final JSON without a newline separator after "Now output the JSON."
+_FINAL_MSG = (
+    "I saw USIM02's note about the Q2 pipeline numbers doc needing a check "
+    "before Thursday. I searched Notion across pages and databases - nothing "
+    'was titled "Q2 pipeline numbers" and no databases matched "pipeline". '
+    "Here's what I'm seeing and the smartest path forward.\n\n"
+    "*Bottom line:* The doc almost certainly isn't in our connected Notion "
+    "workspace under that name. The three most likely scenarios are below. "
+    "My recommendation: don't wait - confirm where it actually lives before "
+    "tomorrow. If it's in another tool, drop me a link. If it doesn't exist "
+    "yet, let's stand it up today. And if the Quarterly Review Q2 2024 page "
+    "is the one finance is waiting on, I can verify it for staleness - just "
+    "say the word."
+)
+
+_FINAL_JSON = (
+    '{"message": '
+    + '"'
+    + _FINAL_MSG.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+    + '"'
+    + ', "presentation": {"elements": ['
+    '{"type": "items", "title": "Scenarios", "items": ['
+    '{"title": "The doc lives in another tool", '
+    '"facts": [{"label": "What\'s needed", "value": "A link here in Slack"}, '
+    '{"label": "Risk if ignored", "value": "Finance blocked while we search the wrong place"}], '
+    '"context": ["Most likely if your team uses Google Sheets, Confluence, or a private Notion page."]},'
+    '{"title": "The doc hasn\'t been created yet", '
+    '"facts": [{"label": "What\'s needed", "value": "Build a new Q2 pipeline numbers page today or tomorrow"}, '
+    '{"label": "Risk if ignored", "value": "Thursday deadline missed because there\'s nothing to review"}], '
+    '"context": ["I can create a fresh Notion page and structure it if needed."]},'
+    '{"title": "It\'s the old Quarterly Review Q2 2024 page", '
+    '"facts": [{"label": "What\'s needed", "value": "Confirm if that\'s what finance means"}, '
+    '{"label": "Risk if ignored", "value": "Using year-old data could mislead decisions"}], '
+    '"context": ["Last edited April 2025 - could be stale."]}]},'
+    '{"type": "sources", "items": [{"source_ref": "source:9", '
+    '"title": "Notion Q2 2024 review page", '
+    '"body": "Only page with Q2 in title in connected Notion workspace."}]},'
+    '{"type": "context", "items": ["Searched Notion (pages and databases) via '
+    'connected integration. Slack channel history also checked for links."]}]}}'
+)
+
+# The full scratchpad fixture: echoed template + reasoning + final JSON (no
+# newline between "Now output the JSON." and the JSON object, matching the
+# real leak shape).
+_LEAK_FIXTURE = (
+    ': {"message": "...", "presentation": {...}}\n\n'
+    "Now craft message: Catch the flag from Slack channel (the observed message "
+    'from USIM02: "Someone needs to double-check the Q2 pipeline numbers doc '
+    "before Thursday - I haven't had time and finance is waiting on it.\"). "
+    "We can mention that. So start with \"I saw USIM02's note about the Q2 "
+    'pipeline numbers doc and finance waiting. I searched Notion..." but user '
+    "request says start from what you noticed and what you checked, so that's "
+    "perfect.\n\n"
+    'Now build presentation: items, with title "Scenarios & tradeoffs" maybe. '
+    'Each item: title (scenario name), facts: "What it means", "Risk", '
+    '"Action".\n\n'
+    "Final structure: Message: lead-in, then items presentation, then a closing "
+    "recommendation in message?\n\n"
+    "We'll produce:\n"
+    '{"message": "draft placeholder", "presentation": {"elements": []}}\n\n'
+    "But message already includes bottom line and recommendation. So it's good.\n\n"
+    "Now output the JSON." + _FINAL_JSON
+)
+
+
+def test_extract_last_json_object_returns_last_with_message() -> None:
+    # Basic: two JSON objects in text, returns the last one with a message field.
+    text = 'noise {"a":1} more {"message":"hi"} tail'
+    result = _extract_last_json_object(text)
+    assert result == {"message": "hi"}
+
+
+def test_extract_last_json_object_skips_no_message_objects() -> None:
+    # Objects without a message field are not returned.
+    text = '{"a": 1} {"b": 2}'
+    assert _extract_last_json_object(text) is None
+
+
+def test_extract_last_json_object_prefers_later_object() -> None:
+    text = '{"message": "first"} some text {"message": "second"}'
+    result = _extract_last_json_object(text)
+    assert result is not None
+    assert result["message"] == "second"
+
+
+def test_looks_like_humanizer_scratchpad_echoed_template() -> None:
+    # Starts with echoed template containing both keys.
+    assert _looks_like_humanizer_scratchpad(
+        ': {"message": "...", "presentation": {...}}'
+    )
+
+
+def test_looks_like_humanizer_scratchpad_now_craft_message() -> None:
+    assert _looks_like_humanizer_scratchpad("Now craft message: write something")
+
+
+def test_looks_like_humanizer_scratchpad_now_output_json() -> None:
+    assert _looks_like_humanizer_scratchpad('Now output the JSON.{"message": "hi"}')
+
+
+def test_looks_like_humanizer_scratchpad_clean_prose_false() -> None:
+    assert not _looks_like_humanizer_scratchpad(
+        "I checked Notion and couldn't find the doc. Here's what I know."
+    )
+
+
+def test_sanitize_leak_fixture_extracts_message_or_falls_back() -> None:
+    # The end-to-end test: the scratchpad leak must resolve to EITHER the
+    # extracted final message (starting with "I saw USIM02") OR the safe
+    # fallback — it must never contain the internal reasoning phrases or start
+    # with the raw JSON template.
+    result = sanitize_humanized_response(_LEAK_FIXTURE, fallback="RAW")
+    assert not result.startswith('{"message"'), "must not post raw JSON to Slack"
+    assert "Now craft message" not in result, "internal reasoning must not leak"
+    assert "Now build presentation" not in result, "internal reasoning must not leak"
+    # Either we extracted the real answer or we fell back cleanly.
+    assert result.startswith("I saw USIM02") or result == "RAW", (
+        f"unexpected result: {result[:120]!r}"
+    )
+
+
+def test_parse_presentation_hint_from_leak_fixture() -> None:
+    # _parse_presentation_hint must find the presentation in the LAST JSON
+    # object in the scratchpad, not give up because the whole text isn't JSON.
+    hint = _parse_presentation_hint(_LEAK_FIXTURE)
+    assert hint is not None, "presentation hint must be extracted from the scratchpad"
+    assert len(hint.elements) > 0, "extracted hint must have at least one element"
