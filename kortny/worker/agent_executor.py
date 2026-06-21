@@ -165,6 +165,7 @@ from kortny.tools.find_tools import FindToolsTool
 from kortny.tools.native_runtime import (
     NativeToolBuildContext,
     _build_document_visual_critic,  # noqa: PLC2701
+    _build_revision_patch_proposer,  # noqa: PLC2701
     build_native_inventory_tools,
     build_native_tools,
     native_tool_classes_by_name,
@@ -2761,6 +2762,7 @@ class AgentTaskExecutor:
             critic = _build_document_visual_critic(native_context)
             if critic is None:
                 return
+            llm_propose_fn = _build_revision_patch_proposer(native_context)
 
             max_pages = settings.doc_visual_critic_max_pages
             font_paths = [p for p in settings.document_font_paths.split(":") if p]
@@ -2802,6 +2804,7 @@ class AgentTaskExecutor:
                     render=_render_fn,
                     critique_fn=_critique_fn,
                     original_pdf=v1_pdf_bytes,
+                    llm_propose_fn=llm_propose_fn,
                 )
 
                 for rev_event in outcome.events:

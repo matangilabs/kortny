@@ -590,3 +590,127 @@ def test_visual_revision_enabled_low_score_accepted(
     )
     assert v2_artifact_event.payload["revision_of"] == str(artifact.id)
     assert v2_artifact_event.payload["visual_critique"]["overall_score"] == 8
+
+
+def test_llm_proposer_wired_calls_llm_propose_fn(
+    db_session: Session, tmp_path: Path
+) -> None:
+    """_build_revision_patch_proposer result is passed as llm_propose_fn to attempt_visual_revision."""
+    settings = _make_settings(KORTNY_DOCUMENT_VISUAL_REVISION_ENABLED=True)
+    task = _make_task(db_session, event_id="EvProposerWired")
+
+    pdf_file = tmp_path / "report.pdf"
+    pdf_file.write_bytes(b"%PDF-1.4 fake")
+    _add_artifact_with_critique(db_session, task, pdf_path=pdf_file, score=4)
+    db_session.flush()
+
+    mock_critic = MagicMock(
+        return_value=VisualCritique(overall_score=4, summary="poor", issues=[])
+    )
+    mock_proposer = MagicMock(return_value=None)
+    noop_outcome = RevisionOutcome(
+        status="noop",
+        reason="no actionable deterministic fix",
+        events=[
+            RevisionEvent(
+                kind="visual_revision_noop",
+                detail="no actionable deterministic fix",
+                old_score=4,
+            )
+        ],
+    )
+
+    captured: dict[str, Any] = {}
+
+    def _capture_attempt_visual_revision(*args: Any, **kwargs: Any) -> RevisionOutcome:
+        captured.update(kwargs)
+        return noop_outcome
+
+    task_svc = TaskService(db_session)
+    executor = _make_executor()
+
+    with (
+        patch(
+            "kortny.worker.agent_executor._build_document_visual_critic",
+            return_value=mock_critic,
+        ),
+        patch(
+            "kortny.worker.agent_executor._build_revision_patch_proposer",
+            return_value=mock_proposer,
+        ),
+        patch(
+            "kortny.worker.agent_executor.attempt_visual_revision",
+            side_effect=_capture_attempt_visual_revision,
+        ),
+    ):
+        executor._maybe_revise_documents(
+            settings=settings,
+            session=db_session,
+            task=task,
+            task_service=task_svc,
+            working_dir=tmp_path,
+        )
+
+    assert "llm_propose_fn" in captured
+    assert captured["llm_propose_fn"] is mock_proposer
+
+
+def test_llm_proposer_none_still_works(db_session: Session, tmp_path: Path) -> None:
+    """When _build_revision_patch_proposer returns None, _maybe_revise_documents does not raise."""
+    settings = _make_settings(KORTNY_DOCUMENT_VISUAL_REVISION_ENABLED=True)
+    task = _make_task(db_session, event_id="EvProposerNone")
+
+    pdf_file = tmp_path / "report.pdf"
+    pdf_file.write_bytes(b"%PDF-1.4 fake")
+    _add_artifact_with_critique(db_session, task, pdf_path=pdf_file, score=4)
+    db_session.flush()
+
+    mock_critic = MagicMock(
+        return_value=VisualCritique(overall_score=4, summary="poor", issues=[])
+    )
+    noop_outcome = RevisionOutcome(
+        status="noop",
+        reason="no actionable deterministic fix",
+        events=[
+            RevisionEvent(
+                kind="visual_revision_noop",
+                detail="no actionable deterministic fix",
+                old_score=4,
+            )
+        ],
+    )
+
+    captured: dict[str, Any] = {}
+
+    def _capture_attempt_visual_revision(*args: Any, **kwargs: Any) -> RevisionOutcome:
+        captured.update(kwargs)
+        return noop_outcome
+
+    task_svc = TaskService(db_session)
+    executor = _make_executor()
+
+    with (
+        patch(
+            "kortny.worker.agent_executor._build_document_visual_critic",
+            return_value=mock_critic,
+        ),
+        patch(
+            "kortny.worker.agent_executor._build_revision_patch_proposer",
+            return_value=None,
+        ),
+        patch(
+            "kortny.worker.agent_executor.attempt_visual_revision",
+            side_effect=_capture_attempt_visual_revision,
+        ),
+    ):
+        # Must not raise
+        executor._maybe_revise_documents(
+            settings=settings,
+            session=db_session,
+            task=task,
+            task_service=task_svc,
+            working_dir=tmp_path,
+        )
+
+    assert "llm_propose_fn" in captured
+    assert captured["llm_propose_fn"] is None
