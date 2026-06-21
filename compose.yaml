@@ -88,6 +88,8 @@ services:
       KORTNY_PUBLIC_BASE_URL: ${KORTNY_PUBLIC_BASE_URL:-}
       KORTNY_PREVIEW_SIGNING_SECRET: ${KORTNY_PREVIEW_SIGNING_SECRET:-}
       FASTEMBED_CACHE_PATH: ${FASTEMBED_CACHE_PATH:-/data/fastembed-cache}
+      # HIG-282: Playwright-MCP browser session. Unset disables browser tools.
+      KORTNY_BROWSER_MCP_URL: ${KORTNY_BROWSER_MCP_URL:-}
       POSTGRES_URL: postgresql://${POSTGRES_USER:-kortny}:${POSTGRES_PASSWORD:-kortny}@postgres:5432/${POSTGRES_DB:-kortny}
       UV_CACHE_DIR: /tmp/uv-cache
       UV_LINK_MODE: copy
@@ -195,6 +197,21 @@ services:
       - .:/app
       - uv-cache:/tmp/uv-cache
       - task-artifacts:/data/artifacts
+
+  playwright-mcp:
+    # Microsoft Playwright-MCP: stateful browser automation over MCP.
+    # Off by default; enable with: docker compose --profile browser up -d playwright-mcp
+    # Set KORTNY_BROWSER_MCP_URL=http://playwright-mcp:8931/mcp in .env (or worker env).
+    # Image: https://github.com/microsoft/playwright-mcp (Apache-2.0)
+    # TODO: pin to a specific digest once the project tags stable releases.
+    image: mcr.microsoft.com/playwright/mcp:latest
+    profiles:
+      - browser
+    command: ["--headless", "--port", "8931"]
+    # No host-port publish: internal to compose network only.
+    # The worker reaches it via http://playwright-mcp:8931/mcp.
+    expose:
+      - "8931"
 
   phoenix:
     image: ${PHOENIX_IMAGE:-arizephoenix/phoenix:latest}
