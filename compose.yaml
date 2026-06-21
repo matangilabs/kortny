@@ -207,7 +207,10 @@ services:
     image: mcr.microsoft.com/playwright/mcp:latest
     profiles:
       - browser
-    command: ["--headless", "--port", "8931"]
+    # --host 0.0.0.0 is REQUIRED: Playwright-MCP otherwise binds to 127.0.0.1
+    # inside the container and is unreachable over the compose network
+    # (verified live 2026-06-21 — without it the worker's connection times out).
+    command: ["--headless", "--host", "0.0.0.0", "--port", "8931"]
     # No host-port publish: internal to compose network only.
     # The worker reaches it via http://playwright-mcp:8931/mcp.
     expose:
