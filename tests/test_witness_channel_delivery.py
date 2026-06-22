@@ -230,6 +230,10 @@ def make_channel_fixture(
         scope_id=channel_id,
         observation_status="active",
         proactivity_status=proactivity_status,
+        # Stamp the epoch so Gate 1b passes for test candidates (created_at=NOW-1d).
+        full_enabled_at=NOW - timedelta(days=60)
+        if proactivity_status == "full"
+        else None,
         retention_days=90,
         cooldown_seconds=900,
         enabled_by_user_id="UInvite",
@@ -499,6 +503,8 @@ def test_policy_digest_only_defers_with_policy_reason(db_session: Session) -> No
     )
     assert policy is not None
     policy.proactivity_status = "full"
+    # Stamp full_enabled_at so Gate 1b passes (candidate was created at NOW-1d).
+    policy.full_enabled_at = NOW - timedelta(days=60)
     db_session.flush()
     after = run_channel_delivery(
         db_session,

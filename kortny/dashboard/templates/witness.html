@@ -27,6 +27,84 @@
     <div class="notice notice-{{ notice_tone }}" role="status">{{ notice }}</div>
   {% endif %}
 
+  {% set ws = witness_dormancy %}
+  {% set is_live = ws.dm_digest_enabled or ws.channels_full > 0 %}
+  <section class="card witness-dormancy-banner {% if is_live %}witness-dormancy-live{% endif %}" aria-label="Witness delivery status">
+    <div class="witness-dormancy-summary">
+      <div>
+        {% if is_live %}
+          <strong>Witness is delivering.</strong>
+        {% else %}
+          <strong>Witness delivery is dormant</strong> — {{ ws.total_queued|number }} candidates queued.
+        {% endif %}
+        DM digests: <strong>{% if ws.dm_digest_enabled %}ON{% if ws.dm_digest_epoch %} (since {{ ws.dm_digest_epoch|datetime }}){% endif %}{% else %}OFF{% endif %}</strong>.
+        Channel posts: <strong>{{ ws.channels_full }}/{{ ws.channels_total }} channels enabled</strong>.
+        {{ ws.total_deferred|number }} attempts deferred, {{ ws.total_sent|number }} sent.
+        Autopilot: <strong>{% if ws.autopilot_db_override is none %}env default{% elif ws.autopilot_db_override %}ON{% else %}OFF{% endif %}</strong>.
+      </div>
+      <div class="witness-dormancy-controls">
+        <form method="post" action="/witness/digest-toggle" style="display:inline">
+          <input type="hidden" name="next" value="{{ witness_return_path }}">
+          <input type="hidden" name="enabled" value="{{ 'false' if ws.dm_digest_enabled else 'true' }}">
+          <button class="btn-ghost" type="submit">{% if ws.dm_digest_enabled %}Disable DM digests{% else %}Enable DM digests{% endif %}</button>
+        </form>
+        <form method="post" action="/witness/autopilot-toggle" style="display:inline">
+          <input type="hidden" name="next" value="{{ witness_return_path }}">
+          <input type="hidden" name="enabled" value="{{ 'false' if ws.autopilot_db_override else 'true' }}">
+          <button class="btn-ghost" type="submit">{% if ws.autopilot_db_override %}Disable autopilot{% else %}Enable autopilot{% endif %}</button>
+        </form>
+      </div>
+    </div>
+    {% if ws.channel_rows %}
+      <div style="margin-top: 16px; overflow-x: auto;">
+        <table class="table">
+          <caption style="text-align:left; font-weight:600; margin-bottom:8px;">Per-channel delivery</caption>
+          <thead>
+            <tr>
+              <th scope="col">Channel</th>
+              <th scope="col">Proactivity</th>
+              <th scope="col">Queued</th>
+              <th scope="col">Posts this week</th>
+              <th scope="col">Last deferral</th>
+              <th scope="col">Last sent</th>
+              <th scope="col">Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for ch in ws.channel_rows %}
+              <tr>
+                <td><code>{{ ch.channel_id }}</code></td>
+                <td>
+                  <span class="badge badge-{{ 'success' if ch.proactivity_status == 'full' else ('warning' if ch.proactivity_status == 'digest_only' else 'neutral') }}">
+                    {{ ch.proactivity_status }}
+                  </span>
+                  {% if ch.full_enabled_at %}
+                    <small style="color:var(--muted); display:block;">enabled {{ ch.full_enabled_at|datetime }}</small>
+                  {% endif %}
+                </td>
+                <td>{{ ch.queued_candidate_count|number }}</td>
+                <td>{{ ch.channel_posts_this_week }}/{{ ch.channel_posts_per_week_budget }}</td>
+                <td>{{ ch.last_deferral_reason or "—" }}</td>
+                <td>{{ ch.last_sent_at|datetime if ch.last_sent_at else "never" }}</td>
+                <td>
+                  <form method="post" action="/witness/channel-proactivity" style="display:flex;gap:4px;flex-wrap:wrap;">
+                    <input type="hidden" name="next" value="{{ witness_return_path }}">
+                    <input type="hidden" name="channel_id" value="{{ ch.channel_id }}">
+                    {% for opt in [("off", "Off"), ("digest_only", "Digest only"), ("full", "Full")] %}
+                      {% if opt[0] != ch.proactivity_status %}
+                        <button class="btn-ghost" type="submit" name="status" value="{{ opt[0] }}" style="font-size:0.8em;padding:2px 8px;">&#8594; {{ opt[1] }}</button>
+                      {% endif %}
+                    {% endfor %}
+                  </form>
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% endif %}
+  </section>
+
   <section class="memory-toolbar graph-toolbar" aria-label="Witness candidate result count">
     <p>
       Showing {{ witness.page.first_item|number }}-{{ witness.page.last_item|number }}

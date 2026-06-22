@@ -76,6 +76,7 @@ from kortny.dashboard.data import (
     get_usage_aggregate,
     get_user_detail,
     get_witness_candidates_dashboard,
+    get_witness_dormancy_status,
     get_witness_kpis,
     list_tasks,
     list_users,
@@ -1003,6 +1004,10 @@ def register_routes(app: FastAPI) -> None:
             session,
             installation_id=principal.installation_id,
         )
+        dormancy_status = get_witness_dormancy_status(
+            session,
+            installation_id=principal.installation_id,
+        )
         return templates.TemplateResponse(
             request=request,
             name="witness.html",
@@ -1010,6 +1015,7 @@ def register_routes(app: FastAPI) -> None:
                 **_dashboard_context(principal, active_page="witness"),
                 "witness": candidates,
                 "witness_kpis": kpis,
+                "witness_dormancy": dormancy_status,
                 "witness_return_path": _request_path(request),
                 "notice": notice,
                 "notice_tone": _notice_tone(notice_tone),
@@ -1192,6 +1198,106 @@ def register_routes(app: FastAPI) -> None:
             session.rollback()
             return _redirect_with_notice(next_path, str(exc), tone="danger")
         return _redirect_with_notice(next_path, notice, tone=tone)
+
+    @app.post("/witness/channel-proactivity")
+    async def witness_set_channel_proactivity(
+        request: Request,
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> RedirectResponse:
+        form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+        next_path = _safe_next_path(form.get("next", ["/witness"])[0])
+        installation_id = _dashboard_installation_id(session, principal)
+        if installation_id is None:
+            return _redirect_with_notice(
+                next_path,
+                "Witness channel settings require a selected workspace.",
+                tone="danger",
+            )
+        channel_id = _form_value(form, "channel_id")
+        status_value = _form_value(form, "status")
+        if not channel_id or not status_value:
+            return _redirect_with_notice(
+                next_path, "Missing channel_id or status.", tone="danger"
+            )
+        try:
+            from kortny.observe.service import ObserveService
+
+            ObserveService(session).set_channel_proactivity_status(
+                installation_id,
+                channel_id,
+                status_value,
+                by_user_id=principal.slack_user_id
+                or dashboard_actor(principal.display_name),
+            )
+            session.commit()
+        except ValueError as exc:
+            session.rollback()
+            return _redirect_with_notice(next_path, str(exc), tone="danger")
+        return _redirect_with_notice(
+            next_path,
+            f"Channel {channel_id} proactivity set to {status_value}.",
+        )
+
+    @app.post("/witness/digest-toggle")
+    async def witness_toggle_digest(
+        request: Request,
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> RedirectResponse:
+        form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+        next_path = _safe_next_path(form.get("next", ["/witness"])[0])
+        installation_id = _dashboard_installation_id(session, principal)
+        if installation_id is None:
+            return _redirect_with_notice(
+                next_path,
+                "Digest toggle requires a selected workspace.",
+                tone="danger",
+            )
+        enabled = _form_value(form, "enabled") == "true"
+        try:
+            from kortny.observe.service import ObserveService
+
+            ObserveService(session).set_digest_delivery(
+                installation_id,
+                enabled=enabled,
+            )
+            session.commit()
+        except ValueError as exc:
+            session.rollback()
+            return _redirect_with_notice(next_path, str(exc), tone="danger")
+        action = "enabled" if enabled else "disabled"
+        return _redirect_with_notice(next_path, f"DM digest delivery {action}.")
+
+    @app.post("/witness/autopilot-toggle")
+    async def witness_toggle_autopilot(
+        request: Request,
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> RedirectResponse:
+        form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+        next_path = _safe_next_path(form.get("next", ["/witness"])[0])
+        installation_id = _dashboard_installation_id(session, principal)
+        if installation_id is None:
+            return _redirect_with_notice(
+                next_path,
+                "Autopilot toggle requires a selected workspace.",
+                tone="danger",
+            )
+        enabled = _form_value(form, "enabled") == "true"
+        try:
+            from kortny.observe.service import ObserveService
+
+            ObserveService(session).set_autopilot_enabled(
+                installation_id,
+                enabled=enabled,
+            )
+            session.commit()
+        except ValueError as exc:
+            session.rollback()
+            return _redirect_with_notice(next_path, str(exc), tone="danger")
+        action = "enabled" if enabled else "disabled"
+        return _redirect_with_notice(next_path, f"Autopilot {action}.")
 
     @app.get("/skills", response_class=HTMLResponse)
     def skills(

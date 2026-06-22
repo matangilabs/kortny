@@ -101,6 +101,8 @@ class Installation(Base):
     # DM). Ambient passes — e.g. the org-profile proposer (HIG-271) — have no
     # originating user, so they DM this admin to confirm workspace-level facts.
     primary_admin_user_id: Mapped[str | None] = mapped_column(String)
+    digest_enabled_at: Mapped[datetime | None] = mapped_column(TZ)
+    autopilot_enabled: Mapped[bool | None] = mapped_column(Boolean)
     created_at: Mapped[datetime] = mapped_column(
         TZ, nullable=False, server_default=func.now()
     )
@@ -1235,6 +1237,7 @@ class ObservePolicy(Base):
     paused_by_user_id: Mapped[str | None] = mapped_column(String)
     paused_at: Mapped[datetime | None] = mapped_column(TZ)
     pause_reason: Mapped[str | None] = mapped_column(Text)
+    full_enabled_at: Mapped[datetime | None] = mapped_column(TZ)
     metadata_json: Mapped[dict] = mapped_column(
         JSONB, nullable=False, server_default=text("'{}'::jsonb")
     )
