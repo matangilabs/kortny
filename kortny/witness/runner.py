@@ -34,9 +34,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from kortny.config import Settings, load_settings
 from kortny.db.models import (
-    LLMProvider as DbLLMProvider,
-)
-from kortny.db.models import (
+    Installation,
     ObserveChannelProfile,
     ObservePolicy,
     SlackChannelMembership,
@@ -45,6 +43,9 @@ from kortny.db.models import (
     TaskStatus,
     WitnessDeliveryLog,
     WitnessOpportunityCandidate,
+)
+from kortny.db.models import (
+    LLMProvider as DbLLMProvider,
 )
 from kortny.db.session import make_session_factory
 from kortny.llm import LLMProvider, LLMService, ModelRoute, ModelRouter, ModelRouteTier
@@ -284,6 +285,20 @@ class WitnessRunner:
                     limit=profile_limit,
                     min_scan_interval=min_scan_interval,
                 )
+                # Resolve DB-level digest activation for epoch filtering.
+                # If deliver_private=True (env flag), no epoch (back-compat, always-on).
+                # If False, check installation's digest_enabled_at; if set, deliver with epoch.
+                digest_epoch: datetime | None = None
+                db_digest_enabled = False
+                if not deliver_private and installation_id is not None:
+                    install_row = self.session.get(Installation, installation_id)
+                    if (
+                        install_row is not None
+                        and install_row.digest_enabled_at is not None
+                    ):
+                        db_digest_enabled = True
+                        digest_epoch = install_row.digest_enabled_at
+
                 deliveries = (
                     self._deliver_digests(
                         installation_id=installation_id,
@@ -293,8 +308,9 @@ class WitnessRunner:
                         digest_max_items=digest_max_items,
                         quiet_hours_start=quiet_hours_start,
                         quiet_hours_end=quiet_hours_end,
+                        digest_epoch=digest_epoch,
                     )
-                    if deliver_private
+                    if deliver_private or db_digest_enabled
                     else ()
                 )
                 deliveries = deliveries + self._deliver_channel_suggestions(
@@ -305,9 +321,18 @@ class WitnessRunner:
                     quiet_hours_start=quiet_hours_start,
                     quiet_hours_end=quiet_hours_end,
                 )
+                # DB autopilot override: installation.autopilot_enabled beats env when not None.
+                effective_autopilot = autopilot_enabled
+                if installation_id is not None:
+                    install_ap_row = self.session.get(Installation, installation_id)
+                    if (
+                        install_ap_row is not None
+                        and install_ap_row.autopilot_enabled is not None
+                    ):
+                        effective_autopilot = install_ap_row.autopilot_enabled
                 should_run_autopilot = (
-                    autopilot_enabled
-                    if autopilot_enabled is not None
+                    effective_autopilot
+                    if effective_autopilot is not None
                     else bool(
                         self.settings is not None
                         and self.settings.witness_autopilot_enabled
@@ -525,6 +550,7 @@ class WitnessRunner:
         digest_max_items: int,
         quiet_hours_start: int | None,
         quiet_hours_end: int | None,
+        digest_epoch: datetime | None = None,
     ) -> tuple[WitnessDeliveryOutcome, ...]:
         if self.slack_client is None:
             return ()
@@ -534,6 +560,12 @@ class WitnessRunner:
             now=now,
             limit=WITNESS_DIGEST_CANDIDATE_SCAN_LIMIT,
         )
+
+        # Epoch filter: skip candidates created before digest was activated.
+        # When digest_epoch is None (env deliver_private=True back-compat), no filter.
+        if digest_epoch is not None:
+            candidates = tuple(c for c in candidates if c.created_at >= digest_epoch)
+
         if not candidates:
             return ()
 
@@ -884,6 +916,36 @@ class WitnessRunner:
                 now=now,
             )
 
+        # Gate 1b: activation epoch — only deliver candidates created after
+        # full_enabled_at was stamped.  Pre-epoch backlog stays preview-only.
+        epoch = self._channel_full_enabled_at(
+            installation_id=installation_id,
+            channel_id=channel_id,
+        )
+        if epoch is None:
+            # Policy is full but no epoch yet (shouldn't happen — set_channel_proactivity_status
+            # stamps it). Defer conservatively.
+            return self._defer_channel_candidates(
+                candidates,
+                installation_id=installation_id,
+                log_user=log_user,
+                reason="no_epoch",
+                now=now,
+            )
+        epoch_candidates = [c for c in candidates if c.created_at >= epoch]
+        pre_epoch = [c for c in candidates if c.created_at < epoch]
+        if pre_epoch:
+            _ = self._defer_channel_candidates(
+                pre_epoch,
+                installation_id=installation_id,
+                log_user=log_user,
+                reason="pre_epoch",
+                now=now,
+            )
+        if not epoch_candidates:
+            return ()
+        candidates = epoch_candidates
+
         # Gate 2: quiet hours — deferred, never dropped.
         if _in_quiet_hours(now, quiet_hours_start, quiet_hours_end):
             return self._defer_channel_candidates(
@@ -1218,6 +1280,24 @@ class WitnessRunner:
             and policy.proactivity_status == "full"
             and policy.paused_at is None
         )
+
+    def _channel_full_enabled_at(
+        self,
+        *,
+        installation_id: uuid.UUID,
+        channel_id: str,
+    ) -> datetime | None:
+        """Return full_enabled_at for the channel's ObservePolicy, or None."""
+        policy = self.session.scalar(
+            select(ObservePolicy).where(
+                ObservePolicy.installation_id == installation_id,
+                ObservePolicy.scope_type == "channel",
+                ObservePolicy.scope_id == channel_id,
+            )
+        )
+        if policy is None:
+            return None
+        return policy.full_enabled_at
 
     def _channel_posts_in_window(
         self,

@@ -45,6 +45,7 @@ from kortny.db.models import (
     LLMUsage,
     ModelPricing,
     ObserveChannelProfile,
+    ObservePolicy,
     ProceduralSkillInvocation,
     ProceduralSkillVersion,
     SlackChannelMembership,
@@ -946,6 +947,202 @@ def _rate_label(value: float | None) -> str:
     if value is None:
         return "-"
     return f"{value * 100:.1f}%"
+
+
+@dataclass(frozen=True)
+class WitnessChannelRow:
+    """Per-channel delivery status for the Witness activation dashboard."""
+
+    channel_id: str
+    channel_name: str
+    proactivity_status: str
+    full_enabled_at: datetime | None
+    queued_candidate_count: int
+    last_deferral_reason: str | None
+    channel_posts_this_week: int
+    channel_posts_per_week_budget: int
+    last_sent_at: datetime | None
+
+
+@dataclass(frozen=True)
+class WitnessDormancyStatus:
+    """Activation state for the Witness dormancy banner."""
+
+    total_queued: int
+    dm_digest_enabled: bool
+    dm_digest_epoch: datetime | None
+    channels_full: int
+    channels_total: int
+    total_deferred: int
+    total_sent: int
+    autopilot_db_override: bool | None  # None = using env default
+    channel_rows: tuple[WitnessChannelRow, ...]
+
+
+def get_witness_dormancy_status(
+    session: Session,
+    *,
+    installation_id: uuid.UUID | None = None,
+    channel_posts_per_week_budget: int = 1,
+    now: datetime | None = None,
+) -> WitnessDormancyStatus:
+    """Compute activation state for Witness dormancy banner and per-channel table."""
+    observed_now = now or datetime.now(UTC)
+    one_week_ago = observed_now - timedelta(days=7)
+
+    candidate_scope = _kg_installation_filter(
+        WitnessOpportunityCandidate, installation_id
+    )
+    log_scope = _kg_installation_filter(WitnessDeliveryLog, installation_id)
+    policy_scope = (
+        [ObservePolicy.installation_id == installation_id]
+        if installation_id is not None
+        else []
+    )
+
+    # Total queued candidates
+    total_queued = int(
+        session.scalar(
+            select(func.count())
+            .select_from(WitnessOpportunityCandidate)
+            .where(*candidate_scope, WitnessOpportunityCandidate.status == "candidate")
+        )
+        or 0
+    )
+
+    # DM digest state from installation
+    dm_digest_enabled = False
+    dm_digest_epoch: datetime | None = None
+    autopilot_db_override: bool | None = None
+    if installation_id is not None:
+        install = session.get(Installation, installation_id)
+        if install is not None:
+            dm_digest_epoch = install.digest_enabled_at
+            dm_digest_enabled = dm_digest_epoch is not None
+            autopilot_db_override = install.autopilot_enabled
+
+    # Channel policies with proactivity status
+    channel_policies = (
+        session.execute(
+            select(ObservePolicy).where(
+                *policy_scope, ObservePolicy.scope_type == "channel"
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    channels_full = sum(1 for p in channel_policies if p.proactivity_status == "full")
+    channels_total = len(channel_policies)
+
+    # Total deferred from delivery log
+    total_deferred = int(
+        session.scalar(
+            select(func.count())
+            .select_from(WitnessDeliveryLog)
+            .where(*log_scope, WitnessDeliveryLog.decision == "channel_deferred")
+        )
+        or 0
+    )
+
+    # Total sent from delivery log
+    total_sent = int(
+        session.scalar(
+            select(func.count())
+            .select_from(WitnessDeliveryLog)
+            .where(
+                *log_scope,
+                WitnessDeliveryLog.decision.in_(
+                    ("channel_sent", "notify", "question", "draft", "digest")
+                ),
+                WitnessDeliveryLog.reason == "sent",
+            )
+        )
+        or 0
+    )
+
+    # Per-channel rows
+    channel_rows: list[WitnessChannelRow] = []
+    for policy in channel_policies:
+        channel_id = policy.scope_id
+        if channel_id is None:
+            continue
+        ch_scope = _kg_installation_filter(WitnessOpportunityCandidate, installation_id)
+        queued = int(
+            session.scalar(
+                select(func.count())
+                .select_from(WitnessOpportunityCandidate)
+                .where(
+                    *ch_scope,
+                    WitnessOpportunityCandidate.status == "candidate",
+                    WitnessOpportunityCandidate.channel_id == channel_id,
+                )
+            )
+            or 0
+        )
+        log_user = f"channel:{channel_id}"
+        log_installation_filter = (
+            [WitnessDeliveryLog.installation_id == policy.installation_id]
+            if installation_id is not None
+            else []
+        )
+        last_deferral = session.scalar(
+            select(WitnessDeliveryLog.reason)
+            .where(
+                *log_installation_filter,
+                WitnessDeliveryLog.slack_user_id == log_user,
+            )
+            .order_by(WitnessDeliveryLog.created_at.desc())
+            .limit(1)
+        )
+        posts_this_week = int(
+            session.scalar(
+                select(func.count())
+                .select_from(WitnessDeliveryLog)
+                .where(
+                    *log_installation_filter,
+                    WitnessDeliveryLog.slack_user_id == log_user,
+                    WitnessDeliveryLog.decision.in_(
+                        ("channel_sent", "ambient_file_brief")
+                    ),
+                    WitnessDeliveryLog.created_at > one_week_ago,
+                )
+            )
+            or 0
+        )
+        last_sent = session.scalar(
+            select(func.max(WitnessDeliveryLog.created_at)).where(
+                *log_installation_filter,
+                WitnessDeliveryLog.slack_user_id == log_user,
+                WitnessDeliveryLog.decision == "channel_sent",
+                WitnessDeliveryLog.reason == "sent",
+            )
+        )
+        channel_rows.append(
+            WitnessChannelRow(
+                channel_id=channel_id,
+                channel_name=channel_id,
+                proactivity_status=policy.proactivity_status,
+                full_enabled_at=policy.full_enabled_at,
+                queued_candidate_count=queued,
+                last_deferral_reason=last_deferral,
+                channel_posts_this_week=posts_this_week,
+                channel_posts_per_week_budget=channel_posts_per_week_budget,
+                last_sent_at=last_sent,
+            )
+        )
+
+    return WitnessDormancyStatus(
+        total_queued=total_queued,
+        dm_digest_enabled=dm_digest_enabled,
+        dm_digest_epoch=dm_digest_epoch,
+        channels_full=channels_full,
+        channels_total=channels_total,
+        total_deferred=total_deferred,
+        total_sent=total_sent,
+        autopilot_db_override=autopilot_db_override,
+        channel_rows=tuple(channel_rows),
+    )
 
 
 @dataclass(frozen=True)

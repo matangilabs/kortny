@@ -450,6 +450,88 @@ class ObserveService:
             return existing
         return policy
 
+    def set_channel_proactivity_status(
+        self,
+        installation_id: UUID,
+        channel_id: str,
+        status: str,
+        *,
+        by_user_id: str | None = None,
+        now: datetime | None = None,
+    ) -> ObservePolicy:
+        """Set proactivity_status for a channel policy.
+
+        When transitioning TO 'full' and full_enabled_at is NULL, stamps the
+        activation epoch. Leaving 'full' does NOT clear full_enabled_at — the
+        original epoch is preserved so re-enabling keeps the original backlog exclusion.
+        Valid statuses: 'off', 'digest_only', 'full'.
+        """
+        valid = {"off", "digest_only", "full"}
+        if status not in valid:
+            raise ValueError(
+                f"Invalid proactivity_status {status!r}; must be one of {valid}"
+            )
+        observed_now = now or datetime.now(UTC)
+        installation = self.session.get(Installation, installation_id)
+        if installation is None:
+            raise ValueError(f"Installation {installation_id} not found")
+        policy = self.ensure_channel_policy(
+            installation=installation,
+            channel_id=channel_id,
+            enabled_by_user_id=by_user_id,
+        )
+        policy.proactivity_status = status
+        if status == "full" and policy.full_enabled_at is None:
+            policy.full_enabled_at = observed_now
+        policy.updated_at = observed_now
+        if by_user_id:
+            policy.enabled_by_user_id = by_user_id
+        return policy
+
+    def set_digest_delivery(
+        self,
+        installation_id: UUID,
+        *,
+        enabled: bool,
+        now: datetime | None = None,
+    ) -> None:
+        """Enable or disable DM digest delivery at workspace level.
+
+        Enabling stamps digest_enabled_at (the epoch) if not already set.
+        Disabling clears digest_enabled_at so future re-enables get a fresh epoch
+        (unlike full_enabled_at which is preserved — digests are workspace-wide
+        so operators expect a clean slate on re-enable).
+        """
+        observed_now = now or datetime.now(UTC)
+        installation = self.session.get(Installation, installation_id)
+        if installation is None:
+            raise ValueError(f"Installation {installation_id} not found")
+        if enabled:
+            if installation.digest_enabled_at is None:
+                installation.digest_enabled_at = observed_now
+        else:
+            installation.digest_enabled_at = None
+        installation.updated_at = observed_now
+
+    def set_autopilot_enabled(
+        self,
+        installation_id: UUID,
+        *,
+        enabled: bool,
+        now: datetime | None = None,
+    ) -> None:
+        """Set DB-level autopilot override for a workspace.
+
+        DB value overrides env when not None. Set to None to fall back to env.
+        This method sets True or False (not None — use direct model update to clear).
+        """
+        observed_now = now or datetime.now(UTC)
+        installation = self.session.get(Installation, installation_id)
+        if installation is None:
+            raise ValueError(f"Installation {installation_id} not found")
+        installation.autopilot_enabled = enabled
+        installation.updated_at = observed_now
+
     @staticmethod
     def is_observable(policy: ObservePolicy) -> bool:
         """Return whether a policy allows passive event observation."""
