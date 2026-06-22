@@ -215,6 +215,9 @@ class WitnessRunner:
         self.slack_client = slack_client
         self.runner_id = runner_id or default_witness_runner_id()
         self.advisory_lock_key = advisory_lock_key
+        # Lazily initialised on first shadow evaluation to avoid circular import
+        # (ledger.policy imports from kortny.witness.runner).
+        self.__ledger_service: object = None
 
     def run_once(
         self,
@@ -838,6 +841,72 @@ class WitnessRunner:
             user_id,
             len(included),
         )
+        # ── Shadow ledger parity hook (observe-only, never affects delivery) ──
+        try:
+            if getattr(self.settings, "kortny_proactive_ledger_shadow_enabled", True):
+                # Lazy imports break the circular dependency
+                # (ledger.policy imports from kortny.witness.runner).
+                from kortny.witness.ledger.policy import (  # noqa: PLC0415
+                    CandidateInputs as _CandidateInputs,
+                )
+                from kortny.witness.ledger.policy import (
+                    DeliveryContext as _DeliveryContext,
+                )
+                from kortny.witness.ledger.service import (  # noqa: PLC0415
+                    ProactiveActionService as _ProactiveActionService,
+                )
+
+                if self.__ledger_service is None:
+                    self.__ledger_service = _ProactiveActionService()
+                _svc = self.__ledger_service
+                assert isinstance(_svc, _ProactiveActionService)
+                _digest_already_sent = self._digest_sent_in_window(
+                    installation_id=installation_id,
+                    user_id=user_id,
+                    now=now,
+                    digest_interval=digest_interval,
+                )
+                _events = collect_user_feedback_events(
+                    self.session,
+                    installation_id=installation_id,
+                    slack_user_id=user_id,
+                    now=now,
+                )
+                for _outcome in outcomes:
+                    _cand = next(
+                        (c for c in candidates if c.id == _outcome.candidate_id), None
+                    )
+                    if _cand is None:
+                        continue
+                    _ci = _CandidateInputs(
+                        confidence_score=_cand.confidence_score or Decimal("0.500"),
+                        reinforcement_count=_cand.reinforcement_count or 1,
+                        evidence_count=len(_cand.evidence_json or []),
+                        span_days=_candidate_span_days(_cand, now=now),
+                        candidate_type=_cand.candidate_type or "",
+                        created_at=_coerce_utc(_cand.created_at),
+                    )
+                    _ctx = _DeliveryContext(
+                        now=now,
+                        delivery_threshold=delivery_threshold,
+                        digest_epoch=None,
+                        digest_interval_exceeded=not _digest_already_sent,
+                        digest_max_items=digest_max_items,
+                        items_before_this=0,
+                        in_quiet_hours=False,
+                        user_feedback_events=tuple(_events),
+                    )
+                    _svc.shadow_evaluate(
+                        "dm_digest",
+                        _ci,
+                        _ctx,
+                        real_decision=_outcome.status,
+                        candidate_id=_outcome.candidate_id,
+                    )
+        except Exception:
+            logger.exception(
+                "proactive_ledger shadow hook failed in _deliver_user_digest"
+            )
         return tuple(outcomes)
 
     def _deliver_channel_suggestions(
@@ -1060,6 +1129,71 @@ class WitnessRunner:
                     score=score,
                     now=now,
                 )
+            )
+        # ── Shadow ledger parity hook (observe-only, never affects delivery) ──
+        try:
+            if getattr(self.settings, "kortny_proactive_ledger_shadow_enabled", True):
+                # Lazy imports break the circular dependency
+                # (ledger.policy imports from kortny.witness.runner).
+                from kortny.witness.ledger.policy import (  # noqa: PLC0415
+                    CandidateInputs as _CandidateInputs,
+                )
+                from kortny.witness.ledger.policy import (
+                    DeliveryContext as _DeliveryContext,
+                )
+                from kortny.witness.ledger.service import (  # noqa: PLC0415
+                    ProactiveActionService as _ProactiveActionService,
+                )
+
+                if self.__ledger_service is None:
+                    self.__ledger_service = _ProactiveActionService()
+                _svc = self.__ledger_service
+                assert isinstance(_svc, _ProactiveActionService)
+                _budget_left = channel_posts_per_week - self._channel_posts_in_window(
+                    installation_id=installation_id,
+                    log_user=log_user,
+                    now=now,
+                )
+                _events_ch = collect_channel_feedback_events(
+                    self.session,
+                    installation_id=installation_id,
+                    channel_id=channel_id,
+                    now=now,
+                )
+                for _outcome in outcomes:
+                    _cand = next(
+                        (c for c in candidates if c.id == _outcome.candidate_id), None
+                    )
+                    if _cand is None:
+                        continue
+                    _ci = _CandidateInputs(
+                        confidence_score=_cand.confidence_score or Decimal("0.500"),
+                        reinforcement_count=_cand.reinforcement_count or 1,
+                        evidence_count=len(_cand.evidence_json or []),
+                        span_days=_candidate_span_days(_cand, now=now),
+                        candidate_type=_cand.candidate_type or "",
+                        created_at=_coerce_utc(_cand.created_at),
+                    )
+                    _ctx = _DeliveryContext(
+                        now=now,
+                        delivery_threshold=delivery_threshold,
+                        channel_full_enabled=True,
+                        channel_epoch=epoch,
+                        channel_posts_budget_left=_budget_left,
+                        items_before_this_channel=0,
+                        in_quiet_hours=False,
+                        user_feedback_events=tuple(_events_ch),
+                    )
+                    _svc.shadow_evaluate(
+                        "channel_post",
+                        _ci,
+                        _ctx,
+                        real_decision=_outcome.status,
+                        candidate_id=_outcome.candidate_id,
+                    )
+        except Exception:
+            logger.exception(
+                "proactive_ledger shadow hook failed in _deliver_channel_group"
             )
         return tuple(outcomes)
 
