@@ -1787,6 +1787,8 @@ class WitnessOpportunityCandidate(Base):
     automated_task_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("tasks.id", ondelete="SET NULL")
     )
+    task_status: Mapped[str | None] = mapped_column(Text)
+    task_finished_at: Mapped[datetime | None] = mapped_column(TZ)
     cooldown_until: Mapped[datetime | None] = mapped_column(TZ)
     last_suggested_at: Mapped[datetime | None] = mapped_column(TZ)
     reinforcement_count: Mapped[int] = mapped_column(

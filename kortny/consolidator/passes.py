@@ -38,6 +38,7 @@ from kortny.db.models import (
     Task,
     TaskEventType,
     TaskStatus,
+    WitnessOpportunityCandidate,
     WorkspaceState,
 )
 from kortny.embeddings import (
@@ -82,6 +83,7 @@ MERGE_SIMILARITY_THRESHOLD = 0.92
 MERGE_PAIR_CAP = 20
 USER_CONFIRMED_SOURCE_TYPE = "user_confirmed"
 FACT_PROJECTION_KEY_PREFIX = "workspace_fact"
+PROACTIVE_OUTCOMES_BATCH_CAP = 200
 
 
 @dataclass(frozen=True, slots=True)
@@ -593,6 +595,7 @@ class HygieneCounters:
     profiles_refreshed: int = 0
     profiles_marked_stale: int = 0
     assessments_requeued: int = 0
+    outcomes_reconciled: int = 0
 
     def to_payload(self) -> dict[str, int]:
         return {
@@ -601,6 +604,7 @@ class HygieneCounters:
             "profiles_refreshed": self.profiles_refreshed,
             "profiles_marked_stale": self.profiles_marked_stale,
             "assessments_requeued": self.assessments_requeued,
+            "outcomes_reconciled": self.outcomes_reconciled,
         }
 
 
@@ -634,6 +638,11 @@ def run_hygiene(
         task_service=effective_task_service,
         now=effective_now,
     )
+    reconciled = _reconcile_proactive_outcomes(
+        session,
+        installation_id=installation_id,
+        now=effective_now,
+    )
     session.flush()
     return HygieneCounters(
         purged_observations=purged,
@@ -641,6 +650,7 @@ def run_hygiene(
         profiles_refreshed=refreshed,
         profiles_marked_stale=marked_stale,
         assessments_requeued=requeued,
+        outcomes_reconciled=reconciled,
     )
 
 
@@ -928,6 +938,73 @@ def _requeue_failed_assessments(
             )
         requeued += 1
     return requeued
+
+
+_TERMINAL_TASK_STATUSES: frozenset[TaskStatus] = frozenset(
+    {
+        TaskStatus.succeeded,
+        TaskStatus.failed,
+        TaskStatus.crashed,
+        TaskStatus.cancelled,
+    }
+)
+
+
+def _reconcile_proactive_outcomes(
+    session: Session,
+    *,
+    installation_id: uuid.UUID,
+    now: datetime,
+) -> int:
+    """Hygiene step: back-fill task_status / task_finished_at on reconciled
+    proactive candidates whose linked task has reached a terminal state.
+
+    Idempotent: skips rows where task_status is already set.
+    """
+    from kortny.witness.ledger.service import (  # noqa: PLC0415
+        ProactiveActionService,
+    )
+
+    ledger = ProactiveActionService()
+
+    candidates = list(
+        session.scalars(
+            select(WitnessOpportunityCandidate)
+            .where(
+                WitnessOpportunityCandidate.installation_id == installation_id,
+                WitnessOpportunityCandidate.automated_task_id.is_not(None),
+                WitnessOpportunityCandidate.task_status.is_(None),
+            )
+            .limit(PROACTIVE_OUTCOMES_BATCH_CAP)
+            .with_for_update(skip_locked=True)
+        )
+    )
+
+    reconciled = 0
+    for candidate in candidates:
+        task = session.get(Task, candidate.automated_task_id)
+        if task is None:
+            continue
+        task_status = TaskStatus(task.status)
+        if task_status not in _TERMINAL_TASK_STATUSES:
+            continue
+        candidate.task_status = task.status
+        candidate.task_finished_at = task.updated_at
+        to_state = (
+            "task_succeeded" if task_status is TaskStatus.succeeded else "task_failed"
+        )
+        ledger.record_transition(
+            session,
+            candidate,
+            to_state=to_state,
+            event_type="task_terminal",
+            reason_code=task.status,
+            task_id=task.id,
+            now=now,
+        )
+        reconciled += 1
+
+    return reconciled
 
 
 @dataclass(frozen=True, slots=True)
