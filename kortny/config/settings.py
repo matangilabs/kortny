@@ -328,6 +328,15 @@ class Settings(BaseSettings):
             "channel (24-hour window). 0 disables the draft tier."
         ),
     )
+    kortny_proactive_ledger_shadow_enabled: bool = Field(
+        default=True,
+        validation_alias="KORTNY_PROACTIVE_LEDGER_SHADOW_ENABLED",
+        description=(
+            "When True, each Witness delivery and autopilot decision is "
+            "shadow-evaluated by the Proactive Action Ledger and divergences "
+            "are logged. Step 1 only; no behavior is changed."
+        ),
+    )
     ambient_files_enabled: bool = Field(
         default=True,
         validation_alias="KORTNY_AMBIENT_FILES_ENABLED",

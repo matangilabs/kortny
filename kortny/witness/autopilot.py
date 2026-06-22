@@ -212,7 +212,9 @@ class WitnessAutopilot:
         ):
             for candidate in candidates:
                 try:
-                    outcomes.append(self._review_candidate(candidate, now=run_at))
+                    outcome = self._review_candidate(candidate, now=run_at)
+                    outcomes.append(outcome)
+                    # ponytail: live autopilot shadow deferred to ledger Step 2 — the real WitnessAutopilotDecision (action_kind/risk) isn't available here; a faithful shadow must hook inside _review_candidate.
                 except Exception as exc:
                     logger.exception(
                         "witness autopilot candidate review failed candidate_id=%s",
