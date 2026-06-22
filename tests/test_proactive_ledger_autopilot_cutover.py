@@ -421,19 +421,23 @@ class TestAutopilotShadowEvaluate:
         def capture_warning(msg: str, *args: object, **kwargs: object) -> None:
             logged_messages.append(msg % args if args else msg)
 
-        with patch(
-            "kortny.witness.ledger.policy.ProactiveActionPolicy.decide",
-            return_value=LedgerDecision(decision="silent", reason_code="test_diverge"),
-        ):
-            with patch(
+        with (
+            patch(
+                "kortny.witness.ledger.policy.ProactiveActionPolicy.decide",
+                return_value=LedgerDecision(
+                    decision="silent", reason_code="test_diverge"
+                ),
+            ),
+            patch(
                 "kortny.witness.autopilot.logger.warning", side_effect=capture_warning
-            ):
-                _autopilot_shadow_evaluate(
-                    candidate=candidate,
-                    decision=d,
-                    preflight_defer_reason=None,
-                    now=NOW,
-                )
+            ),
+        ):
+            _autopilot_shadow_evaluate(
+                candidate=candidate,
+                decision=d,
+                preflight_defer_reason=None,
+                now=NOW,
+            )
 
         divergence_msgs = [m for m in logged_messages if "shadow_divergence" in m]
         assert len(divergence_msgs) == 1
@@ -458,30 +462,26 @@ class TestAutopilotShadowEvaluate:
 
     def test_shadow_disabled_by_env(self, caplog: pytest.LogCaptureFixture) -> None:
         """When KORTNY_PROACTIVE_LEDGER_SHADOW_ENABLED=false, nothing runs."""
+        import logging
+
         candidate = self._make_orm_candidate()
         d = _decision()
 
-        with patch.dict(
-            os.environ, {"KORTNY_PROACTIVE_LEDGER_SHADOW_ENABLED": "false"}
+        # Patch _candidate_inputs_from_orm: if the shadow runs past the early
+        # return, it will call this function. Assert it is NOT called.
+        with (
+            patch.dict(os.environ, {"KORTNY_PROACTIVE_LEDGER_SHADOW_ENABLED": "false"}),
+            patch("kortny.witness.autopilot._candidate_inputs_from_orm") as mock_inputs,
+            caplog.at_level(logging.WARNING, logger="kortny.witness.autopilot"),
         ):
-            # Patch _candidate_inputs_from_orm: if the shadow runs past the early
-            # return, it will call this function. Assert it is NOT called.
-            with patch(
-                "kortny.witness.autopilot._candidate_inputs_from_orm"
-            ) as mock_inputs:
-                import logging
-
-                with caplog.at_level(
-                    logging.WARNING, logger="kortny.witness.autopilot"
-                ):
-                    _autopilot_shadow_evaluate(
-                        candidate=candidate,
-                        decision=d,
-                        preflight_defer_reason=None,
-                        now=NOW,
-                    )
-                # Shadow must exit before building policy inputs.
-                mock_inputs.assert_not_called()
+            _autopilot_shadow_evaluate(
+                candidate=candidate,
+                decision=d,
+                preflight_defer_reason=None,
+                now=NOW,
+            )
+            # Shadow must exit before building policy inputs.
+            mock_inputs.assert_not_called()
 
         divergence_logs = [
             r for r in caplog.records if "shadow_divergence" in r.message
