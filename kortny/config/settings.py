@@ -337,6 +337,15 @@ class Settings(BaseSettings):
             "are logged. Step 1 only; no behavior is changed."
         ),
     )
+    kortny_proactive_ledger_events_enabled: bool = Field(
+        default=True,
+        validation_alias="KORTNY_PROACTIVE_LEDGER_EVENTS_ENABLED",
+        description=(
+            "When True, every Witness candidate status transition writes a "
+            "ProactiveActionEvent audit row in the same transaction. "
+            "Disable to silence the event log without changing status logic."
+        ),
+    )
     ambient_files_enabled: bool = Field(
         default=True,
         validation_alias="KORTNY_AMBIENT_FILES_ENABLED",

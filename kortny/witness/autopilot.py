@@ -8,10 +8,13 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
+
+if TYPE_CHECKING:
+    from kortny.witness.ledger.service import ProactiveActionService
 
 from kortny.config import Settings, load_settings
 from kortny.db.models import LLMProvider as DbLLMProvider
@@ -46,6 +49,14 @@ from kortny.witness.opportunities import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _get_ledger() -> ProactiveActionService:
+    # Deferred import to break the ledger/policy → autopilot → ledger/service cycle.
+    from kortny.witness.ledger.service import ProactiveActionService  # noqa: PLC0415
+
+    return ProactiveActionService()
+
 
 WITNESS_AUTOPILOT_REVIEW_PROMPT_NAME = "kortny.witness_autopilot_reviewer"
 WITNESS_AUTOPILOT_REVIEW_RESPONSE_FORMAT: JsonObject = {"type": "json_object"}
@@ -345,6 +356,7 @@ class WitnessAutopilot:
                 source_task=source_task,
                 now=now,
             )
+            prev_status = candidate.status
             candidate.automated_task_id = task.id
             candidate.status = "accepted"
             candidate.cooldown_until = None
@@ -368,6 +380,16 @@ class WitnessAutopilot:
                     "generated_task_id": str(task.id),
                     "execution_policy": "default_on_low_risk_task",
                 },
+            )
+            _get_ledger().record_transition(
+                self.session,
+                candidate,
+                to_state="accepted",
+                event_type="autopilot_executed",
+                from_state=prev_status,
+                actor_id=self.actor_id,
+                task_id=task.id,
+                now=now,
             )
             TaskService(self.session).append_event(
                 task,
@@ -394,6 +416,7 @@ class WitnessAutopilot:
             )
 
         if decision.decision == "dismiss":
+            prev_status = candidate.status
             candidate.status = "dismissed"
             candidate.cooldown_until = None
             candidate.updated_at = now
@@ -409,6 +432,15 @@ class WitnessAutopilot:
                     "delivery_target": decision.delivery_target,
                     "reason": decision.reason,
                 },
+            )
+            _get_ledger().record_transition(
+                self.session,
+                candidate,
+                to_state="dismissed",
+                event_type="autopilot_dismissed",
+                from_state=prev_status,
+                actor_id=self.actor_id,
+                now=now,
             )
             _append_candidate_event(
                 self.session,
@@ -429,6 +461,7 @@ class WitnessAutopilot:
                 reason=decision.reason,
             )
 
+        prev_status = candidate.status
         candidate.status = "cooldown"
         candidate.cooldown_until = now + self.cooldown
         candidate.updated_at = now
@@ -445,6 +478,16 @@ class WitnessAutopilot:
                 "reason": decision.reason,
                 "cooldown_until": candidate.cooldown_until.isoformat(),
             },
+        )
+        _get_ledger().record_transition(
+            self.session,
+            candidate,
+            to_state="cooldown",
+            event_type="autopilot_deferred",
+            from_state=prev_status,
+            reason_code="decision_deferred",
+            actor_id=self.actor_id,
+            now=now,
         )
         _append_candidate_event(
             self.session,
@@ -476,6 +519,7 @@ class WitnessAutopilot:
         now: datetime,
         reason: str,
     ) -> WitnessAutopilotOutcome:
+        prev_status = candidate.status
         candidate.status = "cooldown"
         candidate.cooldown_until = now + self.cooldown
         candidate.updated_at = now
@@ -495,6 +539,16 @@ class WitnessAutopilot:
                 "review_reason": decision.reason,
                 "cooldown_until": candidate.cooldown_until.isoformat(),
             },
+        )
+        _get_ledger().record_transition(
+            self.session,
+            candidate,
+            to_state="cooldown",
+            event_type="autopilot_deferred",
+            from_state=prev_status,
+            reason_code="reviewed_decision_deferred",
+            actor_id=self.actor_id,
+            now=now,
         )
         _append_candidate_event(
             self.session,
@@ -874,6 +928,7 @@ class WitnessAutopilot:
         now: datetime,
         reason: str,
     ) -> WitnessAutopilotOutcome:
+        prev_status = candidate.status
         candidate.status = "cooldown"
         candidate.cooldown_until = now + self.cooldown
         candidate.updated_at = now
@@ -888,6 +943,16 @@ class WitnessAutopilot:
                 "reason": reason,
                 "cooldown_until": candidate.cooldown_until.isoformat(),
             },
+        )
+        _get_ledger().record_transition(
+            self.session,
+            candidate,
+            to_state="cooldown",
+            event_type="autopilot_deferred",
+            from_state=prev_status,
+            reason_code="no_review_deferred",
+            actor_id=self.actor_id,
+            now=now,
         )
         self.session.flush()
         return WitnessAutopilotOutcome(

@@ -14,12 +14,15 @@ import logging
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from kortny.config import Settings
+
+if TYPE_CHECKING:
+    from kortny.witness.ledger.service import ProactiveActionService
 from kortny.db.models import LLMProvider as DbLLMProvider
 from kortny.db.models import (
     Schedule,
@@ -48,6 +51,14 @@ from kortny.witness.lifecycle import WitnessSlackClient
 from kortny.witness.opportunities import RecurrenceGate, recurrence_evidence_line
 
 logger = logging.getLogger(__name__)
+
+
+def _get_ledger() -> ProactiveActionService:
+    # Deferred import to break the ledger/policy → runner → lifecycle → ledger/service cycle.
+    from kortny.witness.ledger.service import ProactiveActionService  # noqa: PLC0415
+
+    return ProactiveActionService()
+
 
 WITNESS_AUTOMATION_DRAFTED_MESSAGE = "witness_candidate_automation_drafted"
 WITNESS_AUTOMATED_MESSAGE = "witness_candidate_automated"
@@ -167,6 +178,7 @@ def sync_candidate_for_schedule_action(
 
     run_at = _coerce_utc(now)
     if action == "activate" and schedule.status == "active":
+        prev_status = candidate.status
         candidate.status = "automated"
         candidate.automated_schedule_id = schedule.id
         candidate.cooldown_until = None
@@ -180,6 +192,15 @@ def sync_candidate_for_schedule_action(
                 "automation_kind": candidate.automation_kind or "recurring",
                 "schedule_id": str(schedule.id),
             },
+        )
+        _get_ledger().record_transition(
+            session,
+            candidate,
+            to_state="automated",
+            event_type="automated_recurring",
+            from_state=prev_status,
+            actor_id=by_user_id,
+            now=run_at,
         )
         log_observation(
             logger,
@@ -263,6 +284,7 @@ def _materialize_one_shot(
             failure_reason=f"{type(exc).__name__}: {exc}",
         )
 
+    prev_status = candidate.status
     candidate.status = "automated"
     candidate.automated_task_id = task.id
     candidate.cooldown_until = None
@@ -276,6 +298,16 @@ def _materialize_one_shot(
             "automation_kind": "one_shot",
             "task_id": str(task.id),
         },
+    )
+    _get_ledger().record_transition(
+        session,
+        candidate,
+        to_state="automated",
+        event_type="automated_one_shot",
+        from_state=prev_status,
+        actor_id=accepted_by,
+        task_id=task.id,
+        now=now,
     )
     log_observation(
         logger,

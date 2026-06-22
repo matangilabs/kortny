@@ -2864,3 +2864,34 @@ class FileExtractionCache(Base):
     __table_args__ = (
         Index("idx_file_extraction_cache_last_accessed", "last_accessed_at"),
     )
+
+
+class ProactiveActionEvent(Base):
+    """Append-only audit log for every Witness candidate status transition."""
+
+    __tablename__ = "proactive_action_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    candidate_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("witness_opportunity_candidates.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    installation_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    from_state: Mapped[str | None] = mapped_column(Text)
+    to_state: Mapped[str] = mapped_column(Text, nullable=False)
+    event_type: Mapped[str] = mapped_column(Text, nullable=False)
+    reason_code: Mapped[str | None] = mapped_column(Text)
+    actor_id: Mapped[str | None] = mapped_column(Text)
+    policy_decision: Mapped[str | None] = mapped_column(Text)
+    task_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    delivery_log_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    detail_json: Mapped[dict[str, object] | None] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(TZ, nullable=False)
+
+    __table_args__ = (
+        Index("idx_pae_candidate_id", "candidate_id"),
+        Index("idx_pae_installation_id", "installation_id"),
+        Index("idx_pae_candidate_created_at", "candidate_id", "created_at"),
+    )

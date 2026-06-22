@@ -26,9 +26,12 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from slack_sdk import WebClient
+
+if TYPE_CHECKING:
+    from kortny.witness.ledger.service import ProactiveActionService
 from sqlalchemy import and_, desc, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -90,6 +93,14 @@ from kortny.witness.receptivity import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _get_ledger() -> ProactiveActionService:
+    # Deferred import to break the ledger/policy → runner → ledger/service cycle.
+    from kortny.witness.ledger.service import ProactiveActionService  # noqa: PLC0415
+
+    return ProactiveActionService()
+
 
 DEFAULT_WITNESS_PROFILE_SCAN_LIMIT = 10
 DEFAULT_WITNESS_DELIVERY_LIMIT = 5
@@ -778,6 +789,7 @@ class WitnessRunner:
 
         message_ts = _response_ts(side_effect.response)
         for score, decision, candidate in included:
+            prev_status = candidate.status
             candidate.status = "sent"
             candidate.cooldown_until = None
             candidate.last_suggested_at = now
@@ -795,6 +807,15 @@ class WitnessRunner:
                     "delivery_policy": "digest_dm",
                     "decision": decision,
                 },
+            )
+            _get_ledger().record_transition(
+                self.session,
+                candidate,
+                to_state="sent",
+                event_type="digest_sent",
+                from_state=prev_status,
+                actor_id="witness_runner",
+                now=now,
             )
             self._log_delivery_decision(
                 installation_id=installation_id,
@@ -1268,6 +1289,7 @@ class WitnessRunner:
             )
 
         message_ts = _response_ts(side_effect.response)
+        prev_status = candidate.status
         candidate.status = "sent"
         candidate.cooldown_until = None
         candidate.last_suggested_at = now
@@ -1286,6 +1308,15 @@ class WitnessRunner:
                 "delivery_policy": "channel_post",
                 "decision": decision,
             },
+        )
+        _get_ledger().record_transition(
+            self.session,
+            candidate,
+            to_state="sent",
+            event_type="channel_sent",
+            from_state=prev_status,
+            actor_id="witness_runner",
+            now=now,
         )
         self._log_delivery_decision(
             installation_id=installation_id,
