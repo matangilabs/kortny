@@ -16,7 +16,14 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from kortny.agent.capabilities import CapabilityOverview, build_capability_overview
-from kortny.agent.coordinator import DEFAULT_SYSTEM_PROMPT, AgentRunResult
+from kortny.agent.coordinator import (
+    DEFAULT_SYSTEM_PROMPT,
+    HONEST_FAILURE_FALLBACK,
+    HONEST_FAILURE_FALLBACK_DEFAULT,
+    HONEST_FAILURE_SYNTHESIS_PROMPT,
+    AgentExecutionGuardrailError,
+    AgentRunResult,
+)
 from kortny.agent.execution import ExecutionGuardrailLimits
 from kortny.agent.image_attachments import SlackImageAttachmentResolver
 from kortny.agent.runtime import CustomAgentRuntime
@@ -187,6 +194,43 @@ from kortny.workflow.handoff import evaluate_runtime_handoff
 GENERIC_FAILURE_TEXT = (
     "Something went wrong while I was working on this. Please try again soon."
 )
+
+
+def _guardrail_failure_reason(exc: AgentExecutionGuardrailError) -> str:
+    """Extract a structured failure reason from a guardrail exception message."""
+    msg = str(exc)
+    if "circuit breaker" in msg.lower() or "same_tool_call_repeated" in msg:
+        return "same_tool_call_repeated"
+    if "Recoverable tool failure budget" in msg:
+        return "recoverable_failure_budget_exceeded"
+    return "unknown"
+
+
+def _summarize_tool_history(session: Session, task: Task) -> str:
+    """Build a compact summary of tool calls and errors for the honest-failure prompt."""
+    events = session.scalars(
+        select(TaskEvent)
+        .where(
+            TaskEvent.task_id == task.id,
+            TaskEvent.type.in_([TaskEventType.tool_call, TaskEventType.error]),
+        )
+        .order_by(TaskEvent.created_at)
+        .limit(20)
+    ).all()
+
+    lines: list[str] = []
+    for event in events:
+        if not isinstance(event.payload, dict):
+            continue
+        if event.type == TaskEventType.tool_call:
+            tool = event.payload.get("tool", "unknown")
+            lines.append(f"- called {tool}")
+        elif event.type == TaskEventType.error:
+            err = event.payload.get("error_summary") or event.payload.get("error", "")
+            lines.append(f"- error: {str(err)[:120]}")
+    return "\n".join(lines) if lines else "(no tool calls recorded)"
+
+
 MEMORY_CONFIRMATION_PURPOSE = "memory_confirmation"
 TOOL_APPROVAL_PROMPT_SYNTHESIS_PROMPT_NAME = "kortny.tool_approval_prompt"
 
@@ -491,6 +535,34 @@ class AgentTaskExecutor:
             return TaskExecutionResult(
                 result_summary=(f"Waiting for approval to run {exc.request.tool_name}.")
             )
+        except AgentExecutionGuardrailError as exc:
+            logger.info(
+                "agent executor guardrail exhaustion task_id=%s error=%s",
+                task.id,
+                str(exc),
+            )
+            self._post_honest_failure_notice(
+                settings=settings,
+                session=session,
+                task=task,
+                task_service=task_service,
+                exc=exc,
+            )
+            self._mark_channel_assessment_failed(
+                session=session,
+                task=task,
+                task_service=task_service,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            self._complete_ack_reaction(
+                settings=settings,
+                session=session,
+                task=task,
+                task_service=task_service,
+                succeeded=False,
+            )
+            raise
         except TaskCancelledError:
             logger.info("agent executor cancelled task_id=%s", task.id)
             raise
@@ -3158,6 +3230,148 @@ class AgentTaskExecutor:
             logger.exception(
                 "failed to post generic failure notice task_id=%s", task.id
             )
+
+    def _post_honest_failure_notice(
+        self,
+        *,
+        settings: Settings,
+        session: Session,
+        task: Task,
+        task_service: TaskService,
+        exc: AgentExecutionGuardrailError,
+    ) -> None:
+        """Post an honest, specific failure notice for terminal exhaustion.
+
+        On circuit-breaker or max-recoverable-failure exhaustion, synthesize a
+        clear Slack message with a single cheap-tier LLM call. If that call
+        errors or returns empty, fall back to a deterministic message keyed by
+        the failure reason. The task still ends failed -- this only replaces the
+        generic "Something went wrong" text.
+        """
+        if _should_suppress_slack_post(session, task):
+            task_service.append_event(
+                task,
+                TaskEventType.log,
+                {
+                    "message": "slack_honest_failure_suppressed",
+                    "reason": "background_channel_assessment",
+                },
+            )
+            return
+
+        failure_reason = _guardrail_failure_reason(exc)
+        failure_text = self._synthesize_honest_failure(
+            settings=settings,
+            session=session,
+            task=task,
+            task_service=task_service,
+            failure_reason=failure_reason,
+        )
+        try:
+            client = self.slack_client
+            if client is None:
+                client = cast(
+                    SlackPostingClient,
+                    WebClient(token=settings.slack_bot_token),
+                )
+            SlackPoster(
+                session=session,
+                client=client,
+                task_service=task_service,
+            ).post_message(
+                SlackThread.from_task(task),
+                failure_text,
+                purpose="failure",
+            )
+            logger.info(
+                "posted honest failure notice task_id=%s reason=%s",
+                task.id,
+                failure_reason,
+            )
+        except Exception:
+            logger.exception("failed to post honest failure notice task_id=%s", task.id)
+
+    def _synthesize_honest_failure(
+        self,
+        *,
+        settings: Settings,
+        session: Session,
+        task: Task,
+        task_service: TaskService,
+        failure_reason: str,
+    ) -> str:
+        """Make one cheap-tier LLM call to compose an honest failure message.
+
+        If the call errors or returns empty, return a deterministic fallback.
+        Never retries; never re-enters the agent loop.
+        """
+        fallback = HONEST_FAILURE_FALLBACK.get(
+            failure_reason, HONEST_FAILURE_FALLBACK_DEFAULT
+        )
+        try:
+            model_route = ModelRouter(settings).route_for_tier(
+                ModelRouteTier.cheap_fast,
+                reason="honest_failure_synthesis",
+            )
+            selection = select_runtime_model(
+                session=session,
+                settings=settings,
+                installation_id=task.installation_id,
+                model_route=model_route,
+            )
+            llm = LLMService(
+                session=session,
+                provider=create_provider_for_selection(
+                    settings=settings,
+                    selection=selection,
+                ),
+                provider_name=selection.provider_name,
+                task_service=task_service,
+                model_route=selection.model_route,
+                settings=settings,
+            )
+            tool_summary = _summarize_tool_history(session, task)
+            context = (
+                f"User request: {task.input}\n\n"
+                f"What was tried:\n{tool_summary}\n\n"
+                f"Failure reason: {failure_reason}"
+            )
+            completion = llm.complete(
+                task_id=task.id,
+                messages=[
+                    ChatMessage(role="user", content=context),
+                    ChatMessage(role="system", content=HONEST_FAILURE_SYNTHESIS_PROMPT),
+                ],
+                tools=(),
+                prompt_name="kortny.honest_failure_synthesis",
+                prompt_source="code",
+            )
+            summary = (completion.content or "").strip()
+            if summary:
+                task_service.append_event(
+                    task,
+                    TaskEventType.log,
+                    {
+                        "message": "honest_failure_synthesized",
+                        "failure_reason": failure_reason,
+                        "summary_chars": len(summary),
+                    },
+                )
+                return summary
+        except Exception:
+            logger.exception(
+                "honest failure synthesis failed task_id=%s; using fallback",
+                task.id,
+            )
+        task_service.append_event(
+            task,
+            TaskEventType.log,
+            {
+                "message": "honest_failure_fallback_used",
+                "failure_reason": failure_reason,
+            },
+        )
+        return fallback
 
     def _complete_ack_reaction(
         self,
