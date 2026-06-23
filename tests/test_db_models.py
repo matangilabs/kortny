@@ -46,6 +46,7 @@ def test_mvp_schema_declares_all_core_tables() -> None:
         "llm_tier_assignments",
         "witness_opportunity_candidates",
         "witness_delivery_log",
+        "proactive_action_events",
         "artifacts",
         "model_pricing",
         "assistant_thread_context",

@@ -25,6 +25,7 @@ from kortny.db.models import (
     Installation,
     LLMUsage,
     ObserveChannelProfile,
+    ObservePolicy,
     SlackChannelMembership,
     SlackSideEffect,
     Task,
@@ -87,6 +88,7 @@ def _cleanup(session: Session) -> None:
         LLMUsage,
         SlackSideEffect,
         ObserveChannelProfile,
+        ObservePolicy,
         SlackChannelMembership,
         TaskEvent,
         Task,
@@ -233,6 +235,33 @@ def _execute_completion(task_input: str = "Check the Q2 pipeline doc.") -> Compl
     )
 
 
+def _make_channel_policy(
+    session: Session,
+    installation: Installation,
+    channel_id: str = "CRefire01",
+    *,
+    proactivity_status: str = "full",
+    paused_at: datetime | None = None,
+    full_enabled_at: datetime | None = None,
+) -> ObservePolicy:
+    if full_enabled_at is None:
+        full_enabled_at = datetime.now(UTC) - timedelta(days=1)
+    policy = ObservePolicy(
+        installation_id=installation.id,
+        scope_type="channel",
+        scope_id=channel_id,
+        observation_status="active",
+        proactivity_status=proactivity_status,
+        paused_at=paused_at,
+        full_enabled_at=full_enabled_at,
+        quiet_hours_json={},
+        metadata_json={},
+    )
+    session.add(policy)
+    session.flush()
+    return policy
+
+
 # ---------------------------------------------------------------------------
 # Test 1: dedup collapses paraphrased summaries to one candidate
 # ---------------------------------------------------------------------------
@@ -299,6 +328,7 @@ def test_autopilot_sets_automated_task_id_on_execute(
     membership = _make_membership(db_session, inst, channel_id="CRefire02")
     source_task = _make_task(db_session, inst, membership.channel_id)
     profile = _make_profile(db_session, inst, membership, source_task)
+    _make_channel_policy(db_session, inst, "CRefire02")
 
     svc = WitnessOpportunityService(db_session)
     ci = _candidate_input(
@@ -392,6 +422,7 @@ def test_preflight_defers_when_equivalent_executed_within_cooldown(
         db_session, inst, membership.channel_id, message_ts="1780000001.000001"
     )
     profile = _make_profile(db_session, inst, membership, source_task)
+    _make_channel_policy(db_session, inst, "CRefire03")
 
     # Create the candidate via the service
     svc = WitnessOpportunityService(db_session)
@@ -443,6 +474,7 @@ def test_preflight_fires_when_no_prior_execution(
     membership = _make_membership(db_session, inst, channel_id="CRefire04")
     source_task = _make_task(db_session, inst, membership.channel_id)
     profile = _make_profile(db_session, inst, membership, source_task)
+    _make_channel_policy(db_session, inst, "CRefire04")
 
     svc = WitnessOpportunityService(db_session)
     ci = _candidate_input(
@@ -482,6 +514,7 @@ def test_preflight_fires_when_prior_execution_outside_cooldown(
         db_session, inst, membership.channel_id, message_ts="1780000002.000001"
     )
     profile = _make_profile(db_session, inst, membership, source_task)
+    _make_channel_policy(db_session, inst, "CRefire05")
 
     svc = WitnessOpportunityService(db_session)
     ci = _candidate_input(
@@ -519,3 +552,204 @@ def test_preflight_fires_when_prior_execution_outside_cooldown(
     assert reason is None, (
         f"Preflight should not defer when automated task was outside cooldown, got: {reason}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Activation gate integration tests
+# ---------------------------------------------------------------------------
+
+
+def test_autopilot_defers_on_digest_only_channel(
+    db_session: Session,
+) -> None:
+    """Autopilot defers candidate when channel policy is digest_only (not full)."""
+    inst = _make_installation(db_session)
+    membership = _make_membership(db_session, inst, channel_id="CGateInt01")
+    source_task = _make_task(db_session, inst, membership.channel_id)
+    profile = _make_profile(db_session, inst, membership, source_task)
+    # digest_only policy — activation gate should block
+    _make_channel_policy(
+        db_session,
+        inst,
+        "CGateInt01",
+        proactivity_status="digest_only",
+        full_enabled_at=datetime.now(UTC) - timedelta(days=1),
+    )
+
+    svc = WitnessOpportunityService(db_session)
+    ci = _candidate_input(
+        "Digest only gate test", "Should defer on digest_only channel."
+    )
+    svc.project_from_channel_profile(
+        task=source_task,
+        membership=membership,
+        profile=profile,
+        candidates=(ci,),
+    )
+    db_session.commit()
+
+    candidate = db_session.scalar(select(WitnessOpportunityCandidate))
+    assert candidate is not None
+    candidate.confidence_score = Decimal("0.900")
+    db_session.flush()
+
+    provider = FakeWitnessLLMProvider([])  # should not call LLM (preflighted out)
+    autopilot = WitnessAutopilot(
+        db_session,
+        llm_provider=provider,
+        provider_name=DbLLMProvider.openrouter,
+    )
+    result = autopilot.run_once(installation_id=inst.id)
+    db_session.commit()
+
+    assert result.executed_count == 0
+    assert result.deferred_count == 1
+
+
+def test_autopilot_executes_on_full_channel_post_epoch(
+    db_session: Session,
+) -> None:
+    """Autopilot executes candidate on a full-enabled channel where candidate post-dates epoch."""
+    inst = _make_installation(db_session)
+    membership = _make_membership(db_session, inst, channel_id="CGateInt02")
+    source_task = _make_task(db_session, inst, membership.channel_id)
+    profile = _make_profile(db_session, inst, membership, source_task)
+    # full policy, epoch 2 days ago; candidate will be created NOW (post-epoch)
+    _make_channel_policy(
+        db_session,
+        inst,
+        "CGateInt02",
+        proactivity_status="full",
+        paused_at=None,
+        full_enabled_at=datetime.now(UTC) - timedelta(days=2),
+    )
+
+    svc = WitnessOpportunityService(db_session)
+    ci = _candidate_input("Full channel gate test", "Should execute on full channel.")
+    svc.project_from_channel_profile(
+        task=source_task,
+        membership=membership,
+        profile=profile,
+        candidates=(ci,),
+    )
+    db_session.commit()
+
+    candidate = db_session.scalar(select(WitnessOpportunityCandidate))
+    assert candidate is not None
+    candidate.confidence_score = Decimal("0.900")
+    db_session.flush()
+
+    provider = FakeWitnessLLMProvider([_execute_completion()])
+    autopilot = WitnessAutopilot(
+        db_session,
+        llm_provider=provider,
+        provider_name=DbLLMProvider.openrouter,
+    )
+    result = autopilot.run_once(installation_id=inst.id)
+    db_session.commit()
+
+    assert result.executed_count == 1
+
+
+def test_autopilot_defers_on_pre_epoch_candidate(
+    db_session: Session,
+) -> None:
+    """Autopilot defers when candidate was created before channel's full_enabled_at."""
+    inst = _make_installation(db_session)
+    membership = _make_membership(db_session, inst, channel_id="CGateInt03")
+    source_task = _make_task(db_session, inst, membership.channel_id)
+    profile = _make_profile(db_session, inst, membership, source_task)
+    now = datetime.now(UTC)
+    # epoch is NOW, so any candidate created before NOW is pre-epoch
+    _make_channel_policy(
+        db_session,
+        inst,
+        "CGateInt03",
+        proactivity_status="full",
+        paused_at=None,
+        full_enabled_at=now,
+    )
+
+    svc = WitnessOpportunityService(db_session)
+    ci = _candidate_input("Pre-epoch gate test", "Should defer because pre-epoch.")
+    svc.project_from_channel_profile(
+        task=source_task,
+        membership=membership,
+        profile=profile,
+        candidates=(ci,),
+    )
+    db_session.commit()
+
+    candidate = db_session.scalar(select(WitnessOpportunityCandidate))
+    assert candidate is not None
+    # Force the candidate's created_at to be 2 hours before the epoch
+    candidate.created_at = now - timedelta(hours=2)
+    candidate.confidence_score = Decimal("0.900")
+    db_session.flush()
+
+    provider = FakeWitnessLLMProvider([])  # should not call LLM
+    autopilot = WitnessAutopilot(
+        db_session,
+        llm_provider=provider,
+        provider_name=DbLLMProvider.openrouter,
+    )
+    result = autopilot.run_once(installation_id=inst.id)
+    db_session.commit()
+
+    assert result.executed_count == 0
+    assert result.deferred_count == 1
+
+
+def test_autopilot_bypass_when_setting_false(
+    db_session: Session,
+) -> None:
+    """When kortny_witness_autopilot_respect_activation=False, gate is bypassed."""
+    from kortny.config import Settings  # noqa: PLC0415
+
+    inst = _make_installation(db_session)
+    membership = _make_membership(db_session, inst, channel_id="CGateInt04")
+    source_task = _make_task(db_session, inst, membership.channel_id)
+    profile = _make_profile(db_session, inst, membership, source_task)
+    # No channel policy at all — would normally block, but setting=False bypasses
+
+    svc = WitnessOpportunityService(db_session)
+    ci = _candidate_input("Bypass gate test", "Should execute with setting off.")
+    svc.project_from_channel_profile(
+        task=source_task,
+        membership=membership,
+        profile=profile,
+        candidates=(ci,),
+    )
+    db_session.commit()
+
+    candidate = db_session.scalar(select(WitnessOpportunityCandidate))
+    assert candidate is not None
+    candidate.confidence_score = Decimal("0.900")
+    db_session.flush()
+
+    # Build a Settings with the flag off
+    settings = Settings.model_validate(
+        {
+            "SLACK_BOT_TOKEN": "xoxb-test",
+            "SLACK_APP_TOKEN": "xapp-test",
+            "SLACK_SIGNING_SECRET": "test-secret",
+            "LLM_PROVIDER": "openai",
+            "LLM_API_KEY": "test-key",
+            "LLM_MODEL": "gpt-4o-mini",
+            "POSTGRES_URL": "postgresql://kortny:kortny@localhost:5432/kortny",
+            "COMPOSIO_API_KEY": "test-composio",
+            "KORTNY_WITNESS_AUTOPILOT_RESPECT_ACTIVATION": False,
+        }
+    )
+
+    provider = FakeWitnessLLMProvider([_execute_completion()])
+    autopilot = WitnessAutopilot(
+        db_session,
+        settings=settings,
+        llm_provider=provider,
+        provider_name=DbLLMProvider.openrouter,
+    )
+    result = autopilot.run_once(installation_id=inst.id)
+    db_session.commit()
+
+    assert result.executed_count == 1

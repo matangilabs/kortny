@@ -337,6 +337,37 @@ class Settings(BaseSettings):
             "are logged. Step 1 only; no behavior is changed."
         ),
     )
+    kortny_proactive_ledger_autopilot_cutover: bool = Field(
+        default=False,
+        validation_alias="KORTNY_PROACTIVE_LEDGER_AUTOPILOT_CUTOVER",
+        description=(
+            "When True, the autopilot real decision is derived from "
+            "ProactiveActionPolicy.decide() instead of the inline gate "
+            "functions (_autopilot_preflight_defer_reason + "
+            "_decision_safety_defer_reason). The parity tests guarantee "
+            "that on==off outcomes are identical for the same inputs. "
+            "Default False — zero behavior change on merge."
+        ),
+    )
+    kortny_witness_autopilot_respect_activation: bool = Field(
+        default=True,
+        validation_alias="KORTNY_WITNESS_AUTOPILOT_RESPECT_ACTIVATION",
+        description=(
+            "When True (default), autopilot will only execute/post on a channel "
+            "that has proactivity_status='full', paused_at IS NULL, "
+            "full_enabled_at IS NOT NULL, and candidate.created_at >= full_enabled_at. "
+            "DM targets are unaffected. Set False to restore the legacy bypass."
+        ),
+    )
+    kortny_proactive_ledger_events_enabled: bool = Field(
+        default=True,
+        validation_alias="KORTNY_PROACTIVE_LEDGER_EVENTS_ENABLED",
+        description=(
+            "When True, every Witness candidate status transition writes a "
+            "ProactiveActionEvent audit row in the same transaction. "
+            "Disable to silence the event log without changing status logic."
+        ),
+    )
     ambient_files_enabled: bool = Field(
         default=True,
         validation_alias="KORTNY_AMBIENT_FILES_ENABLED",

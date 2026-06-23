@@ -4,14 +4,19 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
+
+if TYPE_CHECKING:
+    from kortny.witness.ledger.policy import CandidateInputs
+    from kortny.witness.ledger.service import ProactiveActionService
 
 from kortny.config import Settings, load_settings
 from kortny.db.models import LLMProvider as DbLLMProvider
@@ -46,6 +51,178 @@ from kortny.witness.opportunities import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _get_ledger() -> ProactiveActionService:
+    # Deferred import to break the ledger/policy → autopilot → ledger/service cycle.
+    from kortny.witness.ledger.service import ProactiveActionService  # noqa: PLC0415
+
+    return ProactiveActionService()
+
+
+def _autopilot_cutover_enabled() -> bool:
+    """Return True when the autopilot ledger cutover flag is active.
+
+    Reads via Settings so it is consistent with other flag paths; falls back
+    to False on any load error so the default is always safe.
+    """
+    try:
+        s = load_settings()
+        return s.kortny_proactive_ledger_autopilot_cutover
+    except Exception:
+        return False
+
+
+def _candidate_inputs_from_orm(
+    candidate: WitnessOpportunityCandidate,
+) -> CandidateInputs:
+    """Build CandidateInputs from an ORM row for policy evaluation."""
+    from kortny.witness.ledger.policy import CandidateInputs  # noqa: PLC0415
+
+    evidence_count = (
+        len(candidate.evidence_json) if isinstance(candidate.evidence_json, list) else 0
+    )
+    created_at = (
+        candidate.created_at if candidate.created_at is not None else _coerce_utc(None)
+    )
+    return CandidateInputs(
+        confidence_score=candidate.confidence_score,
+        reinforcement_count=candidate.reinforcement_count,
+        evidence_count=evidence_count,
+        span_days=0,
+        candidate_type=candidate.candidate_type,
+        created_at=created_at,
+    )
+
+
+def _autopilot_shadow_evaluate(
+    *,
+    candidate: WitnessOpportunityCandidate,
+    decision: WitnessAutopilotDecision,
+    preflight_defer_reason: str | None,
+    now: datetime,
+    session: Session | None = None,
+) -> None:
+    """Faithful in-place shadow: call the policy with the REAL decision fields.
+
+    Runs regardless of the cutover flag (shadow is always-on when
+    KORTNY_PROACTIVE_LEDGER_SHADOW_ENABLED is True). Any exception is
+    swallowed so this can never affect the real path.
+
+    Builds DeliveryContext from the real WitnessAutopilotDecision so the
+    policy sees identical inputs to what the inline gate saw — this is what
+    makes the shadow "faithful".
+    """
+    try:
+        if os.environ.get("KORTNY_PROACTIVE_LEDGER_SHADOW_ENABLED", "true").lower() in (
+            "false",
+            "0",
+            "no",
+        ):
+            return
+
+        from kortny.witness.ledger.policy import (  # noqa: PLC0415
+            DeliveryContext,
+            ProactiveActionPolicy,
+        )
+
+        policy_candidate = _candidate_inputs_from_orm(candidate)
+        channel_full_enabled: bool | None = None
+        channel_paused = False
+        channel_epoch: datetime | None = None
+        if session is not None and candidate.source_task_id is not None:
+            source_task = session.get(Task, candidate.source_task_id)
+            if source_task is not None:
+                channel_full_enabled, channel_paused, channel_epoch = (
+                    _load_channel_activation_ctx(
+                        session, candidate, source_task=source_task
+                    )
+                )
+        policy_ctx = DeliveryContext(
+            now=now,
+            delivery_threshold=Decimal("0.600"),
+            autopilot_preflight_defer_reason=preflight_defer_reason,
+            autopilot_decision=decision,
+            autopilot_min_confidence=DEFAULT_WITNESS_AUTOPILOT_MIN_CONFIDENCE,
+            autopilot_channel_full_enabled=channel_full_enabled,
+            autopilot_channel_paused=channel_paused,
+            autopilot_channel_epoch=channel_epoch,
+        )
+        ledger_decision = ProactiveActionPolicy().decide(
+            "autopilot", policy_candidate, policy_ctx
+        )
+
+        # Determine the real outcome for comparison.
+        # At this call site: preflight_reason is None (already passed above),
+        # so the real outcome derives solely from the decision fields.
+        # We compute this as a LedgerOutcome directly (not via _normalise_real,
+        # which maps legacy gate strings; here we already have the canonical
+        # outcome from _review_candidate's control flow).
+        if (
+            decision.decision == "execute_task"
+            and decision.action_kind == "draft_artifact"
+        ):
+            real_ledger_outcome = "ask"
+        elif decision.should_execute:
+            real_ledger_outcome = "act"
+        elif decision.decision == "dismiss":
+            real_ledger_outcome = "silent"
+        else:
+            real_ledger_outcome = "defer"
+
+        diverged = ledger_decision.decision != real_ledger_outcome
+        if diverged:
+            logger.warning(
+                "proactive_ledger_shadow_divergence surface=autopilot "
+                "candidate_id=%s real=%s ledger=%s reason=%s",
+                candidate.id,
+                real_ledger_outcome,
+                ledger_decision.decision,
+                ledger_decision.reason_code,
+            )
+    except Exception:
+        logger.exception(
+            "proactive_ledger_shadow_evaluate failed surface=autopilot candidate_id=%s",
+            candidate.id,
+        )
+
+
+def _inline_record_autopilot_decision_event(
+    session: Session,
+    candidate: WitnessOpportunityCandidate,
+    *,
+    decision: WitnessAutopilotDecision,
+    actor_id: str,
+    now: datetime,
+) -> None:
+    """Record an autopilot_decision ledger event for the inline gate path.
+
+    Maps the inline gate's real decision to the shared LedgerOutcome vocabulary
+    so the event is consistent with what the cutover path records.
+    """
+    if decision.decision == "execute_task" and decision.action_kind == "draft_artifact":
+        policy_decision = "ask"
+        reason_code = "draft_artifact"
+    elif decision.should_execute:
+        policy_decision = "act"
+        reason_code = "execute_task"
+    elif decision.decision == "dismiss":
+        policy_decision = "silent"
+        reason_code = "dismissed"
+    else:
+        policy_decision = "defer"
+        reason_code = "deferred"
+    _get_ledger().record_transition(
+        session,
+        candidate,
+        to_state=candidate.status,  # status unchanged at decision time
+        event_type="autopilot_decision",
+        policy_decision=policy_decision,
+        reason_code=reason_code,
+        actor_id=actor_id,
+        now=now,
+    )
+
 
 WITNESS_AUTOPILOT_REVIEW_PROMPT_NAME = "kortny.witness_autopilot_reviewer"
 WITNESS_AUTOPILOT_REVIEW_RESPONSE_FORMAT: JsonObject = {"type": "json_object"}
@@ -214,7 +391,6 @@ class WitnessAutopilot:
                 try:
                     outcome = self._review_candidate(candidate, now=run_at)
                     outcomes.append(outcome)
-                    # ponytail: live autopilot shadow deferred to ledger Step 2 — the real WitnessAutopilotDecision (action_kind/risk) isn't available here; a faithful shadow must hook inside _review_candidate.
                 except Exception as exc:
                     logger.exception(
                         "witness autopilot candidate review failed candidate_id=%s",
@@ -308,6 +484,11 @@ class WitnessAutopilot:
                 if self.settings is not None
                 else False
             ),
+            respect_activation=(
+                self.settings.kortny_witness_autopilot_respect_activation
+                if self.settings is not None
+                else True
+            ),
         )
         if preflight_reason is not None:
             return self._defer_without_review(
@@ -317,6 +498,41 @@ class WitnessAutopilot:
             )
 
         decision = self._review_with_llm(candidate, source_task=source_task)
+
+        # ── Faithful in-place shadow (always-on when shadow is enabled) ──────
+        # Runs here because this is the FIRST point where both the real
+        # WitnessAutopilotDecision and the preflight result (known to be None
+        # here — the preflight-fail paths return early above) are available.
+        # The try/except guarantees this can NEVER affect the real path.
+        _autopilot_shadow_evaluate(
+            candidate=candidate,
+            decision=decision,
+            preflight_defer_reason=None,
+            now=now,
+            session=self.session,
+        )
+
+        # ── Cutover: derive behavior from the shared policy (flag-gated) ─────
+        use_cutover = _autopilot_cutover_enabled()
+        if use_cutover:
+            return self._review_candidate_via_policy(
+                candidate,
+                decision=decision,
+                source_task=source_task,
+                now=now,
+            )
+
+        # ── Inline gate (default; flag OFF = byte-equivalent behavior) ───────
+        # Record a decision-level ledger event so the autopilot decision is
+        # always auditable, regardless of the cutover flag.
+        _inline_record_autopilot_decision_event(
+            self.session,
+            candidate,
+            decision=decision,
+            actor_id=self.actor_id,
+            now=now,
+        )
+
         if (
             decision.decision == "execute_task"
             and decision.action_kind == "draft_artifact"
@@ -345,6 +561,7 @@ class WitnessAutopilot:
                 source_task=source_task,
                 now=now,
             )
+            prev_status = candidate.status
             candidate.automated_task_id = task.id
             candidate.status = "accepted"
             candidate.cooldown_until = None
@@ -368,6 +585,16 @@ class WitnessAutopilot:
                     "generated_task_id": str(task.id),
                     "execution_policy": "default_on_low_risk_task",
                 },
+            )
+            _get_ledger().record_transition(
+                self.session,
+                candidate,
+                to_state="accepted",
+                event_type="autopilot_executed",
+                from_state=prev_status,
+                actor_id=self.actor_id,
+                task_id=task.id,
+                now=now,
             )
             TaskService(self.session).append_event(
                 task,
@@ -394,6 +621,7 @@ class WitnessAutopilot:
             )
 
         if decision.decision == "dismiss":
+            prev_status = candidate.status
             candidate.status = "dismissed"
             candidate.cooldown_until = None
             candidate.updated_at = now
@@ -409,6 +637,15 @@ class WitnessAutopilot:
                     "delivery_target": decision.delivery_target,
                     "reason": decision.reason,
                 },
+            )
+            _get_ledger().record_transition(
+                self.session,
+                candidate,
+                to_state="dismissed",
+                event_type="autopilot_dismissed",
+                from_state=prev_status,
+                actor_id=self.actor_id,
+                now=now,
             )
             _append_candidate_event(
                 self.session,
@@ -429,6 +666,7 @@ class WitnessAutopilot:
                 reason=decision.reason,
             )
 
+        prev_status = candidate.status
         candidate.status = "cooldown"
         candidate.cooldown_until = now + self.cooldown
         candidate.updated_at = now
@@ -445,6 +683,16 @@ class WitnessAutopilot:
                 "reason": decision.reason,
                 "cooldown_until": candidate.cooldown_until.isoformat(),
             },
+        )
+        _get_ledger().record_transition(
+            self.session,
+            candidate,
+            to_state="cooldown",
+            event_type="autopilot_deferred",
+            from_state=prev_status,
+            reason_code="decision_deferred",
+            actor_id=self.actor_id,
+            now=now,
         )
         _append_candidate_event(
             self.session,
@@ -476,6 +724,7 @@ class WitnessAutopilot:
         now: datetime,
         reason: str,
     ) -> WitnessAutopilotOutcome:
+        prev_status = candidate.status
         candidate.status = "cooldown"
         candidate.cooldown_until = now + self.cooldown
         candidate.updated_at = now
@@ -495,6 +744,16 @@ class WitnessAutopilot:
                 "review_reason": decision.reason,
                 "cooldown_until": candidate.cooldown_until.isoformat(),
             },
+        )
+        _get_ledger().record_transition(
+            self.session,
+            candidate,
+            to_state="cooldown",
+            event_type="autopilot_deferred",
+            from_state=prev_status,
+            reason_code="reviewed_decision_deferred",
+            actor_id=self.actor_id,
+            now=now,
         )
         _append_candidate_event(
             self.session,
@@ -517,6 +776,247 @@ class WitnessAutopilot:
             decision=decision.decision,
             risk=decision.risk,
             reason=reason,
+        )
+
+    def _review_candidate_via_policy(
+        self,
+        candidate: WitnessOpportunityCandidate,
+        *,
+        decision: WitnessAutopilotDecision,
+        source_task: Task,
+        now: datetime,
+    ) -> WitnessAutopilotOutcome:
+        """Cutover path: derive autopilot behavior from ProactiveActionPolicy.
+
+        Called only when KORTNY_PROACTIVE_LEDGER_AUTOPILOT_CUTOVER=True.
+        The policy has already been shadow-evaluated before this method is
+        called, so no additional shadow evaluation is needed here.
+
+        LedgerOutcome → autopilot behavior:
+            act    → execute task (current execute path)
+            ask    → draft tier (execute_task + draft_artifact)
+            silent → dismiss (current below-bar handling)
+            defer  → cooldown / defer (safety or decision deferred)
+
+        ponytail: the AutonomyPolicy table (conservative/balanced/autonomous)
+        ceiling should clamp this policy decision before the outcome mapping —
+        that's a follow-up integration point here.
+        """
+        from kortny.witness.ledger.policy import (  # noqa: PLC0415
+            DeliveryContext,
+            ProactiveActionPolicy,
+        )
+
+        policy_candidate = _candidate_inputs_from_orm(candidate)
+        channel_full_enabled, channel_paused, channel_epoch = (
+            _load_channel_activation_ctx(
+                self.session, candidate, source_task=source_task
+            )
+        )
+        policy_ctx = DeliveryContext(
+            now=now,
+            delivery_threshold=Decimal("0.600"),
+            autopilot_preflight_defer_reason=None,  # preflight already passed
+            autopilot_decision=decision,
+            autopilot_min_confidence=DEFAULT_WITNESS_AUTOPILOT_MIN_CONFIDENCE,
+            autopilot_channel_full_enabled=channel_full_enabled,
+            autopilot_channel_paused=channel_paused,
+            autopilot_channel_epoch=channel_epoch,
+        )
+        policy = ProactiveActionPolicy()
+        ledger_decision = policy.decide("autopilot", policy_candidate, policy_ctx)
+
+        # Record the decision-level ledger event before branching.
+        _get_ledger().record_transition(
+            self.session,
+            candidate,
+            to_state=candidate.status,  # status unchanged at decision time
+            event_type="autopilot_decision",
+            policy_decision=ledger_decision.decision,
+            reason_code=ledger_decision.reason_code,
+            actor_id=self.actor_id,
+            now=now,
+        )
+
+        if ledger_decision.decision == "act":
+            # → execute path (equivalent to inline should_execute == True)
+            task = self._create_proactive_task(
+                candidate,
+                decision=decision,
+                source_task=source_task,
+                now=now,
+            )
+            prev_status = candidate.status
+            candidate.automated_task_id = task.id
+            candidate.status = "accepted"
+            candidate.cooldown_until = None
+            candidate.last_suggested_at = now
+            candidate.updated_at = now
+            _record_feedback(
+                candidate,
+                action="autopilot_executed",
+                by_user_id=self.actor_id,
+                now=now,
+                details={
+                    "decision": decision.decision,
+                    "risk": decision.risk,
+                    "action_kind": decision.action_kind,
+                    "delivery_target": decision.delivery_target,
+                    "requires_user_reply": decision.requires_user_reply,
+                    "allowed_without_confirmation": (
+                        decision.allowed_without_confirmation
+                    ),
+                    "reason": decision.reason,
+                    "generated_task_id": str(task.id),
+                    "execution_policy": "ledger_cutover",
+                    "ledger_reason_code": ledger_decision.reason_code,
+                },
+            )
+            _get_ledger().record_transition(
+                self.session,
+                candidate,
+                to_state="accepted",
+                event_type="autopilot_executed",
+                from_state=prev_status,
+                actor_id=self.actor_id,
+                task_id=task.id,
+                now=now,
+            )
+            TaskService(self.session).append_event(
+                task,
+                TaskEventType.log,
+                {
+                    "message": WITNESS_AUTOPILOT_TASK_CREATED_MESSAGE,
+                    "candidate_id": str(candidate.id),
+                    "source_task_id": str(source_task.id),
+                    "decision": decision.decision,
+                    "risk": decision.risk,
+                    "action_kind": decision.action_kind,
+                    "delivery_target": decision.delivery_target,
+                    "reason": decision.reason,
+                },
+            )
+            self.session.flush()
+            return WitnessAutopilotOutcome(
+                candidate_id=candidate.id,
+                status="executed",
+                decision=decision.decision,
+                risk=decision.risk,
+                reason=decision.reason,
+                task_id=task.id,
+            )
+
+        if ledger_decision.decision == "ask":
+            # → draft tier (draft_artifact action_kind, equivalent to inline
+            # HIG-230 branch)
+            return self._review_draft_candidate(
+                candidate,
+                decision=decision,
+                source_task=source_task,
+                now=now,
+            )
+
+        if ledger_decision.decision == "silent":
+            # → dismiss (equivalent to inline dismiss path)
+            prev_status = candidate.status
+            candidate.status = "dismissed"
+            candidate.cooldown_until = None
+            candidate.updated_at = now
+            _record_feedback(
+                candidate,
+                action="autopilot_dismissed",
+                by_user_id=self.actor_id,
+                now=now,
+                details={
+                    "decision": decision.decision,
+                    "risk": decision.risk,
+                    "action_kind": decision.action_kind,
+                    "delivery_target": decision.delivery_target,
+                    "reason": decision.reason,
+                    "ledger_reason_code": ledger_decision.reason_code,
+                },
+            )
+            _get_ledger().record_transition(
+                self.session,
+                candidate,
+                to_state="dismissed",
+                event_type="autopilot_dismissed",
+                from_state=prev_status,
+                actor_id=self.actor_id,
+                now=now,
+            )
+            _append_candidate_event(
+                self.session,
+                candidate,
+                message=WITNESS_AUTOPILOT_CANDIDATE_DISMISSED_MESSAGE,
+                payload={
+                    "decision": decision.decision,
+                    "risk": decision.risk,
+                    "reason": decision.reason,
+                    "ledger_reason_code": ledger_decision.reason_code,
+                },
+            )
+            self.session.flush()
+            return WitnessAutopilotOutcome(
+                candidate_id=candidate.id,
+                status="dismissed",
+                decision=decision.decision,
+                risk=decision.risk,
+                reason=decision.reason,
+            )
+
+        # defer (ledger_decision.decision == "defer"): cooldown path.
+        # Preserves the reason_code from the policy for observability.
+        prev_status = candidate.status
+        candidate.status = "cooldown"
+        candidate.cooldown_until = now + self.cooldown
+        candidate.updated_at = now
+        _record_feedback(
+            candidate,
+            action="autopilot_deferred",
+            by_user_id=self.actor_id,
+            now=now,
+            details={
+                "decision": decision.decision,
+                "risk": decision.risk,
+                "action_kind": decision.action_kind,
+                "delivery_target": decision.delivery_target,
+                "reason": decision.reason,
+                "cooldown_until": candidate.cooldown_until.isoformat(),
+                "ledger_reason_code": ledger_decision.reason_code,
+            },
+        )
+        _get_ledger().record_transition(
+            self.session,
+            candidate,
+            to_state="cooldown",
+            event_type="autopilot_deferred",
+            from_state=prev_status,
+            reason_code=ledger_decision.reason_code,
+            actor_id=self.actor_id,
+            now=now,
+        )
+        _append_candidate_event(
+            self.session,
+            candidate,
+            message=WITNESS_AUTOPILOT_CANDIDATE_DEFERRED_MESSAGE,
+            payload={
+                "decision": decision.decision,
+                "risk": decision.risk,
+                "action_kind": decision.action_kind,
+                "delivery_target": decision.delivery_target,
+                "reason": decision.reason,
+                "cooldown_until": candidate.cooldown_until.isoformat(),
+                "ledger_reason_code": ledger_decision.reason_code,
+            },
+        )
+        self.session.flush()
+        return WitnessAutopilotOutcome(
+            candidate_id=candidate.id,
+            status="deferred",
+            decision=decision.decision,
+            risk=decision.risk,
+            reason=decision.reason,
         )
 
     def _review_draft_candidate(
@@ -874,6 +1374,7 @@ class WitnessAutopilot:
         now: datetime,
         reason: str,
     ) -> WitnessAutopilotOutcome:
+        prev_status = candidate.status
         candidate.status = "cooldown"
         candidate.cooldown_until = now + self.cooldown
         candidate.updated_at = now
@@ -888,6 +1389,16 @@ class WitnessAutopilot:
                 "reason": reason,
                 "cooldown_until": candidate.cooldown_until.isoformat(),
             },
+        )
+        _get_ledger().record_transition(
+            self.session,
+            candidate,
+            to_state="cooldown",
+            event_type="autopilot_deferred",
+            from_state=prev_status,
+            reason_code="no_review_deferred",
+            actor_id=self.actor_id,
+            now=now,
         )
         self.session.flush()
         return WitnessAutopilotOutcome(
@@ -1077,12 +1588,41 @@ def _candidate_channel_id(
     return source_task.slack_channel_id
 
 
+def _load_channel_activation_ctx(
+    session: Session,
+    candidate: WitnessOpportunityCandidate,
+    *,
+    source_task: Task,
+) -> tuple[bool | None, bool, datetime | None]:
+    """Return (channel_full_enabled, channel_paused, channel_epoch) for DeliveryContext.
+
+    Returns (None, False, None) when the target is a DM or has no channel policy.
+    """
+    channel_id = _candidate_channel_id(candidate, source_task=source_task)
+    if channel_id is None or channel_id.startswith("D"):
+        return (None, False, None)
+    policy = session.scalar(
+        select(ObservePolicy).where(
+            ObservePolicy.installation_id == candidate.installation_id,
+            ObservePolicy.scope_type == "channel",
+            ObservePolicy.scope_id == channel_id,
+        )
+    )
+    if policy is None:
+        return (False, False, None)
+    full_enabled = policy.proactivity_status == "full"
+    paused = policy.paused_at is not None
+    epoch = policy.full_enabled_at
+    return (full_enabled, paused, epoch)
+
+
 def _autopilot_preflight_defer_reason(
     session: Session,
     candidate: WitnessOpportunityCandidate,
     *,
     source_task: Task,
     witness_deliver_private: bool,
+    respect_activation: bool = True,
 ) -> str | None:
     channel_id = _candidate_channel_id(candidate, source_task=source_task)
     if channel_id is None:
@@ -1114,6 +1654,29 @@ def _autopilot_preflight_defer_reason(
         )
         if recently_executed_task is not None:
             return "Equivalent opportunity already executed by autopilot in the last 7 days."
+    # Channel activation gate: only auto-post to channels with full proactivity
+    # enabled AFTER their activation epoch. DMs are exempt.
+    if respect_activation and not channel_id.startswith("D"):
+        policy = session.scalar(
+            select(ObservePolicy).where(
+                ObservePolicy.installation_id == candidate.installation_id,
+                ObservePolicy.scope_type == "channel",
+                ObservePolicy.scope_id == channel_id,
+            )
+        )
+        if policy is None or policy.proactivity_status != "full":
+            return "channel not enabled for proactive delivery"
+        if policy.paused_at is not None:
+            return "channel proactivity paused"
+        if policy.full_enabled_at is None:
+            return "channel has no activation epoch"
+        candidate_created = (
+            candidate.created_at
+            if candidate.created_at is not None
+            else datetime.now(UTC)
+        )
+        if candidate_created < policy.full_enabled_at:
+            return "candidate predates channel activation"
     return None
 
 

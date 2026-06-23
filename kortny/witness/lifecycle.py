@@ -6,7 +6,7 @@ import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -14,6 +14,17 @@ from sqlalchemy.orm import Session
 from kortny.db.models import WitnessOpportunityCandidate
 from kortny.slack.formatting import normalize_user_facing_text
 from kortny.slack.outbox import SlackSideEffectOutbox
+
+if TYPE_CHECKING:
+    from kortny.witness.ledger.service import ProactiveActionService
+
+
+def _get_ledger() -> ProactiveActionService:
+    # Deferred import to break the ledger/policy → runner → lifecycle → ledger/service cycle.
+    from kortny.witness.ledger.service import ProactiveActionService  # noqa: PLC0415
+
+    return ProactiveActionService()
+
 
 WITNESS_SUGGESTION_PURPOSE = "witness_suggestion"
 # HIG-198: proactive suggestion posted into a channel (policy-gated). The
@@ -61,6 +72,7 @@ def dismiss_candidate(
     _ensure_not_archived(candidate)
     _ensure_not_automated(candidate)
     now = datetime.now(UTC)
+    prev_status = candidate.status
     candidate.status = "dismissed"
     candidate.cooldown_until = None
     candidate.updated_at = now
@@ -70,6 +82,15 @@ def dismiss_candidate(
         by_user_id=by_user_id,
         now=now,
         details={"reason": _bounded(reason, 240) if reason else None},
+    )
+    _get_ledger().record_transition(
+        session,
+        candidate,
+        to_state="dismissed",
+        event_type="dismissed",
+        from_state=prev_status,
+        actor_id=by_user_id,
+        now=now,
     )
     session.flush()
     return candidate
@@ -90,6 +111,7 @@ def snooze_candidate(
     _ensure_not_automated(candidate)
     now = datetime.now(UTC)
     cooldown_until = now + duration
+    prev_status = candidate.status
     candidate.status = "cooldown"
     candidate.cooldown_until = cooldown_until
     candidate.updated_at = now
@@ -102,6 +124,16 @@ def snooze_candidate(
             "cooldown_until": cooldown_until.isoformat(),
             "duration_seconds": int(duration.total_seconds()),
         },
+    )
+    _get_ledger().record_transition(
+        session,
+        candidate,
+        to_state="cooldown",
+        event_type="snoozed",
+        from_state=prev_status,
+        reason_code="snoozed",
+        actor_id=by_user_id,
+        now=now,
     )
     session.flush()
     return candidate
@@ -118,6 +150,7 @@ def accept_candidate(
     _ensure_not_archived(candidate)
     _ensure_not_automated(candidate)
     now = datetime.now(UTC)
+    prev_status = candidate.status
     candidate.status = "accepted"
     candidate.cooldown_until = None
     candidate.updated_at = now
@@ -127,6 +160,15 @@ def accept_candidate(
         by_user_id=by_user_id,
         now=now,
         details={},
+    )
+    _get_ledger().record_transition(
+        session,
+        candidate,
+        to_state="accepted",
+        event_type="accepted",
+        from_state=prev_status,
+        actor_id=by_user_id,
+        now=now,
     )
     session.flush()
     return candidate
@@ -144,6 +186,7 @@ def reactivate_candidate(
         raise ValueError("Archived Witness candidates cannot be reactivated.")
     _ensure_not_automated(candidate)
     now = datetime.now(UTC)
+    prev_status = candidate.status
     candidate.status = "candidate"
     candidate.cooldown_until = None
     candidate.updated_at = now
@@ -153,6 +196,15 @@ def reactivate_candidate(
         by_user_id=by_user_id,
         now=now,
         details={},
+    )
+    _get_ledger().record_transition(
+        session,
+        candidate,
+        to_state="candidate",
+        event_type="reactivated",
+        from_state=prev_status,
+        actor_id=by_user_id,
+        now=now,
     )
     session.flush()
     return candidate
@@ -167,6 +219,7 @@ def archive_candidate(
 ) -> WitnessOpportunityCandidate:
     candidate = _candidate_for_update(session, candidate_id, installation_id)
     now = datetime.now(UTC)
+    prev_status = candidate.status
     candidate.status = "archived"
     candidate.cooldown_until = None
     candidate.updated_at = now
@@ -176,6 +229,15 @@ def archive_candidate(
         by_user_id=by_user_id,
         now=now,
         details={},
+    )
+    _get_ledger().record_transition(
+        session,
+        candidate,
+        to_state="archived",
+        event_type="archived",
+        from_state=prev_status,
+        actor_id=by_user_id,
+        now=now,
     )
     session.flush()
     return candidate
@@ -234,6 +296,7 @@ def send_private_suggestion(
         session.flush()
         raise ValueError("Slack response did not include a message timestamp.")
 
+    prev_status = candidate.status
     candidate.status = "sent"
     candidate.cooldown_until = None
     candidate.last_suggested_at = delivered_at
@@ -250,6 +313,15 @@ def send_private_suggestion(
             "deduped": side_effect.deduped,
             "delivery_policy": "explicit_dm_only",
         },
+    )
+    _get_ledger().record_transition(
+        session,
+        candidate,
+        to_state="sent",
+        event_type="sent",
+        from_state=prev_status,
+        actor_id=by_user_id,
+        now=delivered_at,
     )
     session.flush()
     return WitnessDeliveryResult(

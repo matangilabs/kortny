@@ -15,6 +15,7 @@ from kortny.db.models import (
     Installation,
     LLMUsage,
     ObserveChannelProfile,
+    ObservePolicy,
     SlackChannelMembership,
     SlackSideEffect,
     Task,
@@ -351,6 +352,9 @@ def test_witness_autopilot_executes_low_risk_candidate_as_pending_task(
     db_session: Session,
 ) -> None:
     task, membership, profile = create_profile_fixture(db_session)
+    make_channel_activation_policy(
+        db_session, task.installation_id, membership.channel_id
+    )
     result = WitnessOpportunityService(db_session).project_from_channel_profile(
         task=task,
         membership=membership,
@@ -434,6 +438,9 @@ def test_witness_autopilot_defers_non_execution_decision(
     db_session: Session,
 ) -> None:
     task, membership, profile = create_profile_fixture(db_session)
+    make_channel_activation_policy(
+        db_session, task.installation_id, membership.channel_id
+    )
     result = WitnessOpportunityService(db_session).project_from_channel_profile(
         task=task,
         membership=membership,
@@ -490,6 +497,9 @@ def test_witness_autopilot_defers_confirmation_or_schedule_actions(
     db_session: Session,
 ) -> None:
     task, membership, profile = create_profile_fixture(db_session)
+    make_channel_activation_policy(
+        db_session, task.installation_id, membership.channel_id
+    )
     result = WitnessOpportunityService(db_session).project_from_channel_profile(
         task=task,
         membership=membership,
@@ -994,6 +1004,9 @@ def test_witness_runner_invokes_autopilot_when_enabled(
     db_session: Session,
 ) -> None:
     source_task, membership, _profile = create_profile_fixture(db_session)
+    make_channel_activation_policy(
+        db_session, source_task.installation_id, membership.channel_id
+    )
     run_at = datetime(2026, 6, 5, 16, 0, tzinfo=UTC)
     provider = FakeWitnessLLMProvider(
         [
@@ -1137,12 +1150,34 @@ def cleanup_database(session: Session) -> None:
         LLMUsage,
         SlackSideEffect,
         ObserveChannelProfile,
+        ObservePolicy,
         SlackChannelMembership,
         TaskEvent,
         Task,
         Installation,
     ):
         session.execute(delete(model))
+
+
+def make_channel_activation_policy(
+    session: Session,
+    installation_id: uuid.UUID,
+    channel_id: str,
+) -> ObservePolicy:
+    """Create a full-proactivity ObservePolicy so the activation gate passes."""
+    policy = ObservePolicy(
+        installation_id=installation_id,
+        scope_type="channel",
+        scope_id=channel_id,
+        observation_status="active",
+        proactivity_status="full",
+        full_enabled_at=datetime.now(UTC) - timedelta(days=60),
+        quiet_hours_json={},
+        metadata_json={},
+    )
+    session.add(policy)
+    session.flush()
+    return policy
 
 
 def create_profile_fixture(

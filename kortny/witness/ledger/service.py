@@ -1,17 +1,25 @@
-"""Proactive Action Ledger service -- Step 1 (shadow-only).
+"""Proactive Action Ledger service -- Step 1 (shadow-only) + Step 2 (event log).
 
 shadow_evaluate() is called by the runner and autopilot AFTER their real
 decision to verify parity. Exceptions are always swallowed so a bug here
 can never affect real delivery or autopilot execution.
 
-Step 2+ will add the full lifecycle API and the cutover switch.
+record_transition() writes an append-only ProactiveActionEvent row in the
+same transaction as the caller. It is a no-op when
+KORTNY_PROACTIVE_LEDGER_EVENTS_ENABLED is False.
 """
 
 from __future__ import annotations
 
 import logging
+import os
+import uuid
 from dataclasses import dataclass
+from datetime import datetime
 
+from sqlalchemy.orm import Session
+
+from kortny.db.models import ProactiveActionEvent, WitnessOpportunityCandidate
 from kortny.witness.ledger.policy import (
     CandidateInputs,
     DeliveryContext,
@@ -90,6 +98,50 @@ class ProactiveActionService:
                 candidate_id,
             )
             return None
+
+    def record_transition(
+        self,
+        session: Session,
+        candidate: WitnessOpportunityCandidate,
+        *,
+        to_state: str,
+        event_type: str,
+        from_state: str | None = None,
+        reason_code: str | None = None,
+        actor_id: str | None = None,
+        policy_decision: str | None = None,
+        task_id: uuid.UUID | None = None,
+        detail: dict[str, object] | None = None,
+        now: datetime,
+    ) -> ProactiveActionEvent | None:
+        """Insert one ProactiveActionEvent in the same transaction as the caller.
+
+        Returns None (and writes nothing) when KORTNY_PROACTIVE_LEDGER_EVENTS_ENABLED
+        is False. Otherwise inserts the row, flushes, and returns it.
+        """
+        if os.environ.get("KORTNY_PROACTIVE_LEDGER_EVENTS_ENABLED", "true").lower() in (
+            "false",
+            "0",
+            "no",
+        ):
+            return None
+        effective_from = from_state if from_state is not None else candidate.status
+        event = ProactiveActionEvent(
+            candidate_id=candidate.id,
+            installation_id=candidate.installation_id,
+            from_state=effective_from,
+            to_state=to_state,
+            event_type=event_type,
+            reason_code=reason_code,
+            actor_id=actor_id,
+            policy_decision=policy_decision,
+            task_id=task_id,
+            detail_json=detail,
+            created_at=now,
+        )
+        session.add(event)
+        session.flush()
+        return event
 
 
 def _normalise_real(real_decision: str, surface: LedgerSurface) -> LedgerOutcome:
