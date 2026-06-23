@@ -19,6 +19,7 @@
 #   (article-extractor/youtube-transcript -> trafilatura / yt-dlp)
 #   (slack-gif-creator  -> Pillow + ffmpeg)
 #   shared HTML/templating -> jinja2; optional interactive charts -> plotly
+#   doc-editor          -> python-docx
 FROM ghcr.io/astral-sh/uv:python3.11-bookworm-slim
 
 # System packages:
@@ -53,4 +54,5 @@ RUN uv pip install --system --no-cache \
         Pillow>=10.3 \
         trafilatura>=1.10 \
         yt-dlp>=2024.8.6 \
-        jinja2>=3.1
+        jinja2>=3.1 \
+        python-docx>=1.2

@@ -68,6 +68,7 @@ DEFAULT_PACK_SLUGS: tuple[str, ...] = (
     "brand-template",
     "chart-maker",
     "spreadsheet-builder",
+    "doc-editor",
     "styled-report-pdf",
 )
 DEFAULT_PACK_ENABLEMENT_ADDED_BY = "system:default-pack-seed"
