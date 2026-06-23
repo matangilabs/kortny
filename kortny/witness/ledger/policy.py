@@ -78,6 +78,14 @@ class DeliveryContext:
     autopilot_preflight_defer_reason: str | None = None
     autopilot_decision: WitnessAutopilotDecision | None = None
     autopilot_min_confidence: Decimal = Decimal("0.600")
+    # ── Autopilot channel activation gate ──────────────────────────────────
+    # autopilot_channel_full_enabled: None means DM/exempt (skip gate);
+    # False means channel not full or no policy row found.
+    autopilot_channel_full_enabled: bool | None = None
+    # True when paused_at IS NOT NULL on the ObservePolicy row.
+    autopilot_channel_paused: bool = False
+    # full_enabled_at from ObservePolicy; None when not set.
+    autopilot_channel_epoch: datetime | None = None
     # ── Receptivity ────────────────────────────────────────────────────────
     user_feedback_events: tuple[UserFeedbackEvent, ...] = field(default_factory=tuple)
 
@@ -201,6 +209,16 @@ class ProactiveActionPolicy:
     ) -> LedgerDecision:
         if ctx.autopilot_preflight_defer_reason is not None:
             return LedgerDecision(decision="defer", reason_code="preflight_defer")
+        # Channel activation gate (only when ctx signals a channel target)
+        if ctx.autopilot_channel_full_enabled is not None:
+            if ctx.autopilot_channel_paused:
+                return LedgerDecision(decision="defer", reason_code="paused")
+            if not ctx.autopilot_channel_full_enabled:
+                return LedgerDecision(decision="defer", reason_code="not_activated")
+            if ctx.autopilot_channel_epoch is None:
+                return LedgerDecision(decision="defer", reason_code="not_activated")
+            if candidate.created_at < ctx.autopilot_channel_epoch:
+                return LedgerDecision(decision="defer", reason_code="pre_epoch")
         decision = ctx.autopilot_decision
         if decision is None:
             return LedgerDecision(decision="defer", reason_code="no_review")

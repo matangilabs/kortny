@@ -29,6 +29,7 @@ from sqlalchemy.orm import Session
 
 from kortny.db.models import (
     Installation,
+    ObservePolicy,
     ProactiveActionEvent,
     Task,
     TaskEvent,
@@ -39,6 +40,7 @@ from kortny.witness.autopilot import (
     DEFAULT_WITNESS_AUTOPILOT_MIN_CONFIDENCE,
     WitnessAutopilotDecision,
     _autopilot_cutover_enabled,
+    _autopilot_preflight_defer_reason,
     _autopilot_shadow_evaluate,
     _inline_record_autopilot_decision_event,
 )
@@ -964,3 +966,459 @@ class TestCutoverOnOffParity:
         assert inline == policy, (
             f"{desc}: inline={inline} policy={policy} — ON and OFF produce different outcomes!"
         )
+
+
+# ---------------------------------------------------------------------------
+# Activation gate: policy correctly gates on channel activation fields
+# ---------------------------------------------------------------------------
+
+
+class TestActivationGatePolicyParity:
+    """Activation gate cases: policy correctly gates on channel activation fields."""
+
+    def _ctx_with_activation(
+        self,
+        *,
+        channel_full_enabled: bool | None = True,
+        channel_paused: bool = False,
+        channel_epoch: datetime | None = None,
+        preflight_defer_reason: str | None = None,
+        autopilot_decision: WitnessAutopilotDecision | None = None,
+    ) -> DeliveryContext:
+        if autopilot_decision is None:
+            autopilot_decision = _decision()
+        return DeliveryContext(
+            now=NOW,
+            delivery_threshold=Decimal("0.550"),
+            autopilot_preflight_defer_reason=preflight_defer_reason,
+            autopilot_decision=autopilot_decision,
+            autopilot_min_confidence=DEFAULT_WITNESS_AUTOPILOT_MIN_CONFIDENCE,
+            autopilot_channel_full_enabled=channel_full_enabled,
+            autopilot_channel_paused=channel_paused,
+            autopilot_channel_epoch=channel_epoch,
+        )
+
+    def _decide(self, ctx: DeliveryContext) -> LedgerDecision:
+        return ProactiveActionPolicy().decide("autopilot", _candidate_inputs(), ctx)
+
+    def test_digest_only_channel_policy_defers(self) -> None:
+        ctx = self._ctx_with_activation(channel_full_enabled=False)
+        result = self._decide(ctx)
+        assert result.decision == "defer"
+        assert result.reason_code == "not_activated"
+
+    def test_paused_channel_defers(self) -> None:
+        ctx = self._ctx_with_activation(
+            channel_full_enabled=True,
+            channel_paused=True,
+            channel_epoch=NOW - timedelta(hours=2),
+        )
+        result = self._decide(ctx)
+        assert result.decision == "defer"
+        assert result.reason_code == "paused"
+
+    def test_full_pre_epoch_defers(self) -> None:
+        # candidate.created_at is NOW - timedelta(hours=1) (from _candidate_inputs)
+        # epoch is NOW (so candidate is before epoch)
+        ctx = self._ctx_with_activation(
+            channel_full_enabled=True,
+            channel_paused=False,
+            channel_epoch=NOW,  # epoch is NOW, candidate created=NOW-1h → pre-epoch
+        )
+        result = self._decide(ctx)
+        assert result.decision == "defer"
+        assert result.reason_code == "pre_epoch"
+
+    def test_full_post_epoch_executes(self) -> None:
+        # candidate.created_at is NOW - timedelta(hours=1), epoch is NOW - 2h → post-epoch
+        ctx = self._ctx_with_activation(
+            channel_full_enabled=True,
+            channel_paused=False,
+            channel_epoch=NOW - timedelta(hours=2),
+        )
+        result = self._decide(ctx)
+        assert result.decision == "act"
+        assert result.reason_code == "execute_task"
+
+    def test_dm_target_exempt_from_gate(self) -> None:
+        # channel_full_enabled=None means DM/exempt, gate is skipped
+        ctx = self._ctx_with_activation(channel_full_enabled=None)
+        result = self._decide(ctx)
+        assert result.decision == "act"
+
+    def test_activation_gate_parity_not_activated(self) -> None:
+        ctx = self._ctx_with_activation(channel_full_enabled=False)
+        result = self._decide(ctx)
+        assert result.decision == "defer"
+        assert result.reason_code == "not_activated"
+
+    def test_activation_gate_parity_pre_epoch(self) -> None:
+        ctx = self._ctx_with_activation(
+            channel_full_enabled=True,
+            channel_paused=False,
+            channel_epoch=NOW,
+        )
+        result = self._decide(ctx)
+        assert result.decision == "defer"
+        assert result.reason_code == "pre_epoch"
+
+    def test_activation_gate_parity_full_post_epoch(self) -> None:
+        ctx = self._ctx_with_activation(
+            channel_full_enabled=True,
+            channel_paused=False,
+            channel_epoch=NOW - timedelta(hours=2),
+        )
+        result = self._decide(ctx)
+        assert result.decision == "act"
+
+
+# ---------------------------------------------------------------------------
+# Preflight activation gate: DB-backed tests for _autopilot_preflight_defer_reason
+# ---------------------------------------------------------------------------
+
+
+@_pg_skipif
+class TestAutopilotPreflightActivationGate:
+    """DB-backed tests for the activation gate in _autopilot_preflight_defer_reason."""
+
+    def _make_observe_policy(
+        self,
+        session: Session,
+        installation: Installation,
+        *,
+        channel_id: str = "CGate01",
+        proactivity_status: str = "full",
+        observation_status: str = "active",
+        paused_at: datetime | None = None,
+        full_enabled_at: datetime | None = None,
+    ) -> ObservePolicy:
+        p = ObservePolicy(
+            installation_id=installation.id,
+            scope_type="channel",
+            scope_id=channel_id,
+            observation_status=observation_status,
+            proactivity_status=proactivity_status,
+            paused_at=paused_at,
+            full_enabled_at=full_enabled_at,
+            quiet_hours_json={},
+            metadata_json={},
+        )
+        session.add(p)
+        session.flush()
+        return p
+
+    def _make_source_task(
+        self,
+        session: Session,
+        installation: Installation,
+        channel_id: str,
+    ) -> Task:
+        from kortny.tasks import TaskService  # noqa: PLC0415
+
+        return TaskService(session).create_task(
+            installation_id=installation.id,
+            slack_event_id=f"Ev{uuid.uuid4().hex}",
+            slack_channel_id=channel_id,
+            slack_thread_ts=None,
+            slack_message_ts=f"178{uuid.uuid4().int % 10000000:07d}.000000",
+            slack_user_id="UTestUser",
+            input="Test.",
+        )
+
+    def _make_candidate(
+        self,
+        session: Session,
+        installation: Installation,
+        channel_id: str,
+        *,
+        created_at: datetime | None = None,
+    ) -> WitnessOpportunityCandidate:
+        from kortny.db.models import SlackChannelMembership  # noqa: PLC0415
+
+        now = datetime.now(UTC)
+        # Add membership so the existing channel membership gate passes
+        membership = SlackChannelMembership(
+            installation_id=installation.id,
+            channel_id=channel_id,
+            channel_name="test-gate-channel",
+            channel_type="public_channel",
+            membership_status="active",
+            discovered_via="member_joined_channel",
+            added_by_user_id="UTestUser",
+            onboarding_status="posted",
+            onboarding_message_ts="1780000000.000000",
+            metadata_json={},
+        )
+        session.add(membership)
+        cand = WitnessOpportunityCandidate(
+            installation_id=installation.id,
+            channel_id=channel_id,
+            visibility_scope_type="channel",
+            visibility_scope_id=channel_id,
+            candidate_type="recurring_check",
+            title="Gate test candidate",
+            summary="Testing the channel activation gate.",
+            evidence_json=[],
+            source_type="channel_profile",
+            source_id="profile-gate",
+            dedupe_key=f"gate:{uuid.uuid4()}",
+            confidence_score=Decimal("0.750"),
+            status="candidate",
+            metadata_json={},
+            feedback_json={},
+            created_at=created_at or now,
+            updated_at=now,
+        )
+        session.add(cand)
+        session.flush()
+        return cand
+
+    def test_preflight_no_policy_defers(self, _pg_session: Session) -> None:
+        installation = _make_installation_pg(_pg_session)
+        channel_id = "CGate01"
+        source_task = self._make_source_task(_pg_session, installation, channel_id)
+        candidate = self._make_candidate(_pg_session, installation, channel_id)
+        _pg_session.flush()
+
+        reason = _autopilot_preflight_defer_reason(
+            _pg_session,
+            candidate,
+            source_task=source_task,
+            witness_deliver_private=False,
+            respect_activation=True,
+        )
+        assert reason is not None
+        assert "not enabled" in reason
+
+    def test_preflight_digest_only_defers(self, _pg_session: Session) -> None:
+        installation = _make_installation_pg(_pg_session)
+        channel_id = "CGate02"
+        source_task = self._make_source_task(_pg_session, installation, channel_id)
+        candidate = self._make_candidate(_pg_session, installation, channel_id)
+        self._make_observe_policy(
+            _pg_session,
+            installation,
+            channel_id=channel_id,
+            proactivity_status="digest_only",
+            full_enabled_at=datetime.now(UTC) - timedelta(days=1),
+        )
+        _pg_session.flush()
+
+        reason = _autopilot_preflight_defer_reason(
+            _pg_session,
+            candidate,
+            source_task=source_task,
+            witness_deliver_private=False,
+            respect_activation=True,
+        )
+        assert reason is not None
+        assert "not enabled" in reason
+
+    def test_preflight_off_defers(self, _pg_session: Session) -> None:
+        installation = _make_installation_pg(_pg_session)
+        channel_id = "CGate03"
+        source_task = self._make_source_task(_pg_session, installation, channel_id)
+        candidate = self._make_candidate(_pg_session, installation, channel_id)
+        self._make_observe_policy(
+            _pg_session,
+            installation,
+            channel_id=channel_id,
+            proactivity_status="off",
+        )
+        _pg_session.flush()
+
+        reason = _autopilot_preflight_defer_reason(
+            _pg_session,
+            candidate,
+            source_task=source_task,
+            witness_deliver_private=False,
+            respect_activation=True,
+        )
+        assert reason is not None
+        assert "not enabled" in reason
+
+    def test_preflight_paused_defers(self, _pg_session: Session) -> None:
+        installation = _make_installation_pg(_pg_session)
+        channel_id = "CGate04"
+        source_task = self._make_source_task(_pg_session, installation, channel_id)
+        candidate = self._make_candidate(_pg_session, installation, channel_id)
+        self._make_observe_policy(
+            _pg_session,
+            installation,
+            channel_id=channel_id,
+            proactivity_status="full",
+            paused_at=datetime.now(UTC),
+            full_enabled_at=datetime.now(UTC) - timedelta(days=1),
+        )
+        _pg_session.flush()
+
+        reason = _autopilot_preflight_defer_reason(
+            _pg_session,
+            candidate,
+            source_task=source_task,
+            witness_deliver_private=False,
+            respect_activation=True,
+        )
+        assert reason is not None
+        assert "paused" in reason
+
+    def test_preflight_no_epoch_defers(self, _pg_session: Session) -> None:
+        installation = _make_installation_pg(_pg_session)
+        channel_id = "CGate05"
+        source_task = self._make_source_task(_pg_session, installation, channel_id)
+        candidate = self._make_candidate(_pg_session, installation, channel_id)
+        self._make_observe_policy(
+            _pg_session,
+            installation,
+            channel_id=channel_id,
+            proactivity_status="full",
+            paused_at=None,
+            full_enabled_at=None,
+        )
+        _pg_session.flush()
+
+        reason = _autopilot_preflight_defer_reason(
+            _pg_session,
+            candidate,
+            source_task=source_task,
+            witness_deliver_private=False,
+            respect_activation=True,
+        )
+        assert reason is not None
+        assert "epoch" in reason
+
+    def test_preflight_pre_epoch_defers(self, _pg_session: Session) -> None:
+        installation = _make_installation_pg(_pg_session)
+        channel_id = "CGate06"
+        now = datetime.now(UTC)
+        # candidate was created 2 hours ago, epoch is NOW (so candidate is pre-epoch)
+        source_task = self._make_source_task(_pg_session, installation, channel_id)
+        candidate = self._make_candidate(
+            _pg_session,
+            installation,
+            channel_id,
+            created_at=now - timedelta(hours=2),
+        )
+        self._make_observe_policy(
+            _pg_session,
+            installation,
+            channel_id=channel_id,
+            proactivity_status="full",
+            paused_at=None,
+            full_enabled_at=now,
+        )
+        _pg_session.flush()
+
+        reason = _autopilot_preflight_defer_reason(
+            _pg_session,
+            candidate,
+            source_task=source_task,
+            witness_deliver_private=False,
+            respect_activation=True,
+        )
+        assert reason is not None
+        assert "predates" in reason
+
+    def test_preflight_full_post_epoch_passes(self, _pg_session: Session) -> None:
+        installation = _make_installation_pg(_pg_session)
+        channel_id = "CGate07"
+        now = datetime.now(UTC)
+        # candidate was created 1 hour ago, epoch was 2 hours ago → post-epoch
+        source_task = self._make_source_task(_pg_session, installation, channel_id)
+        candidate = self._make_candidate(
+            _pg_session,
+            installation,
+            channel_id,
+            created_at=now - timedelta(hours=1),
+        )
+        self._make_observe_policy(
+            _pg_session,
+            installation,
+            channel_id=channel_id,
+            proactivity_status="full",
+            paused_at=None,
+            full_enabled_at=now - timedelta(hours=2),
+        )
+        _pg_session.flush()
+
+        reason = _autopilot_preflight_defer_reason(
+            _pg_session,
+            candidate,
+            source_task=source_task,
+            witness_deliver_private=False,
+            respect_activation=True,
+        )
+        assert reason is None, f"Expected no defer reason, got: {reason}"
+
+    def test_preflight_dm_exempt(self, _pg_session: Session) -> None:
+        installation = _make_installation_pg(_pg_session)
+        channel_id = "DDirectMessage"  # starts with D → DM, exempt
+        source_task = self._make_source_task(_pg_session, installation, channel_id)
+        now = datetime.now(UTC)
+        cand = WitnessOpportunityCandidate(
+            installation_id=installation.id,
+            channel_id=channel_id,
+            visibility_scope_type="dm",
+            visibility_scope_id=channel_id,
+            candidate_type="recurring_check",
+            title="DM gate test candidate",
+            summary="Testing DM exemption.",
+            evidence_json=[],
+            source_type="channel_profile",
+            source_id="profile-dm-gate",
+            dedupe_key=f"gate-dm:{uuid.uuid4()}",
+            confidence_score=Decimal("0.750"),
+            status="candidate",
+            metadata_json={},
+            feedback_json={},
+            created_at=now,
+            updated_at=now,
+        )
+        _pg_session.add(cand)
+        _pg_session.flush()
+
+        reason = _autopilot_preflight_defer_reason(
+            _pg_session,
+            cand,
+            source_task=source_task,
+            witness_deliver_private=True,  # DMs enabled
+            respect_activation=True,
+        )
+        # DMs skip the activation gate entirely
+        assert reason is None, (
+            f"DM should be exempt from activation gate, got: {reason}"
+        )
+
+    def test_preflight_setting_off_bypasses(self, _pg_session: Session) -> None:
+        installation = _make_installation_pg(_pg_session)
+        channel_id = "CGate08"
+        source_task = self._make_source_task(_pg_session, installation, channel_id)
+        candidate = self._make_candidate(_pg_session, installation, channel_id)
+        # No policy at all (would normally defer), but respect_activation=False bypasses
+        _pg_session.flush()
+
+        reason = _autopilot_preflight_defer_reason(
+            _pg_session,
+            candidate,
+            source_task=source_task,
+            witness_deliver_private=False,
+            respect_activation=False,
+        )
+        assert reason is None, f"Setting OFF should bypass gate, got: {reason}"
+
+    def test_preflight_setting_default_true_blocks(self, _pg_session: Session) -> None:
+        installation = _make_installation_pg(_pg_session)
+        channel_id = "CGate09"
+        source_task = self._make_source_task(_pg_session, installation, channel_id)
+        candidate = self._make_candidate(_pg_session, installation, channel_id)
+        # No policy row → should block when respect_activation=True (default)
+        _pg_session.flush()
+
+        reason = _autopilot_preflight_defer_reason(
+            _pg_session,
+            candidate,
+            source_task=source_task,
+            witness_deliver_private=False,
+            # respect_activation defaults to True
+        )
+        assert reason is not None, "Default True should block channel without policy"

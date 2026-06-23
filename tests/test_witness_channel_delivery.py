@@ -1152,7 +1152,10 @@ def test_draft_tier_requires_channel_policy_full(db_session: Session) -> None:
     assert result.drafted_count == 0
     assert result.deferred_count == 1
     assert result.outcomes[0].reason is not None
-    assert "proactivity_status" in result.outcomes[0].reason
+    # The activation gate in preflight now fires first for non-full channels,
+    # so the reason comes from _autopilot_preflight_defer_reason rather than
+    # the old draft-tier policy check.
+    assert "not enabled" in result.outcomes[0].reason
     assert candidate.status == "cooldown"
     assert delivery_log_rows(db_session) == ()
 

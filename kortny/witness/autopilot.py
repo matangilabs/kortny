@@ -101,6 +101,7 @@ def _autopilot_shadow_evaluate(
     decision: WitnessAutopilotDecision,
     preflight_defer_reason: str | None,
     now: datetime,
+    session: Session | None = None,
 ) -> None:
     """Faithful in-place shadow: call the policy with the REAL decision fields.
 
@@ -126,12 +127,26 @@ def _autopilot_shadow_evaluate(
         )
 
         policy_candidate = _candidate_inputs_from_orm(candidate)
+        channel_full_enabled: bool | None = None
+        channel_paused = False
+        channel_epoch: datetime | None = None
+        if session is not None and candidate.source_task_id is not None:
+            source_task = session.get(Task, candidate.source_task_id)
+            if source_task is not None:
+                channel_full_enabled, channel_paused, channel_epoch = (
+                    _load_channel_activation_ctx(
+                        session, candidate, source_task=source_task
+                    )
+                )
         policy_ctx = DeliveryContext(
             now=now,
             delivery_threshold=Decimal("0.600"),
             autopilot_preflight_defer_reason=preflight_defer_reason,
             autopilot_decision=decision,
             autopilot_min_confidence=DEFAULT_WITNESS_AUTOPILOT_MIN_CONFIDENCE,
+            autopilot_channel_full_enabled=channel_full_enabled,
+            autopilot_channel_paused=channel_paused,
+            autopilot_channel_epoch=channel_epoch,
         )
         ledger_decision = ProactiveActionPolicy().decide(
             "autopilot", policy_candidate, policy_ctx
@@ -469,6 +484,11 @@ class WitnessAutopilot:
                 if self.settings is not None
                 else False
             ),
+            respect_activation=(
+                self.settings.kortny_witness_autopilot_respect_activation
+                if self.settings is not None
+                else True
+            ),
         )
         if preflight_reason is not None:
             return self._defer_without_review(
@@ -489,6 +509,7 @@ class WitnessAutopilot:
             decision=decision,
             preflight_defer_reason=None,
             now=now,
+            session=self.session,
         )
 
         # ── Cutover: derive behavior from the shared policy (flag-gated) ─────
@@ -787,12 +808,20 @@ class WitnessAutopilot:
         )
 
         policy_candidate = _candidate_inputs_from_orm(candidate)
+        channel_full_enabled, channel_paused, channel_epoch = (
+            _load_channel_activation_ctx(
+                self.session, candidate, source_task=source_task
+            )
+        )
         policy_ctx = DeliveryContext(
             now=now,
             delivery_threshold=Decimal("0.600"),
             autopilot_preflight_defer_reason=None,  # preflight already passed
             autopilot_decision=decision,
             autopilot_min_confidence=DEFAULT_WITNESS_AUTOPILOT_MIN_CONFIDENCE,
+            autopilot_channel_full_enabled=channel_full_enabled,
+            autopilot_channel_paused=channel_paused,
+            autopilot_channel_epoch=channel_epoch,
         )
         policy = ProactiveActionPolicy()
         ledger_decision = policy.decide("autopilot", policy_candidate, policy_ctx)
@@ -1559,12 +1588,41 @@ def _candidate_channel_id(
     return source_task.slack_channel_id
 
 
+def _load_channel_activation_ctx(
+    session: Session,
+    candidate: WitnessOpportunityCandidate,
+    *,
+    source_task: Task,
+) -> tuple[bool | None, bool, datetime | None]:
+    """Return (channel_full_enabled, channel_paused, channel_epoch) for DeliveryContext.
+
+    Returns (None, False, None) when the target is a DM or has no channel policy.
+    """
+    channel_id = _candidate_channel_id(candidate, source_task=source_task)
+    if channel_id is None or channel_id.startswith("D"):
+        return (None, False, None)
+    policy = session.scalar(
+        select(ObservePolicy).where(
+            ObservePolicy.installation_id == candidate.installation_id,
+            ObservePolicy.scope_type == "channel",
+            ObservePolicy.scope_id == channel_id,
+        )
+    )
+    if policy is None:
+        return (False, False, None)
+    full_enabled = policy.proactivity_status == "full"
+    paused = policy.paused_at is not None
+    epoch = policy.full_enabled_at
+    return (full_enabled, paused, epoch)
+
+
 def _autopilot_preflight_defer_reason(
     session: Session,
     candidate: WitnessOpportunityCandidate,
     *,
     source_task: Task,
     witness_deliver_private: bool,
+    respect_activation: bool = True,
 ) -> str | None:
     channel_id = _candidate_channel_id(candidate, source_task=source_task)
     if channel_id is None:
@@ -1596,6 +1654,29 @@ def _autopilot_preflight_defer_reason(
         )
         if recently_executed_task is not None:
             return "Equivalent opportunity already executed by autopilot in the last 7 days."
+    # Channel activation gate: only auto-post to channels with full proactivity
+    # enabled AFTER their activation epoch. DMs are exempt.
+    if respect_activation and not channel_id.startswith("D"):
+        policy = session.scalar(
+            select(ObservePolicy).where(
+                ObservePolicy.installation_id == candidate.installation_id,
+                ObservePolicy.scope_type == "channel",
+                ObservePolicy.scope_id == channel_id,
+            )
+        )
+        if policy is None or policy.proactivity_status != "full":
+            return "channel not enabled for proactive delivery"
+        if policy.paused_at is not None:
+            return "channel proactivity paused"
+        if policy.full_enabled_at is None:
+            return "channel has no activation epoch"
+        candidate_created = (
+            candidate.created_at
+            if candidate.created_at is not None
+            else datetime.now(UTC)
+        )
+        if candidate_created < policy.full_enabled_at:
+            return "candidate predates channel activation"
     return None
 
 

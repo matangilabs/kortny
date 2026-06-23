@@ -349,6 +349,16 @@ class Settings(BaseSettings):
             "Default False — zero behavior change on merge."
         ),
     )
+    kortny_witness_autopilot_respect_activation: bool = Field(
+        default=True,
+        validation_alias="KORTNY_WITNESS_AUTOPILOT_RESPECT_ACTIVATION",
+        description=(
+            "When True (default), autopilot will only execute/post on a channel "
+            "that has proactivity_status='full', paused_at IS NULL, "
+            "full_enabled_at IS NOT NULL, and candidate.created_at >= full_enabled_at. "
+            "DM targets are unaffected. Set False to restore the legacy bypass."
+        ),
+    )
     kortny_proactive_ledger_events_enabled: bool = Field(
         default=True,
         validation_alias="KORTNY_PROACTIVE_LEDGER_EVENTS_ENABLED",
