@@ -127,6 +127,7 @@ from kortny.slack.humanizer import (
     LLMResponseSynthesizer,
     ResponseSynthesizer,
     StaticResponseSynthesizer,
+    sanitize_humanized_response,
     strip_internal_response_preamble,
     synthesize_response,
 )
@@ -2133,6 +2134,45 @@ class AgentTaskExecutor:
             blocks = render_blocks(
                 response_text, presentation, source_index=source_index
             )
+            # Post-render guard (HIG-287 robust net): if the humanizer produced
+            # presentation elements but ALL of them rendered to zero blocks, the
+            # answer body has nowhere to appear in Slack.  Replace the posted
+            # text with the raw answer — punctuation-independent (catches
+            # period-terminated intros that the pre-render colon guard misses).
+            # Only fires when: presentation had elements AND blocks is None.
+            # Short answers (response_source < 200 chars) are excluded — they
+            # have no offloaded body to lose.
+            if (
+                presentation is not None
+                and presentation.elements
+                and blocks is None
+                and len(response_source.strip()) >= 200
+            ):
+                fallback_text = sanitize_humanized_response(
+                    None, fallback=response_source
+                )
+                logger.warning(
+                    "post_render_drop_guard task_id=%s presentation_elements=%s "
+                    "raw_chars=%s humanized_chars=%s — "
+                    "all elements rendered to 0 blocks, falling back to raw answer",
+                    task.id,
+                    len(presentation.elements),
+                    len(response_source),
+                    len(response_text),
+                )
+                task_service.append_event(
+                    task,
+                    TaskEventType.log,
+                    {
+                        "message": "substance_drop_guard_triggered",
+                        "reason": "post_render_zero_blocks",
+                        "presentation_elements": len(presentation.elements),
+                        "raw_chars": len(response_source),
+                        "humanized_chars": len(response_text),
+                    },
+                )
+                response_text = fallback_text
+                blocks = None
             if thread.is_assistant and settings.assistant_streaming_enabled:
                 poster.stream_message(thread, response_text, blocks=blocks)
             else:

@@ -334,6 +334,8 @@ def test_eval_all_cases_pass() -> None:
     messages = "\n".join(
         f"  [{r.case_name}] guard_fired={r.guard_fired} "
         f"expected_guard={r.expects_guard_trigger} "
+        f"post_render_guard_fired={r.post_render_guard_fired} "
+        f"expected_post_render={r.expects_post_render_guard_trigger} "
         f"missing_tokens={r.missing_tokens}"
         for r in failures
     )
@@ -341,18 +343,27 @@ def test_eval_all_cases_pass() -> None:
 
 
 def test_eval_discrimination_is_perfect() -> None:
-    """The guard must correctly fire/not-fire on every labeled case."""
+    """Both guards must correctly fire/not-fire on every labeled case."""
     from kortny.evals.response_pipeline.cases import SEED_RESPONSE_PIPELINE_CASES
     from kortny.evals.response_pipeline.scoring import score_response_pipeline
 
     report = score_response_pipeline(SEED_RESPONSE_PIPELINE_CASES)
     assert report.discrimination == 1.0, (
-        f"Imperfect discrimination: {report.discrimination:.3f}\n"
+        f"Imperfect pre-render discrimination: {report.discrimination:.3f}\n"
         + "\n".join(
             f"  {r.case_name}: guard_fired={r.guard_fired} "
             f"expected={r.expects_guard_trigger}"
             for r in report.results
             if r.guard_fired != r.expects_guard_trigger
+        )
+    )
+    assert report.post_render_discrimination == 1.0, (
+        f"Imperfect post-render discrimination: {report.post_render_discrimination:.3f}\n"
+        + "\n".join(
+            f"  {r.case_name}: post_render_guard_fired={r.post_render_guard_fired} "
+            f"expected={r.expects_post_render_guard_trigger}"
+            for r in report.results
+            if r.post_render_guard_fired != r.expects_post_render_guard_trigger
         )
     )
 
@@ -365,7 +376,7 @@ def test_eval_discrimination_is_perfect() -> None:
     ],
 )
 def test_eval_guard_fires_on_drop_cases(case_name: str) -> None:
-    """The guard must fire on each case marked expects_guard_trigger=True."""
+    """The pre-render guard must fire on each case marked expects_guard_trigger=True."""
     from kortny.evals.response_pipeline.cases import SEED_RESPONSE_PIPELINE_CASES
     from kortny.evals.response_pipeline.scoring import score_response_pipeline
 
@@ -391,7 +402,7 @@ def test_eval_guard_fires_on_drop_cases(case_name: str) -> None:
     ],
 )
 def test_eval_guard_silent_on_clean_cases(case_name: str) -> None:
-    """The guard must NOT fire on clean/correct cases."""
+    """The pre-render guard must NOT fire on clean/correct cases."""
     from kortny.evals.response_pipeline.cases import SEED_RESPONSE_PIPELINE_CASES
     from kortny.evals.response_pipeline.scoring import score_response_pipeline
 
@@ -403,4 +414,138 @@ def test_eval_guard_silent_on_clean_cases(case_name: str) -> None:
         f"Guard fired falsely for {case_name!r}: "
         f"humanized_len={len(cases[0].humanized_text)} "
         f"raw_len={len(cases[0].raw_answer)}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# New: post-render zero-blocks guard (the render-based net)
+# ---------------------------------------------------------------------------
+
+
+def test_period_intro_not_caught_by_colon_guard() -> None:
+    """A period-terminated intro does NOT trigger the pre-render colon guard.
+
+    This is the variant the old guard misses: 'Here's what I found.' ends
+    with '.' not ':', so _is_substance_dropped_prerender is silent even
+    though the body is entirely offloaded to a presentation that will render
+    to zero blocks.
+    """
+    # This is the exact intro from the 'period_intro_failing_presentation' eval case.
+    assert not _is_substance_dropped_prerender(
+        humanized_text="Here's what I found.",
+        raw_answer=(
+            "Here is what I found about the three open vendor proposals:\n\n"
+            "**Acme Corp** (submitted 2026-06-01)\n"
+            "- Pricing: $48,000/year for up to 50 seats\n"
+            "- SLA: 99.9% uptime, 4-hour response window\n"
+            "- Integration: REST API + Slack webhook; no native Linear connector\n"
+            "- Risk: no SOC 2 Type II cert yet (audit scheduled Q3 2026)\n\n"
+            "**Bravo Systems** (submitted 2026-06-03)\n"
+            "- Pricing: $61,000/year for up to 75 seats (volume discount negotiable)\n"
+            "- SLA: 99.95% uptime, 2-hour response window, dedicated CSM\n"
+            "- Integration: native Linear, GitHub, and Slack connectors\n"
+            "- Risk: higher cost; references checked — all positive\n\n"
+            "**Charlie Tech** (submitted 2026-06-10)\n"
+            "- Pricing: $39,500/year for up to 40 seats\n"
+            "- SLA: 99.5% uptime, 8-hour response window (business hours only)\n"
+            "- Integration: REST API only; no pre-built connectors\n"
+            "- Risk: lowest uptime SLA; small team (8 engineers)\n\n"
+            "Recommendation: Bravo Systems best fits the integration and SLA "
+            "requirements; Charlie Tech is viable only if budget is the hard constraint."
+        ),
+        presentation_element_count=1,
+    ), (
+        "Pre-render colon guard must NOT fire for a period-terminated intro "
+        "— 'Here's what I found.' does not end with ':'"
+    )
+
+
+def test_period_intro_caught_by_post_render_guard() -> None:
+    """The post-render zero-blocks guard catches the period-terminated intro variant.
+
+    When the humanizer writes 'Here's what I found.' (period, not colon),
+    the pre-render guard is silent. But if the presentation element renders
+    to zero blocks, the post-render guard in agent_executor fires and falls
+    back to the raw answer. The eval scorer simulates this via
+    _is_zero_blocks_from_nonempty_presentation().
+    """
+    from kortny.evals.response_pipeline.cases import SEED_RESPONSE_PIPELINE_CASES
+    from kortny.evals.response_pipeline.scoring import (
+        _is_zero_blocks_from_nonempty_presentation,
+        score_response_pipeline,
+    )
+
+    cases = [
+        c
+        for c in SEED_RESPONSE_PIPELINE_CASES
+        if c.name == "period_intro_failing_presentation"
+    ]
+    assert cases, "Case 'period_intro_failing_presentation' missing from eval suite"
+    case = cases[0]
+
+    # 1. Confirm: pre-render guard does NOT fire (period, not colon).
+    assert not _is_substance_dropped_prerender(
+        humanized_text=case.humanized_text,
+        raw_answer=case.raw_answer,
+        presentation_element_count=case.presentation_element_count,
+    ), "Pre-render guard must NOT fire on period-terminated intro"
+
+    # 2. Confirm: post-render guard DOES fire (presentation elements > 0, blocks = None).
+    assert _is_zero_blocks_from_nonempty_presentation(case), (
+        "Post-render guard must fire when presentation_element_count > 0 "
+        "and rendered_blocks is None"
+    )
+
+    # 3. Confirm: eval scoring routes to fallback text containing the substance.
+    report = score_response_pipeline(cases)
+    result = report.results[0]
+    assert result.post_render_guard_fired
+    assert not result.guard_fired, "Pre-render guard must be silent"
+    assert result.passed, f"Eval case failed: missing_tokens={result.missing_tokens}"
+    for token in ["Acme Corp", "Bravo Systems", "Charlie Tech", "Recommendation"]:
+        assert token in result.final_text, (
+            f"Token {token!r} missing from fallback text — substance was dropped"
+        )
+
+
+def test_post_render_guard_silent_when_blocks_render() -> None:
+    """Post-render guard must NOT fire when presentation renders to valid blocks."""
+    from kortny.evals.response_pipeline.cases import SEED_RESPONSE_PIPELINE_CASES
+    from kortny.evals.response_pipeline.scoring import (
+        _is_zero_blocks_from_nonempty_presentation,
+    )
+
+    # 'long_list_with_valid_blocks' has presentation_element_count=1 and
+    # rendered_blocks=[_FIELDS_BLOCK] (not None) — guard must not fire.
+    cases = [
+        c
+        for c in SEED_RESPONSE_PIPELINE_CASES
+        if c.name == "long_list_with_valid_blocks"
+    ]
+    assert cases
+    case = cases[0]
+    assert case.rendered_blocks is not None, "fixture must have rendered_blocks"
+    assert not _is_zero_blocks_from_nonempty_presentation(case), (
+        "Post-render guard must NOT fire when rendered_blocks is not None"
+    )
+
+
+def test_post_render_guard_silent_for_short_raw() -> None:
+    """Post-render guard must NOT fire for short raw answers (< 200 chars)."""
+    from kortny.evals.response_pipeline.cases import ResponsePipelineCase
+    from kortny.evals.response_pipeline.scoring import (
+        _is_zero_blocks_from_nonempty_presentation,
+    )
+
+    short_case = ResponsePipelineCase(
+        name="short_with_failing_presentation",
+        raw_answer="The meeting is at 3pm.",  # < 200 chars
+        humanized_text="Here's the info.",
+        presentation_element_count=1,
+        rendered_blocks=None,  # would trigger if raw were long enough
+        key_tokens=["3pm"],
+        expects_guard_trigger=False,
+    )
+    assert not _is_zero_blocks_from_nonempty_presentation(short_case), (
+        "Post-render guard must not fire for raw answers < 200 chars"
     )

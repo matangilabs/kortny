@@ -6,10 +6,13 @@ Each case captures:
 - how many presentation elements the LLM returned
 - what render_blocks produced (pre-computed; None means blocks=0)
 - tokens that MUST appear in the final posted text for the answer to be intact
-- whether the substance-drop guard is expected to fire
+- whether the pre-render substance-drop guard is expected to fire
+  (``_is_substance_dropped_prerender`` — the colon-heuristic guard)
+- whether the post-render guard is expected to fire
+  (presentation had elements but rendered to 0 blocks — the render-based net)
 
 Expand from real agent outputs over time; this seed set is the floor that
-_is_substance_dropped_prerender() and the posting pipeline are held to.
+both guards are held to.
 """
 
 from __future__ import annotations
@@ -26,6 +29,7 @@ class ResponsePipelineCase:
     rendered_blocks: list[dict] | None
     key_tokens: list[str]
     expects_guard_trigger: bool
+    expects_post_render_guard_trigger: bool = False
     notes: str = ""
 
 
@@ -101,6 +105,29 @@ _MULTISTEP_RAW = (
     "5. Posted a summary to #finance-ops with a link to the Notion page.\n"
 )
 
+# Research result long enough to carry real substance — the period-terminated
+# intro variant that the colon guard misses but the post-render net catches.
+_RESEARCH_FINDINGS_RAW = (
+    "Here is what I found about the three open vendor proposals:\n\n"
+    "**Acme Corp** (submitted 2026-06-01)\n"
+    "- Pricing: $48,000/year for up to 50 seats\n"
+    "- SLA: 99.9% uptime, 4-hour response window\n"
+    "- Integration: REST API + Slack webhook; no native Linear connector\n"
+    "- Risk: no SOC 2 Type II cert yet (audit scheduled Q3 2026)\n\n"
+    "**Bravo Systems** (submitted 2026-06-03)\n"
+    "- Pricing: $61,000/year for up to 75 seats (volume discount negotiable)\n"
+    "- SLA: 99.95% uptime, 2-hour response window, dedicated CSM\n"
+    "- Integration: native Linear, GitHub, and Slack connectors\n"
+    "- Risk: higher cost; references checked — all positive\n\n"
+    "**Charlie Tech** (submitted 2026-06-10)\n"
+    "- Pricing: $39,500/year for up to 40 seats\n"
+    "- SLA: 99.5% uptime, 8-hour response window (business hours only)\n"
+    "- Integration: REST API only; no pre-built connectors\n"
+    "- Risk: lowest uptime SLA; small team (8 engineers)\n\n"
+    "Recommendation: Bravo Systems best fits the integration and SLA "
+    "requirements; Charlie Tech is viable only if budget is the hard constraint."
+)
+
 # A pre-computed valid fields block (simulates a successfully rendered element).
 _FIELDS_BLOCK: dict = {
     "type": "section",
@@ -123,10 +150,12 @@ SEED_RESPONSE_PIPELINE_CASES: tuple[ResponsePipelineCase, ...] = (
         rendered_blocks=None,
         key_tokens=["web_search", "code_exec", "memory_recall"],
         expects_guard_trigger=True,
+        expects_post_render_guard_trigger=True,
         notes=(
             "Exact reproduction of the HIG-287 bug: gemini-3.1-flash-lite put "
             "the skills list only in presentation, the message was a 107-char "
-            "intro. Guard must fire and replace text with the raw answer."
+            "intro. Both guards fire — pre-render (colon ending) and post-render "
+            "(presentation had elements but blocks=None)."
         ),
     ),
     # 2. Plain short answer — no drop possible.
@@ -195,9 +224,37 @@ SEED_RESPONSE_PIPELINE_CASES: tuple[ResponsePipelineCase, ...] = (
         rendered_blocks=None,
         key_tokens=["Notion", "Linear", "SMB"],
         expects_guard_trigger=True,
+        expects_post_render_guard_trigger=True,
         notes=(
             "Lead-in preamble 'Here's a summary:' with 1 presentation element "
-            "and 0 rendered blocks. Guard must fire and fall back to raw answer."
+            "and 0 rendered blocks. Both guards fire — pre-render (colon ending) "
+            "and post-render (blocks=None from nonempty presentation)."
+        ),
+    ),
+    # 7. Period-terminated intro + failing presentation: old colon-guard MISSES,
+    #    post-render net CATCHES.
+    #
+    #    The humanizer wrote "Here's what I found." (ends with ".", not ":").
+    #    The pre-render colon guard is silent — no colon, so it doesn't detect
+    #    the drop.  But the presentation element renders to zero blocks, so the
+    #    raw answer body has nowhere to appear in Slack.  The post-render guard
+    #    (presentation.elements > 0 AND blocks is None) catches this and falls
+    #    back.
+    ResponsePipelineCase(
+        name="period_intro_failing_presentation",
+        raw_answer=_RESEARCH_FINDINGS_RAW,
+        humanized_text="Here's what I found.",
+        presentation_element_count=1,
+        rendered_blocks=None,
+        key_tokens=["Acme Corp", "Bravo Systems", "Charlie Tech", "Recommendation"],
+        expects_guard_trigger=False,  # pre-render colon guard does NOT fire
+        expects_post_render_guard_trigger=True,  # post-render net DOES fire
+        notes=(
+            "Period-terminated intro ('Here's what I found.') + 1 presentation "
+            "element that renders to 0 blocks. The colon-guard is silent because "
+            "the message ends with '.' not ':'. The post-render guard fires because "
+            "presentation had elements but blocks is None — the body has nowhere "
+            "to go. This is the variant HIG-287 colon-guard would miss."
         ),
     ),
 )
