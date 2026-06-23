@@ -812,6 +812,9 @@ def synthesize_response(
             reason="humanizer_failed",
         )
 
+    presentation_element_count = (
+        len(result.presentation.elements) if result.presentation is not None else 0
+    )
     task_service.append_event(
         task,
         TaskEventType.log,
@@ -822,13 +825,41 @@ def synthesize_response(
             "raw_chars": len(raw_text),
             "output_chars": len(result.text),
             "response_mode": response_record.response_mode.value,
-            "presentation_elements": (
-                len(result.presentation.elements)
-                if result.presentation is not None
-                else 0
-            ),
+            "presentation_elements": presentation_element_count,
         },
     )
+
+    # Guard: the model sometimes puts the answer body only in `presentation`
+    # and reduces `message` to an intro preamble ("Here's what I can do:").
+    # If `presentation` later renders to zero blocks, the body is silently lost.
+    # Detect the drop here, before rendering, and fall back to the raw answer.
+    if _is_substance_dropped_prerender(
+        humanized_text=result.text,
+        raw_answer=raw_text,
+        presentation_element_count=presentation_element_count,
+    ):
+        fallback_text = sanitize_humanized_response(None, fallback=raw_text)
+        logger.warning(
+            "substance_drop_guard task_id=%s raw_chars=%s humanized_chars=%s "
+            "presentation_elements=%s — falling back to raw answer",
+            task.id,
+            len(raw_text),
+            len(result.text),
+            presentation_element_count,
+        )
+        task_service.append_event(
+            task,
+            TaskEventType.log,
+            {
+                "message": "substance_drop_guard_triggered",
+                "reason": "prerender",
+                "raw_chars": len(raw_text),
+                "humanized_chars": len(result.text),
+                "presentation_elements": presentation_element_count,
+            },
+        )
+        result = replace(result, text=fallback_text, presentation=None)
+
     # Attach the server-built source index so the renderer can resolve any
     # `sources` refs to real URLs (built from the same evidence the LLM saw).
     return replace(result, source_index=build_source_index(response_record.evidence))
@@ -1130,6 +1161,89 @@ def _is_substantive_answer(text: str) -> bool:
     if len(stripped) < 8:
         return False
     return stripped.casefold().rstrip(".!… ") not in _BARE_ACK_ANSWERS
+
+
+# ---------------------------------------------------------------------------
+# Substance-drop guard (HIG-287)
+# ---------------------------------------------------------------------------
+
+# Raw answers shorter than this are considered trivial — a one-sentence reply
+# is fine even if the humanized version is similarly short.
+_SUBSTANCE_DROP_MIN_RAW_CHARS = 200
+
+# If the humanized text is below this fraction of the raw answer length AND
+# the text ends with ":", the model has offloaded the body to presentation.
+_SUBSTANCE_DROP_RATIO = 0.40
+
+# Informational only — phrases that commonly appear in intro preambles.
+# Not used directly in the guard; the colon ending is the gating signal.
+_LEAD_IN_PHRASES: tuple[str, ...] = (
+    "here's what i can do",
+    "here's what i found",
+    "here's what i know",
+    "here's a summary",
+    "here are the",
+    "here are some",
+    "the following",
+    "as follows",
+)
+
+
+def _is_substance_dropped_prerender(
+    *,
+    humanized_text: str,
+    raw_answer: str,
+    presentation_element_count: int,
+) -> bool:
+    """Return True when the humanized text appears to have dropped the answer body.
+
+    Called in ``synthesize_response()`` after the LLM returns its result, before
+    ``render_blocks()`` runs.  We cannot know yet whether the presentation will
+    render to zero blocks, so we detect body loss from text signals alone.
+
+    The primary signal for a preamble-only message is a trailing colon (":").
+    A text that ends with ":" is an unfinished sentence — it was meant to
+    introduce a list that the model then put in presentation.  This is the
+    pattern that caused the skills-list bug (HIG-287).
+
+    Primary trigger (presentation-based offloading):
+      - ``presentation_element_count > 0`` (model used presentation), AND
+      - the humanized text ends with ":" (incomplete intro sentence).
+
+    Secondary trigger (belt-and-suspenders, no presentation):
+      - ratio < 0.20 AND text ends with ":".
+      This catches pathological truncation where the model somehow produced
+      a very short intro without using the presentation field.
+
+    False-positive protection:
+      - Short raw answers (< ``_SUBSTANCE_DROP_MIN_RAW_CHARS``) are never
+        flagged — a legitimately short answer is fine.
+      - A colon-ending text with NO presentation elements is only flagged by
+        the tighter secondary path (ratio < 0.20), which avoids false positives
+        on short answers like "Status: Active" or "Result: Done."
+      - A text that starts with "Here are the X items." and ends with "."
+        (a real complete sentence) is never flagged even if it contains a
+        lead-in phrase in the middle.
+    """
+    raw_stripped = raw_answer.strip()
+    raw_len = len(raw_stripped)
+    if raw_len < _SUBSTANCE_DROP_MIN_RAW_CHARS:
+        return False
+
+    humanized_stripped = humanized_text.strip()
+    humanized_len = len(humanized_stripped)
+    lower = humanized_stripped.casefold()
+
+    ends_with_colon = lower.endswith(":")
+    presentation_had_elements = presentation_element_count > 0
+
+    # Primary: model offloaded to presentation AND message is a colon-intro.
+    if presentation_had_elements and ends_with_colon:
+        return True
+
+    # Secondary: extreme ratio drop without presentation (< 20%) AND colon ending.
+    ratio_too_low = humanized_len < raw_len * _SUBSTANCE_DROP_RATIO
+    return ratio_too_low and humanized_len < raw_len * 0.20 and ends_with_colon
 
 
 def build_response_record(

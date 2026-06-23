@@ -88,8 +88,21 @@ def render_blocks(
         )
 
     if not element_blocks:
-        # Hint produced nothing usable: keep legacy behavior (table→block,
-        # else prose) so we never post a lone markdown block for plain prose.
+        # All presentation elements were dropped (validation failure, ValueError,
+        # or an unhandled element type in _render_element).  Log so the substance-
+        # drop guard upstream can be diagnosed from the same trace.
+        # ponytail: the root cause is usually _render_element() returning [] from
+        # its final catch-all (unhandled isinstance branch) or from a caught
+        # ValueError.  The upstream guard in synthesize_response() fires *before*
+        # render_blocks() when it detects an intro-only ":"-ending message with
+        # presentation elements, replacing result.text with the raw answer and
+        # clearing presentation=None — so this path should rarely be reached for
+        # the skills-list failure mode after HIG-287.
+        logger.warning(
+            "render_blocks: all %d presentation element(s) dropped; "
+            "substance_drop_guard should have replaced text upstream",
+            len(hint.elements),
+        )
         if has_table_in_prose:
             return [voice]
         return None
@@ -137,6 +150,14 @@ def _render_element(
             exc,
         )
         return []
+    # ponytail: reaching here means the element passed parse_presentation()
+    # validation (so its type is in KNOWN_ELEMENT_TYPES) but no isinstance
+    # branch above matched — a schema/renderer sync gap.  Log at warning so it
+    # surfaces in traces without being fatal.
+    logger.warning(
+        "render_element: element type=%s not handled by any renderer branch",
+        getattr(element, "type", "?"),
+    )
     return []
 
 
