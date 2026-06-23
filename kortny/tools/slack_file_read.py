@@ -21,6 +21,7 @@ from slack_sdk.errors import SlackApiError
 from sqlalchemy.orm import Session
 
 from kortny.pdf_raster import rasterize_pdf_pages
+from kortny.tools.channel_access import ChannelAccessGate
 from kortny.tools.types import JsonObject, JsonSchema, ToolResult
 
 logger = logging.getLogger(__name__)
@@ -102,6 +103,7 @@ class SlackFileReadTool:
         session: Session | None = None,
         pdf_ocr: PdfPageOcr | None = None,
         pdf_ocr_max_pages: int = 20,
+        access_gate: ChannelAccessGate | None = None,
     ) -> None:
         if not bot_token.strip():
             raise ValueError("SLACK_BOT_TOKEN is required for slack_file_read")
@@ -120,6 +122,7 @@ class SlackFileReadTool:
         self._session: Session | None = session
         self._pdf_ocr: PdfPageOcr | None = pdf_ocr
         self._pdf_ocr_max_pages: int = pdf_ocr_max_pages
+        self._access_gate: ChannelAccessGate | None = access_gate
 
     def invoke(self, args: JsonObject) -> ToolResult:
         """Download the file, extract supported text, and return metadata."""
@@ -143,6 +146,22 @@ class SlackFileReadTool:
                 code=exc.code,
                 message=str(exc),
             )
+
+        # Enforce asker membership for file_id reads: the file metadata carries
+        # the channel(s) where the file is shared.  Allow if the asker can
+        # read at least one of those channels.  Deny (via RecoverableToolError)
+        # only when ALL channels are inaccessible, or when the file has channel
+        # data but the asker cannot access any of them.
+        # file_url reads are not gated — the URL came from a message the asker
+        # could already see, and no channel metadata is available at this point.
+        if (
+            self._access_gate is not None
+            and request.file_id is not None
+            and metadata.channel_ids
+            and not any(self._access_gate.can_read(ch) for ch in metadata.channel_ids)
+        ):
+            first_channel = metadata.channel_ids[0]
+            self._access_gate.check(first_channel)  # raises with correct error
         if metadata.size_bytes is not None:
             _ensure_size_allowed(metadata.size_bytes, self.max_file_size_bytes)
 
@@ -253,6 +272,7 @@ class SlackFileReadTool:
             mime_type=_optional_string(raw_file.get("mimetype")),
             size_bytes=_optional_int(raw_file.get("size")),
             download_url=download_url,
+            channel_ids=_file_channel_ids(raw_file),
         )
 
     def _ocr_scanned_pdf(self, path: Path, *, max_chars: int) -> TextExtraction:
@@ -368,12 +388,14 @@ class FileMetadata:
         mime_type: str | None,
         size_bytes: int | None,
         download_url: str,
+        channel_ids: list[str] | None = None,
     ) -> None:
         self.file_id = file_id
         self.filename = filename
         self.mime_type = mime_type
         self.size_bytes = size_bytes
         self.download_url = download_url
+        self.channel_ids: list[str] = channel_ids or []
 
 
 class TextExtraction:
@@ -474,6 +496,14 @@ def _file_metadata_filename(raw_file: Mapping[str, Any]) -> str:
     if file_id is not None:
         return file_id
     return "slack-file"
+
+
+def _file_channel_ids(raw_file: Mapping[str, Any]) -> list[str]:
+    """Extract the list of channel IDs from a files.info raw_file payload."""
+    raw_channels = raw_file.get("channels")
+    if not isinstance(raw_channels, list):
+        return []
+    return [c for c in raw_channels if isinstance(c, str) and c]
 
 
 def _filename_from_url(url: str) -> str:

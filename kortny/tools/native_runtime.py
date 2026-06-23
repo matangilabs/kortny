@@ -22,6 +22,7 @@ from kortny.execution import (
 from kortny.memory import WorkspaceStateService
 from kortny.tasks import TaskService
 from kortny.tools.catalog import dashboard_native_tool_names, runtime_native_tool_names
+from kortny.tools.channel_access import ChannelAccessGate
 from kortny.tools.code_exec import CodeExecTool
 from kortny.tools.deploy_site import DeploySiteTool
 from kortny.tools.document_studio import DocumentStudioTool
@@ -437,6 +438,10 @@ def _build_slack_channel_history_tool(context: NativeToolBuildContext) -> Tool:
             context.session,
             installation_id=context.task.installation_id,
         ),
+        access_gate=ChannelAccessGate(
+            task=context.task,
+            client=context.slack_history_client,
+        ),
     )
 
 
@@ -449,6 +454,10 @@ def _build_slack_file_read_tool(context: NativeToolBuildContext) -> Tool:
         session=context.session,
         pdf_ocr=_build_pdf_ocr_callable(context),
         pdf_ocr_max_pages=context.settings.pdf_ocr_max_pages,
+        access_gate=ChannelAccessGate(
+            task=context.task,
+            client=context.slack_history_client,
+        ),
     )
 
 
