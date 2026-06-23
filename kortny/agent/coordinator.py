@@ -164,6 +164,45 @@ PARTIAL_FALLBACK_MESSAGE = (
     "I ran out of room to finish this one. I made progress but couldn't wrap it "
     "up — want me to keep going?"
 )
+# Synthesis prompt for the honest-failure path: one cheap-tier LLM call explains
+# what was tried and why the loop stopped, in plain language the user can act on.
+HONEST_FAILURE_SYNTHESIS_PROMPT = (
+    "The agent loop stopped because of a repeated or unrecoverable error. "
+    "Write a brief, honest Slack message (2-4 sentences) telling the user: "
+    "(a) what you actually tried, described in plain language (not internal "
+    "tool names like 'slack_file_read' -- say 'read the file' instead), "
+    "(b) why you could not finish -- be specific about the obstacle, and "
+    "(c) one concrete alternative or next step they can take. "
+    "Do not mention 'circuit breaker', 'tool', or any internal system term. "
+    "Do not over-apologize. Do not use markdown headers."
+)
+# Deterministic fallback messages per failure reason -- used when the LLM call
+# fails or returns no content. Keyed by the reason string logged in the event.
+HONEST_FAILURE_FALLBACK: dict[str, str] = {
+    "same_tool_call_repeated": (
+        "I got stuck repeating the same step and couldn't finish. "
+        "Try rephrasing, or tell me which specific file or thread to use."
+    ),
+    "recoverable_failure_budget_exceeded": (
+        "I ran into too many errors in a row and had to stop. "
+        "Try breaking this into smaller steps, or let me know if you'd like "
+        "me to try a different approach."
+    ),
+    "max_recoverable_failures_exceeded": (
+        "I ran into too many errors in a row and had to stop. "
+        "Try breaking this into smaller steps, or let me know if you'd like "
+        "me to try a different approach."
+    ),
+    "same_recoverable_error_exceeded": (
+        "I ran into too many errors in a row and had to stop. "
+        "Try breaking this into smaller steps, or let me know if you'd like "
+        "me to try a different approach."
+    ),
+}
+HONEST_FAILURE_FALLBACK_DEFAULT = (
+    "I ran into a problem I couldn't work around and had to stop. "
+    "Try rephrasing the request or breaking it into smaller steps."
+)
 DEFAULT_SYSTEM_PROMPT = (
     "You are __AGENT_NAME__, a Slack-native AI coworker. Use the available tools when "
     "they are needed to complete the user's request. If the user asks for "
