@@ -34,6 +34,7 @@ from kortny.tools.sandbox_workbench import (
     SandboxExportArtifactTool,
     SandboxPublishPreviewTool,
     SandboxReadFileTool,
+    SandboxStageFileTool,
     SandboxWriteFileTool,
     WorkbenchSession,
 )
@@ -668,6 +669,20 @@ def _build_sandbox_write_file_tool(context: NativeToolBuildContext) -> Tool | No
     return SandboxWriteFileTool(workbench=workbench)
 
 
+def _build_sandbox_stage_file_tool(context: NativeToolBuildContext) -> Tool | None:
+    workbench = _workbench_session(context)
+    if workbench is None:
+        _log_workbench_unavailable(
+            context, "sandbox_stage_file", "missing_sandbox_runner_url"
+        )
+        return None
+    return SandboxStageFileTool(
+        workbench=workbench,
+        slack_file_client=context.slack_file_client,
+        bot_token=context.settings.slack_bot_token,
+    )
+
+
 def _build_sandbox_read_file_tool(context: NativeToolBuildContext) -> Tool | None:
     workbench = _workbench_session(context)
     if workbench is None:
@@ -797,6 +812,9 @@ NATIVE_TOOL_REGISTRATIONS: tuple[NativeToolRegistration, ...] = (
     NativeToolRegistration("sandbox_bash", SandboxBashTool, _build_sandbox_bash_tool),
     NativeToolRegistration(
         "sandbox_write_file", SandboxWriteFileTool, _build_sandbox_write_file_tool
+    ),
+    NativeToolRegistration(
+        "sandbox_stage_file", SandboxStageFileTool, _build_sandbox_stage_file_tool
     ),
     NativeToolRegistration(
         "sandbox_read_file", SandboxReadFileTool, _build_sandbox_read_file_tool

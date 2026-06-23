@@ -7,13 +7,16 @@ model is told to use absolute paths and re-activate environments per call.
 
 from __future__ import annotations
 
+import hashlib
 import mimetypes
 import uuid
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
+from urllib.parse import unquote, urlparse
 
+import httpx
 from sqlalchemy.orm import Session
 
 from kortny.db.models import Artifact, TaskEventType
@@ -30,7 +33,13 @@ from kortny.execution.sandbox_sessions import (
     SandboxSessionError,
     SandboxSessionInfo,
 )
-from kortny.tools.types import JsonObject, JsonSchema, ToolArtifact, ToolResult
+from kortny.tools.types import (
+    JsonObject,
+    JsonSchema,
+    RecoverableToolError,
+    ToolArtifact,
+    ToolResult,
+)
 
 DEFAULT_BASH_TIMEOUT_SECONDS = 120
 MAX_BASH_TIMEOUT_SECONDS = 300
@@ -42,6 +51,7 @@ WORKBENCH_STATE_NOTE = (
     "environment variables and the working directory do not. Use absolute "
     "paths under /workspace."
 )
+SANDBOX_STAGE_FILE_MAX_BYTES = 5 * 1024 * 1024  # 5 MB
 
 
 class TaskEventSink(Protocol):
@@ -195,6 +205,169 @@ class SandboxWriteFileTool(_WorkbenchToolBase):
         return ToolResult(
             output={"successful": True, "path": path, "size_bytes": written}
         )
+
+
+class SandboxStageFileTool(_WorkbenchToolBase):
+    """Download a Slack file's bytes and stage them into the sandbox workspace."""
+
+    name = "sandbox_stage_file"
+    description = (
+        "Downloads a Slack file's bytes (binary-safe) and stages them directly "
+        "into this task's sandbox workspace. Use this before editing uploaded "
+        "files (e.g. .docx) with a skill script — unlike slack_file_read, this "
+        "preserves the binary format so python-docx and similar tools can open it."
+    )
+    parameters: JsonSchema = {
+        "type": "object",
+        "properties": {
+            "file_id": {
+                "type": "string",
+                "description": "Slack file ID (e.g. F123ABC). Provide this or file_url.",
+            },
+            "file_url": {
+                "type": "string",
+                "description": "Private Slack download URL. Provide this or file_id.",
+            },
+            "dest_path": {
+                "type": "string",
+                "description": (
+                    "Destination path under /workspace. "
+                    "Defaults to /workspace/original.<ext> derived from the filename."
+                ),
+            },
+        },
+        "required": [],
+        "additionalProperties": False,
+    }
+
+    def __init__(
+        self,
+        workbench: WorkbenchSession,
+        slack_file_client: Any,
+        bot_token: str,
+        timeout: float = 30.0,
+        transport: httpx.BaseTransport | None = None,
+    ) -> None:
+        super().__init__(workbench)
+        self.slack_file_client = slack_file_client
+        self.bot_token = bot_token
+        self.timeout = timeout
+        self.transport = transport
+
+    def invoke(self, args: JsonObject) -> ToolResult:
+        file_id = args.get("file_id")
+        file_url = args.get("file_url")
+
+        if not file_id and not file_url:
+            raise ValueError(
+                "sandbox_stage_file requires either 'file_id' or 'file_url'"
+            )
+        if file_id and file_url:
+            raise ValueError(
+                "sandbox_stage_file accepts 'file_id' or 'file_url', not both"
+            )
+
+        # Resolve filename and download URL
+        filename: str
+        download_url: str
+        if file_url:
+            if not isinstance(file_url, str):
+                raise ValueError("'file_url' must be a string")
+            filename = unquote(Path(urlparse(file_url).path).name) or "slack-file"
+            download_url = file_url
+        else:
+            if not isinstance(file_id, str):
+                raise ValueError("'file_id' must be a string")
+            filename, download_url = self._lookup_slack_file(file_id)
+
+        # Determine dest_path
+        dest_path_arg = args.get("dest_path")
+        if dest_path_arg and isinstance(dest_path_arg, str):
+            dest_path = dest_path_arg.strip()
+        else:
+            ext = Path(filename).suffix
+            dest_path = f"original{ext}"
+
+        if not dest_path.startswith("/workspace/"):
+            dest_path = f"/workspace/{dest_path.lstrip('/')}"
+
+        # Download binary content
+        try:
+            with httpx.Client(transport=self.transport, timeout=self.timeout) as client:
+                resp = client.get(
+                    download_url,
+                    headers={"Authorization": f"Bearer {self.bot_token}"},
+                    follow_redirects=True,
+                )
+                resp.raise_for_status()
+                content = resp.content
+        except httpx.HTTPError as exc:
+            raise RecoverableToolError(
+                code="slack_file_download_failed",
+                message=f"Failed to download file: {exc}",
+                hint="Check the file URL and bot token.",
+            ) from exc
+
+        # Size guard
+        if len(content) > SANDBOX_STAGE_FILE_MAX_BYTES:
+            raise RecoverableToolError(
+                code="file_too_large_for_sandbox",
+                message=(
+                    f"File is {len(content)} bytes; limit is "
+                    f"{SANDBOX_STAGE_FILE_MAX_BYTES} bytes (5 MB). "
+                    "Split or reduce the file."
+                ),
+                hint="Use a smaller file or split it first.",
+            )
+
+        sha256 = hashlib.sha256(content).hexdigest()
+        mime_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+
+        # Write to sandbox
+        try:
+            session_info = self.workbench.ensure()
+            written = self.workbench.client.write_file(
+                session_info.session_id, dest_path, content
+            )
+        except (SandboxUnavailableError, SandboxSessionError) as exc:
+            raise RecoverableToolError(
+                code="sandbox_unavailable",
+                message=f"Sandbox session error: {exc}",
+                hint=(
+                    "Check that KORTNY_SANDBOX_RUNNER_URL is set and the "
+                    "sandbox-runner container is healthy."
+                ),
+            ) from exc
+
+        return ToolResult(
+            output={
+                "path": dest_path,
+                "filename": filename,
+                "mime_type": mime_type,
+                "size_bytes": len(content),
+                "sha256": sha256,
+                "written_bytes": written,
+            }
+        )
+
+    def _lookup_slack_file(self, file_id: str) -> tuple[str, str]:
+        """Fetch filename + download URL from Slack files.info."""
+        from slack_sdk.errors import SlackApiError  # noqa: PLC0415
+
+        try:
+            response = self.slack_file_client.files_info(file=file_id)
+        except SlackApiError as exc:
+            raise RecoverableToolError(
+                code="slack_file_lookup_failed",
+                message=f"Slack files.info failed: {exc}",
+                hint="Check the file_id and bot token scopes.",
+            ) from exc
+        raw_file = response.get("file") or {}
+        name: str = raw_file.get("name") or raw_file.get("title") or file_id
+        url: str = raw_file.get("url_private_download") or raw_file.get(
+            "url_private", ""
+        )
+        return name, url
 
 
 class SandboxReadFileTool(_WorkbenchToolBase):
