@@ -12,6 +12,7 @@ from sqlalchemy import desc, or_, select
 from sqlalchemy.orm import Session
 
 from kortny.db.models import ObservationEvent, Task, TaskEvent, TaskEventType
+from kortny.tools.channel_access import ChannelAccessGate
 from kortny.tools.types import JsonObject, JsonSchema, ToolResult
 
 DEFAULT_CHANNEL_HISTORY_LIMIT = 200
@@ -254,6 +255,7 @@ class SlackChannelHistoryTool:
         page_limit: int = DEFAULT_CHANNEL_HISTORY_PAGE_LIMIT,
         max_limit: int = MAX_CHANNEL_HISTORY_LIMIT,
         cache: ChannelHistoryCache | None = None,
+        access_gate: ChannelAccessGate | None = None,
     ) -> None:
         if page_limit < 1:
             raise ValueError("page_limit must be at least 1")
@@ -269,6 +271,7 @@ class SlackChannelHistoryTool:
         self.page_limit = min(page_limit, max_limit)
         self.max_limit = max_limit
         self.cache = cache
+        self.access_gate = access_gate
 
     def invoke(self, args: JsonObject) -> ToolResult:
         """Fetch channel history and return structured message records."""
@@ -279,6 +282,13 @@ class SlackChannelHistoryTool:
         limit = _limit(args, self.max_limit)
         include_threads = _include_threads(args)
         source = _history_source(args)
+
+        # Enforce asker membership before reading any channel data.
+        # Raises RecoverableToolError(code="channel_access_denied") for
+        # user-initiated tasks targeting a channel the asker is not in.
+        # No-op for synthetic/scheduled tasks and same-channel reads.
+        if self.access_gate is not None:
+            self.access_gate.check(channel_id)
 
         if self.cache is not None and source == "auto":
             cached_messages = self.cache.fetch_messages(
