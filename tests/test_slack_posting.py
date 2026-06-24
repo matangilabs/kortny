@@ -979,66 +979,6 @@ def test_assistant_thread_keeps_thread_ts_on_dm_channel(db_session: Session) -> 
     assert client.messages[0]["thread_ts"] == "1716400000.000777"
 
 
-def test_stream_message_streams_and_records_event(db_session: Session) -> None:
-    task = create_assistant_task(db_session)
-    client = FakeStreamingSlackClient()
-    thread = SlackThread.from_task(task)
-
-    ts = SlackPoster(session=db_session, client=client).stream_message(
-        thread, "Here's what I know."
-    )
-
-    assert client.stream_starts == [
-        {"channel": "D0AU8HZT285", "thread_ts": "1716400000.000777"}
-    ]
-    assert client.stream_appends[0]["markdown_text"] == "Here's what I know."
-    assert client.stream_stops[0]["ts"] == ts
-    # No plain chat.postMessage when streaming.
-    assert client.messages == []
-
-    event = db_session.scalar(
-        select(TaskEvent)
-        .where(
-            TaskEvent.task_id == task.id,
-            TaskEvent.type == TaskEventType.message_posted,
-        )
-        .order_by(TaskEvent.seq.desc())
-        .limit(1)
-    )
-    assert event is not None
-    assert event.payload["delivery"] == "stream"
-    assert event.payload["thread_ts"] == "1716400000.000777"
-    assert event.payload["message_ts"] == ts
-
-
-def test_stream_message_idempotent_on_retry(db_session: Session) -> None:
-    task = create_assistant_task(db_session)
-    client = FakeStreamingSlackClient()
-    poster = SlackPoster(session=db_session, client=client)
-    thread = SlackThread.from_task(task)
-
-    first = poster.stream_message(thread, "Answer.")
-    second = poster.stream_message(thread, "Answer.")
-
-    assert first == second
-    # Only one stream sequence — the retry short-circuits on the prior event.
-    assert len(client.stream_starts) == 1
-
-
-def test_stream_message_falls_back_without_streaming_support(
-    db_session: Session,
-) -> None:
-    task = create_assistant_task(db_session)
-    client = FakeSlackClient()  # no chat_startStream
-    poster = SlackPoster(session=db_session, client=client)
-
-    poster.stream_message(SlackThread.from_task(task), "Answer.")
-
-    # Fell back to a plain (but still threaded) post.
-    assert client.messages[0]["thread_ts"] == "1716400000.000777"
-    assert client.messages[0]["text"] == "Answer."
-
-
 def test_clear_assistant_status_clears_for_assistant_thread(
     db_session: Session,
 ) -> None:

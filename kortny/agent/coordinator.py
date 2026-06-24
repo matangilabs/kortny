@@ -351,6 +351,23 @@ class _ExecutionBudgetExhausted(Exception):
         self.reason = reason
 
 
+_CHECKLIST_INTERNAL_PREFIXES: tuple[str, ...] = (
+    "handle the slack request",
+    "format",
+    "plan",
+    "finaliz",
+    "compil",
+    "synthesiz",
+)
+
+
+def _is_internal_step_label(label: str) -> bool:
+    """Return True if a plan step label is internal/system and should be hidden."""
+
+    lower = label.lower().strip()
+    return any(lower.startswith(p) for p in _CHECKLIST_INTERNAL_PREFIXES)
+
+
 @dataclass(frozen=True, slots=True)
 class AgentRunResult:
     """Final coordinator result."""
@@ -523,6 +540,15 @@ class AgentCoordinator:
                 "plan": plan.to_payload(),
             },
         )
+        # Wire checklist mode when the reporter supports it (HIG-289).
+        real_steps = [
+            s.description
+            for s in plan.steps
+            if not _is_internal_step_label(s.description)
+        ]
+        _notify_plan = getattr(self.status_reporter, "notify_plan", None)
+        if callable(_notify_plan) and len(real_steps) >= 2:
+            _notify_plan(real_steps)
         messages = self._messages_with_execution_plan(messages, plan)
         step = plan.start()
         self._append_execution_log(
@@ -534,6 +560,10 @@ class AgentCoordinator:
                 "budget_remaining": plan.budget.remaining(plan.limits),
             },
         )
+        # Advance checklist to first step.
+        _notify_step = getattr(self.status_reporter, "notify_step_started", None)
+        if callable(_notify_step):
+            _notify_step(step.description)
 
         self._append_log(
             task_obj,
@@ -1350,6 +1380,10 @@ class AgentCoordinator:
                 "partial": partial,
             },
         )
+        # Finalize checklist (HIG-289).
+        _notify_completed = getattr(self.status_reporter, "notify_completed", None)
+        if callable(_notify_completed):
+            _notify_completed()
         return AgentRunResult(
             task_id=task.id,
             result_summary=summary,
