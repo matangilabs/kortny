@@ -2245,10 +2245,7 @@ class AgentTaskExecutor:
                 )
                 response_text = fallback_text
                 blocks = None
-            if thread.is_assistant and settings.assistant_streaming_enabled:
-                poster.stream_message(thread, response_text, blocks=blocks)
-            else:
-                poster.post_message(thread, response_text, blocks=blocks)
+            poster.post_message(thread, response_text, blocks=blocks)
             poster.clear_assistant_status(thread)
             return response_text
 

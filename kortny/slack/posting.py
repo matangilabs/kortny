@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import Any, Protocol
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -62,41 +62,6 @@ class SlackPostingClient(Protocol):
         thread_ts: str | None = None,
     ) -> Mapping[str, Any]:
         """Upload and share a Slack file."""
-
-
-class StreamingSlackClient(Protocol):
-    """Assistant streaming surface — a superset of ``SlackPostingClient``.
-
-    Kept separate so plain posting doubles (which only implement
-    ``chat_postMessage``/``files_upload_v2``) still satisfy ``SlackPostingClient``.
-    The streaming path casts to this only after a runtime capability check.
-    """
-
-    def chat_startStream(
-        self,
-        *,
-        channel: str,
-        thread_ts: str | None = None,
-    ) -> Mapping[str, Any]:
-        """Begin a streaming assistant reply; returns the stream message ts."""
-
-    def chat_appendStream(
-        self,
-        *,
-        channel: str,
-        ts: str,
-        markdown_text: str,
-    ) -> Mapping[str, Any]:
-        """Append a chunk to an in-progress streaming reply."""
-
-    def chat_stopStream(
-        self,
-        *,
-        channel: str,
-        ts: str,
-        blocks: list[dict[str, Any]] | None = None,
-    ) -> Mapping[str, Any]:
-        """Finalize a streaming reply (ends the live "thinking" state)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -266,84 +231,6 @@ class SlackPoster:
             )
         return posted_message_ts
 
-    def stream_message(
-        self,
-        thread: SlackThread,
-        text: str,
-        *,
-        purpose: str = "result",
-        blocks: list[dict[str, Any]] | None = None,
-    ) -> str:
-        """Stream a reply into an assistant thread; return the message ts.
-
-        Uses the Slack streaming suite (``chat.startStream`` →
-        ``chat.appendStream`` → ``chat.stopStream``) so the answer renders
-        natively token-by-token in the live agent pane and the loading status
-        ends on ``stopStream`` (HIG-247). Idempotent across task retries via the
-        ``message_posted`` event guard. Falls back to a plain threaded post when
-        the client lacks streaming support (e.g. test/playground doubles).
-        """
-
-        post_thread_ts = _post_thread_ts(thread)
-        slack_text = normalize_user_facing_text(text)
-        self._flag_egress_urls(thread, slack_text, purpose=purpose)
-
-        if thread.task_id is not None:
-            existing_ts = self._existing_text_message_ts(thread.task_id, purpose)
-            if existing_ts is not None:
-                return existing_ts
-
-        if not self._client_supports_streaming() or thread.channel_id == "playground":
-            return self.post_message(thread, text, purpose=purpose, blocks=blocks)
-
-        stream_client = cast("StreamingSlackClient", self.client)
-        with start_span(
-            "slack.stream_message",
-            attributes={
-                "kortny.task.id": thread.task_id,
-                "slack.channel_id": thread.channel_id,
-                "slack.thread_ts": post_thread_ts,
-                "slack.message_purpose": purpose,
-                "slack.text_chars": len(slack_text),
-                "slack.delivery": "stream",
-            },
-        ):
-            start = stream_client.chat_startStream(
-                channel=thread.channel_id,
-                thread_ts=post_thread_ts,
-            )
-            stream_ts = _response_ts(start)
-            if stream_ts is None:
-                raise SlackPostingError("Slack chat_startStream response is missing ts")
-            stream_client.chat_appendStream(
-                channel=thread.channel_id,
-                ts=stream_ts,
-                markdown_text=slack_text,
-            )
-            # The streamed markdown_text IS the rendered content; passing blocks
-            # here would re-render the same answer a second time. Finalize plain.
-            stream_client.chat_stopStream(
-                channel=thread.channel_id,
-                ts=stream_ts,
-            )
-            set_span_attributes({"slack.posted_message_ts": stream_ts})
-
-        if thread.task_id is not None:
-            event_payload: dict[str, Any] = {
-                "channel": thread.channel_id,
-                "thread_ts": post_thread_ts,
-                "message_ts": stream_ts,
-                "text": slack_text,
-                "purpose": purpose,
-                "delivery": "stream",
-            }
-            self.task_service.append_event(
-                thread.task_id,
-                TaskEventType.message_posted,
-                event_payload,
-            )
-        return stream_ts
-
     def clear_assistant_status(self, thread: SlackThread) -> None:
         """Clear the assistant loading status (``setStatus`` with empty string).
 
@@ -376,41 +263,6 @@ class SlackPoster:
                 thread.thread_ts,
                 exc_info=True,
             )
-
-    def _client_supports_streaming(self) -> bool:
-        return all(
-            callable(getattr(self.client, name, None))
-            for name in ("chat_startStream", "chat_appendStream", "chat_stopStream")
-        )
-
-    def _existing_text_message_ts(
-        self,
-        task_id: uuid.UUID,
-        purpose: str,
-    ) -> str | None:
-        """Return the ts of a prior text reply for this task+purpose, if any.
-
-        Idempotency guard for the streaming path (which doesn't go through the
-        outbox): a retried task that already delivered its reply must not stream
-        a duplicate.
-        """
-
-        row = self.session.scalar(
-            select(TaskEvent)
-            .where(
-                TaskEvent.task_id == task_id,
-                TaskEvent.type == TaskEventType.message_posted,
-                TaskEvent.payload["purpose"].as_string() == purpose,
-            )
-            .order_by(TaskEvent.created_at.desc())
-            .limit(1)
-        )
-        if row is None:
-            return None
-        message_ts = (
-            row.payload.get("message_ts") if isinstance(row.payload, dict) else None
-        )
-        return message_ts if isinstance(message_ts, str) and message_ts else None
 
     def upload_file(
         self,
