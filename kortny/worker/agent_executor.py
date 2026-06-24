@@ -15,7 +15,11 @@ from slack_sdk import WebClient
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from kortny.agent.capabilities import CapabilityOverview, build_capability_overview
+from kortny.agent.capabilities import (
+    CapabilityOverview,
+    ConnectedToolkitSummary,
+    build_capability_overview,
+)
 from kortny.agent.coordinator import (
     DEFAULT_SYSTEM_PROMPT,
     HONEST_FAILURE_FALLBACK,
@@ -48,6 +52,7 @@ from kortny.composio.runtime import connected_toolkit_slugs
 from kortny.config import Settings, load_settings
 from kortny.db.models import (
     Artifact,
+    ComposioToolCard,
     Installation,
     McpServer,
     Task,
@@ -1954,11 +1959,38 @@ class AgentTaskExecutor:
                     .order_by(McpServer.name)
                 )
             )
+            slugs = tuple(connected_toolkit_slugs(session, task))
+            tool_cards = list(
+                session.scalars(
+                    select(ComposioToolCard)
+                    .where(
+                        ComposioToolCard.installation_id == task.installation_id,
+                        ComposioToolCard.toolkit_slug.in_(slugs),
+                    )
+                    .order_by(ComposioToolCard.toolkit_slug, ComposioToolCard.tool_slug)
+                )
+            )
+            cards_by_toolkit: dict[str, list[str]] = {}
+            for card in tool_cards:
+                cards_by_toolkit.setdefault(card.toolkit_slug, []).append(
+                    card.tool_slug
+                )
+            connected_toolkits = tuple(
+                ConnectedToolkitSummary(
+                    toolkit_slug=slug,
+                    app_name=slug.replace("_", " ").title(),
+                    app_description="",
+                    tool_names=cards_by_toolkit.get(slug, []),
+                    total_tool_count=len(cards_by_toolkit.get(slug, [])),
+                )
+                for slug in slugs
+            )
             return build_capability_overview(
                 native_descriptors=native_descriptors,
                 external_cards=external_cards,
                 mcp_rows=mcp_rows,
-                connected_composio_toolkits=connected_toolkit_slugs(session, task),
+                connected_composio_toolkits=slugs,
+                connected_toolkits=connected_toolkits,
             )
         except Exception:
             logger.warning(

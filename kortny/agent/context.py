@@ -83,7 +83,7 @@ _DOCUMENT_MIME_TO_FORMAT = {
 # enabled-skill count up; a smaller, sharper index keeps the L1 block focused
 # and within the 4k char budget. Omissions beyond K are still recorded.
 DEFAULT_SKILLS_CONTEXT_MAX_SKILLS = 15
-DEFAULT_CAPABILITIES_CONTEXT_MAX_CHARS = 1_200
+DEFAULT_CAPABILITIES_CONTEXT_MAX_CHARS = 10_000
 DEFAULT_SKILL_DIRECT_THRESHOLD = 0.60
 RELEVANCE_BUDGET_OMISSION_REASON = "relevance_budget"
 EPISODE_RELATION_TIERS = {"same_thread": 0, "same_channel": 1, "same_user": 2}
