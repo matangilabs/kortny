@@ -15,7 +15,11 @@ from slack_sdk import WebClient
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from kortny.agent.capabilities import CapabilityOverview, build_capability_overview
+from kortny.agent.capabilities import (
+    CapabilityOverview,
+    ConnectedToolkitSummary,
+    build_capability_overview,
+)
 from kortny.agent.coordinator import (
     DEFAULT_SYSTEM_PROMPT,
     HONEST_FAILURE_FALLBACK,
@@ -23,6 +27,7 @@ from kortny.agent.coordinator import (
     HONEST_FAILURE_SYNTHESIS_PROMPT,
     AgentExecutionGuardrailError,
     AgentRunResult,
+    ConnectedToolLoader,
 )
 from kortny.agent.execution import ExecutionGuardrailLimits
 from kortny.agent.image_attachments import SlackImageAttachmentResolver
@@ -365,6 +370,9 @@ class AgentTaskExecutor:
         # Capability overview built per task in _build_registry, consumed when
         # constructing the custom runtime's context assembler.
         self._capability_overview: CapabilityOverview | None = None
+        # Connected-tool loader built per task in _finalize_registry; passed to
+        # the coordinator for direct callability (resolve-on-call).
+        self._connected_tool_loader: ConnectedToolLoader | None = None
 
     def execute(
         self,
@@ -377,6 +385,7 @@ class AgentTaskExecutor:
         self._active_external_providers = []
         self._active_browser_session_holder = None
         self._capability_overview = None
+        self._connected_tool_loader = None
         try:
             logger.info("agent executor started task_id=%s", task.id)
             with task_workspace(task.id, base_dir=self.workspace_base_dir) as workspace:
@@ -1383,6 +1392,7 @@ class AgentTaskExecutor:
             ),
             agent_display_name=settings.agent_display_name,
             image_resolver=self._build_image_resolver(settings),
+            connected_tool_loader=self._connected_tool_loader,
         ).run(task)
 
     def _build_status_reporter(
@@ -1888,6 +1898,46 @@ class AgentTaskExecutor:
                 tools.extend(mcp_provider.load_runtime_tools_for_slugs(mcp_slugs))
             return tuple(tools)
 
+        # Direct callability loader: given a runtime tool name like
+        # ``composio_{toolkit}_{toolslug}``, find its tool_slug in the synced
+        # card catalog for any connected toolkit and load the runtime tool.
+        _composio_provider_ref = composio_provider
+        _toolkits_ref = toolkits
+
+        def connected_tool_loader(tool_name: str) -> Tool | None:
+            if _composio_provider_ref is None:
+                return None
+            if not tool_name.startswith("composio_"):
+                return None
+            # Scan all ComposioToolCard rows for connected toolkits and match
+            # by reconstructing the runtime name for each card.
+            from sqlalchemy import select as _select
+
+            from kortny.db.models import ComposioToolCard as _ComposioToolCard
+            from kortny.tools.composio_execute import (
+                composio_runtime_tool_name as _runtime_name,
+            )
+
+            cards = list(
+                _composio_provider_ref.session.scalars(
+                    _select(_ComposioToolCard).where(
+                        _ComposioToolCard.installation_id
+                        == _composio_provider_ref.task.installation_id,
+                        _ComposioToolCard.toolkit_slug.in_(sorted(_toolkits_ref)),
+                    )
+                )
+            )
+            for card in cards:
+                if _runtime_name(card.toolkit_slug, card.tool_slug) == tool_name:
+                    loaded = _composio_provider_ref.load_runtime_tools_for_slugs(
+                        [card.tool_slug]
+                    )
+                    if loaded:
+                        return loaded[0]
+            return None
+
+        self._connected_tool_loader = connected_tool_loader
+
         registry.register_if_absent(
             cast(
                 Tool,
@@ -1941,6 +1991,8 @@ class AgentTaskExecutor:
         """Build the installation capability overview; never fails the task."""
 
         try:
+            from kortny.db.models import ComposioToolCard
+
             classes_by_name = native_tool_classes_by_name()
             native_descriptors = tuple(
                 tool_descriptor_from_class(classes_by_name[name], settings=settings)
@@ -1954,11 +2006,45 @@ class AgentTaskExecutor:
                     .order_by(McpServer.name)
                 )
             )
-            return build_capability_overview(
+            toolkit_slugs = connected_toolkit_slugs(session, task)
+            base_overview = build_capability_overview(
                 native_descriptors=native_descriptors,
                 external_cards=external_cards,
                 mcp_rows=mcp_rows,
-                connected_composio_toolkits=connected_toolkit_slugs(session, task),
+                connected_composio_toolkits=toolkit_slugs,
+            )
+            # Build ConnectedToolkitSummary objects — one per connected toolkit,
+            # with all tool_slug values found in the synced ComposioToolCard catalog
+            # for this installation.
+            summaries: list[ConnectedToolkitSummary] = []
+            if toolkit_slugs:
+                cards = list(
+                    session.scalars(
+                        select(ComposioToolCard).where(
+                            ComposioToolCard.installation_id == task.installation_id,
+                            ComposioToolCard.toolkit_slug.in_(sorted(toolkit_slugs)),
+                        )
+                    )
+                )
+                tools_by_slug: dict[str, list[str]] = {}
+                for card in cards:
+                    tools_by_slug.setdefault(card.toolkit_slug, []).append(
+                        card.tool_slug
+                    )
+                for slug in toolkit_slugs:
+                    tool_names = tuple(sorted(tools_by_slug.get(slug, [])))
+                    summaries.append(
+                        ConnectedToolkitSummary(
+                            toolkit_slug=slug,
+                            app_description=slug,
+                            tool_names=tool_names,
+                        )
+                    )
+            from dataclasses import replace as _replace
+
+            return _replace(
+                base_overview,
+                connected_toolkits=tuple(summaries),
             )
         except Exception:
             logger.warning(

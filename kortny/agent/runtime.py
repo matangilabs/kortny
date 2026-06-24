@@ -14,6 +14,7 @@ from kortny.agent.coordinator import (
     DEFAULT_TOOL_RESULT_PROMPT_MAX_CHARS,
     AgentCoordinator,
     AgentRunResult,
+    ConnectedToolLoader,
     LLMClient,
 )
 from kortny.agent.execution import ExecutionGuardrailLimits
@@ -66,6 +67,7 @@ class CustomAgentRuntime:
         status_reporter: StatusReporter | None = None,
         agent_display_name: str = "Kortny",
         image_resolver: ImageAttachmentResolver | None = None,
+        connected_tool_loader: ConnectedToolLoader | None = None,
     ) -> None:
         self.coordinator = AgentCoordinator(
             session=session,
@@ -93,6 +95,7 @@ class CustomAgentRuntime:
             status_reporter=status_reporter,
             agent_display_name=agent_display_name,
             image_resolver=image_resolver,
+            connected_tool_loader=connected_tool_loader,
         )
 
     def run(self, task: Task | uuid.UUID) -> AgentRunResult:

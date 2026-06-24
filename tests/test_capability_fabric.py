@@ -392,11 +392,15 @@ def test_capability_card_overflow_is_budgeted_with_omission(
     db_session: Session,
 ) -> None:
     task = create_task(db_session)
+    # Use enough disabled tools to exceed the 8000-char capability budget.
     overview = CapabilityOverview(
         native_categories=(),
         disabled_native=tuple(
-            (f"tool_{index}", "Missing required environment variable EXAMPLE_KEY")
-            for index in range(40)
+            (
+                f"tool_{index}",
+                "Missing required environment variable EXAMPLE_KEY_WITH_LONG_SUFFIX",
+            )
+            for index in range(300)
         ),
         composio_toolkits=(),
         mcp_servers=(),
@@ -409,7 +413,7 @@ def test_capability_card_overflow_is_budgeted_with_omission(
 
     capabilities_message = package.messages[1].content
     assert capabilities_message is not None
-    assert len(capabilities_message) <= 1200
+    assert len(capabilities_message) <= 8000
     assert "[capabilities truncated at configured budget]" in capabilities_message
     assert any(
         omission.kind == "capabilities" and omission.reason == "budget_compacted"
