@@ -1948,7 +1948,7 @@ class AgentTaskExecutor:
             try:
                 prewarm_slugs = [
                     s
-                    for s in retrieve(task.input or "")[:3]
+                    for s in retrieve(task.input or "")[:8]
                     if not s.startswith("mcp__")
                 ]
                 prewarm_event["prewarm_slugs"] = prewarm_slugs
