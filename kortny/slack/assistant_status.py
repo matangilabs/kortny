@@ -1,4 +1,4 @@
-"""Live assistant status narration (HIG-247 follow-up).
+"""Live assistant status narration and Claude-Tag-style progress checklist.
 
 Drives Slack's ``assistant.threads.setStatus`` from the worker so the loading
 indicator in the agent pane reflects what Kortny is *actually* doing — the tool
@@ -7,6 +7,11 @@ process sets the initial cycling ``loading_messages`` when the message arrives;
 once the worker claims the task it takes over with real, activity-specific
 status lines. ``setStatus`` is stateless and accepts the bot token from any
 process, so the worker can drive it directly.
+
+For channel tasks (app-mention / non-assistant), ``ChannelProgressReporter``
+edits the ack message in place.  When the coordinator produces a real plan with
+two or more non-internal steps, the reporter switches into checklist mode and
+renders a Claude-Tag-style checklist (``✓``/``✱``/``○``) via ``chat.update``.
 """
 
 from __future__ import annotations
@@ -120,6 +125,79 @@ class MessageUpdateClient(Protocol):
         """Edit the text of an existing message."""
 
 
+# ---------------------------------------------------------------------------
+# Checklist helpers
+# ---------------------------------------------------------------------------
+
+# Step labels that are internal/system and should never appear in the checklist.
+_INTERNAL_STEP_LABELS: frozenset[str] = frozenset(
+    {
+        "Handle the Slack request using available context and tools.",
+        "Formatting/Synthesizing the answer",
+        "Planning",
+        "Finalizing",
+        "Compiling",
+    }
+)
+
+_INTERNAL_STEP_PREFIXES: tuple[str, ...] = (
+    "handle the slack request",
+    "format",
+    "plan",
+    "finaliz",
+    "compil",
+    "synthesiz",
+)
+
+
+def _is_internal_step(label: str) -> bool:
+    """Return True if this step label is internal/system and should be hidden."""
+
+    if label in _INTERNAL_STEP_LABELS:
+        return True
+    lower = label.lower().strip()
+    return any(lower.startswith(p) for p in _INTERNAL_STEP_PREFIXES)
+
+
+def _render_checklist(
+    steps: list[str],
+    current_idx: int,
+    *,
+    all_done: bool,
+) -> str:
+    """Render a checked/in-progress/pending checklist string.
+
+    Glyphs: ``✓`` completed, ``✱`` in-progress, ``○`` pending.
+    ``current_idx`` is the index of the in-progress step (-1 = none started).
+    ``all_done`` marks every step completed regardless of ``current_idx``.
+    """
+
+    lines: list[str] = []
+    for i, label in enumerate(steps):
+        if all_done or i < current_idx:
+            glyph = "✓"  # ✓
+        elif i == current_idx:
+            glyph = "✱"  # ✱
+        else:
+            glyph = "○"  # ○
+        lines.append(f"{glyph} {label}")
+    return "\n".join(lines)
+
+
+def _checklist_text(
+    base_text: str, steps: list[str], current_idx: int, *, all_done: bool
+) -> str:
+    """Compose the full message text for a checklist update."""
+
+    checklist = _render_checklist(steps, current_idx, all_done=all_done)
+    return f"{base_text}\n{checklist}" if base_text else checklist
+
+
+# ---------------------------------------------------------------------------
+# Progress reporter
+# ---------------------------------------------------------------------------
+
+
 class ChannelProgressReporter:
     """Narrates progress by editing the channel acknowledgement message.
 
@@ -129,6 +207,12 @@ class ChannelProgressReporter:
     "Writing the reply…" — appended under the original ack text so it is never
     lost. Throttled to >= ``min_interval_seconds`` between edits and deduped on
     content; never raises (a progress edit must not fail the task).
+
+    When the coordinator produces a real execution plan with two or more
+    non-internal steps, the reporter switches to *checklist mode*.  In that mode
+    ``notify_plan``/``notify_step_started``/``notify_completed`` drive structured
+    ``✓``/``✱``/``○`` updates via ``chat.update`` and ``report()`` becomes a
+    no-op (the checklist methods own the message from that point).
     """
 
     def __init__(
@@ -149,8 +233,16 @@ class ChannelProgressReporter:
         self._clock = clock or time.monotonic
         self._last_line: str | None = None
         self._last_at: float | None = None
+        # Checklist state — inactive until notify_plan() is called with ≥2 steps.
+        self._checklist_mode: bool = False
+        self._plan_steps: list[str] = []
+        self._current_step_idx: int = -1
+        self._plan_completed: bool = False
 
     def report(self, status: str, *, phase: str | None = None) -> None:
+        # In checklist mode the structured notify_* methods own all updates.
+        if self._checklist_mode:
+            return
         line = (status or "").strip()
         if not line:
             return
@@ -173,6 +265,68 @@ class ChannelProgressReporter:
                 self._channel_id,
                 self._message_ts,
                 line,
+                exc_info=True,
+            )
+
+    def notify_plan(self, steps: list[str]) -> None:
+        """Switch to checklist mode when the plan has two or more real steps.
+
+        ``steps`` must already be filtered (internal steps removed).  If fewer
+        than two steps remain after filtering, checklist mode is not activated
+        and the reporter continues with single-line progress.
+        """
+
+        if len(steps) < 2:
+            return
+        self._checklist_mode = True
+        self._plan_steps = list(steps)
+        self._current_step_idx = -1
+        self._plan_completed = False
+        self._chat_update(
+            _checklist_text(self._base_text, self._plan_steps, -1, all_done=False)
+        )
+
+    def notify_step_started(self, step_label: str) -> None:
+        """Advance the checklist to mark ``step_label`` as in-progress."""
+
+        if not self._checklist_mode:
+            return
+        try:
+            idx = self._plan_steps.index(step_label)
+        except ValueError:
+            # Step not in the visible checklist (internal step or unknown) — skip.
+            return
+        self._current_step_idx = idx
+        self._chat_update(
+            _checklist_text(
+                self._base_text,
+                self._plan_steps,
+                self._current_step_idx,
+                all_done=False,
+            )
+        )
+
+    def notify_completed(self) -> None:
+        """Mark all checklist steps as completed."""
+
+        if not self._checklist_mode:
+            return
+        self._plan_completed = True
+        self._chat_update(
+            _checklist_text(self._base_text, self._plan_steps, -1, all_done=True)
+        )
+
+    def _chat_update(self, text: str) -> None:
+        updater = getattr(self._client, "chat_update", None)
+        if not callable(updater):
+            return
+        try:
+            updater(channel=self._channel_id, ts=self._message_ts, text=text)
+        except Exception:
+            logger.warning(
+                "failed to update channel checklist channel=%s ts=%s",
+                self._channel_id,
+                self._message_ts,
                 exc_info=True,
             )
 
