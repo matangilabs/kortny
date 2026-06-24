@@ -109,6 +109,7 @@ from kortny.tasks import TaskService
 from kortny.tools import ToolRegistry
 from kortny.tools.catalog import tool_metadata, tool_timeout_seconds
 from kortny.tools.registry import ToolNotFoundError
+from kortny.tools.repair import repair_post_call, repair_pre_call
 from kortny.tools.types import (
     JsonObject,
     JsonSchema,
@@ -779,11 +780,39 @@ class AgentCoordinator:
         plan: ExecutionPlan,
     ) -> int:
         artifact_count = 0
+        _repair_retried_calls: set[str] = set()
         for tool_call in completion.tool_calls:
             self.task_service.raise_if_cancelled(
                 task_obj, phase=f"before_tool_{tool_call.name}"
             )
             arguments = self._tool_arguments(task_obj, tool_call)
+            # HIG-291: try a structural repair before the attempt is recorded so the
+            # circuit-breaker hash sees the repaired args (not the malformed ones).
+            _pre_repair = repair_pre_call(
+                tool_name=tool_call.name,
+                args=arguments,
+                parameters=(
+                    self.registry.get(tool_call.name).parameters
+                    if self.registry.has(tool_call.name)
+                    else None
+                ),
+            )
+            if _pre_repair is not None:
+                arguments = _pre_repair.arguments
+                self.task_service.append_event(
+                    task_obj,
+                    TaskEventType.log,
+                    {
+                        "message": "repair_applied",
+                        "turn": turn,
+                        "tool": tool_call.name,
+                        "tool_call_id": tool_call.id,
+                        "phase": _pre_repair.phase,
+                        "pattern": _pre_repair.pattern,
+                        "changed_keys": list(_pre_repair.changed_keys),
+                        "retry": _pre_repair.retry,
+                    },
+                )
             attempt = self._record_tool_attempt(
                 task_obj=task_obj,
                 plan=plan,
@@ -996,6 +1025,60 @@ class AgentCoordinator:
                 )
                 raise
 
+            # HIG-291: POST-call reactive repair — try once before the recoverable-failure
+            # budget is charged. Only fires if the error is repairable AND we haven't
+            # already retried this call (loop cap = 1 retry per tool call).
+            if (
+                recoverable_error is not None
+                and tool_call.id not in _repair_retried_calls
+            ):
+                _post_repair = repair_post_call(
+                    tool_name=tool_call.name,
+                    args=arguments,
+                    result=result,
+                    error=recoverable_error,
+                )
+                if _post_repair is not None and _post_repair.retry:
+                    _repair_retried_calls.add(tool_call.id)
+                    try:
+                        _retry_result = self.registry.invoke(
+                            tool_call.name, _post_repair.arguments
+                        )
+                        # Retry succeeded — clear the error state.
+                        result = ToolResult(
+                            output={
+                                **_retry_result.output,
+                                "tool_repair": {
+                                    "applied": True,
+                                    "phase": _post_repair.phase,
+                                    "pattern": _post_repair.pattern,
+                                    "changed_keys": list(_post_repair.changed_keys),
+                                    "note": _post_repair.note,
+                                },
+                            },
+                            cost_usd=_retry_result.cost_usd,
+                            artifacts=_retry_result.artifacts,
+                        )
+                        recoverable_error = None
+                        error_classification = None
+                        self.task_service.append_event(
+                            task_obj,
+                            TaskEventType.log,
+                            {
+                                "message": "repair_applied",
+                                "turn": turn,
+                                "tool": tool_call.name,
+                                "tool_call_id": tool_call.id,
+                                "phase": _post_repair.phase,
+                                "pattern": _post_repair.pattern,
+                                "changed_keys": list(_post_repair.changed_keys),
+                                "retry": True,
+                            },
+                        )
+                    except (RecoverableToolError, Exception):
+                        # Repair retry failed — fall through to normal recoverable path.
+                        pass
+
             if error_classification is not None:
                 recoverable_budget_exceeded = self._record_recoverable_failure(
                     task_obj=task_obj,
@@ -1114,6 +1197,25 @@ class AgentCoordinator:
                 ),
                 cost_usd=str(result.cost_usd),
             )
+            # HIG-291: inject pre-call repair note into the result the model sees.
+            if _pre_repair is not None:
+                prompt_result_payload = {
+                    **prompt_result_payload,
+                    "output": {
+                        **(
+                            prompt_result_payload["output"]
+                            if isinstance(prompt_result_payload.get("output"), dict)
+                            else {}
+                        ),
+                        "tool_repair": {
+                            "applied": True,
+                            "phase": _pre_repair.phase,
+                            "pattern": _pre_repair.pattern,
+                            "changed_keys": list(_pre_repair.changed_keys),
+                            "note": _pre_repair.note,
+                        },
+                    },
+                }
             messages.append(
                 ChatMessage(
                     role="tool",
@@ -2553,6 +2655,7 @@ def _compact_output_metadata(output: JsonObject) -> JsonObject:
         "error",
         "log_id",
         "scope",
+        "tool_repair",  # HIG-291: preserve repair note through compaction
     ):
         if key in output:
             compact[key] = output[key]
