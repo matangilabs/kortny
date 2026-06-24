@@ -39,7 +39,7 @@ jobs:
             image: ghcr.io/boffti/kortny-sandbox-exec
             dockerfile: docker/sandbox-exec.Dockerfile
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Derive version from tag
         id: version
