@@ -225,14 +225,21 @@ class ComposioCatalogSyncService:
     ) -> int:
         if not tools:
             return 0
+        existing_rows = self.session.execute(
+            select(
+                ComposioToolCard.tool_slug,
+                ComposioToolCard.card_sha,
+                ComposioToolCard.input_schema_json,
+            ).where(
+                ComposioToolCard.installation_id == installation_id,
+                ComposioToolCard.toolkit_slug == toolkit_slug,
+            )
+        ).all()
         existing: dict[str, str] = {
-            tool_slug: sha
-            for tool_slug, sha in self.session.execute(
-                select(ComposioToolCard.tool_slug, ComposioToolCard.card_sha).where(
-                    ComposioToolCard.installation_id == installation_id,
-                    ComposioToolCard.toolkit_slug == toolkit_slug,
-                )
-            ).all()
+            row.tool_slug: row.card_sha for row in existing_rows
+        }
+        existing_schemas: dict[str, dict[str, object]] = {
+            row.tool_slug: (row.input_schema_json or {}) for row in existing_rows
         }
         # HIG-169 P0.3: drift-check every tool on every refresh — NOT only the
         # ones whose card_sha changed. card_sha omits inputSchema, so a
@@ -252,7 +259,10 @@ class ComposioCatalogSyncService:
                 description=description,
                 side_effect=side_effect,
             )
-            if existing.get(tool.slug) == sha:
+            # Skip only if sha matches AND we already have a non-empty schema
+            # cached. This ensures schema backfill on rows that pre-date the
+            # input_schema_json column.
+            if existing.get(tool.slug) == sha and existing_schemas.get(tool.slug):
                 continue
             rows.append(
                 {
@@ -263,6 +273,7 @@ class ComposioCatalogSyncService:
                     "description": description,
                     "side_effect": side_effect,
                     "card_sha": sha,
+                    "input_schema_json": tool.input_parameters or {},
                 }
             )
         if not rows:
@@ -276,6 +287,7 @@ class ComposioCatalogSyncService:
                 "description": statement.excluded.description,
                 "side_effect": statement.excluded.side_effect,
                 "card_sha": statement.excluded.card_sha,
+                "input_schema_json": statement.excluded.input_schema_json,
                 "synced_at": statement.excluded.synced_at,
             },
         )
