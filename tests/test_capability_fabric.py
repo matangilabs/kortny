@@ -396,7 +396,10 @@ def test_capability_card_overflow_is_budgeted_with_omission(
     overview = CapabilityOverview(
         native_categories=(),
         disabled_native=tuple(
-            (f"tool_{index}", "Missing required environment variable EXAMPLE_KEY_WITH_LONG_SUFFIX")
+            (
+                f"tool_{index}",
+                "Missing required environment variable EXAMPLE_KEY_WITH_LONG_SUFFIX",
+            )
             for index in range(300)
         ),
         composio_toolkits=(),
