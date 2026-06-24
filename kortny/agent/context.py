@@ -16,7 +16,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from kortny.agent.attachment_parsing import parse_image_attachment_pairs
-from kortny.agent.capabilities import CapabilityOverview, render_capability_overview
+from kortny.agent.capabilities import (
+    CapabilityOverview,
+    render_capability_overview,
+    render_connected_integrations,
+)
 from kortny.agent.image_attachments import ImageAttachmentResolver
 from kortny.agent.thread_context import (
     ThreadTranscriptMessage,
@@ -83,7 +87,7 @@ _DOCUMENT_MIME_TO_FORMAT = {
 # enabled-skill count up; a smaller, sharper index keeps the L1 block focused
 # and within the 4k char budget. Omissions beyond K are still recorded.
 DEFAULT_SKILLS_CONTEXT_MAX_SKILLS = 15
-DEFAULT_CAPABILITIES_CONTEXT_MAX_CHARS = 1_200
+DEFAULT_CAPABILITIES_CONTEXT_MAX_CHARS = 8_000
 DEFAULT_SKILL_DIRECT_THRESHOLD = 0.60
 RELEVANCE_BUDGET_OMISSION_REASON = "relevance_budget"
 EPISODE_RELATION_TIERS = {"same_thread": 0, "same_channel": 1, "same_user": 2}
@@ -1096,17 +1100,32 @@ class ContextAssembler:
         rendered = render_capability_overview(self.capability_overview)
         if not rendered:
             return _CapabilitiesContext(content=None, omissions=())
+
+        omissions: list[ContextOmission] = []
+
+        # Append the connected-integrations block when toolkits are present.
+        connected_block = render_connected_integrations(
+            self.capability_overview,
+            max_chars=DEFAULT_CAPABILITIES_CONTEXT_MAX_CHARS,
+        )
+        if connected_block is not None:
+            # Detect whether render_connected_integrations had to truncate by
+            # checking for the "...and N more." trailer in any tool line.
+            if "...and " in connected_block and " more." in connected_block:
+                omissions.append(
+                    ContextOmission("connected_integrations", "budget_compacted", 1)
+                )
+            rendered = rendered + "\n" + connected_block
+
         if len(rendered) > DEFAULT_CAPABILITIES_CONTEXT_MAX_CHARS:
             rendered = _fit_context_to_budget(
                 rendered,
                 DEFAULT_CAPABILITIES_CONTEXT_MAX_CHARS,
                 context_name="capabilities",
             )
-            return _CapabilitiesContext(
-                content=rendered,
-                omissions=(ContextOmission("capabilities", "budget_compacted", 1),),
-            )
-        return _CapabilitiesContext(content=rendered, omissions=())
+            omissions.append(ContextOmission("capabilities", "budget_compacted", 1))
+
+        return _CapabilitiesContext(content=rendered, omissions=tuple(omissions))
 
     def _skills_context(self, task: Task) -> _SkillsContext:
         """Build the L1 name+description block for skills enabled in scope."""
