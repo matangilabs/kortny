@@ -1941,20 +1941,34 @@ class AgentTaskExecutor:
         # Prewarm top-3 task-relevant tool schemas before the first turn so the
         # model sees real input schemas without a find_tools round-trip for the
         # most likely tools.
-        if composio_provider is not None:
+        prewarm_event: dict[str, Any] = {"message": "tool_prewarm"}
+        if composio_provider is None:
+            prewarm_event["skipped_reason"] = "no_composio_provider"
+        else:
             try:
                 prewarm_slugs = [
                     s
-                    for s in retrieve(task.input or "")[:3]
+                    for s in retrieve(task.input or "")[:8]
                     if not s.startswith("mcp__")
                 ]
+                prewarm_event["prewarm_slugs"] = prewarm_slugs
                 if prewarm_slugs:
                     prewarm_tools = load(prewarm_slugs)
                     for t in prewarm_tools:
                         registry.register_if_absent(t)
+                    prewarm_event["loaded_tools"] = [t.name for t in prewarm_tools]
+                    prewarm_event["registered_count"] = len(prewarm_tools)
                     logger.debug("hig292_prewarm slugs=%s", prewarm_slugs)
-            except Exception:
+                else:
+                    prewarm_event["skipped_reason"] = "empty_retrieval"
+            except Exception as exc:
+                prewarm_event["skipped_reason"] = "exception"
+                prewarm_event["error"] = str(exc)[:200]
                 logger.warning("hig292_prewarm_failed", exc_info=True)
+        try:
+            TaskService(session).append_event(task, TaskEventType.log, prewarm_event)
+        except Exception:
+            logger.debug("tool_prewarm_event_failed", exc_info=True)
 
         registry.register_if_absent(
             cast(
