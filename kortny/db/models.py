@@ -1167,9 +1167,9 @@ class ComposioToolCard(Base):
     ``kortny.composio.catalog_sync`` so per-task tool retrieval is purely
     semantic (rank over ``tool_embeddings`` kind ``tool_card``) with no hot-path
     Composio HTTP for candidate listing. ``side_effect`` is the verb-mapped
-    coarse class (read/write/destructive); full input schemas are fetched lazily
-    only for tools that survive selection, so they are intentionally not stored
-    here. ``card_sha`` gates re-embedding the same way the embedding index does.
+    coarse class (read/write/destructive). ``input_schema_json`` is persisted at
+    sync time so tools that survive selection can be built from cache without a
+    hot-path Composio schema fetch. ``card_sha`` gates re-embedding.
     """
 
     __tablename__ = "composio_tool_cards"
@@ -1186,6 +1186,9 @@ class ComposioToolCard(Base):
     description: Mapped[str] = mapped_column(Text, nullable=False)
     side_effect: Mapped[str] = mapped_column(String, nullable=False)
     card_sha: Mapped[str] = mapped_column(String(64), nullable=False)
+    input_schema_json: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
     synced_at: Mapped[datetime] = mapped_column(
         TZ, nullable=False, server_default=func.now()
     )

@@ -44,9 +44,9 @@ def test_render_connected_integrations_basic() -> None:
     # Known toolkit description is injected from TOOLKIT_APP_DESCRIPTIONS.
     assert "Alpha Vantage" in rendered
     assert "Linear" in rendered
-    # Tool names are present.
-    assert "GLOBAL_QUOTE" in rendered
-    assert "list_issues" in rendered
+    # Tool names are NOT rendered in the slim block.
+    assert "GLOBAL_QUOTE" not in rendered
+    assert "list_issues" not in rendered
 
 
 def test_render_connected_integrations_no_toolkits() -> None:
@@ -96,7 +96,8 @@ def test_app_description_map_fallback() -> None:
     assert "Composio" in rendered or "integration" in rendered.lower()
 
 
-def test_per_app_tool_cap() -> None:
+def test_render_connected_integrations_app_only_no_per_tool_csv() -> None:
+    """Awareness block renders only app slug + description, never per-tool CSVs."""
     tool_names = tuple(f"TOOL_{i}" for i in range(50))
     overview = _make_overview(
         (
@@ -107,42 +108,32 @@ def test_per_app_tool_cap() -> None:
             ),
         )
     )
-    rendered = render_connected_integrations(overview, per_app_tool_cap=10)
+    rendered = render_connected_integrations(overview)
     assert rendered is not None
-    # Should contain the "...and 40 more." trailer.
-    assert "...and 40 more." in rendered
-    # Only the first 10 tool names should appear.
-    for i in range(10):
-        assert f"TOOL_{i}" in rendered
-    # Tools beyond the cap should NOT appear as individual names.
-    for i in range(10, 50):
+    # None of the individual tool names should appear.
+    for i in range(50):
         assert f"TOOL_{i}" not in rendered
+    # The app slug must appear.
+    assert "alpha_vantage" in rendered
 
 
-def test_char_budget_truncation_omission() -> None:
-    # Build a very large connected set exceeding max_chars; the algorithm
-    # truncates tool lists until the block fits (or gives up if the minimum
-    # size with just one tool already exceeds the budget — that is a code
-    # boundary condition, not a test requirement).  Use a budget large enough
-    # to exceed when all 100 tools are listed but small enough to force the
-    # truncation loop to run several iterations.
-    tool_names = tuple(f"VERY_LONG_TOOL_NAME_{i}" for i in range(100))
-    overview = _make_overview(
-        (
-            ConnectedToolkitSummary(
-                toolkit_slug="alpha_vantage",
-                app_description="alpha_vantage",
-                tool_names=tool_names,
-            ),
+def test_char_budget_truncation() -> None:
+    # Enough toolkits to potentially exceed a small budget; verify we stay
+    # under the cap without crashing.
+    summaries = tuple(
+        ConnectedToolkitSummary(
+            toolkit_slug=f"toolkit_{i}",
+            app_description=f"toolkit_{i}",
+            tool_names=(),
         )
+        for i in range(200)
     )
-    # Full render with 100 tools would be much larger than 700 chars.
-    max_chars = 700
-    rendered = render_connected_integrations(overview, max_chars=max_chars)
+    max_chars = 500
+    rendered = render_connected_integrations(
+        _make_overview(summaries), max_chars=max_chars
+    )
     assert rendered is not None
     assert len(rendered) <= max_chars
-    # The result should contain a "...and N more." truncation trailer.
-    assert "...and " in rendered and " more." in rendered
 
 
 def test_render_connected_integrations_tools_without_names() -> None:

@@ -1938,6 +1938,24 @@ class AgentTaskExecutor:
 
         self._connected_tool_loader = connected_tool_loader
 
+        # Prewarm top-3 task-relevant tool schemas before the first turn so the
+        # model sees real input schemas without a find_tools round-trip for the
+        # most likely tools.
+        if composio_provider is not None:
+            try:
+                prewarm_slugs = [
+                    s
+                    for s in retrieve(task.input or "")[:3]
+                    if not s.startswith("mcp__")
+                ]
+                if prewarm_slugs:
+                    prewarm_tools = load(prewarm_slugs)
+                    for t in prewarm_tools:
+                        registry.register_if_absent(t)
+                    logger.debug("hig292_prewarm slugs=%s", prewarm_slugs)
+            except Exception:
+                logger.warning("hig292_prewarm_failed", exc_info=True)
+
         registry.register_if_absent(
             cast(
                 Tool,

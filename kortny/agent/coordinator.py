@@ -289,19 +289,25 @@ DEFAULT_SYSTEM_PROMPT = (
     "this task. If a toolkit appears there it IS connected even if you were not "
     "handed its tools this turn; call list_integrations to verify live rather "
     "than asserting it is missing. Do not fabricate connection status. "
-    "When the <connected_integrations> block is present, the listed tools are "
-    "callable DIRECTLY by name — no find_tools hop required. Their schemas are "
-    "fetched on demand. "
+    "When the <connected_integrations> block is present, it shows which apps "
+    "are connected (awareness only). Never guess connected-tool argument names, "
+    "nesting, casing, or required fields — a connected tool's schema is NOT "
+    "known until explicitly loaded. Task-relevant tool schemas are pre-loaded "
+    "before your first turn. If a tool you need is not in your current schemas, "
+    "call find_tools to retrieve and load its schema first, then construct the "
+    "call. "
     "If the request is about data that lives in a connected integration "
     "(issues/tickets, CRM records, docs/pages, finances, analytics), call the "
-    "connected tool directly by its listed name BEFORE answering. "
+    "relevant tool BEFORE answering. If the tool is not yet in your schema set, "
+    "call find_tools first to load it. "
     "Do not answer such requests from channel history, observed messages, or "
     "memory alone, and never merely offer to fetch it later ('I can pull that "
     "if you want') — call it now. "
     "web_search is for public news, commentary, and general information; prefer "
     "connected integrations over web_search for live/domain/private data. "
-    "find_tools is for discovering tools NOT already listed in "
-    "<connected_integrations> (marketplace tools, unconnected integrations). "
+    "find_tools is for discovering and loading any connected tool's schema — "
+    "always call it before constructing a call to a tool whose schema you have "
+    "not yet seen. "
     "Channel mentions are stale hints; the integration is the source of truth. "
     "When answering with text, format for Slack mrkdwn rather than GitHub "
     "Markdown: use *bold*, <https://example.com|label> links, simple line-break "
@@ -908,8 +914,10 @@ class AgentCoordinator:
                         result = self.registry.invoke(tool_call.name, arguments)
                     except ToolNotFoundError as exc:
                         # Before surfacing a recoverable error, attempt to
-                        # lazy-load the tool via the connected_tool_loader
-                        # (direct callability for <connected_integrations> tools).
+                        # lazy-load the tool via the connected_tool_loader.
+                        # When loaded, return schema_loaded_retry_required so
+                        # the model re-examines the schema before constructing
+                        # its call — never execute with guessed arguments.
                         lazy_loaded = False
                         if self.connected_tool_loader is not None:
                             try:
@@ -920,12 +928,24 @@ class AgentCoordinator:
                                         task_obj,
                                         TaskEventType.log,
                                         {
-                                            "message": "connected_tool_lazy_loaded",
+                                            "message": "connected_tool_schema_loaded",
                                             "tool": tool_call.name,
                                         },
                                     )
-                                    result = self.registry.invoke(
-                                        tool_call.name, arguments
+                                    # Schema is now registered. Tell the model
+                                    # to retry with the real schema rather than
+                                    # executing with guessed arguments.
+                                    result = ToolResult(
+                                        output={
+                                            "status": "schema_loaded_retry_required",
+                                            "message": (
+                                                f"Schema for '{tool_call.name}' has been "
+                                                "loaded into this turn. Please re-examine "
+                                                "the input_schema and construct a valid "
+                                                "call with correct argument names, types, "
+                                                "and nesting."
+                                            ),
+                                        }
                                     )
                                     lazy_loaded = True
                             except Exception:

@@ -10,6 +10,7 @@ registry each turn).
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from typing import Any
 
 from kortny.tools.registry import ToolRegistry
 from kortny.tools.types import (
@@ -87,14 +88,22 @@ class FindToolsTool:
         slugs = [slug for slug in self._retrieve(query)][: self._top_k]
         loaded = self._load(slugs) if slugs else ()
 
-        available: list[JsonObject] = []
+        available: list[dict[str, Any]] = []
         newly_loaded = 0
         for tool in loaded:
             if self._registry.register_if_absent(tool):
                 newly_loaded += 1
-            available.append(
-                {"name": tool.name, "description": _first_line(tool.description)}
-            )
+            schema_entry: dict[str, Any] = {
+                "name": tool.name,
+                "description": _first_line(tool.description),
+            }
+            params = getattr(tool, "parameters", None)
+            if params:
+                required = params.get("required", [])
+                schema_entry["input_schema"] = params
+                if required:
+                    schema_entry["required_fields"] = required
+            available.append(schema_entry)
 
         if not available:
             return ToolResult(

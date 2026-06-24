@@ -161,9 +161,10 @@ class ComposioExternalToolProvider:
         """Build executable tools for an explicit set of tool slugs.
 
         The runtime-loading seam for find_tools (HIG-269): resolves each slug's
-        toolkit from the connected set, fetches full schemas in a bounded
-        per-toolkit call, and builds executable tools — the same lazy fetch the
-        ranked path uses, but for a slug set the agent explicitly retrieved.
+        toolkit from the connected set. When a card already has ``input_schema_json``
+        cached, the tool is built directly from the DB row — no Composio HTTP call.
+        Only cards with an empty schema trigger a per-toolkit schema fetch, after
+        which the fetched schema is written back to the card for future prewarms.
         """
 
         wanted = {slug for slug in tool_slugs if slug}
@@ -177,18 +178,37 @@ class ComposioExternalToolProvider:
         }
         if not connections:
             return ()
-        rows = self.session.scalars(
-            select(ComposioToolCard).where(
-                ComposioToolCard.installation_id == self.task.installation_id,
-                ComposioToolCard.tool_slug.in_(sorted(wanted)),
-                ComposioToolCard.toolkit_slug.in_(sorted(connections)),
+        rows = list(
+            self.session.scalars(
+                select(ComposioToolCard).where(
+                    ComposioToolCard.installation_id == self.task.installation_id,
+                    ComposioToolCard.tool_slug.in_(sorted(wanted)),
+                    ComposioToolCard.toolkit_slug.in_(sorted(connections)),
+                )
             )
-        ).all()
-        slugs_by_toolkit: dict[str, set[str]] = {}
-        for row in rows:
-            slugs_by_toolkit.setdefault(row.toolkit_slug, set()).add(row.tool_slug)
+        )
         tools: list[Tool] = []
-        for toolkit_slug, slugs in slugs_by_toolkit.items():
+        needs_fetch: dict[str, set[str]] = {}  # toolkit_slug -> tool_slugs
+        for row in rows:
+            connection = connections.get(row.toolkit_slug)
+            if connection is None:
+                continue
+            if row.input_schema_json:
+                # Cache hit: build synthetic ComposioTool from the card's stored schema.
+                synthetic = ComposioTool(
+                    slug=row.tool_slug,
+                    name=row.name,
+                    description=row.description,
+                    toolkit_slug=row.toolkit_slug,
+                    input_parameters=dict(row.input_schema_json),
+                    tags=(),
+                    version="",
+                )
+                tools.append(self._execute_tool(connection, synthetic))
+            else:
+                needs_fetch.setdefault(row.toolkit_slug, set()).add(row.tool_slug)
+
+        for toolkit_slug, slugs in needs_fetch.items():
             connection = connections[toolkit_slug]
             try:
                 fetched = self.client.list_tools(
@@ -210,7 +230,31 @@ class ComposioExternalToolProvider:
             for tool in fetched:
                 if tool.slug in slugs:
                     tools.append(self._execute_tool(connection, tool))
+                    # Backfill the schema into the card row for future cache hits.
+                    self._backfill_schema(toolkit_slug, tool)
         return tuple(tools)
+
+    def _backfill_schema(self, toolkit_slug: str, tool: ComposioTool) -> None:
+        """Write a freshly fetched input schema back to the stored card row."""
+
+        row = self.session.scalars(
+            select(ComposioToolCard).where(
+                ComposioToolCard.installation_id == self.task.installation_id,
+                ComposioToolCard.toolkit_slug == toolkit_slug,
+                ComposioToolCard.tool_slug == tool.slug,
+            )
+        ).first()
+        if row is not None and not row.input_schema_json:
+            row.input_schema_json = tool.input_parameters or {}
+            try:
+                self.session.flush()
+            except Exception:
+                logger.debug(
+                    "composio_schema_backfill_flush_failed toolkit=%s tool=%s",
+                    toolkit_slug,
+                    tool.slug,
+                    exc_info=True,
+                )
 
     def _load_synced_candidates(self) -> tuple[_SyncedCandidate, ...]:
         if self._synced_candidates is not None:

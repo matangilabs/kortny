@@ -1109,12 +1109,6 @@ class ContextAssembler:
             max_chars=DEFAULT_CAPABILITIES_CONTEXT_MAX_CHARS,
         )
         if connected_block is not None:
-            # Detect whether render_connected_integrations had to truncate by
-            # checking for the "...and N more." trailer in any tool line.
-            if "...and " in connected_block and " more." in connected_block:
-                omissions.append(
-                    ContextOmission("connected_integrations", "budget_compacted", 1)
-                )
             rendered = rendered + "\n" + connected_block
 
         if len(rendered) > DEFAULT_CAPABILITIES_CONTEXT_MAX_CHARS:
