@@ -35,9 +35,10 @@ logger = logging.getLogger(__name__)
 CAPABILITY_PROFILER_PROMPT_NAME = "kortny.integration_learning.capability_profiler"
 _RESPONSE_FORMAT: dict[str, str] = {"type": "json_object"}
 
-# Maximum tools to describe in a single LLM pass.  Composio toolkits rarely
-# exceed 50-60 actions; guard against edge cases.
-_MAX_TOOLS_PER_PASS = 80
+# Batch size for the LLM profiling pass.  Each batch is one LLM call so that
+# large toolkits (e.g. 97-tool twelve_data) are fully covered instead of
+# silently dropping the tail.
+_PROFILER_BATCH_SIZE = 30
 
 # Confidence for capability_profile KG entities — seeded on-connect so we
 # start at active not candidate (profile is immediately useful).
@@ -63,9 +64,14 @@ def build_capability_profile(
     task_id: uuid.UUID,
     toolkit_metadata: dict[str, Any] | None = None,
 ) -> CapabilityProfile | None:
-    """Run one cheap LLM pass to profile a toolkit and write enriched descriptions.
+    """Run batched cheap LLM passes to profile a toolkit and write enriched descriptions.
 
-    Returns the parsed profile, or None if there are no cards or the LLM call
+    Iterates over all tool cards in batches of _PROFILER_BATCH_SIZE so that
+    large toolkits (e.g. 97 tools) are fully covered.  App-level fields
+    (summary, capability_buckets, cross_app_affinity_hints) come from the first
+    successfully-parsed batch; per_tool entries are merged across all batches.
+
+    Returns the parsed profile, or None if there are no cards or every batch
     fails (failures are logged, never propagate — caller must not hard-fail).
 
     Side effects:
@@ -96,22 +102,7 @@ def build_capability_profile(
         )
         return None
 
-    # Build the extraction payload for the LLM pass.
-    tool_list = [
-        {
-            "tool_slug": row.tool_slug,
-            "name": row.name,
-            "description": row.description or row.name,
-            "side_effect": row.side_effect,
-            "required_fields": [
-                k
-                for k, v in (row.input_schema_json or {}).get("properties", {}).items()
-                if k in (row.input_schema_json or {}).get("required", [])
-            ],
-        }
-        for row in cards[:_MAX_TOOLS_PER_PASS]
-    ]
-
+    # Build toolkit metadata dict once — shared across all batch payloads.
     meta: dict[str, Any] = {"toolkit_slug": toolkit_slug}
     if toolkit_metadata:
         meta.update(
@@ -121,13 +112,6 @@ def build_capability_profile(
                 if toolkit_metadata.get(k)
             }
         )
-
-    payload_json = json.dumps(
-        {"toolkit": meta, "tools": tool_list},
-        separators=(",", ":"),
-        sort_keys=True,
-        default=str,
-    )
 
     system_prompt = (
         "You are a tool-description enrichment engine. "
@@ -151,36 +135,70 @@ def build_capability_profile(
         '"cross_app_affinity_hints": [...]}'
     )
 
-    try:
-        completion = llm.complete(
-            task_id=task_id,
-            messages=(
-                ChatMessage(role="system", content=system_prompt),
-                ChatMessage(role="user", content=payload_json),
-            ),
-            response_format=_RESPONSE_FORMAT,
-            prompt_name=CAPABILITY_PROFILER_PROMPT_NAME,
-        )
-        parsed = _parse_profile(
-            completion.content or "", toolkit_slug=toolkit_slug
-        )
-    except Exception as exc:
-        logger.warning(
-            "capability_profiler llm failed toolkit=%s error=%s",
-            toolkit_slug,
-            exc,
-        )
-        return None
+    parsed: CapabilityProfile | None = None
+    enriched_by_slug: dict[str, str] = {}
 
-    if parsed is None:
-        return None
+    for start in range(0, len(cards), _PROFILER_BATCH_SIZE):
+        batch = cards[start : start + _PROFILER_BATCH_SIZE]
+        batch_tool_list = [
+            {
+                "tool_slug": row.tool_slug,
+                "name": row.name,
+                "description": row.description or row.name,
+                "side_effect": row.side_effect,
+                "required_fields": [
+                    k
+                    for k, v in (row.input_schema_json or {})
+                    .get("properties", {})
+                    .items()
+                    if k in (row.input_schema_json or {}).get("required", [])
+                ],
+            }
+            for row in batch
+        ]
+        payload_json = json.dumps(
+            {"toolkit": meta, "tools": batch_tool_list},
+            separators=(",", ":"),
+            sort_keys=True,
+            default=str,
+        )
+        try:
+            completion = llm.complete(
+                task_id=task_id,
+                messages=(
+                    ChatMessage(role="system", content=system_prompt),
+                    ChatMessage(role="user", content=payload_json),
+                ),
+                response_format=_RESPONSE_FORMAT,
+                prompt_name=CAPABILITY_PROFILER_PROMPT_NAME,
+            )
+            batch_parsed = _parse_profile(
+                completion.content or "", toolkit_slug=toolkit_slug
+            )
+        except Exception as exc:
+            logger.warning(
+                "capability_profiler batch failed toolkit=%s batch_start=%s error=%s",
+                toolkit_slug,
+                start,
+                exc,
+            )
+            continue
+        if batch_parsed is None:
+            logger.warning(
+                "capability_profiler batch parse failed toolkit=%s batch_start=%s",
+                toolkit_slug,
+                start,
+            )
+            continue
+        if parsed is None:
+            parsed = batch_parsed  # first successful batch provides app-level fields
+        for item in batch_parsed.per_tool:
+            slug = item.get("tool_slug")
+            desc = item.get("enriched_description")
+            if slug and desc:
+                enriched_by_slug[slug] = desc
 
     # Persist enriched_description onto each card.
-    enriched_by_slug: dict[str, str] = {
-        t["tool_slug"]: t["enriched_description"]
-        for t in parsed.per_tool
-        if t.get("enriched_description") and t.get("tool_slug")
-    }
     if enriched_by_slug:
         _write_enriched_descriptions(
             session,
@@ -188,6 +206,9 @@ def build_capability_profile(
             toolkit_slug=toolkit_slug,
             enriched_by_slug=enriched_by_slug,
         )
+
+    if parsed is None:
+        return None
 
     # Upsert the KG capability_profile entity.
     _upsert_kg_profile_entity(
