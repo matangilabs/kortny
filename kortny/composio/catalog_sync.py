@@ -19,10 +19,11 @@ Triggers (both wire into this module):
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import time
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -38,7 +39,12 @@ from kortny.composio.client import (
 )
 from kortny.composio.tool_cards import card_sha, side_effect_for_tool
 from kortny.config import Settings, load_settings
-from kortny.db.models import ComposioConnection, ComposioToolCard, Installation
+from kortny.db.models import (
+    ComposioConnection,
+    ComposioToolCard,
+    Installation,
+    KnowledgeGraphEntity,
+)
 from kortny.db.session import make_session_factory
 from kortny.embeddings import EmbeddingIndex, create_embedding_backend
 from kortny.llm import LLMService
@@ -372,6 +378,63 @@ class ComposioCatalogSyncService:
             return
 
         try:
+            # --- Stale gate -------------------------------------------------
+            # Compute a digest of all current card_shas for this toolkit.
+            # If the KG profile entity already carries this digest AND every card
+            # has an enriched_description, skip the LLM pass (no-op, no cost).
+            card_sha_rows = self.session.execute(
+                select(
+                    ComposioToolCard.tool_slug,
+                    ComposioToolCard.card_sha,
+                    ComposioToolCard.enriched_description,
+                ).where(
+                    ComposioToolCard.installation_id == installation_id,
+                    ComposioToolCard.toolkit_slug == toolkit_slug,
+                )
+            ).all()
+
+            if not card_sha_rows:
+                return
+
+            sorted_shas = "".join(
+                row.card_sha for row in sorted(card_sha_rows, key=lambda r: r.tool_slug)
+            )
+            card_sha_digest = hashlib.sha256(sorted_shas.encode()).hexdigest()
+
+            canonical_key = f"composio_app:{toolkit_slug}"
+            existing_entity = self.session.scalars(
+                select(KnowledgeGraphEntity).where(
+                    KnowledgeGraphEntity.installation_id == installation_id,
+                    KnowledgeGraphEntity.canonical_key == canonical_key,
+                )
+            ).first()
+
+            all_enriched = all(
+                row.enriched_description is not None for row in card_sha_rows
+            )
+            stored_digest = (
+                (existing_entity.attrs_json or {})
+                .get("generated_from", {})
+                .get("card_sha_digest")
+                if existing_entity is not None
+                else None
+            )
+            if all_enriched and stored_digest == card_sha_digest:
+                logger.debug(
+                    "capability_profiler skip (current) toolkit=%s digest=%s",
+                    toolkit_slug,
+                    card_sha_digest,
+                )
+                return
+
+            logger.debug(
+                "capability_profiler run toolkit=%s all_enriched=%s digest_match=%s",
+                toolkit_slug,
+                all_enriched,
+                stored_digest == card_sha_digest,
+            )
+
+            # --- Profile pass -----------------------------------------------
             from kortny.integration_learning.profiles import build_capability_profile
 
             toolkit_meta: dict[str, Any] | None = None
@@ -398,6 +461,21 @@ class ComposioCatalogSyncService:
                 task_id=self._profile_task_id,
                 toolkit_metadata=toolkit_meta,
             )
+
+            # --- Stamp the digest on the KG entity --------------------------
+            # Re-fetch the entity (build_capability_profile may have just created it).
+            stamped_entity = self.session.scalars(
+                select(KnowledgeGraphEntity).where(
+                    KnowledgeGraphEntity.installation_id == installation_id,
+                    KnowledgeGraphEntity.canonical_key == canonical_key,
+                )
+            ).first()
+            if stamped_entity is not None:
+                attrs = dict(stamped_entity.attrs_json or {})
+                attrs["generated_from"] = {"card_sha_digest": card_sha_digest}
+                stamped_entity.attrs_json = attrs
+                self.session.flush()
+
         except Exception:
             logger.exception(
                 "capability_profiler failed toolkit=%s; sync continues",
@@ -583,6 +661,9 @@ class ComposioCatalogSyncWorker:
         poll_interval_seconds: float | None = None,
         advisory_lock_key: int | None = None,
         use_advisory_lock: bool = True,
+        profiler_factory: (
+            Callable[[Session, uuid.UUID], tuple[LLMService, uuid.UUID] | None] | None
+        ) = None,
     ) -> None:
         self.session_factory = session_factory or make_session_factory()
         self.settings = settings
@@ -598,6 +679,7 @@ class ComposioCatalogSyncWorker:
             else DEFAULT_SYNC_ADVISORY_LOCK_KEY
         )
         self.use_advisory_lock = use_advisory_lock
+        self._profiler_factory = profiler_factory
 
     def run_once(self) -> tuple[InstallationSyncResult, ...]:
         engine = self.session_factory.kw["bind"]
@@ -629,6 +711,8 @@ class ComposioCatalogSyncWorker:
         for installation_id in session.scalars(
             select(Installation.id).order_by(Installation.created_at)
         ):
+            # Wire profiler per-installation so task attribution is correct.
+            self._wire_profiler(session, service, installation_id)
             # HIG-209 Part 3: cheap pre-pass — requeue any connect-parked tasks
             # whose toolkit is now connected in scope, then sync that toolkit so
             # the resumed task's tool resolves on re-run.
@@ -641,6 +725,27 @@ class ComposioCatalogSyncWorker:
                     installation_id,
                 )
         return tuple(results)
+
+    def _wire_profiler(
+        self,
+        session: Session,
+        service: ComposioCatalogSyncService,
+        installation_id: uuid.UUID,
+    ) -> None:
+        """Wire profiler LLM service into the catalog sync service for this installation."""
+        if self._profiler_factory is None:
+            return
+        try:
+            result = self._profiler_factory(session, installation_id)
+            if result is not None:
+                llm, task_id = result
+                service.set_profiler(llm, task_id)
+        except Exception:
+            logger.exception(
+                "catalog_sync profiler factory failed installation_id=%s; "
+                "profiling skipped this cycle",
+                installation_id,
+            )
 
     def _resume_parked_connect_tasks(
         self,

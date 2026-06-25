@@ -28,6 +28,7 @@ class ModelRouteTier(StrEnum):
     high_reasoning = "high_reasoning"
     humanizer = "humanizer"
     vision = "vision"
+    profiler = "profiler"
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,6 +142,14 @@ class ModelRouter:
             # to llm_model when unset; if neither is vision-capable the LLMService
             # fail-loud assert_vision_capable check fires with a clear message.
             return self.settings.llm_vision_model or default
+        if tier is ModelRouteTier.profiler:
+            # Capability profiler runs cheap JSON passes on tool batches; must be
+            # a capable-JSON model. Falls back to standard, then llm_model.
+            return (
+                self.settings.llm_profiler_model
+                or self.settings.llm_standard_model
+                or default
+            )
         return (
             self.settings.llm_high_reasoning_model
             or self.settings.llm_analysis_model
