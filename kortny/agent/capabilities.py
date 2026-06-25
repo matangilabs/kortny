@@ -43,6 +43,8 @@ class ConnectedToolkitSummary:
     toolkit_slug: str
     app_description: str
     tool_names: tuple[str, ...]
+    profile_summary: str | None = None
+    capability_buckets: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,11 +126,19 @@ def render_connected_integrations(
 
     lines = ["<connected_integrations>"]
     for tk in overview.connected_toolkits:
+        # Curated head descriptions are primary.
         desc = TOOLKIT_APP_DESCRIPTIONS.get(tk.toolkit_slug)
         if desc is None:
-            human_name = _humanize_slug(tk.toolkit_slug)
-            desc = f"{human_name} — Third-party integration via Composio."
+            # Prefer learned profile summary for long-tail apps.
+            if tk.profile_summary:
+                human_name = _humanize_slug(tk.toolkit_slug)
+                desc = f"{human_name} — {tk.profile_summary}"
+            else:
+                human_name = _humanize_slug(tk.toolkit_slug)
+                desc = f"{human_name} — Third-party integration via Composio."
         lines.append(f"- {tk.toolkit_slug}: {desc}")
+        if tk.capability_buckets:
+            lines.append(f"  Capabilities: {', '.join(tk.capability_buckets[:6])}")
     lines.append("</connected_integrations>")
     rendered = "\n".join(lines)
     # Hard-truncate only if the block somehow exceeds the budget (extremely

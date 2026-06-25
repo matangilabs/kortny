@@ -24,6 +24,7 @@ class ToolCard:
     visibility_scope_type: str | None = None
     visibility_scope_id: str | None = None
     can_replace_native_tools: tuple[str, ...] = ()
+    enriched_description: str | None = None
 
     def prompt_payload(
         self,

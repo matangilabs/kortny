@@ -349,11 +349,67 @@ class SlackChannelHistoryTool:
                 error_code,
                 _slack_retry_after_seconds(exc.response),
             )
+            # Auto-fallback: if model supplied a bad channel_id that returned
+            # channel_not_found, retry with the task's default channel so the
+            # call doesn't hard-fail on hallucinated IDs (HIG-295 Part 3).
+            requested_channel_id = _optional_string(
+                args.get("channel_id"), "channel_id"
+            )
+            if (
+                error_code in ("channel_not_found", "not_in_channel")
+                and self.default_channel_id is not None
+                and channel_id != self.default_channel_id
+            ):
+                logger.info(
+                    "slack_channel_history channel_not_found on %s; "
+                    "falling back to default channel %s",
+                    channel_id,
+                    self.default_channel_id,
+                )
+                try:
+                    root_messages = self._fetch_history_roots(
+                        channel_id=self.default_channel_id,
+                        oldest_ts=oldest_ts,
+                        latest_ts=latest_ts,
+                        limit=limit,
+                    )
+                    fallback_messages = self._build_output_messages(
+                        channel_id=self.default_channel_id,
+                        root_messages=root_messages,
+                        oldest_ts=oldest_ts,
+                        latest_ts=latest_ts,
+                        limit=limit,
+                        include_threads=include_threads,
+                    )
+                    return ToolResult(
+                        output={
+                            "channel_id": self.default_channel_id,
+                            "oldest_ts": oldest_ts,
+                            "latest_ts": latest_ts,
+                            "limit": limit,
+                            "include_threads": include_threads,
+                            "context_source": "slack_api",
+                            "cache_hit": False,
+                            "slack_api_called": True,
+                            "message_count": len(fallback_messages),
+                            "messages": fallback_messages,
+                            "fallback_note": (
+                                f"Requested channel {channel_id!r} was not found "
+                                f"or not accessible; fell back to the current task "
+                                f"channel {self.default_channel_id!r}."
+                            ),
+                        }
+                    )
+                except (SlackApiError, SlackChannelHistoryError) as fallback_exc:
+                    logger.warning(
+                        "slack_channel_history fallback also failed "
+                        "default_channel=%s error=%s",
+                        self.default_channel_id,
+                        fallback_exc,
+                    )
             return _recoverable_history_result(
                 channel_id=channel_id,
-                requested_channel_id=_optional_string(
-                    args.get("channel_id"), "channel_id"
-                ),
+                requested_channel_id=requested_channel_id,
                 default_channel_id=self.default_channel_id,
                 oldest_ts=oldest_ts,
                 latest_ts=latest_ts,

@@ -2063,13 +2063,40 @@ class AgentTaskExecutor:
                     tools_by_slug.setdefault(card.toolkit_slug, []).append(
                         card.tool_slug
                     )
+                # Load learned capability profiles from KG.
+                profile_by_slug: dict[str, dict[str, Any]] = {}
+                canonical_keys = [f"composio_app:{slug}" for slug in toolkit_slugs]
+                from kortny.db.models import KnowledgeGraphEntity
+
+                profile_rows = list(
+                    session.scalars(
+                        select(KnowledgeGraphEntity).where(
+                            KnowledgeGraphEntity.installation_id
+                            == task.installation_id,
+                            KnowledgeGraphEntity.entity_type == "integration",
+                            KnowledgeGraphEntity.canonical_key.in_(canonical_keys),
+                        )
+                    )
+                )
+                for row in profile_rows:
+                    slug = (row.canonical_key or "").removeprefix("composio_app:")
+                    attrs = row.attrs_json or {}
+                    if attrs.get("kind") == "capability_profile":
+                        profile_by_slug[slug] = attrs
                 for slug in toolkit_slugs:
                     tool_names = tuple(sorted(tools_by_slug.get(slug, [])))
+                    profile = profile_by_slug.get(slug)
                     summaries.append(
                         ConnectedToolkitSummary(
                             toolkit_slug=slug,
                             app_description=slug,
                             tool_names=tool_names,
+                            profile_summary=profile.get("summary") if profile else None,
+                            capability_buckets=(
+                                tuple(profile.get("capability_buckets", [])[:8])
+                                if profile
+                                else ()
+                            ),
                         )
                     )
             from dataclasses import replace as _replace
