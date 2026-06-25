@@ -24,6 +24,7 @@ import time
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Any
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -40,6 +41,7 @@ from kortny.config import Settings, load_settings
 from kortny.db.models import ComposioConnection, ComposioToolCard, Installation
 from kortny.db.session import make_session_factory
 from kortny.embeddings import EmbeddingIndex, create_embedding_backend
+from kortny.llm import LLMService
 from kortny.tool_selection import tool_card_embedding_text
 from kortny.tools.composio_execute import composio_runtime_tool_name
 from kortny.tools.pinning import ToolPinService, compute_tool_fingerprint
@@ -93,6 +95,13 @@ class ComposioCatalogSyncService:
         self.page_size = max(1, page_size)
         self.rate_limit_retries = max(0, rate_limit_retries)
         self._sleep = sleep
+        self.llm: LLMService | None = None
+        self._profile_task_id: uuid.UUID | None = None
+
+    def set_profiler(self, llm: LLMService, task_id: uuid.UUID) -> None:
+        """Wire in an LLM service for the capability profiler."""
+        self.llm = llm
+        self._profile_task_id = task_id
 
     def connected_toolkits(self, installation_id: object) -> tuple[str, ...]:
         """Distinct active, connected toolkit slugs for an installation."""
@@ -155,6 +164,13 @@ class ComposioCatalogSyncService:
             toolkit_slug=toolkit_slug,
             present_tool_slugs={tool.slug for tool in tools},
         )
+        # Profile AFTER upsert so cards exist; BEFORE embed so enriched
+        # descriptions are present when _embed_cards builds its text.
+        if self.llm is not None and self._profile_task_id is not None:
+            self._profile_toolkit(
+                installation_id=installation_id,
+                toolkit_slug=toolkit_slug,
+            )
         embedded = self._embed_cards(
             installation_id=installation_id,
             toolkit_slug=toolkit_slug,
@@ -343,6 +359,51 @@ class ComposioCatalogSyncService:
                     tool.slug,
                 )
 
+    def _profile_toolkit(
+        self,
+        *,
+        installation_id: object,
+        toolkit_slug: str,
+    ) -> None:
+        """Run the capability profiler for one toolkit; never fails sync."""
+        if not isinstance(installation_id, uuid.UUID):
+            return
+        if self.llm is None or self._profile_task_id is None:
+            return
+
+        try:
+            from kortny.integration_learning.profiles import build_capability_profile
+
+            toolkit_meta: dict[str, Any] | None = None
+            try:
+                tk = self.client.get_toolkit(toolkit_slug)
+                toolkit_meta = {
+                    "name": tk.name,
+                    "description": tk.description,
+                    "categories": list(tk.categories),
+                    "auth_schemes": list(tk.auth_schemes),
+                }
+            except Exception as exc:
+                logger.debug(
+                    "catalog_sync get_toolkit failed toolkit=%s error=%s",
+                    toolkit_slug,
+                    exc,
+                )
+
+            build_capability_profile(
+                self.session,
+                installation_id=installation_id,
+                toolkit_slug=toolkit_slug,
+                llm=self.llm,
+                task_id=self._profile_task_id,
+                toolkit_metadata=toolkit_meta,
+            )
+        except Exception:
+            logger.exception(
+                "capability_profiler failed toolkit=%s; sync continues",
+                toolkit_slug,
+            )
+
     def _embed_cards(
         self,
         *,
@@ -358,6 +419,7 @@ class ComposioCatalogSyncService:
                 ComposioToolCard.name,
                 ComposioToolCard.description,
                 ComposioToolCard.side_effect,
+                ComposioToolCard.enriched_description,
             ).where(
                 ComposioToolCard.installation_id == installation_id,
                 ComposioToolCard.toolkit_slug == toolkit_slug,
@@ -372,6 +434,7 @@ class ComposioCatalogSyncService:
                     name=row.name,
                     description=row.description,
                     side_effect=row.side_effect,
+                    enriched_description=getattr(row, "enriched_description", None),
                 ),
             )
             for row in cards
@@ -467,13 +530,19 @@ def _embedding_text(
     name: str,
     description: str,
     side_effect: str,
+    enriched_description: str | None = None,
 ) -> str:
     """Embedding text for a synced card, matching the runtime card's text.
 
     Mirrors ``tool_card_embedding_text`` over the same ToolCard fields the
     provider builds at selection time so the sha gate and ranking stay
     consistent across the sync and the hot path.
+
+    When ``enriched_description`` is provided (HIG-295), it is injected onto
+    the card so ``tool_card_embedding_text`` prefers it over the raw description.
     """
+
+    from dataclasses import replace as _replace
 
     from kortny.composio.runtime import RuntimeComposioConnection
     from kortny.composio.tool_cards import synced_tool_card
@@ -492,6 +561,8 @@ def _embedding_text(
         description=description,
         side_effect=side_effect,
     )
+    if enriched_description:
+        card = _replace(card, enriched_description=enriched_description)
     return tool_card_embedding_text(card)
 
 

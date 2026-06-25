@@ -1189,6 +1189,7 @@ class ComposioToolCard(Base):
     input_schema_json: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, server_default=text("'{}'::jsonb")
     )
+    enriched_description: Mapped[str | None] = mapped_column(Text, nullable=True)
     synced_at: Mapped[datetime] = mapped_column(
         TZ, nullable=False, server_default=func.now()
     )

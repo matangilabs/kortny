@@ -14,10 +14,16 @@ from kortny.tool_selection.models import ToolCard
 
 
 def tool_card_embedding_text(card: ToolCard) -> str:
-    """Compose the canonical embedding text for one external tool card."""
+    """Compose the canonical embedding text for one external tool card.
 
+    Prefers ``enriched_description`` when present (HIG-295): clean,
+    capability-clear text that retrieval can distinguish (e.g. ATR vs Keltner).
+    Falls back to the raw description from the Composio catalog.
+    """
+
+    description = card.enriched_description or card.description
     return (
-        f"{card.display_name}. {card.description} "
+        f"{card.display_name}. {description} "
         f"Capabilities: {', '.join(card.capabilities)}. "
         f"Toolkit: {card.toolkit_slug}."
     )
