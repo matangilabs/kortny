@@ -91,7 +91,7 @@ def test_env_bootstrap_seeds_provider_models_tiers_and_audit(
     assert result.skipped_reason is None
     assert result.provider_account_id is not None
     assert result.model_count == 6
-    assert result.tier_assignment_count == 7
+    assert result.tier_assignment_count == 8
     assert provider is not None
     assert provider.provider_kind == "openrouter"
     assert provider.status == "active"
@@ -124,6 +124,9 @@ def test_env_bootstrap_seeds_provider_models_tiers_and_audit(
         # HIG-279: vision tier falls back to llm_model when LLM_VISION_MODEL is
         # unset; in this test fixture that is "fallback/model".
         "vision": "fallback/model",
+        # Profiler: cheap JSON pass on tool batches, falls back to standard when
+        # LLM_PROFILER_MODEL is unset.
+        "profiler": "deepseek/deepseek-v4-pro",
     }
     assert audit is not None
     assert audit.action == "bootstrap"

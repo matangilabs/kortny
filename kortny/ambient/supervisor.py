@@ -296,10 +296,74 @@ def build_default_loops(settings: Settings) -> list[LoopSpec]:
         )
 
     def _composio_catalog_sync() -> None:
+        import uuid as _uuid
+
+        from sqlalchemy.orm import Session as _Session
+
+        from kortny.llm import LLMService as _LLMService
+        from kortny.llm.routing import ModelRouter as _ModelRouter
+        from kortny.llm.routing import ModelRouteTier as _ModelRouteTier
+        from kortny.llm.runtime_config import (
+            create_provider_for_selection as _create_provider_for_selection,
+        )
+        from kortny.llm.runtime_config import (
+            select_runtime_model as _select_runtime_model,
+        )
+        from kortny.tasks.identity import TaskIdentity as _TaskIdentity
+        from kortny.tasks.service import TaskService as _TaskService
+
+        def _profiler_factory(
+            session: _Session,
+            installation_id: _uuid.UUID,
+        ) -> tuple[_LLMService, _uuid.UUID] | None:
+            try:
+                model_route = _ModelRouter(settings).route_for_tier(
+                    _ModelRouteTier.profiler,
+                    reason="capability_profile",
+                )
+                selection = _select_runtime_model(
+                    session=session,
+                    settings=settings,
+                    installation_id=installation_id,
+                    model_route=model_route,
+                )
+                llm = _LLMService(
+                    session=session,
+                    provider=_create_provider_for_selection(
+                        settings=settings,
+                        selection=selection,
+                    ),
+                    provider_name=selection.provider_name,
+                    model_route=selection.model_route,
+                    settings=settings,
+                )
+                # Stable synthetic task per installation for cost attribution.
+                task_service = _TaskService(session)
+                identity = _TaskIdentity.synthetic(
+                    source="capability-profiler",
+                    source_id=str(installation_id),
+                    input_text="capability profiler: enrich composio tool descriptions",
+                )
+                task = task_service.create_task(
+                    installation_id=installation_id,
+                    slack_channel_id="SYSTEM",
+                    slack_user_id="SYSTEM",
+                    input="capability profiler: enrich composio tool descriptions",
+                    identity=identity,
+                )
+                return llm, task.id
+            except Exception:
+                logger.exception(
+                    "capability profiler factory failed installation_id=%s",
+                    installation_id,
+                )
+                return None
+
         worker = ComposioCatalogSyncWorker(
             settings=settings,
             poll_interval_seconds=settings.composio_sync_interval_hours * 3600.0,
             advisory_lock_key=settings.composio_sync_advisory_lock_key,
+            profiler_factory=_profiler_factory,
         )
         run_gated_forever(
             gate=SystemDriveGate(

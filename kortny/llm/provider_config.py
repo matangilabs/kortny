@@ -37,6 +37,7 @@ CONFIG_TIERS: tuple[ModelRouteTier, ...] = (
     ModelRouteTier.high_reasoning,
     ModelRouteTier.humanizer,
     ModelRouteTier.vision,
+    ModelRouteTier.profiler,
 )
 
 

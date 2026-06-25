@@ -61,6 +61,9 @@ class Settings(BaseSettings):
     llm_vision_model: str | None = Field(
         default=None, validation_alias="LLM_VISION_MODEL"
     )
+    llm_profiler_model: str | None = Field(
+        default=None, validation_alias="LLM_PROFILER_MODEL"
+    )
     llm_config_force_env: bool = Field(
         default=False, validation_alias="LLM_CONFIG_FORCE_ENV"
     )
@@ -613,6 +616,7 @@ class Settings(BaseSettings):
         "llm_high_reasoning_model",
         "llm_humanizer_model",
         "llm_vision_model",
+        "llm_profiler_model",
         "otel_exporter_otlp_endpoint",
         "otel_exporter_otlp_headers",
         "langfuse_host",
@@ -663,6 +667,7 @@ class Settings(BaseSettings):
         "llm_high_reasoning_model",
         "llm_humanizer_model",
         "llm_vision_model",
+        "llm_profiler_model",
     )
     @classmethod
     def _strip_optional_model(cls, value: str | None) -> str | None:
