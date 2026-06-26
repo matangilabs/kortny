@@ -35,8 +35,8 @@ from kortny.observe.ambient_files import (
     summarize_event_files,
 )
 from kortny.observe.service import ObserveService
-from kortny.simulator.fixtures import SIM_MARKER_KEY, build_story
 from kortny.slack.ingress import SlackIngress
+from scripts.demo.fixtures import SIM_MARKER_KEY, build_story
 
 TEST_POSTGRES_URL = os.environ.get("KORTNY_TEST_POSTGRES_URL")
 
