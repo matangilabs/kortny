@@ -1,23 +1,30 @@
-"""Seed, inspect, and remove backdated synthetic workspace history.
+"""Northwind demo workspace DB seeder.
 
-The seeder writes rows that are indistinguishable from real ones to their
-consumers (witness profile scans, episode retrieval, observation queries),
-except that every row carries a simulator marker so ``clean`` can remove
-exactly what ``seed`` created:
+Seeds, inspects, and removes a deterministic backdated "Northwind" team
+history directly in the database so the ambient stack (witness extraction,
+candidate lifecycle, accept-to-automation) can be exercised and demoed
+without waiting weeks of real time.
 
-- ``observation_events.visibility_metadata`` contains ``{"sim": true}``;
-- the channel profile's ``metadata_json`` contains ``{"sim": true}``;
-- synthetic tasks use ``synthetic:sim:{slug}`` identity keys;
-- a sim-created channel membership carries ``{"sim_created": true}``.
+Canonical invocation (against the live dev database inside compose):
 
-No Slack messages are posted and no LLM is called at seed time.
+    docker compose exec worker uv run python -m scripts.demo.db_seed \
+        seed --channel C0123456789 --days 21
+    docker compose exec worker uv run python -m scripts.demo.db_seed status
+    docker compose exec worker uv run python -m scripts.demo.db_seed clean
+
+``seed`` requires an explicit ``--channel`` (use a real test channel ID so
+post-accept confirmations land somewhere visible) and refuses to run when no
+installation exists. Nothing is posted to Slack and no LLM is called.
 """
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
+import sys
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -28,6 +35,7 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 from sqlalchemy.sql.elements import ColumnElement
 
+from kortny.config import load_settings
 from kortny.db.models import (
     Episode,
     Installation,
@@ -39,11 +47,13 @@ from kortny.db.models import (
     TaskStatus,
     WitnessOpportunityCandidate,
 )
+from kortny.db.session import make_session_factory, session_scope
 from kortny.memory.episodes import EpisodeService
 from kortny.observe.service import ObserveService
-from kortny.simulator.fixtures import (
+from kortny.tasks import TaskService
+from kortny.tasks.identity import TaskIdentity
+from scripts.demo.fixtures import (
     DEFAULT_SIM_DAYS,
-    JEN,
     MARCO,
     PERSONAS,
     PRIYA,
@@ -52,12 +62,11 @@ from kortny.simulator.fixtures import (
     SIM_SOURCE,
     SIM_TASK_IDENTITY_PREFIX,
     SIM_TASK_IDENTITY_SOURCE,
+    THEO,
     SimMessage,
     SimPersona,
     build_story,
 )
-from kortny.tasks import TaskService
-from kortny.tasks.identity import TaskIdentity
 
 PROFILE_CONFIDENCE_SCORE = Decimal("0.750")
 
@@ -73,55 +82,35 @@ class SimTaskSpec:
     slug: str
     persona: SimPersona
     window_fraction: float
-    input: str
-    result_summary: str
+    about: str
+
+    @property
+    def input(self) -> str:
+        return f"Can you give me a summary of {self.about}?"
+
+    @property
+    def result_summary(self) -> str:
+        return f"Here is a summary of {self.about} based on the recent channel history."
 
 
 SIM_TASK_SPECS: tuple[SimTaskSpec, ...] = (
     SimTaskSpec(
-        slug="trading-summary-recap",
-        persona=PRIYA,
-        window_fraction=0.70,
-        input=(
-            "What did the desk post for yesterday's end-of-day trading "
-            "summary? I need the numbers for the morning meeting."
-        ),
-        result_summary=(
-            "Compiled the trading summary numbers the team posts manually "
-            "every weekday around 5pm: yesterday closed at +212k PnL across "
-            "187 fills with ACME-B as the top book. Priya copies these from "
-            "the blotter export by hand each evening."
-        ),
-    ),
-    SimTaskSpec(
-        slug="weekly-status-compile",
-        persona=JEN,
-        window_fraction=0.45,
-        input=(
-            "Pull together the status updates from this week's Friday thread "
-            "so I can paste them into the leadership report."
-        ),
-        result_summary=(
-            "Drafted the weekly status report Jen compiles by hand every "
-            "Friday: collected the thread replies (signals backtest at 80%, "
-            "rack migration done, telemetry collectors pending) and formatted "
-            "them into the usual leadership summary."
-        ),
-    ),
-    SimTaskSpec(
-        slug="q2-pipeline-verification",
+        slug="standup-recap",
         persona=MARCO,
+        window_fraction=0.70,
+        about="this week's standup posts",
+    ),
+    SimTaskSpec(
+        slug="stripe-webhook-check",
+        persona=THEO,
+        window_fraction=0.45,
+        about="the Stripe webhook issue",
+    ),
+    SimTaskSpec(
+        slug="redshift-vs-bigquery",
+        persona=PRIYA,
         window_fraction=0.20,
-        input=(
-            "Can you sanity-check the Q2 pipeline numbers doc? Nobody has "
-            "double-checked it and finance needs it before Thursday."
-        ),
-        result_summary=(
-            "Cross-checked the Q2 pipeline numbers doc Marco asked the team "
-            "to verify before Thursday; flagged two stale rows in the revenue "
-            "tab. The doc still needs a final owner sign-off — nobody has "
-            "claimed the verification yet."
-        ),
+        about="the metrics pipeline decision",
     ),
 )
 
@@ -189,7 +178,6 @@ def seed_simulation(
     identity keys, and the channel profile is upserted (its version is
     bumped on re-seed so the witness runner treats it as scan-due again).
     """
-
     channel_id = channel_id.strip()
     if not channel_id:
         raise SimulatorError("A non-empty --channel is required.")
@@ -261,7 +249,6 @@ def clean_simulation(session: Session) -> CleanReport:
     Schedules created by accepting an automated candidate are intentionally
     left in place; they are reported in ``automated_candidate_notes``.
     """
-
     sim_task_ids = list(
         session.scalars(
             select(Task.id).where(
@@ -360,7 +347,6 @@ def clean_simulation(session: Session) -> CleanReport:
 
 def simulation_status(session: Session) -> StatusReport:
     """Report current simulator row counts without modifying anything."""
-
     observation_rows = list(
         session.execute(
             select(
@@ -753,66 +739,69 @@ def _upsert_profile(
 
 def _profile_summary(channel_id: str) -> str:
     return (
-        f"Channel {channel_id} is Acme Robotics' trading-operations channel. "
-        "Priya posts a hand-compiled end-of-day trading summary every weekday "
-        "around 17:00. Jen collects status updates in a thread every Friday "
-        "morning and pastes a manually compiled weekly report around noon. "
-        "Marco asked for someone to double-check the Q2 pipeline numbers doc "
-        "before Thursday and nobody picked it up. A fleet telemetry vendor "
-        "decision between TelemetryHub and GridWatch was debated and trailed "
-        "off without an owner. The rest is greetings, memes, and ops chatter."
+        f"Channel {channel_id} is Northwind's engineering and product coordination hub. "
+        "Marco and Lena post weekday standup updates Mon/Wed/Thu covering what shipped "
+        "and what is next. Priya collects status updates in a thread every Friday and "
+        "pastes a manually compiled weekly report around noon. Theo flagged a Stripe "
+        "webhook signing secret issue that nobody has resolved. Marco and the team "
+        "debated Redshift vs BigQuery for the metrics pipeline but the decision trailed "
+        "off without an owner. Priya shared the v2 product roadmap PDF before the "
+        "stakeholder sync. The rest is greetings and ops chatter."
     )
 
 
 def _semantic_extraction() -> dict[str, Any]:
     return {
         "likely_purpose": (
-            "Trading operations coordination: daily numbers, weekly status, "
-            "and infrastructure decisions for Acme Robotics."
+            "Engineering and product coordination for Northwind B2B SaaS: "
+            "standups, weekly status, ops alerts, and launch preparation."
         ),
         "recurring_topics": [
-            "end-of-day trading summary",
+            "weekday standup updates",
             "weekly status report",
-            "Q2 pipeline numbers doc",
-            "fleet telemetry vendor decision",
+            "Stripe webhook signing secret issue",
+            "Redshift vs BigQuery metrics pipeline decision",
+            "v2 product launch preparation",
         ],
         "workflows": [
-            "Priya hand-compiles an EOD trading summary from the blotter "
-            "every weekday at about 17:00.",
-            "Jen asks for thread updates every Friday at 10:00 and pastes a "
+            "Marco and Lena post weekday standup updates Mon/Wed/Thu covering "
+            "what shipped and what is next.",
+            "Priya asks for thread updates every Friday at 10:00 and pastes a "
             "hand-compiled weekly status report around 12:00.",
         ],
         "important_entities": [
-            "Priya Raman (trading operations lead)",
-            "Jen Park (program manager)",
-            "Marco Diaz (quant developer)",
-            "Sam Okafor (infrastructure engineer)",
-            "TelemetryHub",
-            "GridWatch",
+            "Dana Okonkwo (Founder / CEO)",
+            "Priya Raman (Product Manager)",
+            "Marco Diaz (Senior Engineer)",
+            "Lena Foss (Engineer)",
+            "Theo Brandt (Ops / RevOps)",
+            "Stripe",
+            "Redshift",
+            "BigQuery",
         ],
         "assumptions": [
-            "The daily trading summary is compiled manually and could be "
-            "automated on a weekday 5pm cadence.",
+            "The standup posts happen manually Mon/Wed/Thu and could be "
+            "structured or summarized automatically.",
             "The Friday status report is compiled by hand from thread "
             "replies every week.",
-            "The Q2 pipeline numbers doc still needs a one-time verification "
-            "before Thursday.",
-            "The fleet telemetry vendor decision (TelemetryHub vs GridWatch) "
-            "is unresolved and has no owner.",
+            "The Stripe webhook signing secret issue still needs a one-time "
+            "verification before the v2 launch.",
+            "The Redshift vs BigQuery decision for the metrics pipeline is "
+            "unresolved and has no owner.",
         ],
         "help_opportunities": [
-            "Post the end-of-day trading summary automatically every weekday at 5pm.",
+            "Summarize or structure the weekday standup updates automatically.",
             "Compile the Friday status report from the thread replies.",
-            "Verify the Q2 pipeline numbers doc once before Thursday.",
-            "Track the open TelemetryHub vs GridWatch vendor decision.",
+            "Verify the Stripe webhook signing secret before the v2 launch.",
+            "Track the open Redshift vs BigQuery vendor decision.",
         ],
         "evidence": [
-            "EOD trading summary posts appear every weekday at 17:00.",
+            "Standup posts appear Mon/Wed/Thu in #engineering.",
             "Friday threads collect updates that are pasted into a manual "
-            "weekly report.",
-            "'Someone needs to double-check the Q2 pipeline numbers doc "
-            "before Thursday' was never resolved.",
-            "'Let's revisit next week' ended the vendor decision thread.",
+            "weekly report in #product.",
+            "'Someone needs to verify the signing secret is rotated correctly' "
+            "was never resolved.",
+            "'Let's revisit next week' ended the metrics pipeline decision thread.",
         ],
         "confidence": "high",
     }
@@ -856,3 +845,125 @@ def _delete_rows(session: Session, statement: Delete) -> int:
 def _checksum(payload: dict[str, Any]) -> str:
     serialized = json.dumps(payload, sort_keys=True, default=str, separators=(",", ":"))
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build the db_seed argument parser."""
+    parser = argparse.ArgumentParser(
+        prog="python -m scripts.demo.db_seed",
+        description="Seed, inspect, or remove backdated synthetic Northwind history.",
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    seed_parser = subparsers.add_parser(
+        "seed",
+        help="Inject the backdated fixture story for one channel.",
+    )
+    seed_parser.add_argument(
+        "--channel",
+        required=True,
+        help="Slack channel ID the history attaches to (e.g. C0123456789).",
+    )
+    seed_parser.add_argument(
+        "--days",
+        type=int,
+        default=DEFAULT_SIM_DAYS,
+        help=f"Backdated window length in days (default {DEFAULT_SIM_DAYS}).",
+    )
+
+    subparsers.add_parser("clean", help="Delete all simulator-seeded rows.")
+    subparsers.add_parser("status", help="Print current simulator row counts.")
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """CLI entrypoint; returns a process exit code."""
+    args = build_parser().parse_args(argv)
+    settings = load_settings()
+    session_factory = make_session_factory(database_url=settings.postgres_url)
+
+    try:
+        with session_scope(session_factory) as session:
+            if args.command == "seed":
+                _print_seed_report(
+                    seed_simulation(
+                        session,
+                        channel_id=args.channel,
+                        days=args.days,
+                    )
+                )
+            elif args.command == "clean":
+                _print_clean_report(clean_simulation(session))
+            else:
+                _print_status_report(simulation_status(session))
+    except SimulatorError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _print_seed_report(report: SeedReport) -> None:
+    print(f"seeded channel {report.channel_id} ({report.days} days)")
+    print(f"  installation: {report.installation_team_id}")
+    print(
+        "  observation events: "
+        f"{report.observation_events_created} created, "
+        f"{report.observation_events_existing} already present"
+    )
+    print(f"  distinct message days: {report.distinct_message_days}")
+    print(f"  observation policy observable: {report.policy_observable}")
+    print(
+        "  channel membership: "
+        + ("created by simulator" if report.membership_created else "existing")
+        + ("" if report.membership_active else " (warning: not active)")
+    )
+    print(
+        "  channel profile: "
+        + ("created" if report.profile_created else "updated")
+        + f" (version {report.profile_version}, scan-due for witness)"
+    )
+    print(
+        f"  synthetic tasks: {report.tasks_created} created, "
+        f"{report.tasks_existing} already present"
+    )
+    print(f"  episodes recorded: {report.episodes_recorded}")
+
+
+def _print_clean_report(report: CleanReport) -> None:
+    print("cleaned simulator rows")
+    print(f"  witness candidates deleted: {report.candidates_deleted}")
+    for note in report.automated_candidate_notes:
+        print(f"    note: {note}")
+    print(f"  episodes deleted: {report.episodes_deleted}")
+    print(f"  channel profiles deleted: {report.profiles_deleted}")
+    print(f"  task events deleted: {report.task_events_deleted}")
+    print(f"  tasks deleted: {report.tasks_deleted}")
+    print(f"  observation events deleted: {report.observation_events_deleted}")
+    print(f"  sim-created memberships deleted: {report.memberships_deleted}")
+
+
+def _print_status_report(report: StatusReport) -> None:
+    print("simulator status")
+    print(f"  observation events: {report.observation_events}")
+    print(f"  distinct message days: {report.distinct_message_days}")
+    versions = ", ".join(str(version) for version in report.profile_versions)
+    print(
+        f"  channel profiles: {report.profiles}"
+        + (f" (versions: {versions})" if versions else "")
+    )
+    print(f"  synthetic tasks: {report.tasks}")
+    print(f"  task events: {report.task_events}")
+    print(f"  episodes: {report.episodes}")
+    if report.candidates_by_status:
+        breakdown = ", ".join(
+            f"{status}={count}"
+            for status, count in sorted(report.candidates_by_status.items())
+        )
+        print(f"  derived witness candidates: {breakdown}")
+    else:
+        print("  derived witness candidates: none")
+    print(f"  sim-created memberships: {report.memberships}")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -32,21 +32,21 @@ from kortny.db.models import (
 )
 from kortny.db.session import make_engine, make_session_factory, normalize_database_url
 from kortny.llm import ChatMessage, Completion, TokenUsage
-from kortny.simulator import (
-    SIM_MARKER_KEY,
-    SIM_TASK_IDENTITY_PREFIX,
-    SIM_TASK_SPECS,
-    SimulatorError,
-    clean_simulation,
-    seed_simulation,
-    simulation_status,
-)
-from kortny.simulator.__main__ import build_parser
 from kortny.tools.types import JsonObject, JsonSchema
 from kortny.witness.runner import (
     DEFAULT_WITNESS_SCAN_INTERVAL,
     WitnessRunner,
     _profile_scan_due,
+)
+from scripts.demo.db_seed import (
+    SIM_MARKER_KEY,
+    SIM_TASK_IDENTITY_PREFIX,
+    SIM_TASK_SPECS,
+    SimulatorError,
+    build_parser,
+    clean_simulation,
+    seed_simulation,
+    simulation_status,
 )
 
 TEST_POSTGRES_URL = os.environ.get("KORTNY_TEST_POSTGRES_URL")
@@ -143,17 +143,16 @@ def witness_extraction_completion() -> Completion:
             "{"
             '"candidates":[{'
             '"candidate_type":"recurring_check",'
-            '"title":"Automate the EOD trading summary",'
-            '"summary":"Post the trading summary the team compiles by hand '
-            'every weekday at 5pm.",'
-            '"suggested_action":"Offer a weekday 5pm trading summary.",'
-            '"suggested_message":"Want me to post the EOD trading summary?",'
+            '"title":"Automate the daily standup summary",'
+            '"summary":"Post the daily standup summary the team compiles by hand.",'
+            '"suggested_action":"Offer a weekday standup summary.",'
+            '"suggested_message":"Want me to post the daily standup summary?",'
             '"automation_kind":"recurring",'
-            '"cadence_suggestion":"every weekday at 5pm",'
-            '"deliverable":"post the EOD trading summary in this channel",'
-            '"evidence":["EOD trading summary posts appear every weekday."],'
+            '"cadence_suggestion":"every weekday morning",'
+            '"deliverable":"post the daily standup summary in this channel",'
+            '"evidence":["Standup posts appear every weekday."],'
             '"confidence_score":0.8,'
-            '"confidence_reason":"The profile shows a daily manual pattern."'
+            '"confidence_reason":"The profile shows a recurring manual pattern."'
             "}],"
             '"skipped_reason":null'
             "}"
@@ -214,16 +213,15 @@ def test_seed_writes_backdated_marked_rows(db_session: Session) -> None:
         assert event.channel_id == SIM_CHANNEL
         assert event.user_id is not None and event.user_id.startswith("USIM")
 
-    # Weekday 17:00 trading-summary pattern is real across the window.
-    trading_events = [
+    # Weekday standup pattern is real across the window.
+    standup_events = [
         event
         for event in events
-        if event.visibility_metadata.get("sim_pattern") == "trading_summary"
+        if event.visibility_metadata.get("sim_pattern") == "standup"
     ]
-    assert len(trading_events) >= 13  # every weekday in a 21-day window
-    for event in trading_events:
+    assert len(standup_events) >= 7
+    for event in standup_events:
         assert event.observed_at.weekday() < 5
-        assert event.observed_at.hour == 17
 
     # Policy ensured through the real observe machinery.
     policy = db_session.scalar(
@@ -417,7 +415,7 @@ def test_clean_removes_sim_rows_and_derived_candidates_only(
             visibility_scope_type="channel",
             visibility_scope_id=SIM_CHANNEL,
             candidate_type="artifact_followup",
-            title="Verify the Q2 pipeline numbers doc",
+            title="Verify the Stripe webhook signing secret",
             summary="One-shot verification ask from the sim history.",
             evidence_json=[],
             source_type="task_summary",
@@ -526,9 +524,9 @@ def test_clean_leaves_schedule_for_automated_candidate(db_session: Session) -> N
     schedule = Schedule(
         installation_id=installation.id,
         owner_type="system",
-        title="EOD trading summary",
+        title="daily standup summary",
         spec_kind="cron",
-        cron_expr="0 17 * * 1-5",
+        cron_expr="0 9 * * 1,3,4",
         status="active",
     )
     db_session.add(schedule)

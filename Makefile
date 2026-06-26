@@ -65,17 +65,18 @@ compose-logs-observability:
 compose-logs-workflow:
 	docker compose logs -f app worker temporal temporal-worker
 
-# Workspace simulator (runs against the live dev DB inside compose).
+# Demo workspace seeders (scripts/demo/).
+# DB seeder: runs against the live dev DB inside compose.
 # Usage: make seed-sim CHANNEL=C0123456789 [DAYS=21]
 seed-sim:
 	@test -n "$(CHANNEL)" || { echo "CHANNEL=<slack channel id> is required, e.g. make seed-sim CHANNEL=C0123456789"; exit 1; }
-	docker compose exec worker uv run python -m kortny.simulator seed --channel $(CHANNEL) --days $(or $(DAYS),21)
+	docker compose exec worker uv run python -m scripts.demo.db_seed seed --channel $(CHANNEL) --days $(or $(DAYS),21)
 
 clean-sim:
-	docker compose exec worker uv run python -m kortny.simulator clean
+	docker compose exec worker uv run python -m scripts.demo.db_seed clean
 
 status-sim:
-	docker compose exec worker uv run python -m kortny.simulator status
+	docker compose exec worker uv run python -m scripts.demo.db_seed status
 
 clean:
 	rm -rf .mypy_cache .pytest_cache .ruff_cache htmlcov .coverage build dist
