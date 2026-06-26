@@ -2692,6 +2692,87 @@ def test_dashboard_composio_connect_creates_custom_auth_config_for_api_key_toolk
     assert connection.metadata_json["connect_link_status"] == "pending"
 
 
+def test_dashboard_composio_connect_no_auth_toolkit_connects_directly(
+    client: tuple[TestClient, Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # HIG: a NO_AUTH toolkit (no oauth2, no api-key scheme) used to hit the
+    # "no hosted API-key flow" raise and could never connect. It must now create
+    # a managed auth config and a connected account directly (no OAuth redirect),
+    # marking the connection active immediately.
+    test_client, session = client
+    task = create_dashboard_task(session)
+    set_runtime_settings_env(monkeypatch)
+    monkeypatch.setenv("COMPOSIO_API_KEY", "composio-dashboard-secret")
+
+    class FakeComposioClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def list_auth_configs(
+            self, *, toolkit_slug: str, limit: int = 20
+        ) -> tuple[ComposioAuthConfig, ...]:
+            return ()
+
+        def get_toolkit(self, slug: str) -> ComposioToolkit:
+            return _composio_toolkit(
+                slug="hackernews",
+                name="Hacker News",
+                auth_schemes=("NO_AUTH",),
+                managed_auth_schemes=(),
+                no_auth=True,
+            )
+
+        def create_managed_auth_config(
+            self, *, toolkit_slug: str
+        ) -> ComposioAuthConfig:
+            assert toolkit_slug == "hackernews"
+            return ComposioAuthConfig(
+                id="ac_hn",
+                name="Hacker News managed",
+                toolkit_slug="hackernews",
+                auth_scheme="NO_AUTH",
+                is_composio_managed=True,
+                enabled=True,
+            )
+
+        def create_connected_account(
+            self, *, user_id: str, auth_config_id: str
+        ) -> ComposioConnectionRequest:
+            assert auth_config_id == "ac_hn"
+            assert user_id == f"slack:{task.installation_id}:UCost"
+            return ComposioConnectionRequest(
+                id="ca_hn",
+                redirect_url="",
+                status="active",
+                connected_account_id="ca_hn",
+            )
+
+    monkeypatch.setattr("kortny.dashboard.app.ComposioClient", FakeComposioClient)
+    login(test_client)
+
+    response = test_client.post(
+        "/composio/hackernews/connect",
+        data={"visibility_scope_type": "user", "display_name": "HN"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert "hackernews" in response.headers["location"]
+    assert "notice_tone=success" in response.headers["location"]
+    connection = session.scalar(
+        select(ComposioConnection).where(
+            ComposioConnection.toolkit_slug == "hackernews",
+            ComposioConnection.auth_config_id == "ac_hn",
+        )
+    )
+    assert connection is not None
+    assert connection.status == "active"
+    assert connection.connected_account_id == "ca_hn"
+    assert connection.metadata_json["auth_config_source"] == "created_no_auth"
+    assert connection.metadata_json["no_auth"] is True
+
+
 def test_dashboard_composio_callback_marks_connection_active(
     client: tuple[TestClient, Session],
     monkeypatch: pytest.MonkeyPatch,
@@ -4509,6 +4590,7 @@ def _composio_toolkit(
     auth_schemes: tuple[str, ...] = ("oauth2",),
     managed_auth_schemes: tuple[str, ...] = ("oauth2",),
     logo_url: str | None = None,
+    no_auth: bool = False,
 ) -> ComposioToolkit:
     return ComposioToolkit(
         slug=slug,
@@ -4524,7 +4606,7 @@ def _composio_toolkit(
         auth_guide_url=None,
         base_url=None,
         enabled=True,
-        no_auth=False,
+        no_auth=no_auth,
         is_local_toolkit=False,
     )
 
