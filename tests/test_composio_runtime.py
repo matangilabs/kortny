@@ -705,7 +705,7 @@ class FakeComposioClient(ComposioClient):
         *,
         tool_slug: str,
         user_id: str,
-        connected_account_id: str,
+        connected_account_id: str | None = None,
         arguments: dict[str, Any],
         version: str | None = None,
     ) -> ComposioToolExecution:
@@ -940,3 +940,41 @@ def test_intent_service_sets_persona_relevant_gate(db_session: Session) -> None:
 
     assert role_relative.persona_relevant is True
     assert factual.persona_relevant is False
+
+
+def test_composio_resolver_surfaces_no_auth_connection(
+    db_session: Session,
+) -> None:
+    """A no_auth=True active connection (connected_account_id=None) is visible.
+
+    No-auth toolkits (e.g. hackernews) carry no connected_account_id; they are
+    identified by no_auth=True on the row. The resolver must include them so the
+    agent can call execute_tool with user_id-only.
+    """
+    task = create_task(db_session, slack_channel_id="CAlpha", slack_user_id="UAneesh")
+    db_session.add(
+        ComposioConnection(
+            installation_id=task.installation_id,
+            toolkit_slug="hackernews",
+            no_auth=True,
+            auth_config_id=None,
+            connected_account_id=None,
+            connection_request_id=None,
+            composio_user_id=f"slack:{task.installation_id}:{task.slack_user_id}",
+            owner_slack_user_id=task.slack_user_id,
+            visibility_scope_type="workspace",
+            visibility_scope_id=None,
+            status="active",
+            display_name="Hacker News",
+            metadata_json={"auth_config_source": "no_auth", "no_auth": True},
+        )
+    )
+    db_session.commit()
+
+    resolver = ComposioConnectionResolver(db_session, task)
+    connections = resolver.allowed_connections(toolkit_slug="hackernews")
+
+    assert len(connections) == 1
+    conn = connections[0]
+    assert conn.toolkit_slug == "hackernews"
+    assert conn.connected_account_id is None

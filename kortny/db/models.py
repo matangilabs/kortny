@@ -1098,6 +1098,9 @@ class ComposioConnection(Base):
         ForeignKey("installations.id", ondelete="CASCADE"), nullable=False
     )
     toolkit_slug: Mapped[str] = mapped_column(String, nullable=False)
+    no_auth: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
     auth_config_id: Mapped[str | None] = mapped_column(String)
     connected_account_id: Mapped[str | None] = mapped_column(String)
     connection_request_id: Mapped[str | None] = mapped_column(String)

@@ -42,6 +42,7 @@ from kortny.composio import (
     ComposioCatalogError,
     ComposioClient,
     ComposioConnectionError,
+    ComposioToolkit,
 )
 from kortny.config import Settings, SettingsError, load_settings
 from kortny.dashboard.auth import (
@@ -3188,11 +3189,44 @@ def register_routes(app: FastAPI) -> None:
             api_key=runtime_settings.composio_api_key,
             timeout_seconds=runtime_settings.composio_request_timeout_seconds,
         )
+
+        # Detect no-auth toolkits before touching auth configs or connect links.
+        # NO_AUTH toolkits (e.g. hackernews) require neither an auth config nor a
+        # connected account — POST /api/v3.1/tools/execute accepts user_id alone.
+        try:
+            toolkit = client.get_toolkit(normalized_slug)
+        except (ComposioCatalogError, ComposioConnectionError) as exc:
+            session.rollback()
+            return _redirect_with_notice(
+                next_path,
+                f"Could not fetch toolkit info: {str(exc)}",
+                tone="danger",
+            )
+        no_auth_schemes = {
+            _normalize_auth_scheme(scheme) for scheme in toolkit.auth_schemes
+        }
+        if toolkit.no_auth or "no_auth" in no_auth_schemes:
+            connection.no_auth = True
+            connection.auth_config_id = None
+            connection.status = "active"
+            connection.metadata_json = {
+                **dict(connection.metadata_json or {}),
+                "auth_config_source": "no_auth",
+                "no_auth": True,
+            }
+            session.commit()
+            return _redirect_with_notice(
+                next_path,
+                "Connected (no auth required).",
+                tone="success",
+            )
+
         try:
             auth_config_id, auth_config_source = _resolve_composio_auth_config_id(
                 client,
                 toolkit_slug=normalized_slug,
                 override_auth_config_id=auth_config_id,
+                toolkit=toolkit,
             )
         except (ComposioCatalogError, ComposioConnectionError) as exc:
             session.rollback()
@@ -3202,37 +3236,6 @@ def register_routes(app: FastAPI) -> None:
                 tone="danger",
             )
         connection.auth_config_id = auth_config_id
-
-        if auth_config_source == "created_no_auth":
-            # No-auth toolkits have no OAuth redirect — create the connected
-            # account directly and mark the connection active immediately.
-            try:
-                account = client.create_connected_account(
-                    user_id=composio_user_id,
-                    auth_config_id=auth_config_id,
-                )
-            except ComposioConnectionError as exc:
-                session.rollback()
-                return _redirect_with_notice(
-                    next_path,
-                    f"Could not connect no-auth toolkit: {str(exc)}",
-                    tone="danger",
-                )
-            connection.connected_account_id = account.connected_account_id or account.id
-            connection.connection_request_id = account.id
-            connection.status = "active"
-            connection.metadata_json = {
-                **dict(connection.metadata_json or {}),
-                "auth_config_source": auth_config_source,
-                "no_auth": True,
-                "connect_status": account.status,
-            }
-            session.commit()
-            return _redirect_with_notice(
-                next_path,
-                "Connected (no auth required).",
-                tone="success",
-            )
 
         try:
             connect_request = client.create_connect_link(
@@ -4620,6 +4623,7 @@ def _resolve_composio_auth_config_id(
     *,
     toolkit_slug: str,
     override_auth_config_id: str,
+    toolkit: ComposioToolkit | None = None,
 ) -> tuple[str, str]:
     if override_auth_config_id:
         return override_auth_config_id, "manual_override"
@@ -4629,24 +4633,14 @@ def _resolve_composio_auth_config_id(
         if auth_config.enabled and auth_config.toolkit_slug == toolkit_slug:
             return auth_config.id, "existing"
 
-    toolkit = client.get_toolkit(toolkit_slug)
+    if toolkit is None:
+        toolkit = client.get_toolkit(toolkit_slug)
     managed_schemes = {
         _normalize_auth_scheme(scheme) for scheme in toolkit.managed_auth_schemes
     }
     if "oauth2" in managed_schemes:
         auth_config = client.create_managed_auth_config(toolkit_slug=toolkit_slug)
         return auth_config.id, "created_managed"
-
-    no_auth_schemes = {
-        _normalize_auth_scheme(scheme) for scheme in toolkit.auth_schemes
-    }
-    if toolkit.no_auth or "no_auth" in no_auth_schemes:
-        # No-auth toolkits (public data APIs, etc.) have neither an oauth2
-        # managed scheme nor an api-key style custom scheme, so they used to fall
-        # into the raise below and could never connect. Create a Composio-managed
-        # auth config for them; the caller connects them directly (no redirect).
-        auth_config = client.create_managed_auth_config(toolkit_slug=toolkit_slug)
-        return auth_config.id, "created_no_auth"
 
     custom_scheme = _hosted_custom_auth_scheme(toolkit.auth_schemes)
     if custom_scheme is None:

@@ -413,3 +413,48 @@ def test_composio_client_executes_tool_with_connected_account() -> None:
     assert execution.error is None
     assert execution.log_id == "log_123"
     assert execution.session_info == {"session_id": "session_123"}
+
+
+def test_composio_client_executes_tool_without_connected_account_id() -> None:
+    """execute_tool with connected_account_id=None omits the key from the POST body.
+
+    NO_AUTH toolkits (e.g. hackernews) need no connected account; Composio's
+    execute endpoint accepts user_id alone and returns real data.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v3.1/tools/execute/HACKERNEWS_GET_FRONTPAGE"
+        assert request.method == "POST"
+        payload = json.loads(request.read().decode())
+        # connected_account_id must be absent — not None, not empty string
+        assert "connected_account_id" not in payload
+        assert payload == {
+            "user_id": "slack:installation:user",
+            "arguments": {},
+        }
+        return httpx.Response(
+            200,
+            json={
+                "data": [{"title": "Show HN: something cool"}],
+                "successful": True,
+                "error": None,
+                "log_id": "log_hn",
+                "session_info": None,
+            },
+        )
+
+    client = ComposioClient(
+        api_key="test-key",
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    execution = client.execute_tool(
+        tool_slug="HACKERNEWS_GET_FRONTPAGE",
+        user_id="slack:installation:user",
+        connected_account_id=None,
+        arguments={},
+    )
+
+    assert execution.successful is True
+    assert execution.data == [{"title": "Show HN: something cool"}]
+    assert execution.log_id == "log_hn"
