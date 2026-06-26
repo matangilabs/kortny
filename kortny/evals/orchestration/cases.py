@@ -155,4 +155,29 @@ SEED_ORCHESTRATION_CASES: tuple[OrchestrationCase, ...] = (
         tags=("single_app", "finance", "scope"),
         note="ensures finance still routes correctly and no cross-domain noise",
     ),
+    # 11 — source-priority guard: Kortny-managed state (schedules) is priority 1,
+    # NOT a connected app. An internal-state question must not reach for a
+    # connected integration. (Guards the precedence-table fix.)
+    OrchestrationCase(
+        request="what do I have scheduled right now?",
+        connected_toolkits=CONNECTED_LIVE,
+        surface=_DM,
+        expected_apps=(),
+        forbidden_apps=("github", "linear", "gmail", "googlecalendar", "notion"),
+        tags=("source_priority", "internal_state", "guard"),
+        note="schedule state is internal (Tier-0/schedule tools), never a "
+        "connected app",
+    ),
+    # 12 — over-reach guard: a pure-knowledge question must answer directly and
+    # NOT fire a connected integration. (Guards against the precedence rule
+    # over-steering cheap models into reaching for tools on stable facts.)
+    OrchestrationCase(
+        request="explain how OAuth 2.0 authorization code flow works",
+        connected_toolkits=CONNECTED_LIVE,
+        surface=_DM,
+        expected_apps=(),
+        forbidden_apps=("github", "linear", "gmail", "googlecalendar", "notion"),
+        tags=("source_priority", "knowledge", "guard"),
+        note="stable general knowledge → answer directly, no connected tool",
+    ),
 )

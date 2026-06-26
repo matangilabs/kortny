@@ -60,18 +60,26 @@ def _seed() -> None:
             "kortny.intent_classifier",
             "intent",
             "Classify an inbound Slack message into a routing decision.",
+            "2",  # v2: connected-data "my/our" signal + worked examples
         ),
         (
             "kortny.agent_coordinator.system",
             "agent",
             "Coordinator system persona + tool-use rules.",
+            "2",  # v2: source-priority table, loop integers, pseudo-call ban
         ),
         (
             "kortny.execution_planner",
             "agent",
             "Author an explicit execution plan for a task.",
+            "2",  # v2: goal-level steps, step cap, worked + negative examples
         ),
-        ("kortny.recovery_planner", "agent", "Re-plan after a failed tool call."),
+        (
+            "kortny.execution_recovery_planner",
+            "agent",
+            "Re-plan after a failed tool call.",
+            "2",  # v2: recovery_action ladder + examples; name matches call site
+        ),
         (
             "kortny.response_humanizer",
             "slack",
@@ -154,6 +162,28 @@ def _seed() -> None:
             "agent",
             "Synthesize a tool-approval request prompt.",
         ),
+        # Previously-unregistered live prompts (reconciled with call sites).
+        (
+            "kortny.honest_failure_synthesis",
+            "agent",
+            "Explain an unrecoverable failure in user terms.",
+        ),
+        (
+            "kortny.integration_learning.capability_profiler",
+            "integration_learning",
+            "Profile a connected toolkit into capability buckets.",
+        ),
+        (
+            "kortny.document_visual_critic",
+            "documents",
+            "Critique a rendered document's visual quality.",
+        ),
+        (
+            "kortny.revision_patch_proposer",
+            "documents",
+            "Propose a patch to revise a generated document.",
+        ),
+        ("kortny.pdf_ocr", "documents", "OCR a PDF page image to text."),
     )
     for entry in seed:
         name, subsystem, description = entry[0], entry[1], entry[2]
