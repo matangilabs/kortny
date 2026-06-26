@@ -30,8 +30,23 @@ a ``tool_result`` output is missing the ``toolkit_slug`` field. It splits a
 ``composio_{toolkit}_{tool}`` runtime name on ``_`` and takes index 1, which is
 wrong for multi-underscore toolkits — hence it is never the primary path.
 
-``any_tool_called`` counts every ``tool_result`` row (Composio, native, MCP) so
-the ``must_use_tools`` context-leak guard fires whenever no tool ran at all.
+``any_tool_called`` counts every ``tool_call``/``tool_result`` row (Composio,
+native, MCP) so the ``must_use_tools`` context-leak guard fires whenever no tool
+ran at all — including a write that paused at the approval gate before its
+result was recorded.
+
+Side-effect-free egress
+-----------------------
+The eval must not post to Slack: the synthetic eval channel does not exist, so a
+real ``chat.postMessage`` from the post-completion hook crashes the run. The
+runner injects a ``_NoOpSlackClient`` whose ``chat_postMessage`` /
+``files_upload_v2`` are no-ops returning a benign ``ok`` response with a
+synthetic ``ts``, so ``_post_outputs`` and the approval-prompt post complete
+without reaching Slack. The agent's LLM + tool execution still runs for real —
+only the Slack egress is stubbed. Write tools (e.g. "file a ticket") still pause
+at the approval gate; with no Slack approver the task simply parks on
+``waiting_approval`` and no real artifact is created, while the eval still
+captures that the right app's tool was reached.
 
 Usage::
 
@@ -43,6 +58,7 @@ from __future__ import annotations
 import os
 import uuid
 from collections.abc import Mapping
+from typing import Any, cast
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -64,15 +80,69 @@ from kortny.evals.orchestration.scoring import (
     RunResult,
     score_orchestration,
 )
+from kortny.slack.posting import SlackPostingClient
 from kortny.tasks import TaskIdentity, TaskService
 from kortny.worker.agent_executor import AgentTaskExecutor
 
 # Sentinel channel used when creating an eval task — it never routes to Slack
-# because AgentTaskExecutor.execute() is called directly (no Slack client).
+# because the injected _NoOpSlackClient stubs all Slack egress.
 # The default channel can be overridden via KORTNY_EVAL_SCOPE_CHANNEL_ID for
 # channel-scoped connections; user-scoped connections key on slack_user_id.
 _EVAL_CHANNEL_ID = "EVAL_ORCHESTRATION"
 _EVAL_THREAD_TS = "0.000000"
+
+
+class _NoOpSlackClient:
+    """A Slack client stub that makes every egress call a no-op.
+
+    Satisfies the ``SlackPostingClient`` protocol (``chat_postMessage`` /
+    ``files_upload_v2``) and tolerates the reaction calls the executor probes
+    via ``getattr`` (``reactions_add`` / ``reactions_remove``). Each method
+    returns a benign ``{"ok": True, ...}`` response with a synthetic ``ts`` so
+    the SlackPoster reads a message ts and never raises, and nothing is ever
+    sent to Slack. The agent's LLM + tool execution is untouched — only egress
+    is stubbed.
+    """
+
+    def chat_postMessage(
+        self,
+        *,
+        channel: str,
+        text: str,
+        thread_ts: str | None = None,
+        blocks: list[dict[str, Any]] | None = None,
+        unfurl_links: bool = True,
+        unfurl_media: bool = True,
+    ) -> Mapping[str, Any]:
+        return {"ok": True, "ts": _synthetic_ts(), "channel": channel}
+
+    def files_upload_v2(
+        self,
+        *,
+        file: str,
+        filename: str | None = None,
+        title: str | None = None,
+        channel: str | None = None,
+        initial_comment: str | None = None,
+        thread_ts: str | None = None,
+    ) -> Mapping[str, Any]:
+        return {"ok": True, "file": {"id": "FEVAL_NOOP"}, "ts": _synthetic_ts()}
+
+    def reactions_add(
+        self, *, channel: str, name: str, timestamp: str
+    ) -> Mapping[str, Any]:
+        return {"ok": True}
+
+    def reactions_remove(
+        self, *, channel: str, name: str, timestamp: str
+    ) -> Mapping[str, Any]:
+        return {"ok": True}
+
+
+def _synthetic_ts() -> str:
+    """A unique Slack-message-ts-shaped string for no-op post responses."""
+    return f"1710000000.{uuid.uuid4().hex[:6]}"
+
 
 # Env overrides for the connection scope owner.
 _SCOPE_USER_ENV = "KORTNY_EVAL_SCOPE_USER_ID"
@@ -130,20 +200,26 @@ def _called_apps_from_events(
     session: Session,
     task_id: uuid.UUID,
 ) -> tuple[frozenset[str], bool]:
-    """Read tool_result TaskEvent rows and return the called-apps set.
+    """Read tool TaskEvent rows and return the called-apps set.
 
-    Derives the called-apps set from the authoritative ``toolkit_slug`` carried
-    in each successful Composio ``tool_result`` output, falling back to the
-    runtime-name parse only when that field is absent.
+    Authoritative source: the canonical ``toolkit_slug`` carried in each
+    successful Composio ``tool_result`` output. To also count writes that
+    *reached* an integration but paused at the approval gate before a
+    ``tool_result`` was ever recorded, this additionally unions in Composio
+    toolkit slugs name-parsed from ``tool_call`` rows. A write that paused
+    pre-result therefore still registers as "reached for that app" — which is
+    exactly the orchestration signal the eval wants (the agent picked the right
+    integration), independent of whether a real artifact was created.
 
     Returns:
         A tuple of (called_toolkit_slugs, any_tool_called) where
         called_toolkit_slugs is the set of Composio toolkit slugs whose tools
-        completed successfully and any_tool_called is True if at least one tool
-        of any kind produced a result (including native/MCP tools, for the
+        were reached (completed or paused at approval) and any_tool_called is
+        True if at least one tool of any kind was invoked (Composio, native, or
+        MCP — including a call that paused before its result, for the
         must_use_tools guard).
     """
-    rows = list(
+    result_rows = list(
         session.scalars(
             select(TaskEvent).where(
                 TaskEvent.task_id == task_id,
@@ -151,12 +227,32 @@ def _called_apps_from_events(
             )
         )
     )
-    any_tool_called = len(rows) > 0
+    call_rows = list(
+        session.scalars(
+            select(TaskEvent).where(
+                TaskEvent.task_id == task_id,
+                TaskEvent.type == TaskEventType.tool_call,
+            )
+        )
+    )
+    # A tool was invoked if any call OR result event exists. A write that paused
+    # at approval emits a tool_call but no tool_result, so count both.
+    any_tool_called = len(result_rows) > 0 or len(call_rows) > 0
+
     slugs: set[str] = set()
-    for row in rows:
+    # Authoritative: real toolkit_slug from successful Composio results.
+    for row in result_rows:
         slug = _toolkit_slug_from_tool_result(row.payload)
         if slug:
             slugs.add(slug)
+    # Supplemental: name-parsed Composio slug from every tool_call, so an
+    # app reached by a write that paused pre-result still counts.
+    for row in call_rows:
+        tool_name = row.payload.get("tool")
+        if isinstance(tool_name, str):
+            slug = _toolkit_slug_from_tool_name(tool_name)
+            if slug:
+                slugs.add(slug)
     return frozenset(slugs), any_tool_called
 
 
@@ -296,15 +392,31 @@ def build_live_run_fn(
             f"resolved {len(resolved)} connected toolkit(s): {sorted(resolved)!r}"
         )
 
-        result = executor.execute(
-            session=session,
-            task=task,
-            task_service=task_service,
-        )
-        session.commit()
+        # A write tool (e.g. case 1 "file a ticket", case 9 "create Linear
+        # issues") pauses on the approval gate; execute() catches
+        # ToolApprovalRequired internally and returns a result with the task
+        # parked on waiting_approval — it does not raise. We still want the
+        # tool_call events captured. Any *other* exception (a genuine mid-case
+        # crash) is contained here so one bad case doesn't abort the whole run:
+        # the transaction is rolled back and whatever events were already
+        # committed are read back below.
+        answer = ""
+        try:
+            result = executor.execute(
+                session=session,
+                task=task,
+                task_service=task_service,
+            )
+            session.commit()
+            answer = result.result_summary or ""
+        except Exception as exc:  # noqa: BLE001 — eval must survive one bad case
+            session.rollback()
+            answer = f"<execute raised: {type(exc).__name__}: {exc}>"
+            print(f"  ! case execution raised (continuing): {answer}")
 
+        # Read whatever tool events exist — a task that paused at approval still
+        # recorded its tool_call rows, so the app it reached still counts.
         called_apps, any_tool_called = _called_apps_from_events(session, task.id)
-        answer = result.result_summary or ""
         return called_apps, any_tool_called, answer
 
     return run
@@ -322,7 +434,13 @@ def run() -> OrchestrationReport:
             f"Eval scope: installation={installation_id} "
             f"user={scope_user_id} channel={scope_channel_id}"
         )
-        executor = AgentTaskExecutor(settings=settings)
+        # Inject a no-op Slack client so the post-completion hook never reaches
+        # Slack (the synthetic eval channel does not exist). LLM + tools still
+        # run for real; only egress is stubbed.
+        executor = AgentTaskExecutor(
+            settings=settings,
+            slack_client=cast(SlackPostingClient, _NoOpSlackClient()),
+        )
         run_fn = build_live_run_fn(
             session,
             executor,
