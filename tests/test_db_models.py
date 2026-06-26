@@ -18,6 +18,8 @@ def test_mvp_schema_declares_all_core_tables() -> None:
         "dashboard_users",
         "dashboard_oauth_states",
         "composio_connections",
+        "composio_trigger_subscriptions",
+        "composio_trigger_events",
         "autonomy_policies",
         "observe_policies",
         "observation_events",
