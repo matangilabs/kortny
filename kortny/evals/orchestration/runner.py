@@ -8,28 +8,30 @@ The runner is **on-demand only** — it creates real tasks, runs the agent, and
 reads the resulting ``TaskEvent`` rows to derive the called-apps set. It is
 never run in CI.
 
-Toolkit-slug extraction
+Toolkit-slug derivation
 -----------------------
-Composio tool names are emitted by ``composio_runtime_tool_name(toolkit_slug,
-tool_slug)`` which produces ``composio_{toolkit}_{tool}`` (e.g.
-``composio_github_list_pull_requests``). The ``tool_call`` ``TaskEvent`` row
-stores the full runtime name in ``payload["tool"]``.
+The authoritative source for the called-app slug is the ``tool_result``
+``TaskEvent`` row. ``ComposioExecuteTool.invoke`` (kortny/tools/composio_execute.py)
+writes its output as ``{"provider": "composio", "toolkit_slug": <slug>,
+"tool_slug": ..., "successful": ..., ...}`` and the coordinator spreads that
+output under ``payload["output"]`` of the ``tool_result`` event. So the real,
+canonical Composio toolkit slug is read directly from
+``payload["output"]["toolkit_slug"]`` when ``payload["output"]["provider"] ==
+"composio"`` — no name-parsing required. This is correct for multi-underscore
+toolkits (e.g. ``twelve_data``, ``alpha_vantage``) that name-parsing would
+mangle.
 
-To recover the toolkit slug from a tool name:
-  1. If the name starts with ``composio_`` → split on ``_`` and take index 1
-     (e.g. ``["composio", "github", "list", ...]`` → ``"github"``). This is
-     reliable because ``composio_runtime_tool_name`` always writes
-     ``composio_{safe_toolkit_id}_{safe_tool_id}``.
-  2. MCP tools follow ``mcp__{server}__{tool}``; they are not Composio tools
-     and are excluded from the called-apps set (MCP servers are not tracked as
-     toolkit slugs in this eval).
+Only successful Composio executions count toward the called-apps set
+(``payload["output"]["successful"] is True``); a failed call did not actually
+reach the integration's data.
 
-Because ``_safe_identifier`` in composio_execute.py lowercases and replaces
-non-alphanumeric chars with ``_``, the extracted slug may differ slightly from
-the canonical slug when the original slug contains hyphens (e.g. ``twelve_data``
-becomes ``twelve_data`` already; ``google-calendar`` would become
-``googlecalendar``). The seed cases use the canonical Composio slugs as they
-appear post-normalization, matching this extraction.
+``_toolkit_slug_from_tool_name`` survives as a *fallback only*: it is used when
+a ``tool_result`` output is missing the ``toolkit_slug`` field. It splits a
+``composio_{toolkit}_{tool}`` runtime name on ``_`` and takes index 1, which is
+wrong for multi-underscore toolkits — hence it is never the primary path.
+
+``any_tool_called`` counts every ``tool_result`` row (Composio, native, MCP) so
+the ``must_use_tools`` context-leak guard fires whenever no tool ran at all.
 
 Usage::
 
@@ -39,6 +41,7 @@ Usage::
 from __future__ import annotations
 
 import uuid
+from collections.abc import Mapping
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -64,13 +67,13 @@ _EVAL_THREAD_TS = "0.000000"
 
 
 def _toolkit_slug_from_tool_name(tool_name: str) -> str | None:
-    """Extract the Composio toolkit slug from a runtime tool name.
+    """Fallback: extract a Composio toolkit slug from a runtime tool name.
 
-    Returns None for non-Composio tools (e.g. native or MCP tools).
-
-    Composio tool names always have the form ``composio_{toolkit}_{tool_slug}``,
-    produced by ``composio_runtime_tool_name``. Split on ``_`` and take index 1
-    to recover the toolkit identifier (post-normalization).
+    NOT the primary path. ``composio_runtime_tool_name`` produces
+    ``composio_{toolkit}_{tool_slug}`` and this splits on ``_`` and takes index
+    1 — which mangles multi-underscore toolkits (``composio_twelve_data_...`` →
+    ``"twelve"``). Used only when a ``tool_result`` output is missing the
+    authoritative ``toolkit_slug`` field. Returns None for non-Composio tools.
     """
     if not tool_name.startswith("composio_"):
         return None
@@ -80,33 +83,65 @@ def _toolkit_slug_from_tool_name(tool_name: str) -> str | None:
     return parts[1]
 
 
+def _toolkit_slug_from_tool_result(payload: Mapping[str, object]) -> str | None:
+    """Derive the authoritative Composio toolkit slug from a tool_result payload.
+
+    Reads ``payload["output"]["toolkit_slug"]`` when the output marks a
+    successful Composio execution (``provider == "composio"`` and
+    ``successful is True``). This is the real canonical slug written by
+    ``ComposioExecuteTool.invoke`` — no name-parsing, correct for
+    multi-underscore toolkits.
+
+    Falls back to name-parsing the runtime tool name only if the authoritative
+    ``toolkit_slug`` field is absent. Returns None for non-Composio,
+    unsuccessful, or non-tool outputs.
+    """
+    output = payload.get("output")
+    if not isinstance(output, dict):
+        return None
+    if output.get("provider") != "composio":
+        return None
+    if output.get("successful") is not True:
+        return None
+    slug = output.get("toolkit_slug")
+    if isinstance(slug, str) and slug:
+        return slug
+    # Authoritative field absent — fall back to name-parsing.
+    tool_name = payload.get("tool")
+    if isinstance(tool_name, str):
+        return _toolkit_slug_from_tool_name(tool_name)
+    return None
+
+
 def _called_apps_from_events(
     session: Session,
     task_id: uuid.UUID,
 ) -> tuple[frozenset[str], bool]:
-    """Read tool_call TaskEvent rows for a task and return the called-apps set.
+    """Read tool_result TaskEvent rows and return the called-apps set.
+
+    Derives the called-apps set from the authoritative ``toolkit_slug`` carried
+    in each successful Composio ``tool_result`` output, falling back to the
+    runtime-name parse only when that field is absent.
 
     Returns:
         A tuple of (called_toolkit_slugs, any_tool_called) where
-        called_toolkit_slugs is the set of Composio toolkit slugs that were
-        invoked and any_tool_called is True if at least one tool of any kind
-        was invoked (including native/MCP tools, for the must_use_tools guard).
+        called_toolkit_slugs is the set of Composio toolkit slugs whose tools
+        completed successfully and any_tool_called is True if at least one tool
+        of any kind produced a result (including native/MCP tools, for the
+        must_use_tools guard).
     """
     rows = list(
         session.scalars(
             select(TaskEvent).where(
                 TaskEvent.task_id == task_id,
-                TaskEvent.type == TaskEventType.tool_call,
+                TaskEvent.type == TaskEventType.tool_result,
             )
         )
     )
     any_tool_called = len(rows) > 0
     slugs: set[str] = set()
     for row in rows:
-        tool_name = row.payload.get("tool", "")
-        if not isinstance(tool_name, str):
-            continue
-        slug = _toolkit_slug_from_tool_name(tool_name)
+        slug = _toolkit_slug_from_tool_result(row.payload)
         if slug:
             slugs.add(slug)
     return frozenset(slugs), any_tool_called

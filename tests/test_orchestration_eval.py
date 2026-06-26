@@ -11,7 +11,10 @@ from kortny.evals.orchestration.cases import (
     SEED_ORCHESTRATION_CASES,
     OrchestrationCase,
 )
-from kortny.evals.orchestration.runner import _toolkit_slug_from_tool_name
+from kortny.evals.orchestration.runner import (
+    _toolkit_slug_from_tool_name,
+    _toolkit_slug_from_tool_result,
+)
 from kortny.evals.orchestration.scoring import (
     OrchestrationAssertionResult,
     OrchestrationReport,
@@ -292,24 +295,101 @@ def test_failures_property_only_returns_failed() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 10. Toolkit slug extraction from composio tool names
+# 10. Authoritative toolkit-slug derivation from tool_result payloads
 # ---------------------------------------------------------------------------
 
 
-def test_toolkit_slug_extraction_composio() -> None:
-    """composio_ prefix tool names yield the correct toolkit slug."""
+def test_toolkit_slug_from_tool_result_authoritative() -> None:
+    """The real toolkit_slug is read directly from the tool_result output.
+
+    Crucially, this is correct for multi-underscore toolkits that name-parsing
+    would mangle (twelve_data -> 'twelve', alpha_vantage -> 'alpha').
+    """
+    payload = {
+        "tool": "composio_twelve_data_get_price",
+        "output": {
+            "provider": "composio",
+            "toolkit_slug": "twelve_data",
+            "tool_slug": "TWELVE_DATA_GET_PRICE",
+            "successful": True,
+        },
+    }
+    assert _toolkit_slug_from_tool_result(payload) == "twelve_data"
+
+    alpha = {
+        "tool": "composio_alpha_vantage_quote",
+        "output": {
+            "provider": "composio",
+            "toolkit_slug": "alpha_vantage",
+            "successful": True,
+        },
+    }
+    assert _toolkit_slug_from_tool_result(alpha) == "alpha_vantage"
+
+
+def test_toolkit_slug_from_tool_result_unsuccessful_excluded() -> None:
+    """A failed Composio execution does not count toward the called-apps set."""
+    payload = {
+        "output": {
+            "provider": "composio",
+            "toolkit_slug": "github",
+            "successful": False,
+        },
+    }
+    assert _toolkit_slug_from_tool_result(payload) is None
+
+
+def test_toolkit_slug_from_tool_result_non_composio() -> None:
+    """Native/MCP tool results carry no Composio provider and yield None."""
+    native = {"output": {"posted": True}}
+    assert _toolkit_slug_from_tool_result(native) is None
+    mcp = {"output": {"provider": "mcp", "successful": True}}
+    assert _toolkit_slug_from_tool_result(mcp) is None
+    no_output = {"tool": "composio_github_list_prs"}
+    assert _toolkit_slug_from_tool_result(no_output) is None
+
+
+def test_toolkit_slug_from_tool_result_falls_back_to_name_parse() -> None:
+    """When toolkit_slug is absent, fall back to name-parsing the runtime name."""
+    payload = {
+        "tool": "composio_github_list_pull_requests",
+        "output": {
+            "provider": "composio",
+            "successful": True,
+            # toolkit_slug deliberately absent
+        },
+    }
+    assert _toolkit_slug_from_tool_result(payload) == "github"
+
+
+# ---------------------------------------------------------------------------
+# 11. Name-parse helper (fallback-only; documents its multi-underscore limit)
+# ---------------------------------------------------------------------------
+
+
+def test_toolkit_slug_name_parse_single_underscore() -> None:
+    """The fallback parser is correct for single-segment toolkit slugs."""
     assert (
         _toolkit_slug_from_tool_name("composio_github_list_pull_requests") == "github"
     )
     assert _toolkit_slug_from_tool_name("composio_linear_list_issues") == "linear"
-    assert _toolkit_slug_from_tool_name("composio_twelve_data_get_price") == "twelve"
     assert (
         _toolkit_slug_from_tool_name("composio_googlecalendar_list_events")
         == "googlecalendar"
     )
 
 
-def test_toolkit_slug_extraction_non_composio() -> None:
+def test_toolkit_slug_name_parse_mangles_multi_underscore() -> None:
+    """The fallback parser mangles multi-underscore slugs — why it's not primary.
+
+    twelve_data -> 'twelve'. This is precisely the bug that reading the
+    authoritative toolkit_slug from the tool_result output avoids.
+    """
+    assert _toolkit_slug_from_tool_name("composio_twelve_data_get_price") == "twelve"
+    assert _toolkit_slug_from_tool_name("composio_alpha_vantage_quote") == "alpha"
+
+
+def test_toolkit_slug_name_parse_non_composio() -> None:
     """Non-Composio tool names return None."""
     assert _toolkit_slug_from_tool_name("mcp__github__list_prs") is None
     assert _toolkit_slug_from_tool_name("slack_post_message") is None
