@@ -5,9 +5,10 @@ each tool card (the #1 retrieval-quality lever per Gorilla/EASYTOOL research) an
 a workspace-scoped KG entity (entity_type="integration") carrying the app-level
 profile summary, capability buckets, and cross-app affinity hints.
 
-The profiler runs inside sync_toolkit() AFTER _upsert_cards() so enriched
-descriptions are written before _embed_cards() sees them.  Re-embedding happens
-automatically because _embed_cards() is called after the profile step.
+The profiler now runs in a dedicated background loop (CapabilityProfilerWorker)
+rather than inline inside sync_toolkit().  build_capability_profile() accepts an
+optional max_tools budget so the background loop can process toolkits
+incrementally across ticks without stalling the sync path.
 
 Backfill: call backfill_capability_profiles(session, installation_id) or run
 python -m kortny.integration_learning.backfill to populate existing connections.
@@ -15,12 +16,13 @@ python -m kortny.integration_learning.backfill to populate existing connections.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import uuid
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any
+from typing import Any, TypedDict
 
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
@@ -40,9 +42,22 @@ _RESPONSE_FORMAT: dict[str, str] = {"type": "json_object"}
 # silently dropping the tail.
 _PROFILER_BATCH_SIZE = 30
 
+# Per-cycle card budget for the background profiler loop.  The loop processes at
+# most this many unenriched tools per tick (spread across all pending toolkits).
+# Deferred upgrade: usage-ranked tool prioritization (process the most-retrieved
+# tools first within a toolkit).
+_DEFAULT_PROFILE_CARD_BUDGET = 120
+
 # Confidence for capability_profile KG entities — seeded on-connect so we
 # start at active not candidate (profile is immediately useful).
 _PROFILE_CONFIDENCE = Decimal("0.700")
+
+
+class ProfileResult(TypedDict):
+    """Counts returned by build_capability_profile when max_tools is used."""
+
+    processed: int
+    remaining_unenriched: int
 
 
 @dataclass(frozen=True)
@@ -63,24 +78,35 @@ def build_capability_profile(
     llm: LLMService,
     task_id: uuid.UUID,
     toolkit_metadata: dict[str, Any] | None = None,
+    max_tools: int | None = None,
 ) -> CapabilityProfile | None:
     """Run batched cheap LLM passes to profile a toolkit and write enriched descriptions.
 
-    Iterates over all tool cards in batches of _PROFILER_BATCH_SIZE so that
-    large toolkits (e.g. 97 tools) are fully covered.  App-level fields
-    (summary, capability_buckets, cross_app_affinity_hints) come from the first
-    successfully-parsed batch; per_tool entries are merged across all batches.
+    When ``max_tools`` is set (background loop mode):
+    - Only cards lacking ``enriched_description`` are considered.
+    - At most ``max_tools`` unenriched cards are processed this call.
+    - The app-level KG entity (summary/buckets) is written on the first run
+      (when no profile entity exists yet); subsequent top-up runs skip that step
+      if the entity already exists and only add per-tool enrichment.
+    - Once ALL unenriched cards have been enriched (remaining_unenriched == 0),
+      the ``generated_from.card_sha_digest`` is stamped on the KG entity so the
+      stale-gate skips this toolkit on the next cycle.
 
-    Returns the parsed profile, or None if there are no cards or every batch
-    fails (failures are logged, never propagate — caller must not hard-fail).
+    When ``max_tools`` is None (legacy/backfill mode), the full set of cards is
+    processed as before — app-level fields are always written.
+
+    Returns the parsed profile from the first successful batch (app-level
+    fields), or None if there are no cards to process or every batch fails.
 
     Side effects:
-    - Writes ``enriched_description`` on each ``ComposioToolCard`` row.
+    - Writes ``enriched_description`` on each ``ComposioToolCard`` row processed.
     - Creates or upserts a KG entity with entity_type="integration" and the
-      app-level profile summary in attrs_json.
+      app-level profile summary in attrs_json (first run / when no entity exists).
+    - When all cards are enriched, stamps card_sha_digest on the KG entity.
     """
 
-    cards = list(
+    # Fetch all cards to compute counts and the digest for gate stamping.
+    all_card_rows = list(
         session.execute(
             select(
                 ComposioToolCard.tool_slug,
@@ -88,15 +114,34 @@ def build_capability_profile(
                 ComposioToolCard.description,
                 ComposioToolCard.side_effect,
                 ComposioToolCard.input_schema_json,
+                ComposioToolCard.card_sha,
+                ComposioToolCard.enriched_description,
             ).where(
                 ComposioToolCard.installation_id == installation_id,
                 ComposioToolCard.toolkit_slug == toolkit_slug,
             )
         ).all()
     )
-    if not cards:
+    if not all_card_rows:
         logger.debug(
             "capability_profiler no cards toolkit=%s installation_id=%s",
+            toolkit_slug,
+            installation_id,
+        )
+        return None
+
+    if max_tools is not None:
+        # Background loop mode: only process unenriched cards, capped to budget.
+        unenriched = [r for r in all_card_rows if r.enriched_description is None]
+        cards_to_process = unenriched[:max_tools]
+    else:
+        # Legacy / backfill mode: process all cards.
+        unenriched = [r for r in all_card_rows if r.enriched_description is None]
+        cards_to_process = list(all_card_rows)
+
+    if not cards_to_process:
+        logger.debug(
+            "capability_profiler nothing to process toolkit=%s installation_id=%s",
             toolkit_slug,
             installation_id,
         )
@@ -138,8 +183,18 @@ def build_capability_profile(
     parsed: CapabilityProfile | None = None
     enriched_by_slug: dict[str, str] = {}
 
-    for start in range(0, len(cards), _PROFILER_BATCH_SIZE):
-        batch = cards[start : start + _PROFILER_BATCH_SIZE]
+    # Determine whether a KG entity exists already (for first-run detection).
+    canonical_key = f"composio_app:{toolkit_slug}"
+    existing_entity = session.scalars(
+        select(KnowledgeGraphEntity).where(
+            KnowledgeGraphEntity.installation_id == installation_id,
+            KnowledgeGraphEntity.canonical_key == canonical_key,
+        )
+    ).first()
+    profile_entity_exists = existing_entity is not None
+
+    for start in range(0, len(cards_to_process), _PROFILER_BATCH_SIZE):
+        batch = cards_to_process[start : start + _PROFILER_BATCH_SIZE]
         batch_tool_list = [
             {
                 "tool_slug": row.tool_slug,
@@ -210,22 +265,84 @@ def build_capability_profile(
     if parsed is None:
         return None
 
-    # Upsert the KG capability_profile entity.
-    _upsert_kg_profile_entity(
-        session,
-        installation_id=installation_id,
-        toolkit_slug=toolkit_slug,
-        task_id=task_id,
-        profile=parsed,
-    )
+    # In max_tools mode, write app-level KG entity only on the first run (when
+    # no entity exists yet).  Subsequent top-up runs skip this to avoid
+    # overwriting a previously-written summary with a partial batch summary.
+    should_write_kg = max_tools is None or not profile_entity_exists
+
+    if should_write_kg:
+        _upsert_kg_profile_entity(
+            session,
+            installation_id=installation_id,
+            toolkit_slug=toolkit_slug,
+            task_id=task_id,
+            profile=parsed,
+        )
+
+    # When all cards are now enriched, stamp the card_sha_digest on the KG
+    # entity so the stale-gate skips this toolkit on the next cycle.
+    if max_tools is not None:
+        newly_enriched = set(enriched_by_slug.keys())
+        # Count remaining unenriched after this pass: unenriched cards that were
+        # not processed this call (tail beyond budget) and processed cards that
+        # the LLM failed to return an enriched_description for.
+        processed_slugs = {r.tool_slug for r in cards_to_process}
+        tail_unenriched = [r for r in unenriched if r.tool_slug not in processed_slugs]
+        processed_but_missing = [
+            r for r in cards_to_process if r.tool_slug not in newly_enriched
+        ]
+        remaining_unenriched = len(tail_unenriched) + len(processed_but_missing)
+
+        if remaining_unenriched == 0:
+            _stamp_digest(
+                session,
+                installation_id=installation_id,
+                toolkit_slug=toolkit_slug,
+                all_card_rows=all_card_rows,
+                newly_enriched=newly_enriched,
+                canonical_key=canonical_key,
+            )
 
     logger.info(
         "capability_profiler done toolkit=%s tools=%s enriched=%s",
         toolkit_slug,
-        len(cards),
+        len(all_card_rows),
         len(enriched_by_slug),
     )
     return parsed
+
+
+def _stamp_digest(
+    session: Session,
+    *,
+    installation_id: uuid.UUID,
+    toolkit_slug: str,
+    all_card_rows: list[Any],
+    newly_enriched: set[str],
+    canonical_key: str,
+) -> None:
+    """Stamp the card_sha_digest on the KG entity once all cards are enriched."""
+    sorted_shas = "".join(
+        row.card_sha for row in sorted(all_card_rows, key=lambda r: r.tool_slug)
+    )
+    card_sha_digest = hashlib.sha256(sorted_shas.encode()).hexdigest()
+
+    stamped_entity = session.scalars(
+        select(KnowledgeGraphEntity).where(
+            KnowledgeGraphEntity.installation_id == installation_id,
+            KnowledgeGraphEntity.canonical_key == canonical_key,
+        )
+    ).first()
+    if stamped_entity is not None:
+        attrs = dict(stamped_entity.attrs_json or {})
+        attrs["generated_from"] = {"card_sha_digest": card_sha_digest}
+        stamped_entity.attrs_json = attrs
+        session.flush()
+        logger.debug(
+            "capability_profiler digest stamped toolkit=%s digest=%s",
+            toolkit_slug,
+            card_sha_digest,
+        )
 
 
 def _parse_profile(content: str, *, toolkit_slug: str) -> CapabilityProfile | None:
