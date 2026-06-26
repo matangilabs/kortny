@@ -350,6 +350,51 @@ class ComposioClient:
             connected_account_id=connected_account_id,
         )
 
+    def create_connected_account(
+        self,
+        *,
+        user_id: str,
+        auth_config_id: str,
+    ) -> ComposioConnectionRequest:
+        """Create a connected account directly, without an OAuth redirect.
+
+        Used for NO_AUTH toolkits: they carry no credentials and have no redirect
+        flow, so the connected account becomes active immediately. Returns a
+        ``ComposioConnectionRequest`` with an empty ``redirect_url`` and the new
+        connected-account id. (Composio v3.1 ``POST /connected_accounts`` — the
+        exact no-auth ``connection`` body is undocumented publicly; user_id-only
+        is the minimal form and is verified live.)
+        """
+
+        response = self._post(
+            "/api/v3.1/connected_accounts",
+            json_payload={
+                "auth_config": {"id": auth_config_id},
+                "connection": {"user_id": user_id},
+            },
+        )
+        payload = response.json()
+        account = payload.get("connected_account") or payload.get("connectedAccount")
+        account_dict = account if isinstance(account, dict) else payload
+        connected_account_id = _optional_str(
+            account_dict.get("id")
+            or account_dict.get("connected_account_id")
+            or account_dict.get("connectedAccountId")
+        )
+        if not connected_account_id:
+            raise ComposioConnectionError(
+                "Composio connected-account response had no id"
+            )
+        status_value = str(
+            account_dict.get("status") or payload.get("status") or "active"
+        ).lower()
+        return ComposioConnectionRequest(
+            id=connected_account_id,
+            redirect_url="",
+            status=status_value,
+            connected_account_id=connected_account_id,
+        )
+
     def set_connected_account_enabled(
         self,
         connected_account_id: str,
