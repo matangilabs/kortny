@@ -373,7 +373,17 @@ _NAMER_SYSTEM_PROMPT = (
     "You name an emerging project. Given a list of recurring work items a team "
     'keeps returning to, return strict JSON {"title": str}. The title is a '
     "short human project name derived ONLY from the items (do not invent "
-    "specifics)."
+    "specifics). "
+    "Return only the JSON object — no prose, markdown, or comments. "
+    "Extract the name solely from the provided items; never fabricate a name "
+    "not grounded in the input. If the items are too vague to produce a "
+    'meaningful name, return {"title": "Untitled Project"}. '
+    "Examples: "
+    '{"recurring_items":["API rate limit investigation","rate limiter refactor","rate limit docs"]} '
+    '-> {"title":"API Rate Limiter"} '
+    '{"recurring_items":["thing1","thing2","thing3"]} '
+    '-> {"title":"Untitled Project"} '
+    "Ground every field in the input; abstain when unsupported."
 )
 
 _NAMER_RESPONSE_FORMAT = {

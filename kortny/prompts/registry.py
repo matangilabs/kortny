@@ -112,41 +112,49 @@ def _seed() -> None:
             "kortny.org_profile_extractor",
             "consolidator",
             "Infer the workspace org profile.",
+            "2",  # v2: output-contract, abstain/no-fabrication, examples
         ),
         (
             "kortny.user_profile_extractor",
             "consolidator",
             "Infer a user's persona (role + work surfaces).",
+            "2",  # v2: output-contract, abstain/no-fabrication, examples
         ),
         (
             "kortny.style_card_extractor",
             "consolidator",
             "Infer per-surface response style cards.",
+            "2",  # v2: output-contract, abstain/no-fabrication, examples
         ),
         (
             "kortny.project_inference_namer",
             "consolidator",
             "Name an inferred project cluster.",
+            "2",  # v2: output-contract, abstain/no-fabrication, examples
         ),
         (
             "kortny.consolidator_merge",
             "consolidator",
             "Merge near-duplicate graph entities.",
+            "2",  # v2: output-contract, abstain/no-fabrication, examples
         ),
         (
             "kortny.consolidator_promotion",
             "consolidator",
             "Adjudicate episode→graph promotion.",
+            "2",  # v2: output-contract, abstain/no-fabrication, examples
         ),
         (
             "kortny.witness_task_response_extractor",
             "witness",
             "Extract a witnessable answer from a task.",
+            "2",  # v2: output-contract, abstain/no-fabrication, examples
         ),
         (
             "kortny.witness_channel_profile_extractor",
             "witness",
             "Extract opportunities from a channel profile.",
+            "2",  # v2: output-contract, abstain/no-fabrication, examples
         ),
         (
             "kortny.witness_autopilot_reviewer",
@@ -158,6 +166,7 @@ def _seed() -> None:
             "kortny.knowledge_graph.channel_semantic_extractor",
             "knowledge_graph",
             "Extract channel semantic facts.",
+            "2",  # v2: output-contract, abstain/no-fabrication, examples
         ),
         (
             "kortny.mcp_description_enricher",
@@ -186,11 +195,13 @@ def _seed() -> None:
             "kortny.document_visual_critic",
             "documents",
             "Critique a rendered document's visual quality.",
+            "2",  # v2: output-contract, abstain/no-fabrication
         ),
         (
             "kortny.revision_patch_proposer",
             "documents",
             "Propose a patch to revise a generated document.",
+            "2",  # v2: output-contract, abstain/no-fabrication
         ),
         ("kortny.pdf_ocr", "documents", "OCR a PDF page image to text."),
     )

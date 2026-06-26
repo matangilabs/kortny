@@ -170,8 +170,9 @@ def _task_response_messages(
                 "Slack. Decide whether a completed Slack answer contains future "
                 "things Kortny should watch for, proactively help with, or remember "
                 "as candidate opportunities. Use semantic judgment; do not require "
-                "specific headings or phrases. Return JSON only. Schema: "
-                '{"candidates":[{"candidate_type":"workflow_gap|'
+                "specific headings or phrases. "
+                "Return only the JSON object — no prose, markdown, or comments. "
+                'Schema: {"candidates":[{"candidate_type":"workflow_gap|'
                 "artifact_followup|unresolved_decision|data_quality_issue|"
                 'recurring_check|project_status_gap|general_help",'
                 '"title":"short title","summary":"what Kortny should watch '
@@ -188,8 +189,17 @@ def _task_response_messages(
                 "the evidence suggests recurrence; default automation_kind to "
                 "watch when unsure. "
                 "Only create candidates that would make Kortny more useful later. "
-                "Return no candidates for routine greetings, generic answers, or "
-                "claims without evidence."
+                "Return no candidates (set skipped_reason) for routine greetings, "
+                "generic answers, or claims without evidence. "
+                "Extract ONLY opportunities grounded in the provided answer and "
+                "request; never invent facts, user ids, or context not present in "
+                "the input. confidence_score must be 0.0..1.0. "
+                "Examples: "
+                '{"slack_surface":"channel","kortny_response":"I pulled the weekly P&L report. Revenue is up 12% WoW.","user_request":"show me the P&L","max_candidates":5} '
+                '-> {"candidates":[{"candidate_type":"recurring_check","title":"Weekly P&L report","summary":"User requests P&L updates; could automate weekly delivery.","suggested_action":"Schedule a weekly P&L summary post","suggested_message":"Want me to post the P&L summary here every Monday?","automation_kind":"recurring","cadence_suggestion":"weekly on Monday","deliverable":"Weekly P&L summary in channel","evidence":["pulled the weekly P&L report","Revenue is up 12% WoW"],"confidence_score":0.80,"confidence_reason":"Explicit recurring report pattern."}]} '
+                '{"slack_surface":"channel","kortny_response":"You\'re welcome!","user_request":"thanks","max_candidates":5} '
+                '-> {"candidates":[],"skipped_reason":"routine_greeting"} '
+                "Ground every field in the input; abstain when unsupported."
             ),
         ),
         ChatMessage(
@@ -231,8 +241,9 @@ def _channel_profile_messages(
                 "proactively help with, or remember as candidate opportunities. "
                 "Use semantic judgment from the provided evidence; do not depend "
                 "on headings, regexes, or fixed phrases. Do not infer private DMs "
-                "or cross-channel facts that are not in the payload. Return JSON "
-                'only. Schema: {"candidates":[{"candidate_type":"'
+                "or cross-channel facts that are not in the payload. "
+                "Return only the JSON object — no prose, markdown, or comments. "
+                'Schema: {"candidates":[{"candidate_type":"'
                 "workflow_gap|artifact_followup|unresolved_decision|"
                 "data_quality_issue|recurring_check|project_status_gap|"
                 'general_help","title":"short title","summary":"what '
@@ -250,8 +261,18 @@ def _channel_profile_messages(
                 "with a cadence when the evidence suggests recurrence; default "
                 "automation_kind to watch when unsure. "
                 "Only create candidates that would make Kortny "
-                "more useful later. Return no candidates when the profile is too "
-                "thin, too speculative, or lacks actionable future help."
+                "more useful later. Return no candidates (set skipped_reason) "
+                "when the profile is too thin, too speculative, or lacks "
+                "actionable future help. "
+                "Extract ONLY opportunities grounded in the provided profile; "
+                "never invent facts, channel ids, or context not present in "
+                "the input. confidence_score must be 0.0..1.0. "
+                "Examples: "
+                '{"channel_id":"C1","profile":{"summary":"Daily trading ops channel. Team posts P&L reports every morning and reviews open positions.","message_count":240},"max_candidates":5} '
+                '-> {"candidates":[{"candidate_type":"recurring_check","title":"Daily P&L summary","summary":"Team posts P&L every morning; Kortny could automate or summarize.","suggested_action":"Post a morning P&L digest in #trading-ops","suggested_message":"I can post a daily P&L digest here each morning. Want me to set that up?","automation_kind":"recurring","cadence_suggestion":"daily at market open","deliverable":"Morning P&L summary post in channel","evidence":["Team posts P&L reports every morning","reviews open positions"],"confidence_score":0.83,"confidence_reason":"Clear daily recurring pattern in profile."}]} '
+                '{"channel_id":"C2","profile":{"summary":"","message_count":2},"max_candidates":5} '
+                '-> {"candidates":[],"skipped_reason":"profile_too_thin"} '
+                "Ground every field in the input; abstain when unsupported."
             ),
         ),
         ChatMessage(

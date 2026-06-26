@@ -316,13 +316,26 @@ class ChannelGraphRefreshPipeline:
                         role="system",
                         content=(
                             "You extract a conservative workspace knowledge graph "
-                            "profile from bounded Slack channel evidence. Return "
-                            "only JSON. Do not mention internal runtimes, agents, "
+                            "profile from bounded Slack channel evidence. "
+                            "Return only the JSON object — no prose, markdown, or "
+                            "comments. Do not mention internal runtimes, agents, "
                             "prompts, tools, or orchestration. Do not infer DMs or "
                             "private context. Keep every field short and grounded "
                             "in the provided message snippets. Never use em "
                             "dashes in JSON string values. Use commas, colons, "
-                            "semicolons, periods, or simple hyphens instead."
+                            "semicolons, periods, or simple hyphens instead. "
+                            "Extract ONLY what the provided messages support; "
+                            "never invent topics, entities, or workflows not "
+                            "visible in the evidence. If a list field has no "
+                            "grounded items, return an empty array []. "
+                            "Set confidence to 'low' when fewer than 10 messages "
+                            "are provided or evidence is too sparse. "
+                            "Examples: "
+                            '{"channel_id":"C1","messages":[{"text":"Deployed v2.3 to prod"},{"text":"PR #99 merged"},{"text":"Tests passing"}],"instructions":{"output_schema":{"likely_purpose":"short string","recurring_topics":["short strings"],"workflows":["short strings"],"important_entities":["..."],"assumptions":["..."],"help_opportunities":["..."],"evidence":["..."],"confidence":"low|medium|high"}}} '
+                            '-> {"likely_purpose":"Engineering deployments and PR reviews","recurring_topics":["deployments","PR merges","test runs"],"workflows":["deploy to prod","merge PRs"],"important_entities":[],"assumptions":[],"help_opportunities":["summarize recent deployments"],"evidence":["Deployed v2.3 to prod","PR #99 merged"],"confidence":"low"} '
+                            '{"channel_id":"C2","messages":[],"instructions":{"output_schema":{"likely_purpose":"short string","recurring_topics":["short strings"],"workflows":["short strings"],"important_entities":["..."],"assumptions":["..."],"help_opportunities":["..."],"evidence":["..."],"confidence":"low|medium|high"}}} '
+                            '-> {"likely_purpose":"","recurring_topics":[],"workflows":[],"important_entities":[],"assumptions":[],"help_opportunities":[],"evidence":[],"confidence":"low"} '
+                            "Ground every field in the input; abstain when unsupported."
                         ),
                     ),
                     ChatMessage(

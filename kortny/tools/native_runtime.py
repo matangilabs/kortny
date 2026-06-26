@@ -245,7 +245,12 @@ def _build_document_visual_critic(
         "unlabelled charts or axes, cramped or excessive whitespace, low contrast, "
         "weak visual hierarchy, typographic issues (wrong size, poor readability). "
         "Judge the RENDERED appearance, not the correctness of the content. "
-        "Respond ONLY with valid JSON matching the provided schema."
+        "Return only the JSON object — no prose, markdown, or comments. "
+        "Report ONLY defects you can observe in the rendered page images; "
+        "never fabricate issues not visible in the input. "
+        "If the document looks publication-ready, return an empty issues list "
+        "and a high overall_score. "
+        "Ground every field in the input; abstain when unsupported."
     )
 
     def visual_critic(page_pngs: Sequence[bytes]) -> VisualCritique:
@@ -370,10 +375,15 @@ def _build_revision_patch_proposer(
         "- split_prose: split an overflowing prose block at natural boundaries\n\n"
         "Rules:\n"
         "1. Do NOT invent or change any text content — only fix presentation/layout.\n"
-        "2. Output a single VisualRevisionPatch JSON with base_spec_hash set to "
+        "2. Return only the JSON object — no prose, markdown, or comments.\n"
+        "3. Output a single VisualRevisionPatch JSON with base_spec_hash set to "
         "the provided value.\n"
-        "3. Only reference block_index values that appear in the candidate blocks.\n"
-        "4. If no fix is possible, output an empty operations list."
+        "4. Only reference block_index values that appear in the candidate blocks; "
+        "never invent block indices not listed.\n"
+        "5. If no fix is possible, output an empty operations list.\n"
+        "6. Extract operations ONLY from the defects listed; never propose changes "
+        "not grounded in the provided issues.\n"
+        "Ground every field in the input; abstain when unsupported."
     )
 
     def revision_proposer(ctx: LlmPatchContext) -> VisualRevisionPatch | None:
