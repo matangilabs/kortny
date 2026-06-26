@@ -5078,9 +5078,10 @@ def test_span_identity_uses_model_and_tool_names() -> None:
         "LLM",
         "openai/gpt-5.4-mini",
     )
-    assert _span_identity(
-        "tool_call", {"tool": "composio_serpapi_news_search"}
-    ) == ("Tool", "composio_serpapi_news_search")
+    assert _span_identity("tool_call", {"tool": "composio_serpapi_news_search"}) == (
+        "Tool",
+        "composio_serpapi_news_search",
+    )
     assert _span_identity("tool_result", {"tool": "code_exec"}) == (
         "Tool",
         "code_exec",

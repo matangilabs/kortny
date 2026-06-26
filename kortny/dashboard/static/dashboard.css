@@ -2521,9 +2521,16 @@ p {
   min-width: 0;
 }
 
+/* The generic .detail-label is block + bottom-margin (built for stacked
+   sections); inline it so the request reads as one clean baseline-aligned line. */
+.run-summary-request .detail-label {
+  flex: none;
+  margin: 0;
+}
+
 .run-summary-request p {
   color: var(--foreground);
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 600;
   margin: 0;
   overflow: hidden;
@@ -6111,8 +6118,12 @@ details.span-row[open] > .span-summary .span-icon::after {
   text-transform: uppercase;
 }
 
+/* Flat: the span body IS the container — the pre shouldn't nest its own box. */
 .span-content pre {
+  background: transparent;
+  border-radius: 0;
   margin: 0;
+  padding: 0 0 10px;
 }
 
 .span-raw {

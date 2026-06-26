@@ -6902,9 +6902,9 @@ def _timeline_event(event: TaskEvent) -> TimelineEvent:
     # A row is expandable only when expanding reveals real content: tool I/O,
     # captured prompt/response, or (for spans) a raw payload worth inspecting.
     # Dim log lines with only their one-line summary stay non-expandable.
-    has_detail = bool(
-        input_json or output_json or prompt_json or response_json
-    ) or (tier == "span" and bool(payload))
+    has_detail = bool(input_json or output_json or prompt_json or response_json) or (
+        tier == "span" and bool(payload)
+    )
     return TimelineEvent(
         seq=event.seq,
         event_type=event_type,
