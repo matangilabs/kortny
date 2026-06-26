@@ -17,6 +17,7 @@ from kortny.evals.orchestration.cases import (
 )
 from kortny.evals.orchestration.runner import (
     _EVAL_CHANNEL_ID,
+    _NoOpSlackClient,
     _resolve_scope_channel_id,
     _resolve_scope_user_id,
     _toolkit_slug_from_tool_name,
@@ -451,7 +452,7 @@ def test_resolve_scope_user_id_env_override(
     The override returns before any DB query, so a sentinel session that would
     error if touched proves the override short-circuits.
     """
-    monkeypatch.setenv("KORTNY_EVAL_SCOPE_USER_ID", "U053N16RPSQ")
+    monkeypatch.setenv("KORTNY_EVAL_SCOPE_USER_ID", "U_EVAL_OWNER_TEST")
 
     class _ExplodingSession:
         def execute(self, *args: object, **kwargs: object) -> object:
@@ -459,7 +460,7 @@ def test_resolve_scope_user_id_env_override(
 
     session = _ExplodingSession()
     user_id = _resolve_scope_user_id(session, uuid.uuid4())  # type: ignore[arg-type]
-    assert user_id == "U053N16RPSQ"
+    assert user_id == "U_EVAL_OWNER_TEST"
 
 
 def test_resolve_scope_channel_id_env_override(
@@ -476,3 +477,43 @@ def test_resolve_scope_channel_id_default(
     """Without the env override, the synthetic eval channel is used."""
     monkeypatch.delenv("KORTNY_EVAL_SCOPE_CHANNEL_ID", raising=False)
     assert _resolve_scope_channel_id() == _EVAL_CHANNEL_ID
+
+
+# ---------------------------------------------------------------------------
+# No-op Slack client (side-effect-free egress)
+# ---------------------------------------------------------------------------
+
+
+def test_noop_slack_client_post_returns_ts() -> None:
+    """chat_postMessage must return an ok response carrying a ts.
+
+    SlackPoster reads the ts off the response; a missing ts raises. The no-op
+    client must therefore return a benign ts so the post path completes without
+    reaching Slack.
+    """
+    client = _NoOpSlackClient()
+    resp = client.chat_postMessage(channel="EVAL_ORCHESTRATION", text="hi")
+    assert resp["ok"] is True
+    assert isinstance(resp["ts"], str) and resp["ts"]
+
+
+def test_noop_slack_client_file_upload_ok() -> None:
+    """files_upload_v2 must return an ok response and never reach Slack."""
+    client = _NoOpSlackClient()
+    resp = client.files_upload_v2(file="/tmp/x.txt", channel="EVAL_ORCHESTRATION")
+    assert resp["ok"] is True
+
+
+def test_noop_slack_client_reactions_are_noops() -> None:
+    """reactions_add / reactions_remove must be no-ops returning ok."""
+    client = _NoOpSlackClient()
+    assert client.reactions_add(channel="C", name="eyes", timestamp="1.0")["ok"]
+    assert client.reactions_remove(channel="C", name="eyes", timestamp="1.0")["ok"]
+
+
+def test_noop_slack_client_post_ts_is_unique() -> None:
+    """Each post returns a distinct ts so the outbox never collides on dedup."""
+    client = _NoOpSlackClient()
+    ts1 = client.chat_postMessage(channel="C", text="a")["ts"]
+    ts2 = client.chat_postMessage(channel="C", text="b")["ts"]
+    assert ts1 != ts2
