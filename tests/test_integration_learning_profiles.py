@@ -1,11 +1,14 @@
-"""Tests for the capability profiler (HIG-295 Step A)."""
+"""Tests for the capability profiler (HIG-295 Step A + B)."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 from typing import Any
 from unittest.mock import MagicMock
+
+import pytest
 
 from kortny.integration_learning.profiles import (
     _parse_profile,
@@ -410,3 +413,308 @@ def test_build_capability_profile_app_level_from_first_batch() -> None:
     assert result is not None
     assert result.summary == "First batch summary."
     assert llm.complete.call_count == 2
+
+
+# --------------------------------------------------------------------------- #
+# max_tools / only-unenriched behavior (HIG-295 Part 2)                       #
+# --------------------------------------------------------------------------- #
+
+
+def _make_card(slug: str, enriched: str | None = None) -> MagicMock:
+    """Build a mock card row with optional enriched_description."""
+    c = MagicMock()
+    c.tool_slug = slug
+    c.name = slug.replace("_", " ").title()
+    c.description = f"raw description for {slug}"
+    c.side_effect = "read"
+    c.input_schema_json = {}
+    c.card_sha = f"sha_{slug}"
+    c.enriched_description = enriched
+    return c
+
+
+def _make_profile_llm(slug_prefix: str = "") -> MagicMock:
+    """LLM that returns valid profile JSON, enriching whatever slugs it receives."""
+
+    def fake_complete(**kwargs: Any) -> MagicMock:
+        user_content = kwargs["messages"][1].content
+        payload = json.loads(user_content)
+        per_tool = [
+            {
+                "tool_slug": t["tool_slug"],
+                "enriched_description": f"Enriched: {t['tool_slug']}",
+            }
+            for t in payload["tools"]
+        ]
+        resp = MagicMock()
+        resp.content = json.dumps(
+            {
+                "summary": "Test toolkit summary.",
+                "capability_buckets": ["bucket_a"],
+                "per_tool": per_tool,
+                "cross_app_affinity_hints": [],
+            }
+        )
+        return resp
+
+    llm = MagicMock()
+    llm.complete.side_effect = fake_complete
+    return llm
+
+
+def test_max_tools_skips_already_enriched_cards() -> None:
+    """max_tools mode: already-enriched cards are not re-processed."""
+    inst_id = uuid.uuid4()
+    task_id = uuid.uuid4()
+
+    enriched_card = _make_card("TOOL_ENRICHED", enriched="Already enriched desc.")
+    unenriched_card = _make_card("TOOL_UNENRICHED", enriched=None)
+
+    session = MagicMock()
+    session.execute.return_value.all.return_value = [enriched_card, unenriched_card]
+    session.scalars.return_value.first.return_value = None
+
+    llm = _make_profile_llm()
+
+    result = build_capability_profile(
+        session,
+        installation_id=inst_id,
+        toolkit_slug="myapp",
+        llm=llm,
+        task_id=task_id,
+        max_tools=10,
+    )
+
+    assert result is not None
+    # Only 1 LLM call (one unenriched card fits in one batch).
+    assert llm.complete.call_count == 1
+    # The LLM was passed only the unenriched card.
+    call_args = llm.complete.call_args
+    user_content = call_args.kwargs["messages"][1].content
+    payload = json.loads(user_content)
+    slugs_sent = [t["tool_slug"] for t in payload["tools"]]
+    assert "TOOL_UNENRICHED" in slugs_sent
+    assert "TOOL_ENRICHED" not in slugs_sent
+
+
+def test_max_tools_caps_number_processed() -> None:
+    """max_tools=2 processes at most 2 unenriched cards even if more exist."""
+    inst_id = uuid.uuid4()
+    task_id = uuid.uuid4()
+
+    cards = [_make_card(f"TOOL_{i}", enriched=None) for i in range(5)]
+
+    session = MagicMock()
+    session.execute.return_value.all.return_value = cards
+    session.scalars.return_value.first.return_value = None
+
+    processed_slugs: list[str] = []
+
+    def fake_complete(**kwargs: Any) -> MagicMock:
+        user_content = kwargs["messages"][1].content
+        payload = json.loads(user_content)
+        for t in payload["tools"]:
+            processed_slugs.append(t["tool_slug"])
+        per_tool = [
+            {
+                "tool_slug": t["tool_slug"],
+                "enriched_description": f"Enriched: {t['tool_slug']}",
+            }
+            for t in payload["tools"]
+        ]
+        resp = MagicMock()
+        resp.content = json.dumps(
+            {
+                "summary": "Summary.",
+                "capability_buckets": [],
+                "per_tool": per_tool,
+                "cross_app_affinity_hints": [],
+            }
+        )
+        return resp
+
+    llm = MagicMock()
+    llm.complete.side_effect = fake_complete
+
+    result = build_capability_profile(
+        session,
+        installation_id=inst_id,
+        toolkit_slug="myapp",
+        llm=llm,
+        task_id=task_id,
+        max_tools=2,
+    )
+
+    assert result is not None
+    # Only the first 2 unenriched cards were processed.
+    assert len(processed_slugs) == 2
+
+
+def test_max_tools_stamps_digest_when_all_enriched() -> None:
+    """When max_tools finishes the last unenriched cards, digest is stamped on KG entity."""
+    inst_id = uuid.uuid4()
+    task_id = uuid.uuid4()
+
+    # Only 1 unenriched card; max_tools=10 covers it.
+    unenriched = _make_card("TOOL_A", enriched=None)
+    all_cards = [unenriched]
+
+    existing_entity = MagicMock()
+    existing_entity.attrs_json = {"kind": "capability_profile", "summary": "old"}
+
+    session = MagicMock()
+    session.execute.return_value.all.return_value = all_cards
+
+    # scalars calls: first for KG entity check during profile, then for stamp.
+    entity_result_1 = MagicMock()
+    entity_result_1.first.return_value = existing_entity  # entity exists
+    entity_result_2 = MagicMock()
+    entity_result_2.first.return_value = existing_entity  # for stamp re-fetch
+
+    session.scalars.side_effect = [entity_result_1, entity_result_2]
+
+    llm = _make_profile_llm()
+
+    result = build_capability_profile(
+        session,
+        installation_id=inst_id,
+        toolkit_slug="myapp",
+        llm=llm,
+        task_id=task_id,
+        max_tools=10,
+    )
+
+    assert result is not None
+    # Digest should have been stamped: attrs_json was mutated on existing_entity.
+    # session.flush should have been called (for the stamp).
+    assert session.flush.called
+    # The entity's attrs_json should now contain generated_from.
+    final_attrs = existing_entity.attrs_json
+    assert isinstance(final_attrs, dict)
+    assert "generated_from" in final_attrs
+    assert "card_sha_digest" in final_attrs["generated_from"]
+
+    # The digest value should match SHA256 of sorted card_shas.
+    expected_digest = hashlib.sha256(unenriched.card_sha.encode()).hexdigest()
+    assert final_attrs["generated_from"]["card_sha_digest"] == expected_digest
+
+
+def test_max_tools_no_digest_stamp_when_cards_remain() -> None:
+    """Digest is NOT stamped when more unenriched cards remain after this call."""
+    inst_id = uuid.uuid4()
+    task_id = uuid.uuid4()
+
+    # 3 unenriched cards, budget = 1 — 2 will remain.
+    cards = [_make_card(f"TOOL_{i}", enriched=None) for i in range(3)]
+
+    existing_entity = MagicMock()
+    existing_entity.attrs_json = {}
+
+    session = MagicMock()
+    session.execute.return_value.all.return_value = cards
+
+    entity_result = MagicMock()
+    entity_result.first.return_value = existing_entity
+    session.scalars.return_value = entity_result
+
+    llm = _make_profile_llm()
+
+    result = build_capability_profile(
+        session,
+        installation_id=inst_id,
+        toolkit_slug="myapp",
+        llm=llm,
+        task_id=task_id,
+        max_tools=1,
+    )
+
+    assert result is not None
+    # attrs_json should NOT have had generated_from stamped.
+    final_attrs = existing_entity.attrs_json
+    assert "generated_from" not in final_attrs
+
+
+def test_max_tools_kg_entity_written_only_on_first_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In max_tools mode, KG entity summary is written only when entity doesn't exist."""
+    inst_id = uuid.uuid4()
+    task_id = uuid.uuid4()
+
+    unenriched = _make_card("TOOL_A", enriched=None)
+
+    session = MagicMock()
+    session.execute.return_value.all.return_value = [unenriched]
+
+    # Entity already exists.
+    existing_entity = MagicMock()
+    existing_entity.attrs_json = {
+        "kind": "capability_profile",
+        "summary": "existing summary",
+    }
+
+    entity_result = MagicMock()
+    entity_result.first.return_value = existing_entity
+    session.scalars.return_value = entity_result
+
+    llm = _make_profile_llm()
+
+    # Patch _upsert_kg_profile_entity to track calls via MonkeyPatch.
+    upsert_calls: list[bool] = []
+    import kortny.integration_learning.profiles as profiles_module
+
+    def tracking_upsert(*args: object, **kwargs: object) -> None:
+        upsert_calls.append(True)
+
+    monkeypatch.setattr(profiles_module, "_upsert_kg_profile_entity", tracking_upsert)
+
+    build_capability_profile(
+        session,
+        installation_id=inst_id,
+        toolkit_slug="myapp",
+        llm=llm,
+        task_id=task_id,
+        max_tools=10,
+    )
+
+    # Entity exists → upsert should NOT have been called (skip on top-up run).
+    assert not upsert_calls, "KG upsert should not run when entity already exists"
+
+
+def test_no_max_tools_writes_kg_entity_always(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Legacy mode (max_tools=None) always writes the KG entity."""
+    inst_id = uuid.uuid4()
+    task_id = uuid.uuid4()
+
+    card = _make_card("TOOL_A", enriched="Already enriched.")
+    card2 = _make_card("TOOL_B", enriched=None)
+
+    session = MagicMock()
+    session.execute.return_value.all.return_value = [card, card2]
+    session.scalars.return_value.first.return_value = None
+
+    llm = _make_profile_llm()
+
+    upsert_calls: list[bool] = []
+    import kortny.integration_learning.profiles as profiles_module
+
+    def tracking_upsert(*args: object, **kwargs: object) -> None:
+        upsert_calls.append(True)
+        # Don't call original to avoid GraphService mock complexity.
+
+    monkeypatch.setattr(profiles_module, "_upsert_kg_profile_entity", tracking_upsert)
+
+    result = build_capability_profile(
+        session,
+        installation_id=inst_id,
+        toolkit_slug="myapp",
+        llm=llm,
+        task_id=task_id,
+        # max_tools=None (legacy mode)
+    )
+
+    # Legacy mode (no max_tools) always calls upsert.
+    assert upsert_calls, "KG upsert should always run in legacy mode"
+    assert result is not None

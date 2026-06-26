@@ -1,14 +1,9 @@
-"""Tests: profiler model tier resolution + catalog sync stale gate + ambient wiring."""
+"""Tests: profiler model tier resolution + new background profiler worker (HIG-295)."""
 
 from __future__ import annotations
 
-import hashlib
-import uuid
 from unittest.mock import MagicMock
 
-import pytest
-
-from kortny.composio.catalog_sync import ComposioCatalogSyncService
 from kortny.config import Settings
 from kortny.llm.routing import ModelRouter, ModelRouteTier
 
@@ -79,230 +74,167 @@ def test_profiler_tier_in_model_route_tier() -> None:
     assert ModelRouteTier.profiler == "profiler"
 
 
-# ---- Stale gate -------------------------------------------------------------
+# ---- Settings flags ---------------------------------------------------------
 
 
-def _make_catalog_sync_service(session: MagicMock) -> ComposioCatalogSyncService:
+def test_profiler_enabled_default_true() -> None:
+    s = _settings()
+    assert s.profiler_enabled is True
+
+
+def test_profiler_enabled_can_be_disabled() -> None:
+    s = _settings(KORTNY_PROFILER_ENABLED="false")
+    assert s.profiler_enabled is False
+
+
+def test_profiler_poll_interval_default() -> None:
+    s = _settings()
+    assert s.profiler_poll_interval_seconds == 60
+
+
+def test_profiler_poll_interval_override() -> None:
+    s = _settings(KORTNY_PROFILER_POLL_INTERVAL_SECONDS="120")
+    assert s.profiler_poll_interval_seconds == 120
+
+
+# ---- Sync path no longer calls LLM -----------------------------------------
+
+
+def test_sync_toolkit_has_no_llm_attributes() -> None:
+    """ComposioCatalogSyncService no longer has set_profiler or llm attributes."""
+    from kortny.composio.catalog_sync import ComposioCatalogSyncService
+
     service = ComposioCatalogSyncService(
-        session,
+        MagicMock(),
         client=MagicMock(),
         embedding_index=None,
     )
-    return service
+    assert not hasattr(service, "set_profiler")
+    assert not hasattr(service, "llm")
+    assert not hasattr(service, "_profile_task_id")
+    assert not hasattr(service, "_profile_toolkit")
 
 
-def _make_card_row(
-    tool_slug: str, card_sha: str, enriched: str | None = "desc"
-) -> MagicMock:
-    row = MagicMock()
-    row.tool_slug = tool_slug
-    row.card_sha = card_sha
-    row.enriched_description = enriched
-    return row
+def test_catalog_sync_worker_has_no_profiler_factory_param() -> None:
+    """ComposioCatalogSyncWorker no longer accepts profiler_factory."""
+    import inspect
+
+    from kortny.composio.catalog_sync import ComposioCatalogSyncWorker
+
+    sig = inspect.signature(ComposioCatalogSyncWorker.__init__)
+    assert "profiler_factory" not in sig.parameters
 
 
-def _digest(rows: list[MagicMock]) -> str:
-    sorted_shas = "".join(r.card_sha for r in sorted(rows, key=lambda r: r.tool_slug))
-    return hashlib.sha256(sorted_shas.encode()).hexdigest()
+# ---- build_default_loops wires capability_profiler --------------------------
 
 
-def test_profiler_skips_when_cards_enriched_and_digest_matches() -> None:
-    """Gate: all cards enriched + digest matches -> skip (no LLM call)."""
-    installation_id = uuid.uuid4()
-    toolkit_slug = "github"
+def _supervisor_settings(**overrides: object):  # type: ignore[no-untyped-def]
+    from kortny.config.settings import LLMProvider, Settings
 
-    session = MagicMock()
-    service = _make_catalog_sync_service(session)
-    llm = MagicMock()
-    task_id = uuid.uuid4()
-    service.set_profiler(llm, task_id)
-
-    rows = [
-        _make_card_row("GITHUB_CREATE_ISSUE", "sha1", "Creates a GitHub issue."),
-        _make_card_row("GITHUB_LIST_REPOS", "sha2", "Lists GitHub repositories."),
-    ]
-    digest = _digest(rows)
-
-    # card_sha_rows query
-    card_result = MagicMock()
-    card_result.all.return_value = rows
-    # KG entity query
-    entity = MagicMock()
-    entity.attrs_json = {
-        "kind": "capability_profile",
-        "generated_from": {"card_sha_digest": digest},
+    kwargs: dict[str, object] = {
+        "SLACK_BOT_TOKEN": "xoxb-test-token",
+        "SLACK_APP_TOKEN": "xapp-test-token",
+        "SLACK_SIGNING_SECRET": "test-signing-secret",
+        "LLM_PROVIDER": LLMProvider.openrouter,
+        "LLM_API_KEY": "test-llm-key",
+        "LLM_MODEL": "openai/gpt-5.4-mini",
+        "COMPOSIO_API_KEY": "composio-key",
+        "POSTGRES_URL": "postgresql://kortny:kortny@localhost:5432/kortny_test",
     }
-    entity_result = MagicMock()
-    entity_result.first.return_value = entity
-
-    session.execute.return_value = card_result
-    session.scalars.return_value = entity_result
-
-    service._profile_toolkit(installation_id=installation_id, toolkit_slug=toolkit_slug)
-
-    llm.complete.assert_not_called()
+    kwargs.update(overrides)
+    return Settings(**kwargs)  # type: ignore[arg-type]
 
 
-def test_profiler_runs_when_card_missing_enriched_description() -> None:
-    """Gate: at least one card lacks enriched_description -> run profiler."""
-    installation_id = uuid.uuid4()
-    toolkit_slug = "github"
+def test_build_default_loops_includes_composio_sync_when_configured() -> None:
+    from kortny.ambient.supervisor import build_default_loops
 
-    session = MagicMock()
-    service = _make_catalog_sync_service(session)
-    llm = MagicMock()
-    task_id = uuid.uuid4()
-    service.set_profiler(llm, task_id)
+    loops = {loop.name: loop for loop in build_default_loops(_supervisor_settings())}
+    assert "composio_catalog_sync" in loops
+    assert loops["composio_catalog_sync"].enabled is True
 
-    rows = [
-        _make_card_row("GITHUB_CREATE_ISSUE", "sha1", None),  # missing enriched
-        _make_card_row("GITHUB_LIST_REPOS", "sha2", "Lists GitHub repositories."),
-    ]
-    digest = _digest(rows)
 
-    card_result = MagicMock()
-    card_result.all.return_value = rows
-    entity = MagicMock()
-    entity.attrs_json = {"generated_from": {"card_sha_digest": digest}}
-    entity_result = MagicMock()
-    entity_result.first.return_value = entity
+def test_build_default_loops_disables_composio_sync_when_catalog_off() -> None:
+    from kortny.ambient.supervisor import build_default_loops
 
-    # Second scalars call (re-fetch for stamp) returns None entity
-    second_entity_result = MagicMock()
-    second_entity_result.first.return_value = None
-
-    session.execute.return_value = card_result
-    session.scalars.side_effect = [entity_result, second_entity_result]
-
-    with pytest.MonkeyPatch().context() as mp:
-        called: list[bool] = []
-
-        def _fake_build(*args: object, **kwargs: object) -> None:
-            called.append(True)
-
-        mp.setattr(
-            "kortny.integration_learning.profiles.build_capability_profile",
-            _fake_build,
+    loops = {
+        loop.name: loop
+        for loop in build_default_loops(
+            _supervisor_settings(COMPOSIO_CATALOG_ENABLED=False)
         )
-        service._profile_toolkit(
-            installation_id=installation_id, toolkit_slug=toolkit_slug
+    }
+    assert loops["composio_catalog_sync"].enabled is False
+
+
+def test_build_default_loops_includes_capability_profiler_when_configured() -> None:
+    from kortny.ambient.supervisor import build_default_loops
+
+    loops = {loop.name: loop for loop in build_default_loops(_supervisor_settings())}
+    assert "capability_profiler" in loops
+    assert loops["capability_profiler"].enabled is True
+
+
+def test_build_default_loops_disables_profiler_when_catalog_off() -> None:
+    from kortny.ambient.supervisor import build_default_loops
+
+    loops = {
+        loop.name: loop
+        for loop in build_default_loops(
+            _supervisor_settings(COMPOSIO_CATALOG_ENABLED=False)
         )
+    }
+    assert loops["capability_profiler"].enabled is False
 
-    assert called, "build_capability_profile was not called"
 
+def test_build_default_loops_disables_profiler_when_profiler_flag_off() -> None:
+    from kortny.ambient.supervisor import build_default_loops
 
-def test_profiler_runs_when_digest_changed() -> None:
-    """Gate: digest mismatch (cards changed) -> run profiler."""
-    installation_id = uuid.uuid4()
-    toolkit_slug = "slack"
-
-    session = MagicMock()
-    service = _make_catalog_sync_service(session)
-    llm = MagicMock()
-    task_id = uuid.uuid4()
-    service.set_profiler(llm, task_id)
-
-    rows = [
-        _make_card_row("SLACK_SEND_MESSAGE", "new_sha1", "Sends a Slack message."),
-    ]
-
-    card_result = MagicMock()
-    card_result.all.return_value = rows
-    entity = MagicMock()
-    entity.attrs_json = {"generated_from": {"card_sha_digest": "old_digest"}}
-    entity_result = MagicMock()
-    entity_result.first.return_value = entity
-
-    second_entity_result = MagicMock()
-    second_entity_result.first.return_value = None
-
-    session.execute.return_value = card_result
-    session.scalars.side_effect = [entity_result, second_entity_result]
-
-    with pytest.MonkeyPatch().context() as mp:
-        called: list[bool] = []
-
-        def _fake_build(*args: object, **kwargs: object) -> None:
-            called.append(True)
-
-        mp.setattr(
-            "kortny.integration_learning.profiles.build_capability_profile",
-            _fake_build,
+    loops = {
+        loop.name: loop
+        for loop in build_default_loops(
+            _supervisor_settings(KORTNY_PROFILER_ENABLED=False)
         )
-        service._profile_toolkit(
-            installation_id=installation_id, toolkit_slug=toolkit_slug
-        )
-
-    assert called, "build_capability_profile was not called"
+    }
+    assert loops["capability_profiler"].enabled is False
 
 
-def test_profiler_skips_when_no_llm_set() -> None:
-    """When set_profiler was not called, _profile_toolkit is a no-op."""
-    installation_id = uuid.uuid4()
-    session = MagicMock()
-    service = _make_catalog_sync_service(session)
-    # no set_profiler call
-
-    with pytest.MonkeyPatch().context() as mp:
-        called: list[bool] = []
-
-        def _fake_build(*args: object, **kwargs: object) -> None:
-            called.append(True)
-
-        mp.setattr(
-            "kortny.integration_learning.profiles.build_capability_profile",
-            _fake_build,
-        )
-        service._profile_toolkit(installation_id=installation_id, toolkit_slug="github")
-
-    assert not called
-    session.execute.assert_not_called()
+# ---- CapabilityProfilerWorker unit tests ------------------------------------
 
 
-# ---- Ambient loop wiring seam -----------------------------------------------
-
-
-def test_catalog_sync_worker_profiler_factory_is_called() -> None:
-    """ComposioCatalogSyncWorker._wire_profiler calls the factory and sets profiler."""
-    installation_id = uuid.uuid4()
-    llm = MagicMock()
-    task_id = uuid.uuid4()
-
-    factory_calls: list[tuple[object, uuid.UUID]] = []
-
-    def _factory(session: object, inst_id: uuid.UUID) -> tuple[MagicMock, uuid.UUID]:
-        factory_calls.append((session, inst_id))
-        return llm, task_id
-
-    from kortny.composio.catalog_sync import ComposioCatalogSyncWorker
-
-    worker = ComposioCatalogSyncWorker(
-        session_factory=MagicMock(),
-        settings=_settings(),
-        profiler_factory=_factory,
-        use_advisory_lock=False,
+def test_profiler_worker_has_correct_advisory_lock_key() -> None:
+    from kortny.integration_learning.profiler_worker import (
+        PROFILER_ADVISORY_LOCK_KEY,
+        CapabilityProfilerWorker,
     )
 
-    session = MagicMock()
-    service = MagicMock()
-    worker._wire_profiler(session, service, installation_id)
-
-    assert len(factory_calls) == 1
-    assert factory_calls[0][1] == installation_id
-    service.set_profiler.assert_called_once_with(llm, task_id)
-
-
-def test_catalog_sync_worker_profiler_factory_none_is_noop() -> None:
-    """When profiler_factory is None, _wire_profiler is a no-op."""
-    from kortny.composio.catalog_sync import ComposioCatalogSyncWorker
-
-    worker = ComposioCatalogSyncWorker(
+    worker = CapabilityProfilerWorker(
         session_factory=MagicMock(),
         settings=_settings(),
-        profiler_factory=None,
         use_advisory_lock=False,
     )
-    session = MagicMock()
-    service = MagicMock()
-    worker._wire_profiler(session, service, uuid.uuid4())
-    service.set_profiler.assert_not_called()
+    assert worker.advisory_lock_key == PROFILER_ADVISORY_LOCK_KEY
+    # Lock key must not clash with catalog sync (759340222).
+    assert PROFILER_ADVISORY_LOCK_KEY != 759340222
+
+
+def test_profiler_worker_default_budget() -> None:
+    from kortny.integration_learning.profiler_worker import CapabilityProfilerWorker
+    from kortny.integration_learning.profiles import _DEFAULT_PROFILE_CARD_BUDGET
+
+    worker = CapabilityProfilerWorker(
+        session_factory=MagicMock(),
+        settings=_settings(),
+        use_advisory_lock=False,
+    )
+    assert worker.card_budget == _DEFAULT_PROFILE_CARD_BUDGET
+
+
+def test_profiler_worker_custom_budget() -> None:
+    from kortny.integration_learning.profiler_worker import CapabilityProfilerWorker
+
+    worker = CapabilityProfilerWorker(
+        session_factory=MagicMock(),
+        settings=_settings(),
+        use_advisory_lock=False,
+        card_budget=50,
+    )
+    assert worker.card_budget == 50
