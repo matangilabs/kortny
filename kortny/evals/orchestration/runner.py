@@ -394,11 +394,19 @@ def build_live_run_fn(
         # Each case gets a unique identity so the dedup logic never collapses
         # distinct runs into the same task row.
         unique_ts = f"{uuid.uuid4().int % 10**9}.{uuid.uuid4().int % 10**6}"
+        # source_surface="assistant" makes the executor run the REAL cheap-tier
+        # intent classifier on this task (AgentTaskExecutor._ensure_intent_
+        # decision), exactly as a live Slack message would. Without it the eval
+        # skipped intent entirely, so the intent->toolkit_affinity->retrieval
+        # boost (HIG-274) — the production tool-disambiguation prior — never
+        # fired and one app's tools could dominate the prewarm. This makes the
+        # eval faithful to the full production path (intent + coordinator).
         identity = TaskIdentity.manual(
             channel_id=scope_channel_id,
             thread_ts=_EVAL_THREAD_TS,
             user_id=scope_user_id,
             input_text=f"{case.request}::{unique_ts}",
+            source_surface="assistant",
         )
         task: Task = task_service.create_task(
             installation_id=installation_id,
