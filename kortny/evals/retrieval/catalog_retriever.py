@@ -16,7 +16,7 @@ from __future__ import annotations
 import argparse
 from collections.abc import Callable, Sequence
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from kortny.composio.catalog_sync import TOOL_CARD_EMBEDDING_KIND
@@ -48,7 +48,12 @@ def connected_toolkit_slugs_for_installation(
         .where(
             ComposioConnection.installation_id == installation_id,
             ComposioConnection.status == "active",
-            ComposioConnection.connected_account_id.is_not(None),
+            # Include no-auth toolkits (connected, no account) so their tools are
+            # retrievable by find_tools / the prewarm.
+            or_(
+                ComposioConnection.no_auth.is_(True),
+                ComposioConnection.connected_account_id.is_not(None),
+            ),
         )
         .distinct()
     ).all()
