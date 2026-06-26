@@ -304,6 +304,28 @@ WRITE_VERBS = frozenset(
         "write",
     }
 )
+# Read verbs mirror ``kortny.composio.tool_cards.READ_VERBS`` so the approval
+# gate's read detection agrees with the catalog's ``side_effect`` classification.
+# Without this, a tag-less Composio read (GMAIL_FETCH_EMAILS, GITHUB_LIST_ISSUES,
+# GOOGLECALENDAR_EVENTS_LIST_ALL_CALENDARS) has no write verb and no read-only
+# tag, so it falls through to "write" and wrongly demands approval — gating a
+# read of the user's own data (violates gate-egress-not-compute).
+READ_VERBS = frozenset(
+    {
+        "crawl",
+        "fetch",
+        "find",
+        "get",
+        "inspect",
+        "list",
+        "query",
+        "read",
+        "retrieve",
+        "scrape",
+        "search",
+        "summarize",
+    }
+)
 READ_ONLY_TAGS = frozenset({"readonly", "readonlyhint", "read_only", "read-only"})
 
 
@@ -433,6 +455,14 @@ def _external_tool_risk_shape(
         return "read", ()
     if verbs:
         return "write", tuple(sorted(verbs))
+    # No explicit read claim and no write/destructive verb: fall back to the
+    # verb lexicon. A slug whose verb is read-only (fetch/list/get/find/...) is a
+    # read — matching ``tool_cards.is_read_only`` so the approval gate agrees
+    # with the catalog's ``side_effect``. ``bypass_allowed`` is False only for an
+    # untrusted/drifted MCP server (HIG-169), where we deliberately do NOT honor
+    # a guessed read and fall through to gating.
+    if bypass_allowed and _read_verbs(tool):
+        return "read", ()
     # Unknown shape: conservative — unknown write-ish defaults to implicit.
     return "write", ("unknown_external_write",)
 
@@ -451,7 +481,7 @@ def _tool_is_explicitly_read_only(tool: Tool) -> bool:
     return bool(normalized & READ_ONLY_TAGS)
 
 
-def _risky_verbs(tool: Tool) -> set[str]:
+def _tool_word_set(tool: Tool) -> set[str]:
     text_parts: list[str] = [tool.name, tool.description]
     composio_tool = getattr(tool, "tool", None)
     for attr in ("slug", "name", "description"):
@@ -465,4 +495,12 @@ def _risky_verbs(tool: Tool) -> set[str]:
             for part in text.casefold().replace("-", "_").split("_")
             if part.strip()
         )
-    return words & WRITE_VERBS
+    return words
+
+
+def _risky_verbs(tool: Tool) -> set[str]:
+    return _tool_word_set(tool) & WRITE_VERBS
+
+
+def _read_verbs(tool: Tool) -> set[str]:
+    return _tool_word_set(tool) & READ_VERBS

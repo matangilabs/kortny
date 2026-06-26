@@ -447,8 +447,9 @@ def test_absent_overview_keeps_legacy_message_list(db_session: Session) -> None:
 
 
 def test_system_prompt_contains_capability_upsell_rule() -> None:
-    assert "Consult the <capabilities> section." in DEFAULT_SYSTEM_PROMPT
-    assert "Never respond with a flat refusal." in DEFAULT_SYSTEM_PROMPT
+    assert "<capabilities>" in DEFAULT_SYSTEM_PROMPT
+    assert "connect Jira and I can do this" in DEFAULT_SYSTEM_PROMPT
+    assert "never a flat refusal" in DEFAULT_SYSTEM_PROMPT
 
 
 # ---------------------------------------------------------------------------
