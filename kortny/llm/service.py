@@ -289,9 +289,27 @@ class LLMService:
 
             model = completion.model or self.provider.model
             cost_usd = completion.cost_usd
+            pricing_missing = False
             if cost_usd is None:
-                pricing = self.get_pricing(model)
-                cost_usd = calculate_cost_usd(completion.usage, pricing)
+                try:
+                    pricing = self.get_pricing(model)
+                    cost_usd = calculate_cost_usd(completion.usage, pricing)
+                except ModelPricingNotFoundError:
+                    # A missing pricing row is an observability gap, NOT a task
+                    # failure. Recording cost is bookkeeping that runs after the
+                    # model already answered — never crash the user's task on it
+                    # (observed: a cheap-tier task died with "Something went
+                    # wrong" purely because openrouter/google/gemini-2.5-flash-lite
+                    # had no pricing row). Record cost=0 + flag it so the spend
+                    # gap is visible and a pricing row can be added.
+                    logger.warning(
+                        "model_pricing_missing provider_model=%s/%s — recording "
+                        "cost=0; add a model_pricing row to track its spend",
+                        self.provider_name.value,
+                        model,
+                    )
+                    cost_usd = Decimal("0")
+                    pricing_missing = True
 
             latency_ms = _latency_ms(started)
             response_content = render_completion(completion, capture_mode)
@@ -310,6 +328,8 @@ class LLMService:
                     tool_call.name for tool_call in completion.tool_calls
                 ],
             }
+            if pricing_missing:
+                metadata["pricing_missing"] = True
             image_count = sum(len(m.images) for m in messages)
             if image_count:
                 metadata["image_count"] = image_count

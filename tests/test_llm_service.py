@@ -31,7 +31,7 @@ from kortny.llm import (
     ModelRouteTier,
     TokenUsage,
 )
-from kortny.llm.service import ModelPricingNotFoundError, calculate_cost_usd
+from kortny.llm.service import calculate_cost_usd
 from kortny.tasks import TaskService
 from kortny.tools.types import JsonObject, JsonSchema
 
@@ -438,7 +438,11 @@ def test_llm_service_uses_latest_effective_pricing(db_session: Session) -> None:
     assert task.total_cost_usd == Decimal("0.002000")
 
 
-def test_llm_service_requires_model_pricing(db_session: Session) -> None:
+def test_llm_service_missing_pricing_is_non_fatal(db_session: Session) -> None:
+    # A missing model_pricing row must NOT fail the task (it used to raise
+    # ModelPricingNotFoundError mid-completion and crashed user tasks with
+    # "Something went wrong"). Recording cost is bookkeeping after the model
+    # already answered: complete, record cost=0, flag pricing_missing.
     task = create_task(db_session)
     provider = FakeProvider(
         Completion(
@@ -449,15 +453,27 @@ def test_llm_service_requires_model_pricing(db_session: Session) -> None:
         )
     )
 
-    with pytest.raises(ModelPricingNotFoundError):
-        LLMService(
-            session=db_session,
-            provider=provider,
-            provider_name=LLMProvider.openrouter,
-        ).complete(
-            task_id=task.id,
-            messages=[ChatMessage(role="user", content="hello")],
+    completion = LLMService(
+        session=db_session,
+        provider=provider,
+        provider_name=LLMProvider.openrouter,
+    ).complete(
+        task_id=task.id,
+        messages=[ChatMessage(role="user", content="hello")],
+    )
+
+    assert completion.content == "done"
+    events = list(
+        db_session.scalars(
+            select(TaskEvent)
+            .where(TaskEvent.task_id == task.id)
+            .order_by(TaskEvent.seq)
         )
+    )
+    completed = [e for e in events if e.payload.get("message") == "llm_call_completed"]
+    assert completed and completed[-1].payload.get("pricing_missing") is True
+    db_session.refresh(task)
+    assert task.total_cost_usd == Decimal("0")
 
 
 def test_llm_service_uses_provider_cost_without_pricing(db_session: Session) -> None:
