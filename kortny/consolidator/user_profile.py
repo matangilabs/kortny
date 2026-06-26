@@ -107,7 +107,22 @@ with an "about" summary of what that channel is for when one is known — lean o
 those summaries, not the opaque channel ids, to read what their work is. \
 tools_used lists integrations they've invoked.
 
-Output ONLY the JSON object, no prose."""
+Return only the JSON object — no prose, markdown, or comments. \
+Extract ONLY what the evidence supports; never invent a role or surface not \
+grounded in the input. If evidence is too thin, return {"confidence": 0.0} \
+and leave all other fields null or empty.
+
+Examples:
+Input: {"slack_title":"Senior Software Engineer","active_channels":[{"channel_id":"C1","events":42,"about":"Engineering sprint planning and PR reviews."},{"channel_id":"C2","events":18,"about":"GitHub issue triage."}],"tools_used":["github","linear"]}
+Output: {"role":"Senior Software Engineer","work_surfaces":["issues","prs"],"confidence":0.91}
+
+Input: {"slack_title":null,"active_channels":[{"channel_id":"C3","events":3}],"tools_used":[]}
+Output: {"confidence":0.0}
+
+Input: {"slack_title":null,"active_channels":[{"channel_id":"C4","events":27,"about":"Revenue pipeline review and CRM updates."},{"channel_id":"C5","events":15,"about":"Email campaigns and outbound sequences."}],"tools_used":["salesforce","outreach"]}
+Output: {"role":"Sales / RevOps","work_surfaces":["pipeline","email","accounts"],"confidence":0.74}
+
+Ground every field in the input; abstain when unsupported."""
 
 
 @dataclass(slots=True)

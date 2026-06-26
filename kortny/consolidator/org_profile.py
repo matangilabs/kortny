@@ -89,7 +89,19 @@ correct for THIS workspace. Be conservative; do NOT fabricate a company. If the 
 evidence is too thin to identify the firm, return confidence below 0.4 and leave \
 fields empty.
 
-Output ONLY the JSON object, no prose."""
+Return only the JSON object — no prose, markdown, or comments. \
+Extract ONLY what the evidence supports; never invent names, facts, or \
+identifiers not present in the input. If evidence is too thin to fill any \
+field, return {"confidence": 0.0} and leave all other fields null or empty.
+
+Examples:
+Input: {"workspace_name":"Acme Widgets","channels":[{"channel_id":"C1","summary":"Sales team tracking widget deals and pipeline."},{"channel_id":"C2","summary":"Engineering sprint planning for widget firmware."},{"channel_id":"C3","summary":"Customer support tickets for widget hardware."}]}
+Output: {"company_name":"Acme Widgets","what_we_do":"Makes and sells hardware widgets","industry":"Hardware / IoT","business_model":"B2B product sales","target_customers":"Businesses needing widget hardware","confidence":0.78}
+
+Input: {"workspace_name":"team-workspace-3","channels":[{"channel_id":"C4","summary":"General chatter."},{"channel_id":"C5","summary":"Random links."}]}
+Output: {"confidence":0.0}
+
+Ground every field in the input; abstain when unsupported."""
 
 
 @dataclass(slots=True)

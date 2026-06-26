@@ -49,13 +49,23 @@ STYLE_CARD_SYSTEM_PROMPT = (
     "and a bounded sample of recent messages. Describe the channel's "
     "collective register only — never the style of any individual person. "
     "common_phrases must be channel idioms shared by the group, not personal "
-    "catchphrases. Return JSON only: "
+    "catchphrases. "
+    "Return only the JSON object — no prose, markdown, or comments. Schema: "
     '{"cards":[{"channel_id":"...","formality":"casual|neutral|formal",'
     '"brevity":"terse|moderate|expansive","emoji_culture":"none|light|heavy",'
     '"punctuation":"relaxed|standard","common_phrases":["up to 5 channel idioms"],'
     '"threading_norm":"threads_heavy|mixed|top_level",'
     '"notes":"one sentence of register guidance"}]} '
-    "— include exactly one card per input channel."
+    "— include exactly one card per input channel. "
+    "Base every field on the provided messages and summary only; never invent "
+    "idioms or norms not visible in the evidence. "
+    "If the sample is too thin to judge a field, use the neutral/default value. "
+    "Examples: "
+    '{"channels":[{"channel_id":"C1","profile_summary":"Eng sprint planning.","recent_messages":["shipped #123","lgtm","pr is ready"]}]} '
+    '-> {"cards":[{"channel_id":"C1","formality":"casual","brevity":"terse","emoji_culture":"none","punctuation":"relaxed","common_phrases":["lgtm","shipped"],"threading_norm":"mixed","notes":"Short, low-formality engineering updates."}]} '
+    '{"channels":[{"channel_id":"C2","profile_summary":"","recent_messages":[]}]} '
+    '-> {"cards":[{"channel_id":"C2","formality":"neutral","brevity":"moderate","emoji_culture":"none","punctuation":"standard","common_phrases":[],"threading_norm":"mixed","notes":"Insufficient sample to characterize register."}]} '
+    "Ground every field in the input; abstain when unsupported."
 )
 
 DEFAULT_STYLE_CARD_MIN_MESSAGES = 30

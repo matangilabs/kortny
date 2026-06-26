@@ -223,7 +223,9 @@ class EpisodePromotionPass:
                     "coworker in Slack. For each completed task episode decide "
                     "whether it contains durable workspace knowledge worth "
                     "keeping. Compare against the related existing memories "
-                    'provided. Return JSON only. Schema: {"decisions":['
+                    "provided. "
+                    "Return only the JSON object — no prose, markdown, or "
+                    'comments. Schema: {"decisions":['
                     '{"episode_id":"uuid","action":"ADD|UPDATE|INVALIDATE|NOOP",'
                     '"entity_id":"uuid of an existing related entity for UPDATE '
                     'or INVALIDATE, else null",'
@@ -242,7 +244,17 @@ class EpisodePromotionPass:
                     "invalidate related_confirmed_facts — they are "
                     "user-confirmed and outrank task evidence; use NOOP and "
                     "explain the conflict in reason instead. NOOP for "
-                    "everything else. Be conservative: most episodes are NOOP."
+                    "everything else. Be conservative: most episodes are NOOP. "
+                    "Extract ONLY what the episode text supports; never invent "
+                    "entity ids, canonical keys, or facts not present in the "
+                    "input. If no episode warrants a durable memory, return all "
+                    "actions as NOOP. Confidence must be 0.0..1.0. "
+                    "Examples: "
+                    '{"episodes":[{"episode_id":"eid-1","outcome":"success","summary":"The team uses Linear for issue tracking.","related_entities":[],"related_confirmed_facts":[]}]} '
+                    '-> {"decisions":[{"episode_id":"eid-1","action":"ADD","entity_id":null,"entity_type":"integration","canonical_key":"integration:linear","display_name":"Linear","summary":"Team uses Linear for issue tracking.","replacement_summary":null,"confidence":0.80,"reason":"Durable tool fact from episode."}]} '
+                    '{"episodes":[{"episode_id":"eid-2","outcome":"success","summary":"User asked about the weather.","related_entities":[],"related_confirmed_facts":[]}]} '
+                    '-> {"decisions":[{"episode_id":"eid-2","action":"NOOP","entity_id":null,"entity_type":null,"canonical_key":null,"display_name":null,"summary":null,"replacement_summary":null,"confidence":0.0,"reason":"One-off question, not durable workspace knowledge."}]} '
+                    "Ground every field in the input; abstain when unsupported."
                 ),
             ),
             ChatMessage(

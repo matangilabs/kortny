@@ -296,9 +296,21 @@ def _confirm_merges(
                     "You deduplicate entries in Kortny's workspace knowledge "
                     "graph. For each candidate pair decide whether they "
                     "describe the same real-world thing and should be merged. "
-                    'Return JSON only: {"merges":[{"keep_id":"uuid",'
+                    "Return only the JSON object — no prose, markdown, or "
+                    'comments. Schema: {"merges":[{"keep_id":"uuid",'
                     '"merge_id":"uuid","merge":true}]} — include every pair '
-                    "with merge true or false. Only merge clear duplicates."
+                    "with merge true or false. Only merge clear duplicates; "
+                    "when in doubt set merge to false. Never invent or change "
+                    "entity ids — use only the keep_id and merge_id values "
+                    "from the provided pairs. "
+                    "Examples: "
+                    '{"pairs":[{"keep_id":"aaa","keep":{"canonical_key":"github","display_name":"GitHub"},"merge_id":"bbb","merge":{"canonical_key":"github_com","display_name":"GitHub.com"}}]} '
+                    '-> {"merges":[{"keep_id":"aaa","merge_id":"bbb","merge":true}]} '
+                    '{"pairs":[{"keep_id":"ccc","keep":{"canonical_key":"stripe","display_name":"Stripe Payments"},"merge_id":"ddd","merge":{"canonical_key":"stripe_integration","display_name":"Stripe API"}}]} '
+                    '-> {"merges":[{"keep_id":"ccc","merge_id":"ddd","merge":true}]} '
+                    '{"pairs":[{"keep_id":"eee","keep":{"canonical_key":"alice","display_name":"Alice"},"merge_id":"fff","merge":{"canonical_key":"bob","display_name":"Bob"}}]} '
+                    '-> {"merges":[{"keep_id":"eee","merge_id":"fff","merge":false}]} '
+                    "Ground every field in the input; abstain when unsupported."
                 ),
             ),
             ChatMessage(
