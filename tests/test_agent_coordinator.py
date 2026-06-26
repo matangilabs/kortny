@@ -483,6 +483,30 @@ def test_coordinator_finishes_with_final_answer(db_session: Session) -> None:
     assert context_event.payload["context_budget"]["thread_context_max_chars"] == 12000
 
 
+def test_missing_required_legs_substring_match() -> None:
+    # HIG-294: the multi-step completion guard flags a connected leg the intent
+    # named that no called tool touched (substring match handles composio
+    # runtime names like composio_googlecalendar_...).
+    required = frozenset({"gmail", "googlecalendar"})
+    assert coordinator_module._missing_required_legs(
+        required, {"composio_gmail_list_threads", "find_tools"}
+    ) == ("googlecalendar",)
+    assert (
+        coordinator_module._missing_required_legs(
+            required,
+            {"composio_gmail_x", "composio_googlecalendar_events_list_all_calendars"},
+        )
+        == ()
+    )
+    # No required legs -> never flags (pure-knowledge / single-app stay direct).
+    assert (
+        coordinator_module._missing_required_legs(
+            frozenset(), {"composio_alpaca_get_latest_trade"}
+        )
+        == ()
+    )
+
+
 def _empty_completion(response_id: str) -> Completion:
     return Completion(
         content="",

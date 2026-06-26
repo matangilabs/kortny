@@ -86,7 +86,7 @@ from kortny.composio.connect import ComposioConnectionRequired
 from kortny.db.models import Task, TaskEvent, TaskEventType
 from kortny.embeddings import EmbeddingIndex
 from kortny.llm import ChatMessage, Completion, ToolCall
-from kortny.llm.routing import latest_intent_decision
+from kortny.llm.routing import effective_intent_decision, latest_intent_decision
 from kortny.llm.service import TaskCostBudgetExceeded
 from kortny.observability import (
     log_observation,
@@ -140,6 +140,42 @@ EMPTY_RESPONSE_REPAIR_PROMPT = (
     "results to either call the next required tool or provide a concise final "
     "answer. Do not return an empty message."
 )
+# Multi-step completion guard (HIG-294): a cheap model often does the first leg
+# of a cross-app request ("find the email") then final-answers, dropping the
+# second leg ("put it on the calendar"). When the model tries to finish without
+# having touched a connected integration the intent named, nudge it to finish
+# the work — bounded so a genuinely unreachable leg still terminates.
+MAX_COMPLETION_NUDGES = 2
+
+
+def _missing_required_legs(
+    required: frozenset[str], called_tool_names: set[str]
+) -> tuple[str, ...]:
+    """Required toolkit slugs not yet reflected in any called tool name.
+
+    Substring match (``"googlecalendar" in "composio_googlecalendar_..."``)
+    avoids brittle slug-parsing and handles multi-underscore toolkits.
+    """
+
+    return tuple(
+        sorted(
+            leg
+            for leg in required
+            if not any(leg in name for name in called_tool_names)
+        )
+    )
+
+
+def _completion_nudge_prompt(missing: tuple[str, ...]) -> str:
+    apps = ", ".join(missing)
+    return (
+        f"You are about to give a final answer but have not used {apps} yet, "
+        "which this request needs. Call the relevant tool now (use find_tools "
+        "first if its schema is not loaded), or if a required input is missing, "
+        "ask one concise question. Do not give a final answer yet."
+    )
+
+
 # Cheap models (e.g. gemini-2.5-flash-lite) intermittently return an empty
 # completion (no content, no tool calls; LiteLLM logs finish_reason 'error').
 # Retry the COMPLETION itself a couple times before it reaches the agent loop,
@@ -617,6 +653,11 @@ class AgentCoordinator:
             {"tool_names": list(self.registry.names())},
         )
 
+        # Multi-step completion guard state (HIG-294).
+        required_legs = self._required_connected_legs(task_obj)
+        called_tool_names: set[str] = set()
+        completion_nudges = 0
+
         for turn in range(1, self.max_turns + 1):
             self.task_service.raise_if_cancelled(task_obj, phase=f"before_turn_{turn}")
             try:
@@ -636,6 +677,10 @@ class AgentCoordinator:
                         tool_calls=completion.tool_calls,
                     )
                 )
+                for call in completion.tool_calls or ():
+                    call_name = getattr(call, "name", "")
+                    if isinstance(call_name, str) and call_name:
+                        called_tool_names.add(call_name.casefold())
 
                 if not completion.tool_calls:
                     if not (completion.content or "").strip() and turn < self.max_turns:
@@ -651,6 +696,37 @@ class AgentCoordinator:
                         messages.append(
                             ChatMessage(
                                 role="system", content=EMPTY_RESPONSE_REPAIR_PROMPT
+                            )
+                        )
+                        continue
+                    # Multi-step completion guard (HIG-294): the model is trying
+                    # to finalize, but a connected integration the intent named
+                    # was never touched. Nudge it to finish the work instead of
+                    # dropping the leg. Bounded by turn budget + nudge cap so a
+                    # genuinely unreachable leg still terminates. ``turn <
+                    # max_turns`` keeps turn-exhaustion finalizing, never nudging.
+                    missing_legs = _missing_required_legs(
+                        required_legs, called_tool_names
+                    )
+                    if (
+                        missing_legs
+                        and turn < self.max_turns
+                        and completion_nudges < MAX_COMPLETION_NUDGES
+                    ):
+                        completion_nudges += 1
+                        self._append_log(
+                            task_obj,
+                            "agent_completion_leg_nudge",
+                            {
+                                "turn": turn,
+                                "missing_toolkits": list(missing_legs),
+                                "nudge": completion_nudges,
+                            },
+                        )
+                        messages.append(
+                            ChatMessage(
+                                role="system",
+                                content=_completion_nudge_prompt(missing_legs),
                             )
                         )
                         continue
@@ -1687,6 +1763,26 @@ class AgentCoordinator:
         )
         decision = latest_intent_decision(events)
         return dict(decision) if decision is not None else None
+
+    def _required_connected_legs(self, task: Task) -> frozenset[str]:
+        """Connected toolkits the grounded intent named for this task (HIG-294).
+
+        These are the legs a cross-app request must actually touch before the
+        agent finalizes. The intent classifier restricts ``toolkit_affinity`` to
+        connected integrations, so this is the set the completion guard holds the
+        model to (e.g. "find the email and put it on the calendar" -> {gmail,
+        googlecalendar}). Empty when the request named no integration.
+        """
+
+        decision = effective_intent_decision(self._latest_intent_decision(task))
+        if decision is None:
+            return frozenset()
+        raw = decision.get("toolkit_affinity")
+        if not isinstance(raw, (list, tuple)):
+            return frozenset()
+        return frozenset(
+            item.casefold() for item in raw if isinstance(item, str) and item
+        )
 
     def _enforce_soft_tool_call_cap(
         self,
