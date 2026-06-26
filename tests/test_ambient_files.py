@@ -725,7 +725,7 @@ def test_simulator_story_carries_sim_flagged_file_share() -> None:
     fixture = file_messages[0]
     assert fixture.pattern == "file_share"
     entry = fixture.files[0]
-    assert entry["filetype"] == "xlsx"
+    assert entry["filetype"] == "pdf"
     assert entry[SIM_MARKER_KEY] is True
     # The sim marker keeps the gate from analyzing a file id that is not real.
     assert detect_file_candidates({"files": [dict(entry)]}, max_mb=MAX_MB) == ()
