@@ -2146,11 +2146,15 @@ def register_routes(app: FastAPI) -> None:
                 tone="danger",
             )
         provider_option = litellm_provider_option(provider_kind)
-        api_key = _form_value(form, "api_key")
-        if not api_key:
+        auth_type = (
+            provider_option.auth_type if provider_option is not None else "api_key"
+        )
+        api_key = _form_value(form, "api_key") or ""
+        key_required = auth_type == "api_key"
+        if key_required and not api_key:
             return _redirect_with_notice(
                 next_path,
-                "API key is required for dashboard-managed providers.",
+                "API key is required for this provider.",
                 tone="danger",
             )
         display_name = _form_value(form, "display_name") or (
@@ -2172,19 +2176,21 @@ def register_routes(app: FastAPI) -> None:
                 tone="danger",
             )
         api_version = _optional_form_value(form, "api_version")
-        try:
-            secret = EncryptedSecret(
-                installation_id=installation_id,
-                secret_type=f"llm_provider:{provider_kind}:{uuid.uuid4().hex}",
-                ciphertext=encrypt_secret_value(
-                    api_key,
-                    encryption_key=runtime_settings.encryption_key,
-                ),
-            )
-        except SecretEncryptionError as exc:
-            return _redirect_with_notice(next_path, str(exc), tone="danger")
-        session.add(secret)
-        session.flush()
+        secret: EncryptedSecret | None = None
+        if api_key:
+            try:
+                secret = EncryptedSecret(
+                    installation_id=installation_id,
+                    secret_type=f"llm_provider:{provider_kind}:{uuid.uuid4().hex}",
+                    ciphertext=encrypt_secret_value(
+                        api_key,
+                        encryption_key=runtime_settings.encryption_key,
+                    ),
+                )
+            except SecretEncryptionError as exc:
+                return _redirect_with_notice(next_path, str(exc), tone="danger")
+            session.add(secret)
+            session.flush()
         provider = LLMProviderAccount(
             installation_id=installation_id,
             provider_kind=provider_kind,
@@ -2192,12 +2198,13 @@ def register_routes(app: FastAPI) -> None:
             status="active",
             health_status="unknown",
             base_url=base_url,
-            encrypted_secret_id=secret.id,
+            encrypted_secret_id=secret.id if secret is not None else None,
             metadata_json={
                 "credential_source": SECRET_CREDENTIAL_SOURCE,
                 "source": "dashboard",
                 "litellm_provider": provider_kind,
                 "api_version": api_version,
+                "auth_type": auth_type,
                 "setup_version": "hig_186_slice_4b",
             },
         )

@@ -224,14 +224,14 @@
                 <select class="input" id="provider_kind" name="provider_kind" required onchange="handleProviderChange(this)">
                   <option value="">Select a provider...</option>
                   {% for option in model_config.provider_options %}
-                    <option value="{{ option.kind }}">{{ option.label }}</option>
+                    <option value="{{ option.kind }}" data-auth-type="{{ option.auth_type }}">{{ option.label }}</option>
                   {% endfor %}
-                  <option value="__custom__">Other LiteLLM provider</option>
+                  <option value="__custom__" data-auth-type="api_key">Other LiteLLM provider</option>
                 </select>
                 <small id="provider-help">Kortny handles the LiteLLM provider slug behind the scenes.</small>
               </div>
 
-              <div class="form-group">
+              <div class="form-group" id="api-key-group">
                 <label for="api_key">API key</label>
                 <div class="password-input-wrapper">
                   <input class="input" type="password" id="api_key" name="api_key" autocomplete="off" placeholder="Paste provider API key" required aria-describedby="api-key-help">
@@ -240,6 +240,8 @@
                   </button>
                 </div>
                 <small id="api-key-help">The key is encrypted before it is stored.</small>
+                <small id="api-key-no-key-hint" style="display:none;">This provider uses instance credentials or environment — no API key needed.</small>
+                <small id="api-key-optional-hint" style="display:none;">API key is optional for this provider. Leave blank to use instance/environment credentials.</small>
               </div>
 
               <div class="form-group">
@@ -385,13 +387,50 @@
       const customFields = document.getElementById("custom-provider-fields");
       const customInput = document.getElementById("provider_kind_custom");
       if (!customFields || !customInput) return;
-      
+
       if (select.value === "__custom__") {
         customFields.classList.add("is-visible");
         customInput.setAttribute("required", "required");
       } else {
         customFields.classList.remove("is-visible");
         customInput.removeAttribute("required");
+      }
+
+      // Auth-type-aware API key field visibility
+      const selectedOption = select.options[select.selectedIndex];
+      const authType = selectedOption ? (selectedOption.getAttribute("data-auth-type") || "api_key") : "api_key";
+      const apiKeyInput = document.getElementById("api_key");
+      const apiKeyHelp = document.getElementById("api-key-help");
+      const noKeyHint = document.getElementById("api-key-no-key-hint");
+      const optionalHint = document.getElementById("api-key-optional-hint");
+
+      if (apiKeyInput) {
+        if (authType === "no_key") {
+          apiKeyInput.removeAttribute("required");
+          apiKeyInput.style.display = "none";
+          if (apiKeyHelp) apiKeyHelp.style.display = "none";
+          if (noKeyHint) noKeyHint.style.display = "";
+          if (optionalHint) optionalHint.style.display = "none";
+        } else if (authType === "instance_role") {
+          apiKeyInput.removeAttribute("required");
+          apiKeyInput.style.display = "none";
+          if (apiKeyHelp) apiKeyHelp.style.display = "none";
+          if (noKeyHint) noKeyHint.style.display = "";
+          if (optionalHint) optionalHint.style.display = "none";
+        } else if (authType === "api_key_optional") {
+          apiKeyInput.removeAttribute("required");
+          apiKeyInput.style.display = "";
+          if (apiKeyHelp) apiKeyHelp.style.display = "none";
+          if (noKeyHint) noKeyHint.style.display = "none";
+          if (optionalHint) optionalHint.style.display = "";
+        } else {
+          // api_key — required
+          apiKeyInput.setAttribute("required", "required");
+          apiKeyInput.style.display = "";
+          if (apiKeyHelp) apiKeyHelp.style.display = "";
+          if (noKeyHint) noKeyHint.style.display = "none";
+          if (optionalHint) optionalHint.style.display = "none";
+        }
       }
     }
 

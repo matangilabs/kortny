@@ -18,6 +18,8 @@ class LiteLLMProviderOption:
     default_base_url: str | None = None
     supports_endpoint_discovery: bool = False
     needs_base_url: bool = False
+    auth_type: str = "api_key"
+    """Authentication type: api_key, api_key_optional, instance_role, no_key."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +94,7 @@ LITELLM_PROVIDER_OPTIONS: tuple[LiteLLMProviderOption, ...] = (
         label="Amazon Bedrock",
         description="AWS Bedrock models. Usually needs AWS environment or role config.",
         default_probe_model="bedrock/anthropic.claude-3-5-haiku-20241022-v1:0",
+        auth_type="instance_role",
     ),
     LiteLLMProviderOption(
         kind="ollama",
@@ -100,6 +103,57 @@ LITELLM_PROVIDER_OPTIONS: tuple[LiteLLMProviderOption, ...] = (
         default_probe_model="ollama/llama3.1",
         default_base_url="http://localhost:11434",
         needs_base_url=True,
+        auth_type="no_key",
+    ),
+    LiteLLMProviderOption(
+        kind="groq",
+        label="Groq",
+        description="Fast inference for open models.",
+        default_probe_model="groq/llama-3.1-70b-versatile",
+        auth_type="api_key",
+    ),
+    LiteLLMProviderOption(
+        kind="together_ai",
+        label="Together AI",
+        description="Hosted open model inference.",
+        default_probe_model="together_ai/meta-llama/Llama-3-70b-chat-hf",
+        auth_type="api_key",
+    ),
+    LiteLLMProviderOption(
+        kind="deepseek",
+        label="DeepSeek",
+        description="DeepSeek models via direct API.",
+        default_probe_model="deepseek/deepseek-chat",
+        auth_type="api_key",
+    ),
+    LiteLLMProviderOption(
+        kind="mistral",
+        label="Mistral AI",
+        description="Mistral models via direct API.",
+        default_probe_model="mistral/mistral-large-latest",
+        auth_type="api_key",
+    ),
+    LiteLLMProviderOption(
+        kind="vertex_ai",
+        label="Google Vertex AI",
+        description="Google Cloud Vertex AI models. Uses instance credentials or service account.",
+        default_probe_model="vertex_ai/gemini-1.5-flash",
+        auth_type="instance_role",
+    ),
+    LiteLLMProviderOption(
+        kind="bedrock_converse",
+        label="Amazon Bedrock (Converse)",
+        description="AWS Bedrock via the Converse API. Uses instance role or AWS environment.",
+        default_probe_model="bedrock_converse/anthropic.claude-3-5-haiku-20241022-v1:0",
+        auth_type="instance_role",
+    ),
+    LiteLLMProviderOption(
+        kind="openai_compatible",
+        label="Custom / Self-Hosted (OpenAI-compatible)",
+        description="Any OpenAI-compatible endpoint: vLLM, LocalAI, TGI, LiteLLM proxy. Enter models as openai/<model> with a base URL.",
+        default_probe_model="openai/my-model",
+        needs_base_url=True,
+        auth_type="api_key_optional",
     ),
 )
 
