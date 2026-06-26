@@ -40,15 +40,23 @@ Usage::
 
 from __future__ import annotations
 
+import os
 import uuid
 from collections.abc import Mapping
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from kortny.composio.runtime import connected_toolkit_slugs
 from kortny.config import load_settings
 from kortny.db import make_session_factory
-from kortny.db.models import Installation, Task, TaskEvent, TaskEventType
+from kortny.db.models import (
+    ComposioConnection,
+    Installation,
+    Task,
+    TaskEvent,
+    TaskEventType,
+)
 from kortny.evals.orchestration.cases import SEED_ORCHESTRATION_CASES, OrchestrationCase
 from kortny.evals.orchestration.scoring import (
     OrchestrationReport,
@@ -59,11 +67,16 @@ from kortny.evals.orchestration.scoring import (
 from kortny.tasks import TaskIdentity, TaskService
 from kortny.worker.agent_executor import AgentTaskExecutor
 
-# Sentinel values used when creating an eval task — they never route to Slack
+# Sentinel channel used when creating an eval task — it never routes to Slack
 # because AgentTaskExecutor.execute() is called directly (no Slack client).
+# The default channel can be overridden via KORTNY_EVAL_SCOPE_CHANNEL_ID for
+# channel-scoped connections; user-scoped connections key on slack_user_id.
 _EVAL_CHANNEL_ID = "EVAL_ORCHESTRATION"
-_EVAL_USER_ID = "EVAL_RUNNER"
 _EVAL_THREAD_TS = "0.000000"
+
+# Env overrides for the connection scope owner.
+_SCOPE_USER_ENV = "KORTNY_EVAL_SCOPE_USER_ID"
+_SCOPE_CHANNEL_ENV = "KORTNY_EVAL_SCOPE_CHANNEL_ID"
 
 
 def _toolkit_slug_from_tool_name(tool_name: str) -> str | None:
@@ -161,25 +174,96 @@ def _first_installation_id(session: Session) -> uuid.UUID:
     return result.id
 
 
+def _resolve_scope_user_id(
+    session: Session,
+    installation_id: uuid.UUID,
+) -> str:
+    """Resolve the Slack user that owns the install's Composio connections.
+
+    Composio connections are commonly ``user``-scoped: the runtime resolver
+    (``ComposioConnectionResolver._allows_task``) only surfaces a ``user``
+    connection when ``visibility_scope_id == task.slack_user_id``. A synthetic
+    task with no real owner therefore resolves ZERO connections and the agent
+    sees no connected tools. To make the eval behave like a real Slack message,
+    scope the task to the connection owner.
+
+    Resolution order:
+      1. ``KORTNY_EVAL_SCOPE_USER_ID`` env override, if set.
+      2. The dominant ``visibility_scope_id`` among active ``user``-scoped
+         ``composio_connections`` for this installation (the slack_user_id that
+         owns the most connections).
+
+    Raises if neither yields an owner (no user-scoped connections to ground on).
+    """
+    override = os.environ.get(_SCOPE_USER_ENV)
+    if override:
+        return override
+
+    row = session.execute(
+        select(
+            ComposioConnection.visibility_scope_id,
+            func.count().label("n"),
+        )
+        .where(
+            ComposioConnection.installation_id == installation_id,
+            ComposioConnection.status == "active",
+            ComposioConnection.visibility_scope_type == "user",
+            ComposioConnection.visibility_scope_id.is_not(None),
+        )
+        .group_by(ComposioConnection.visibility_scope_id)
+        .order_by(func.count().desc(), ComposioConnection.visibility_scope_id)
+        .limit(1)
+    ).first()
+    if row is None or row[0] is None:
+        raise RuntimeError(
+            "No active user-scoped Composio connections found to scope the eval "
+            f"task to. Set {_SCOPE_USER_ENV} to the owning Slack user id, or "
+            "connect integrations for a user in the install."
+        )
+    return str(row[0])
+
+
+def _resolve_scope_channel_id() -> str:
+    """Resolve the channel to scope the eval task to.
+
+    Uses ``KORTNY_EVAL_SCOPE_CHANNEL_ID`` if set (for channel-scoped
+    connections), otherwise the synthetic eval channel. User-scoped connections
+    do not key on the channel, so the synthetic default is fine for them.
+    """
+    return os.environ.get(_SCOPE_CHANNEL_ENV) or _EVAL_CHANNEL_ID
+
+
 def build_live_run_fn(
     session: Session,
     executor: AgentTaskExecutor,
     installation_id: uuid.UUID,
+    *,
+    scope_user_id: str,
+    scope_channel_id: str,
 ) -> RunFn:
     """Build a RunFn that executes one case through the real agent.
 
-    Creates a ``manual`` Task with the case's request text, runs
-    ``AgentTaskExecutor.execute()`` synchronously, then reads the task's
-    ``TaskEvent`` rows of type ``tool_call`` to derive the called-apps set.
+    Creates a ``manual`` Task with the case's request text **scoped to the
+    connection owner**, runs ``AgentTaskExecutor.execute()`` synchronously, then
+    reads the task's ``tool_result`` ``TaskEvent`` rows to derive the
+    called-apps set.
+
+    The task is created with ``slack_user_id=scope_user_id`` and
+    ``slack_channel_id=scope_channel_id`` so the Composio connection resolver
+    (``ComposioConnectionResolver._allows_task``) surfaces the install's
+    user-scoped connections exactly as a real Slack message from that user
+    would — without this, the resolver matches zero connections and the agent
+    has no connected tools.
 
     Requires:
     - A live Postgres session connected to the target install.
     - A configured ``AgentTaskExecutor`` (LLM provider, settings).
     - The ``installation_id`` of the target Kortny install.
+    - ``scope_user_id``: the owning Slack user id for user-scoped connections.
+    - ``scope_channel_id``: the channel id for channel-scoped connections.
 
-    The task uses dummy Slack identifiers (EVAL_ORCHESTRATION channel,
-    EVAL_RUNNER user) — the executor is called directly so no Slack messages
-    are posted (no slack_client is wired in by default).
+    The executor is called directly so no Slack messages are posted (no
+    slack_client is wired in by default).
     """
     task_service = TaskService(session)
 
@@ -188,21 +272,29 @@ def build_live_run_fn(
         # distinct runs into the same task row.
         unique_ts = f"{uuid.uuid4().int % 10**9}.{uuid.uuid4().int % 10**6}"
         identity = TaskIdentity.manual(
-            channel_id=_EVAL_CHANNEL_ID,
+            channel_id=scope_channel_id,
             thread_ts=_EVAL_THREAD_TS,
-            user_id=_EVAL_USER_ID,
+            user_id=scope_user_id,
             input_text=f"{case.request}::{unique_ts}",
         )
         task: Task = task_service.create_task(
             installation_id=installation_id,
-            slack_channel_id=_EVAL_CHANNEL_ID,
-            slack_user_id=_EVAL_USER_ID,
+            slack_channel_id=scope_channel_id,
+            slack_user_id=scope_user_id,
             slack_thread_ts=_EVAL_THREAD_TS,
             slack_message_ts=unique_ts,
             input=case.request,
             identity=identity,
         )
         session.commit()
+
+        # Confirm the scope actually resolves connections before running, so a
+        # zero here clearly signals a scope misconfiguration vs an agent miss.
+        resolved = connected_toolkit_slugs(session, task)
+        print(
+            f"  scope check: user={scope_user_id} channel={scope_channel_id} "
+            f"resolved {len(resolved)} connected toolkit(s): {sorted(resolved)!r}"
+        )
 
         result = executor.execute(
             session=session,
@@ -224,8 +316,20 @@ def run() -> OrchestrationReport:
     session_factory = make_session_factory(database_url=settings.postgres_url)
     with session_factory() as session:
         installation_id = _first_installation_id(session)
+        scope_user_id = _resolve_scope_user_id(session, installation_id)
+        scope_channel_id = _resolve_scope_channel_id()
+        print(
+            f"Eval scope: installation={installation_id} "
+            f"user={scope_user_id} channel={scope_channel_id}"
+        )
         executor = AgentTaskExecutor(settings=settings)
-        run_fn = build_live_run_fn(session, executor, installation_id)
+        run_fn = build_live_run_fn(
+            session,
+            executor,
+            installation_id,
+            scope_user_id=scope_user_id,
+            scope_channel_id=scope_channel_id,
+        )
         return score_orchestration(SEED_ORCHESTRATION_CASES, run_fn)
 
 

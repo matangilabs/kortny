@@ -7,11 +7,18 @@ No live LLM, no DB, no Composio. The offline runner
 
 from __future__ import annotations
 
+import uuid
+
+import pytest
+
 from kortny.evals.orchestration.cases import (
     SEED_ORCHESTRATION_CASES,
     OrchestrationCase,
 )
 from kortny.evals.orchestration.runner import (
+    _EVAL_CHANNEL_ID,
+    _resolve_scope_channel_id,
+    _resolve_scope_user_id,
     _toolkit_slug_from_tool_name,
     _toolkit_slug_from_tool_result,
 )
@@ -429,3 +436,43 @@ def test_seed_dataset_expected_apps_subset_of_connected() -> None:
                 f"case {case.request!r}: expected_app {app!r} not in "
                 f"connected_toolkits {sorted(connected_set)!r}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Connection-scope resolution (env-override path; no DB)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_scope_user_id_env_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """KORTNY_EVAL_SCOPE_USER_ID overrides DB auto-detection.
+
+    The override returns before any DB query, so a sentinel session that would
+    error if touched proves the override short-circuits.
+    """
+    monkeypatch.setenv("KORTNY_EVAL_SCOPE_USER_ID", "U053N16RPSQ")
+
+    class _ExplodingSession:
+        def execute(self, *args: object, **kwargs: object) -> object:
+            raise AssertionError("DB must not be queried when env override is set")
+
+    session = _ExplodingSession()
+    user_id = _resolve_scope_user_id(session, uuid.uuid4())  # type: ignore[arg-type]
+    assert user_id == "U053N16RPSQ"
+
+
+def test_resolve_scope_channel_id_env_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """KORTNY_EVAL_SCOPE_CHANNEL_ID overrides the synthetic default."""
+    monkeypatch.setenv("KORTNY_EVAL_SCOPE_CHANNEL_ID", "C12345678")
+    assert _resolve_scope_channel_id() == "C12345678"
+
+
+def test_resolve_scope_channel_id_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without the env override, the synthetic eval channel is used."""
+    monkeypatch.delenv("KORTNY_EVAL_SCOPE_CHANNEL_ID", raising=False)
+    assert _resolve_scope_channel_id() == _EVAL_CHANNEL_ID
