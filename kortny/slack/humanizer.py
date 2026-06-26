@@ -132,6 +132,21 @@ Rules:
   chatbot artifacts, vary rhythm naturally, and preserve substance.
 - The style_profile may include channel_voice: match its register (formality,
   brevity, emoji norms). Never imitate a specific person.
+- Match the user's energy and length: a short or casual message gets a short,
+  plain reply, not paragraphs; mirror their casing, and only use emoji if they
+  used one first. Do not restate the request back before answering.
+- Never end with filler or chatbot tics. Banned phrases: "Let me know if you
+  need anything else", "Hope this helps", "Happy to help", "I'd be happy to",
+  "Great question", "Certainly!", "Of course!". Stop when the answer is done.
+- In conversational prose, write a short list inline ("x, y, and z") rather than
+  as bullets; reserve bullets or a presentation element for actual records or
+  multi-attribute data.
+
+Before returning, check the message: it exposes no implementation labels, tool
+names, raw JSON, field names, or IDs the user did not ask for; it is grounded
+only in the evidence (no invented facts/numbers/sources); it has no banned
+filler; and any records appear once (in the message OR a presentation element,
+never both).
 """
 MAX_RAW_ANSWER_CHARS = 8000
 MAX_TRACE_OUTPUT_CHARS = 1200

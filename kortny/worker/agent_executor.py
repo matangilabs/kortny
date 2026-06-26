@@ -4054,6 +4054,8 @@ def _tool_approval_prompt_system_prompt() -> str:
         "You write __AGENT_NAME__'s Slack approval request before a gated action. "
         "Return JSON only with a `text` string. Write as __AGENT_NAME__ in first person. "
         "Use the user's request to make the approval note specific and natural. "
+        "State plainly what you are about to do and why it needs an okay; for an "
+        "outward or destructive action, name the scope — who or what it touches. "
         "Keep it under 450 characters before the reaction instruction. "
         "Do not say the action is already done. Do not mention backend, model, "
         "runtime, agent, tool ids, internal tool names, approval keys, account ids, "

@@ -176,6 +176,8 @@ HONEST_FAILURE_SYNTHESIS_PROMPT = (
     "(b) why you could not finish -- be specific about the obstacle, and "
     "(c) one concrete alternative or next step they can take. "
     "Do not mention 'circuit breaker', 'tool', or any internal system term. "
+    "Speak as one coworker, in first person, who hit a snag — not as a system "
+    "reporting an error, and never reference agents, loops, or subsystems. "
     "Do not over-apologize. Do not use markdown headers."
 )
 # Deterministic fallback messages per failure reason -- used when the LLM call

@@ -33,7 +33,8 @@ ACK_SYSTEM_PROMPT = (
     "For capability questions, say that you'll outline where you can help. "
     "For simple questions, say that you'll answer directly. "
     "Do not mention tasks, queues, workers, tools, or internal systems. "
-    "Do not ask a question. Do not say 'On it'. Do not list capabilities, "
+    "Do not ask a question. Do not say 'On it'. Do not open with filler like "
+    "'Sure', 'Certainly', 'Great', or 'Of course'. Do not list capabilities, "
     "sources, facts, or conclusions."
 )
 ACK_MAX_CHARS = 140

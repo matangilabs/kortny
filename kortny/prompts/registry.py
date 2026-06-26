@@ -83,10 +83,15 @@ def _seed() -> None:
         (
             "kortny.response_humanizer",
             "slack",
-            "Rewrite the agent answer in Kortny's Slack voice.",
-            "2",  # v2 (HIG-255): may emit an optional presentation hint
+            "Rewrite the agent answer in the assistant's Slack voice.",
+            "3",  # v3: length/casing mirror, chatbot-tic kill-list, self-check
         ),
-        ("kortny.ack_generator", "slack", "Generate a short acknowledgement line."),
+        (
+            "kortny.ack_generator",
+            "slack",
+            "Generate a short acknowledgement line.",
+            "2",  # v2: ban filler openers
+        ),
         (
             "kortny.artifact_comment",
             "slack",
@@ -161,12 +166,14 @@ def _seed() -> None:
             "kortny.tool_approval_prompt",
             "agent",
             "Synthesize a tool-approval request prompt.",
+            "2",  # v2: require what/why/scope in the note
         ),
         # Previously-unregistered live prompts (reconciled with call sites).
         (
             "kortny.honest_failure_synthesis",
             "agent",
             "Explain an unrecoverable failure in user terms.",
+            "2",  # v2: single-entity coworker framing
         ),
         (
             "kortny.integration_learning.capability_profiler",
