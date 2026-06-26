@@ -14,49 +14,44 @@
     </div>
   </section>
 
-  <section class="card task-detail-hero">
-    <div>
+  {% set tool_call_count = detail.timeline | selectattr("event_type", "equalto", "tool_call") | list | length %}
+  {% set total_tokens = detail.task.total_input_tokens + detail.task.total_output_tokens %}
+  <section class="run-summary" aria-label="Run summary">
+    <div class="run-summary-request">
       <span class="detail-label">Slack request</span>
-      <p class="task-detail-request">{{ detail.task.input }}</p>
+      <p title="{{ detail.task.input }}">{{ detail.task.input }}</p>
     </div>
-    <dl class="task-detail-facts">
-	      <div>
-	        <dt>Created</dt>
-	        <dd>{{ detail.task.created_at|datetime }}</dd>
-	      </div>
-	      <div>
-	        <dt>Finished</dt>
-	        <dd>{{ detail.task.finished_at|datetime }}</dd>
-	      </div>
-	      <div>
-	        <dt>Cost</dt>
-	        <dd>{{ detail.task.total_cost_usd|money }}</dd>
-	      </div>
-	    </dl>
-	    {% if detail.task.error %}
-	      <div class="notice notice-danger task-error-summary" role="alert">
-	        <strong>Error:</strong> {{ detail.task.error }}
-	      </div>
-	    {% endif %}
-	  </section>
-
-  <section class="summary-grid">
-    <div class="card metric-card">
-      <span>Status</span>
-      <strong>{{ detail.task.status.value }}</strong>
-    </div>
-    <div class="card metric-card">
-      <span>Cost</span>
-      <strong>{{ detail.task.total_cost_usd|money }}</strong>
-    </div>
-    <div class="card metric-card">
-      <span>Input Tokens</span>
-      <strong>{{ detail.task.total_input_tokens|number }}</strong>
-    </div>
-    <div class="card metric-card">
-      <span>Output Tokens</span>
-      <strong>{{ detail.task.total_output_tokens|number }}</strong>
-    </div>
+    <dl class="run-summary-stats">
+      <div>
+        <dt>Status</dt>
+        <dd><span class="badge status-{{ detail.task.status.value }}">{{ detail.task.status.value }}</span></dd>
+      </div>
+      <div>
+        <dt>Events</dt>
+        <dd>{{ detail.timeline|length|number }}</dd>
+      </div>
+      <div>
+        <dt>Tool calls</dt>
+        <dd>{{ tool_call_count|number }}</dd>
+      </div>
+      <div>
+        <dt>Tokens</dt>
+        <dd>{{ total_tokens|number }}</dd>
+      </div>
+      <div>
+        <dt>Cost</dt>
+        <dd>{{ detail.task.total_cost_usd|money }}</dd>
+      </div>
+      <div>
+        <dt>Created</dt>
+        <dd>{{ detail.task.created_at|datetime }}</dd>
+      </div>
+    </dl>
+    {% if detail.task.error %}
+      <div class="notice notice-danger task-error-summary" role="alert">
+        <strong>Error:</strong> {{ detail.task.error }}
+      </div>
+    {% endif %}
   </section>
 
   {% if detail.planned_trace.present %}
@@ -328,78 +323,90 @@
             <button class="filter-tab" data-filter="log" role="tab" aria-selected="false">Logs</button>
           </div>
           <div class="timeline-bulk-actions">
-            <button id="btn-expand-all" class="btn-text">Expand visible</button>
+            <button id="btn-expand-all" class="btn-text">Expand all</button>
             <span class="action-divider" aria-hidden="true">|</span>
             <button id="btn-collapse-all" class="btn-text">Collapse all</button>
           </div>
         </div>
       </div>
 
-      <ol class="timeline" aria-label="Task event timeline">
+      <div class="span-timeline" aria-label="Task event timeline">
         {% for event in detail.timeline %}
-          <li class="timeline-item timeline-{{ event.tone }}" data-seq="{{ event.seq }}" data-type="{{ event.event_type }}" data-tone="{{ event.tone }}" data-badges="{% for badge in event.badges %}{{ badge.label|lower }} {% endfor %}">
-            <div class="timeline-marker" aria-hidden="true">{{ event.seq }}</div>
-            <article class="card timeline-card">
-              <header class="timeline-card-header">
-                <div class="timeline-title-stack">
-                  <div class="timeline-title-row">
-                    <h3>{{ event.title }}</h3>
-                    <div class="timeline-badges" aria-label="Event labels">
-                      {% for badge in event.badges %}
-                        <span class="badge badge-{{ badge.tone }}">{{ badge.label }}</span>
-                      {% endfor %}
-                    </div>
-                  </div>
-                  <p>{{ event.summary }}</p>
-                </div>
-                <div class="timeline-time-col">
-                  <time datetime="{{ event.created_at.isoformat() }}">{{ event.created_at|datetime }}</time>
-                </div>
-              </header>
-              {% if event.metrics %}
-                <dl class="event-metrics" aria-label="Event metrics">
-                  {% for metric in event.metrics %}
-                    <div>
-                      <dt>{{ metric.label }}</dt>
-                      <dd>{{ metric.value }}</dd>
-                    </div>
-                  {% endfor %}
-                </dl>
-              {% endif %}
+          {% set is_span = event.tier == "span" %}
+          {% set is_result = event.event_type == "tool_result" %}
+          {% set row_class = "span-row span-tier-" ~ event.tier ~ " span-" ~ event.tone ~ " span-type-" ~ event.event_type ~ (" span-nested" if is_result else "") %}
+          {#- Macro-ish summary content reused by both the expandable and plain row. -#}
+          {% set stat_dur = event.duration_ms is not none %}
+          {% set stat_tok = event.tokens %}
+          {% set stat_cost = event.cost_usd %}
+          {% if is_span %}
+            {% set row_title = (event.span_label ~ " · " ~ event.span_name) if event.span_name else event.title %}
+          {% else %}
+            {% set row_title = event.title %}
+          {% endif %}
+          {#- Inline preview chips: skip the leading event-type badge (the title
+              already conveys the kind), cap at 3 so the row stays one line. -#}
+          {% set preview_badges = event.badges[1:][:3] if event.badges|length > 1 else event.badges[:1] %}
+          <details class="{{ row_class }}"
+                   data-seq="{{ event.seq }}"
+                   data-type="{{ event.event_type }}"
+                   data-tier="{{ event.tier }}"
+                   data-tone="{{ event.tone }}"
+                   data-badges="{% for badge in event.badges %}{{ badge.label|lower }} {% endfor %}">
+            <summary class="span-summary">
+              <span class="span-icon" aria-hidden="true"></span>
+              <span class="span-seq">#{{ event.seq }}</span>
+              <span class="span-title" title="{{ row_title }}">
+                <span class="span-name">{{ row_title }}</span>
+                {% if is_span and event.summary and event.summary != row_title %}<span class="span-sub">{{ event.summary }}</span>{% endif %}
+              </span>
+              <span class="span-tags" aria-hidden="true">
+                {% for badge in preview_badges %}
+                  <span class="span-tag span-tag-{{ badge.tone }}">{{ badge.label }}</span>
+                {% endfor %}
+              </span>
+              <span class="span-stats">
+                {% if stat_dur %}<span class="span-stat span-dur">{{ event.duration_ms|number }} ms</span>{% endif %}
+                {% if stat_tok %}<span class="span-stat span-tok">{{ event.tokens|number }} tok</span>{% endif %}
+                {% if stat_cost %}<span class="span-stat span-cost">{{ event.cost_usd|money }}</span>{% endif %}
+              </span>
+              <time class="span-time" datetime="{{ event.created_at.isoformat() }}">{{ event.created_at|datetime }}</time>
+            </summary>
+            <div class="span-body">
               {% if event.input_json %}
-                <details class="event-payload event-input">
-                  <summary>Input</summary>
+                <div class="span-content">
+                  <span class="span-content-label">Input</span>
                   <pre>{{ event.input_json }}</pre>
-                </details>
+                </div>
               {% endif %}
               {% if event.output_json %}
-                <details class="event-payload event-output">
-                  <summary>Output</summary>
+                <div class="span-content">
+                  <span class="span-content-label">Output</span>
                   <pre>{{ event.output_json }}</pre>
-                </details>
+                </div>
               {% endif %}
               {% if event.prompt_json %}
-                <details class="event-payload event-prompt">
-                  <summary>Prompt</summary>
+                <div class="span-content">
+                  <span class="span-content-label">Prompt</span>
                   <pre>{{ event.prompt_json }}</pre>
-                </details>
+                </div>
               {% endif %}
               {% if event.response_json %}
-                <details class="event-payload event-response">
-                  <summary>Response</summary>
+                <div class="span-content">
+                  <span class="span-content-label">Response</span>
                   <pre>{{ event.response_json }}</pre>
-                </details>
+                </div>
               {% endif %}
-              <details class="event-payload">
-                <summary>Raw payload</summary>
+              <div class="span-content">
+                <span class="span-content-label">Raw</span>
                 <pre>{{ event.payload_json }}</pre>
-              </details>
-            </article>
-          </li>
+              </div>
+            </div>
+          </details>
         {% else %}
-          <li class="empty">No events recorded.</li>
+          <p class="empty">No events recorded.</p>
         {% endfor %}
-      </ol>
+      </div>
       <div class="timeline-footer">
         <button id="btn-scroll-top" class="btn-ghost btn-sm">
           <svg class="icon-arrow-up" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="width: 12px; height: 12px; margin-right: 6px; display: inline-block; vertical-align: text-bottom;" aria-hidden="true">
@@ -520,200 +527,32 @@
         activateTab(initialHash);
       }
 
-      // 2. Calculate Nesting Hierarchy & Depth
-      const items = document.querySelectorAll('.timeline-item');
-      const stack = [];
-      
-      items.forEach((item) => {
-        const type = item.getAttribute('data-type') || '';
-        const badgesStr = item.getAttribute('data-badges') || '';
-        const title = (item.querySelector('h3')?.textContent || '').toLowerCase();
-        
-        // Current item's depth is the size of stack before new pushes
-        const depth = stack.length;
-        item.setAttribute('data-depth', depth);
-        item.style.setProperty('--depth', depth);
-        
-        // Push boundaries to stack
-        const isStartAgent = title.includes('agent executor started') || title.includes('worker started task');
-        const isStartTool = title.includes('tool call started') || type === 'tool_call';
-        const isStartLlm = title.includes('llm_call_started') || title.includes('llm call started');
-        
-        if (isStartAgent) {
-          stack.push({ kind: 'agent', item });
-          item.classList.add('is-thread-parent');
-        } else if (isStartTool) {
-          stack.push({ kind: 'tool', item });
-          item.classList.add('is-thread-parent');
-        } else if (isStartLlm) {
-          stack.push({ kind: 'llm', item });
-          item.classList.add('is-thread-parent');
-        }
-
-        // Pop corresponding blocks from stack if ending (at end of iteration)
-        const isEndAgent = title.includes('agent executor completed');
-        const isEndTool = title.includes('tool call completed') || title.includes('tool call failed') || type === 'tool_result';
-        const isEndLlm = type === 'llm_call' || title.includes('llm call failed');
-        
-        if (isEndAgent && stack.length > 0 && stack[stack.length - 1].kind === 'agent') {
-          stack.pop();
-        } else if (isEndTool && stack.length > 0 && stack[stack.length - 1].kind === 'tool') {
-          stack.pop();
-        } else if (isEndLlm && stack.length > 0 && stack[stack.length - 1].kind === 'llm') {
-          stack.pop();
-        }
-      });
-
-      // 3. Attach Click-to-Collapse listeners to parent markers once
-      items.forEach((item) => {
-        if (item.classList.contains('is-thread-parent')) {
-          const marker = item.querySelector('.timeline-marker');
-          if (marker) {
-            marker.classList.add('thread-parent-marker');
-            marker.title = 'Click to collapse/expand thread';
-            
-            const toggleIcon = document.createElement('span');
-            toggleIcon.className = 'thread-toggle';
-            toggleIcon.textContent = '−';
-            marker.appendChild(toggleIcon);
-            
-            marker.addEventListener('click', (e) => {
-              e.stopPropagation();
-              toggleThread(item);
-            });
-          }
-        }
-      });
-
-      function toggleThread(parentItem, forceCollapse) {
-        const parentSeq = parentItem.getAttribute('data-seq');
-        const parentDepth = parseInt(parentItem.getAttribute('data-depth') || '0');
-        const isCollapsing = forceCollapse !== undefined ? forceCollapse : !parentItem.classList.contains('is-collapsed');
-        
-        parentItem.classList.toggle('is-collapsed', isCollapsing);
-        
-        const toggleEl = parentItem.querySelector('.thread-toggle');
-        if (toggleEl) {
-          toggleEl.textContent = isCollapsing ? '+' : '−';
-        }
-        
-        let next = parentItem.nextElementSibling;
-        while (next) {
-          const nextDepth = parseInt(next.getAttribute('data-depth') || '0');
-          if (nextDepth <= parentDepth) {
-            break;
-          }
-          
-          if (isCollapsing) {
-            next.setAttribute('data-collapsed-by', parentSeq);
-            next.style.display = 'none';
-          } else {
-            if (next.getAttribute('data-collapsed-by') === parentSeq) {
-              next.removeAttribute('data-collapsed-by');
-              next.style.display = '';
-              
-              if (next.classList.contains('is-collapsed')) {
-                // If the child itself is collapsed, hide its sub-children
-                const childSeq = next.getAttribute('data-seq');
-                let childNext = next.nextElementSibling;
-                while (childNext) {
-                  const childNextDepth = parseInt(childNext.getAttribute('data-depth') || '0');
-                  if (childNextDepth <= nextDepth) {
-                    break;
-                  }
-                  childNext.setAttribute('data-collapsed-by', childSeq);
-                  childNext.style.display = 'none';
-                  childNext = childNext.nextElementSibling;
-                }
-                next = childNext;
-                continue;
-              }
-            }
-          }
-          next = next.nextElementSibling;
-        }
-        
-        updateTimeline();
-      }
-
-      // 4. Timeline Step Latency Deltas
-      let prevTime = null;
-      items.forEach((item) => {
-        const timeEl = item.querySelector('time');
-        if (!timeEl) return;
-        const currentStr = timeEl.getAttribute('datetime');
-        if (!currentStr) return;
-        const currentTime = new Date(currentStr);
-        
-        const deltaEl = document.createElement('span');
-        deltaEl.className = 'timeline-time-delta';
-        
-        if (prevTime) {
-          const diffMs = currentTime - prevTime;
-          const formattedDiff = formatDuration(diffMs);
-          deltaEl.textContent = `+${formattedDiff}`;
-          deltaEl.title = `Duration since previous step: ${formattedDiff}`;
-          if (diffMs > 3000) {
-            deltaEl.classList.add('delta-slow');
-          }
-        } else {
-          deltaEl.textContent = 'Start';
-          deltaEl.classList.add('delta-start');
-        }
-        
-        timeEl.parentNode.appendChild(deltaEl);
-        prevTime = currentTime;
-      });
-
-      function formatDuration(ms) {
-        if (ms < 1000) return `${ms}ms`;
-        const secs = ms / 1000;
-        if (secs < 60) return `${secs.toFixed(1)}s`;
-        const mins = Math.floor(secs / 60);
-        const remainingSecs = Math.round(secs % 60);
-        return `${mins}m ${remainingSecs}s`;
-      }
-
-      // 5. Timeline Filter & Search logic
+      // 2. Timeline Filter & Search logic (dense span rows)
+      const items = document.querySelectorAll('.span-row');
       const searchInput = document.getElementById('timeline-search');
       const filterTabs = document.querySelectorAll('.filter-tab');
-      
+
       let currentFilter = 'all';
       let currentQuery = '';
 
       function updateTimeline() {
-        let lastVisibleItem = null;
-        const visibleItems = [];
-        
         items.forEach(item => {
-          item.classList.remove('is-last-visible');
-          // Clear any dynamic guidelines
-          item.querySelectorAll('.thread-line').forEach(el => el.remove());
-          
-          if (item.getAttribute('data-collapsed-by')) {
-            item.style.display = 'none';
-            return;
-          }
-          
           const type = item.getAttribute('data-type') || '';
+          const tier = item.getAttribute('data-tier') || '';
           const tone = item.getAttribute('data-tone') || '';
-          const title = (item.querySelector('h3')?.textContent || '').toLowerCase();
-          const summary = (item.querySelector('.timeline-title-stack p')?.textContent || '').toLowerCase();
+          const title = (item.querySelector('.span-title')?.textContent || '').toLowerCase();
           const badges = (item.getAttribute('data-badges') || '').toLowerCase();
-          const metrics = Array.from(item.querySelectorAll('.event-metrics dd, .event-metrics dt'))
+          const stats = (item.querySelector('.span-stats')?.textContent || '').toLowerCase();
+          const payload = Array.from(item.querySelectorAll('.span-content pre, .event-payload pre'))
             .map(el => el.textContent.toLowerCase())
             .join(' ');
-          const payload = (item.querySelector('.event-payload pre')?.textContent || '').toLowerCase();
-          
-          // Match query
-          const matchesQuery = !currentQuery || 
-            title.includes(currentQuery) || 
-            summary.includes(currentQuery) || 
-            badges.includes(currentQuery) || 
-            metrics.includes(currentQuery) || 
+
+          const matchesQuery = !currentQuery ||
+            title.includes(currentQuery) ||
+            badges.includes(currentQuery) ||
+            stats.includes(currentQuery) ||
             payload.includes(currentQuery);
-            
-          // Match filter
+
           let matchesFilter = false;
           if (currentFilter === 'all') {
             matchesFilter = true;
@@ -726,66 +565,10 @@
           } else if (currentFilter === 'slack') {
             matchesFilter = (type === 'message_posted' || title.includes('slack') || badges.includes('slack'));
           } else if (currentFilter === 'log') {
-            matchesFilter = (type === 'log');
+            matchesFilter = (tier === 'dim');
           }
-          
-          if (matchesQuery && matchesFilter) {
-            item.style.display = '';
-            visibleItems.push(item);
-            lastVisibleItem = item;
-          } else {
-            item.style.display = 'none';
-          }
-        });
-        
-        if (lastVisibleItem) {
-          lastVisibleItem.classList.add('is-last-visible');
-        }
 
-        // Draw guidelines dynamically for visible items!
-        visibleItems.forEach((item, idx) => {
-          const depth = parseInt(item.getAttribute('data-depth') || '0');
-          const next = visibleItems[idx + 1];
-          const nextDepth = next ? parseInt(next.getAttribute('data-depth') || '0') : 0;
-          
-          // 1. Background thread lines (levels 0 to depth-1)
-          for (let i = 0; i < depth; i++) {
-            const line = document.createElement('div');
-            line.className = 'thread-line';
-            line.style.left = `calc(var(--depth-step) * ${i} + 16px)`;
-            line.title = 'Click to collapse this thread level';
-            
-            // If the thread line for level i terminates at this item
-            if (i >= nextDepth) {
-              line.classList.add('is-terminal');
-            }
-            
-            line.addEventListener('click', (e) => {
-              e.stopPropagation();
-              // Find parent item at depth `i`
-              let prev = item;
-              while (prev) {
-                if (parseInt(prev.getAttribute('data-depth') || '0') === i && prev.classList.contains('is-thread-parent')) {
-                  toggleThread(prev);
-                  break;
-                }
-                prev = prev.previousElementSibling;
-              }
-            });
-            item.appendChild(line);
-          }
-          
-          // 2. Self connector line (connecting this marker downwards)
-          const selfLine = document.createElement('div');
-          selfLine.className = 'thread-line self-connect';
-          selfLine.style.left = `calc(var(--depth-step) * ${depth} + 16px)`;
-          selfLine.style.top = '34px';
-          
-          if (nextDepth <= depth) {
-            selfLine.classList.add('is-terminal');
-          }
-          
-          item.appendChild(selfLine);
+          item.style.display = (matchesQuery && matchesFilter) ? '' : 'none';
         });
       }
 
@@ -809,31 +592,27 @@
         });
       });
 
-      // 6. Bulk Payload expansion
+      // 3. Expand / collapse all span rows (rows open their own <details>)
       const btnExpandAll = document.getElementById('btn-expand-all');
       const btnCollapseAll = document.getElementById('btn-collapse-all');
-      
+
+      const expandableRows = document.querySelectorAll('details.span-row');
+
       if (btnExpandAll) {
         btnExpandAll.addEventListener('click', () => {
-          items.forEach(item => {
-            if (item.style.display !== 'none') {
-              const details = item.querySelector('.event-payload');
-              if (details) details.open = true;
-            }
-          });
-        });
-      }
-      
-      if (btnCollapseAll) {
-        btnCollapseAll.addEventListener('click', () => {
-          items.forEach(item => {
-            const details = item.querySelector('.event-payload');
-            if (details) details.open = false;
+          expandableRows.forEach(item => {
+            if (item.style.display !== 'none') item.open = true;
           });
         });
       }
 
-      // 7. Scroll to top handler
+      if (btnCollapseAll) {
+        btnCollapseAll.addEventListener('click', () => {
+          expandableRows.forEach(item => { item.open = false; });
+        });
+      }
+
+      // 4. Scroll to top handler
       const btnScrollTop = document.getElementById('btn-scroll-top');
       if (btnScrollTop) {
         btnScrollTop.addEventListener('click', () => {
