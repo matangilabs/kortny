@@ -562,6 +562,9 @@ class TaskRepository:
         event_id: int | None = None,
         model_tier: str | None = None,
         metadata: dict[str, Any] | None = None,
+        provider_kind: str | None = None,
+        provider_account_id: uuid.UUID | None = None,
+        cost_source: str | None = None,
     ) -> LLMUsage:
         """Record LLM usage and refresh denormalized totals on the task."""
 
@@ -571,15 +574,26 @@ class TaskRepository:
             raise ValueError("Cache token counts must be non-negative")
 
         task_obj = self._resolve_task(task, for_update=True)
-        provider_value = LLMProvider(provider)
+        # Best-effort legacy enum mapping; never raise on unknown providers.
+        try:
+            provider_value: LLMProvider | None = LLMProvider(provider)
+        except ValueError:
+            provider_value = None
         cost = _coerce_decimal(cost_usd)
         if cost < 0:
             raise ValueError("LLM cost must be non-negative")
 
+        # Resolve provider_kind: prefer explicit arg, then fall back to
+        # stringifying the provider argument (which may be the enum value or an
+        # unknown string).
+        effective_provider_kind = provider_kind or (str(provider) if provider else None)
+
         if event_id is None:
-            event_payload = {
+            event_payload: dict[str, Any] = {
                 "message": "llm_call_completed",
-                "provider": provider_value.value,
+                "provider": provider_value.value
+                if provider_value is not None
+                else str(provider),
                 "model": model,
                 "model_tier": model_tier,
                 "input_tokens": input_tokens,
@@ -589,6 +603,8 @@ class TaskRepository:
                 "cache_read_input_tokens": cache_read_input_tokens,
                 "cost_usd": str(cost),
             }
+            if effective_provider_kind:
+                event_payload["provider_kind"] = effective_provider_kind
             if metadata:
                 event_payload.update(sanitize_payload(metadata))
             event = self.append_event(
@@ -602,6 +618,9 @@ class TaskRepository:
             task_id=task_obj.id,
             event_id=event_id,
             provider=provider_value,
+            provider_kind=effective_provider_kind,
+            provider_account_id=provider_account_id,
+            cost_source=cost_source,
             model=model,
             model_tier=model_tier,
             input_tokens=input_tokens,
