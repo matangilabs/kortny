@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
+import sqlalchemy as sa
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -50,7 +51,7 @@ class RuntimeComposioConnection:
     """A Composio connected account that is allowed for one Slack task."""
 
     toolkit_slug: str
-    connected_account_id: str
+    connected_account_id: str | None
     composio_user_id: str
     visibility_scope_type: str
     visibility_scope_id: str | None
@@ -72,7 +73,10 @@ class ComposioConnectionResolver:
         clauses = [
             ComposioConnection.installation_id == self.scope.installation_id,
             ComposioConnection.status == "active",
-            ComposioConnection.connected_account_id.is_not(None),
+            sa.or_(
+                ComposioConnection.no_auth.is_(True),
+                ComposioConnection.connected_account_id.is_not(None),
+            ),
         ]
         if toolkit_slug:
             clauses.append(ComposioConnection.toolkit_slug == toolkit_slug.lower())
@@ -151,8 +155,6 @@ def connected_toolkit_slugs(session: Session, task: Task) -> tuple[str, ...]:
 
 
 def _runtime_connection(row: ComposioConnection) -> RuntimeComposioConnection:
-    if row.connected_account_id is None:
-        raise ValueError("Composio connection is missing connected_account_id")
     return RuntimeComposioConnection(
         toolkit_slug=row.toolkit_slug,
         connected_account_id=row.connected_account_id,

@@ -2534,6 +2534,9 @@ def test_dashboard_composio_connect_creates_pending_connection(
         def __init__(self, **_kwargs: object) -> None:
             pass
 
+        def get_toolkit(self, slug: str) -> ComposioToolkit:
+            return _composio_toolkit(slug="github", name="GitHub")
+
         def list_auth_configs(
             self,
             *,
@@ -2696,23 +2699,22 @@ def test_dashboard_composio_connect_no_auth_toolkit_connects_directly(
     client: tuple[TestClient, Session],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # HIG: a NO_AUTH toolkit (no oauth2, no api-key scheme) used to hit the
-    # "no hosted API-key flow" raise and could never connect. It must now create
-    # a managed auth config and a connected account directly (no OAuth redirect),
-    # marking the connection active immediately.
+    # NO_AUTH toolkits (e.g. hackernews) require no auth config and no connected
+    # account. POST /api/v3.1/tools/execute accepts user_id alone. The connect
+    # handler detects no_auth via get_toolkit, marks the connection active
+    # immediately, and never calls create_managed_auth_config or
+    # create_connected_account.
     test_client, session = client
-    task = create_dashboard_task(session)
+    create_dashboard_task(session)
     set_runtime_settings_env(monkeypatch)
     monkeypatch.setenv("COMPOSIO_API_KEY", "composio-dashboard-secret")
+
+    create_managed_auth_config_called = False
+    create_connected_account_called = False
 
     class FakeComposioClient:
         def __init__(self, **_kwargs: object) -> None:
             pass
-
-        def list_auth_configs(
-            self, *, toolkit_slug: str, limit: int = 20
-        ) -> tuple[ComposioAuthConfig, ...]:
-            return ()
 
         def get_toolkit(self, slug: str) -> ComposioToolkit:
             return _composio_toolkit(
@@ -2726,26 +2728,19 @@ def test_dashboard_composio_connect_no_auth_toolkit_connects_directly(
         def create_managed_auth_config(
             self, *, toolkit_slug: str
         ) -> ComposioAuthConfig:
-            assert toolkit_slug == "hackernews"
-            return ComposioAuthConfig(
-                id="ac_hn",
-                name="Hacker News managed",
-                toolkit_slug="hackernews",
-                auth_scheme="NO_AUTH",
-                is_composio_managed=True,
-                enabled=True,
+            nonlocal create_managed_auth_config_called
+            create_managed_auth_config_called = True
+            raise AssertionError(
+                "create_managed_auth_config must not be called for no-auth toolkits"
             )
 
         def create_connected_account(
             self, *, user_id: str, auth_config_id: str
         ) -> ComposioConnectionRequest:
-            assert auth_config_id == "ac_hn"
-            assert user_id == f"slack:{task.installation_id}:UCost"
-            return ComposioConnectionRequest(
-                id="ca_hn",
-                redirect_url="",
-                status="active",
-                connected_account_id="ca_hn",
+            nonlocal create_connected_account_called
+            create_connected_account_called = True
+            raise AssertionError(
+                "create_connected_account must not be called for no-auth toolkits"
             )
 
     monkeypatch.setattr("kortny.dashboard.app.ComposioClient", FakeComposioClient)
@@ -2760,16 +2755,21 @@ def test_dashboard_composio_connect_no_auth_toolkit_connects_directly(
     assert response.status_code == 303
     assert "hackernews" in response.headers["location"]
     assert "notice_tone=success" in response.headers["location"]
+    assert not create_managed_auth_config_called
+    assert not create_connected_account_called
+
+    session.expire_all()
     connection = session.scalar(
         select(ComposioConnection).where(
             ComposioConnection.toolkit_slug == "hackernews",
-            ComposioConnection.auth_config_id == "ac_hn",
         )
     )
     assert connection is not None
+    assert connection.no_auth is True
     assert connection.status == "active"
-    assert connection.connected_account_id == "ca_hn"
-    assert connection.metadata_json["auth_config_source"] == "created_no_auth"
+    assert connection.connected_account_id is None
+    assert connection.auth_config_id is None
+    assert connection.metadata_json["auth_config_source"] == "no_auth"
     assert connection.metadata_json["no_auth"] is True
 
 
