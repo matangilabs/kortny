@@ -366,6 +366,18 @@
                   {% endfor %}
                 </dl>
               {% endif %}
+              {% if event.input_json %}
+                <details class="event-payload event-input">
+                  <summary>Input</summary>
+                  <pre>{{ event.input_json }}</pre>
+                </details>
+              {% endif %}
+              {% if event.output_json %}
+                <details class="event-payload event-output">
+                  <summary>Output</summary>
+                  <pre>{{ event.output_json }}</pre>
+                </details>
+              {% endif %}
               {% if event.prompt_json %}
                 <details class="event-payload event-prompt">
                   <summary>Prompt</summary>

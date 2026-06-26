@@ -217,6 +217,8 @@ class TimelineEvent:
     payload_json: str
     prompt_json: str | None = None
     response_json: str | None = None
+    input_json: str | None = None
+    output_json: str | None = None
 
 
 @dataclass(frozen=True)
@@ -6852,7 +6854,24 @@ def _timeline_event(event: TaskEvent) -> TimelineEvent:
         payload_json=json.dumps(payload, indent=2, sort_keys=True, default=str),
         prompt_json=_captured_content_json(payload.get("request_messages")),
         response_json=_captured_content_json(payload.get("response")),
+        input_json=_tool_io_json(payload.get("arguments")),
+        output_json=_tool_io_json(payload.get("output")),
     )
+
+
+# Cap tool I/O so a big result (e.g. a search dump) doesn't bloat the page; the
+# full value is always in the Raw payload below.
+_TOOL_IO_MAX_CHARS = 20_000
+
+
+def _tool_io_json(value: Any) -> str | None:
+    """Pretty-print a tool call's input (arguments) or output for the timeline."""
+    if not value:
+        return None
+    text = json.dumps(value, indent=2, sort_keys=True, default=str)
+    if len(text) > _TOOL_IO_MAX_CHARS:
+        return text[:_TOOL_IO_MAX_CHARS] + "\n… (truncated — see Raw payload)"
+    return text
 
 
 def _captured_content_json(value: Any) -> str | None:
