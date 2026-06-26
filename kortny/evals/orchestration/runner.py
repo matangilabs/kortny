@@ -235,9 +235,27 @@ def _called_apps_from_events(
             )
         )
     )
-    # A tool was invoked if any call OR result event exists. A write that paused
-    # at approval emits a tool_call but no tool_result, so count both.
-    any_tool_called = len(result_rows) > 0 or len(call_rows) > 0
+    # A tool that paused at the approval gate emits a `tool_approval_required`
+    # log event carrying the pending runtime tool name in request["tool"] — and
+    # may never emit a `tool_call` row (the gate fires at dispatch). Without this
+    # the eval undercounts: the agent reached the right app but the paused tool
+    # is invisible (observed: a Linear write-capable read paused here, scoring 0
+    # despite correct reaching). Credit it.
+    approval_rows = [
+        row
+        for row in session.scalars(
+            select(TaskEvent).where(
+                TaskEvent.task_id == task_id,
+                TaskEvent.type == TaskEventType.log,
+            )
+        )
+        if row.payload.get("message") == "tool_approval_required"
+    ]
+
+    # A tool was invoked if any call/result exists OR a tool paused at approval.
+    any_tool_called = (
+        len(result_rows) > 0 or len(call_rows) > 0 or len(approval_rows) > 0
+    )
 
     slugs: set[str] = set()
     # Authoritative: real toolkit_slug from successful Composio results.
@@ -249,6 +267,15 @@ def _called_apps_from_events(
     # app reached by a write that paused pre-result still counts.
     for row in call_rows:
         tool_name = row.payload.get("tool")
+        if isinstance(tool_name, str):
+            slug = _toolkit_slug_from_tool_name(tool_name)
+            if slug:
+                slugs.add(slug)
+    # Tools paused at approval (request["tool"]) — the app was reached even with
+    # no tool_call row.
+    for row in approval_rows:
+        request = row.payload.get("request")
+        tool_name = request.get("tool") if isinstance(request, dict) else None
         if isinstance(tool_name, str):
             slug = _toolkit_slug_from_tool_name(tool_name)
             if slug:
