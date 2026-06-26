@@ -414,3 +414,15 @@ def test_model_pricing_table_has_cache_multiplier_columns() -> None:
     assert "cache_read_multiplier" in columns
     assert columns["cache_write_multiplier"].nullable is False
     assert columns["cache_read_multiplier"].nullable is False
+
+
+def test_llm_usage_table_has_new_provider_kind_columns() -> None:
+    columns = Base.metadata.tables["llm_usage"].columns
+    assert "provider_kind" in columns
+    assert "provider_account_id" in columns
+    assert "cost_source" in columns
+    assert columns["provider_kind"].nullable is True
+    assert columns["provider_account_id"].nullable is True
+    assert columns["cost_source"].nullable is True
+    # provider column is now nullable (accepts unknown providers)
+    assert columns["provider"].nullable is True

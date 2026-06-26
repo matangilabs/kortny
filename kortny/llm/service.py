@@ -15,7 +15,11 @@ from sqlalchemy.orm import Session
 from kortny.config.settings import Settings
 from kortny.db.models import LLMProvider as DbLLMProvider
 from kortny.db.models import ModelPricing
-from kortny.llm.litellm_catalog import model_supports_vision
+from kortny.llm.litellm_catalog import (
+    model_candidate_for_identifier,
+    model_supports_vision,
+)
+from kortny.llm.model_ids import pricing_lookup_candidates
 from kortny.llm.routing import ModelRoute, ModelRouteTier
 from kortny.llm.types import ChatMessage, Completion, ImagePart, LLMProvider, TokenUsage
 from kortny.observability import (
@@ -156,6 +160,8 @@ class LLMService:
         task_service: TaskService | None = None,
         model_route: ModelRoute | None = None,
         settings: Settings | None = None,
+        provider_kind: str | None = None,
+        provider_account_id: uuid.UUID | None = None,
     ) -> None:
         self.session = session
         self.provider = provider
@@ -163,6 +169,8 @@ class LLMService:
         self.task_service = task_service or TaskService(session)
         self.model_route = model_route
         self._settings = settings
+        self._provider_kind = provider_kind
+        self._provider_account_id = provider_account_id
 
     def complete(
         self,
@@ -288,28 +296,23 @@ class LLMService:
                 raise
 
             model = completion.model or self.provider.model
-            cost_usd = completion.cost_usd
             pricing_missing = False
-            if cost_usd is None:
-                try:
-                    pricing = self.get_pricing(model)
-                    cost_usd = calculate_cost_usd(completion.usage, pricing)
-                except ModelPricingNotFoundError:
-                    # A missing pricing row is an observability gap, NOT a task
-                    # failure. Recording cost is bookkeeping that runs after the
-                    # model already answered — never crash the user's task on it
-                    # (observed: a cheap-tier task died with "Something went
-                    # wrong" purely because openrouter/google/gemini-2.5-flash-lite
-                    # had no pricing row). Record cost=0 + flag it so the spend
-                    # gap is visible and a pricing row can be added.
-                    logger.warning(
-                        "model_pricing_missing provider_model=%s/%s — recording "
-                        "cost=0; add a model_pricing row to track its spend",
-                        self.provider_name.value,
-                        model,
-                    )
-                    cost_usd = Decimal("0")
-                    pricing_missing = True
+            cost_usd, cost_source = _resolve_cost(
+                completion.cost_usd,
+                completion.usage,
+                model=model,
+                provider_name=self.provider_name,
+                session=self.session,
+                provider_kind=self._provider_kind,
+            )
+            if cost_source == "missing":
+                logger.warning(
+                    "model_pricing_missing provider_model=%s/%s — recording "
+                    "cost=0; add a model_pricing row or ensure litellm.model_cost covers it",
+                    self.provider_name.value,
+                    model,
+                )
+                pricing_missing = True
 
             latency_ms = _latency_ms(started)
             response_content = render_completion(completion, capture_mode)
@@ -330,6 +333,7 @@ class LLMService:
             }
             if pricing_missing:
                 metadata["pricing_missing"] = True
+            metadata["cost_source"] = cost_source
             image_count = sum(len(m.images) for m in messages)
             if image_count:
                 metadata["image_count"] = image_count
@@ -349,6 +353,9 @@ class LLMService:
                 cache_read_input_tokens=completion.usage.cache_read_input_tokens,
                 cost_usd=cost_usd,
                 metadata=metadata,
+                provider_kind=self._provider_kind,
+                provider_account_id=self._provider_account_id,
+                cost_source=cost_source,
             )
             total_tokens = (
                 completion.usage.input_tokens + completion.usage.output_tokens
@@ -540,3 +547,78 @@ def calculate_cost_usd(usage: TokenUsage, pricing: ModelPricing) -> Decimal:
         USD_QUANTUM,
         rounding=ROUND_HALF_UP,
     )
+
+
+def _resolve_cost(
+    completion_cost_usd: Decimal | None,
+    usage: TokenUsage,
+    *,
+    model: str,
+    provider_name: DbLLMProvider,
+    session: Session,
+    provider_kind: str | None = None,
+) -> tuple[Decimal, str]:
+    """Resolve LLM call cost through the cascade, returning (cost_usd, cost_source).
+
+    Cascade:
+    (a) provider_returned — completion.cost_usd if set
+    (b) skipped (db_model_pricing not wired; TODO: wire provider_account_id)
+    (c) legacy_pricing — model_pricing DB table, tries normalized candidates
+    (d) litellm_model_cost — litellm.model_cost map via model_candidate_for_identifier
+    (e) missing — cost 0, caller records pricing_missing=True
+    """
+    # (a) Provider returned
+    if completion_cost_usd is not None:
+        return completion_cost_usd, "provider_returned"
+
+    # (c) Legacy DB model_pricing — try normalized candidates
+    effective_at = datetime.now(UTC)
+    resolved_provider_kind = provider_kind or provider_name.value
+    candidates = pricing_lookup_candidates(model, provider_kind=resolved_provider_kind)
+    for candidate in candidates:
+        pricing = session.scalar(
+            select(ModelPricing)
+            .where(
+                ModelPricing.provider == provider_name,
+                ModelPricing.model == candidate,
+                ModelPricing.effective_from <= effective_at,
+            )
+            .order_by(ModelPricing.effective_from.desc())
+            .limit(1)
+        )
+        if pricing is not None:
+            return calculate_cost_usd(usage, pricing), "legacy_pricing"
+
+    # (d) litellm.model_cost fallback
+    for candidate in candidates:
+        litellm_candidate = model_candidate_for_identifier(
+            resolved_provider_kind, candidate
+        )
+        if litellm_candidate is None and resolved_provider_kind == "openrouter":
+            # For openrouter the sub-provider is embedded in the model name.
+            # Strip the openrouter/ prefix to find the actual sub-provider.
+            bare = candidate.removeprefix("openrouter/")
+            if "/" in bare:
+                sub_provider, _ = bare.split("/", 1)
+                litellm_candidate = model_candidate_for_identifier(sub_provider, bare)
+        if litellm_candidate is None:
+            continue
+        if (
+            litellm_candidate.input_price_per_mtok is None
+            or litellm_candidate.output_price_per_mtok is None
+        ):
+            continue
+        # Build a synthetic ModelPricing for calculate_cost_usd.
+        synthetic_pricing = ModelPricing(
+            provider=provider_name,
+            model=candidate,
+            input_price_per_mtok=litellm_candidate.input_price_per_mtok,
+            output_price_per_mtok=litellm_candidate.output_price_per_mtok,
+            # litellm model_cost doesn't expose cache multipliers; use defaults.
+            cache_write_multiplier=DEFAULT_CACHE_WRITE_MULTIPLIER,
+            cache_read_multiplier=DEFAULT_CACHE_READ_MULTIPLIER,
+        )
+        return calculate_cost_usd(usage, synthetic_pricing), "litellm_model_cost"
+
+    # (e) missing
+    return Decimal("0"), "missing"

@@ -443,13 +443,14 @@ def test_llm_service_missing_pricing_is_non_fatal(db_session: Session) -> None:
     # ModelPricingNotFoundError mid-completion and crashed user tasks with
     # "Something went wrong"). Recording cost is bookkeeping after the model
     # already answered: complete, record cost=0, flag pricing_missing.
+    # Uses a model that is truly unknown to both model_pricing DB and litellm.model_cost.
     task = create_task(db_session)
     provider = FakeProvider(
         Completion(
             content="done",
             tool_calls=(),
             usage=TokenUsage(input_tokens=1, output_tokens=1),
-            model="openai/gpt-4o-mini",
+            model="totally-fake-model-xyz-9999",
         )
     )
 
@@ -472,6 +473,7 @@ def test_llm_service_missing_pricing_is_non_fatal(db_session: Session) -> None:
     )
     completed = [e for e in events if e.payload.get("message") == "llm_call_completed"]
     assert completed and completed[-1].payload.get("pricing_missing") is True
+    assert completed[-1].payload.get("cost_source") == "missing"
     db_session.refresh(task)
     assert task.total_cost_usd == Decimal("0")
 
@@ -573,3 +575,156 @@ def test_llm_service_stamps_registered_prompt_version(db_session: Session) -> No
     assert completed
     assert completed[-1].payload["prompt_name"] == "kortny.intent_classifier"
     assert completed[-1].payload["prompt_version"] == "2"
+
+
+def test_llm_service_legacy_pricing_found_via_normalized_candidate(
+    db_session: Session,
+) -> None:
+    # The model_pricing row has the bare model name ("gpt-4o-mini") but the
+    # completion returns the prefixed form ("openai/gpt-4o-mini").  The cascade
+    # must try normalized candidates and find the row.
+    task = create_task(db_session)
+    db_session.add(
+        ModelPricing(
+            provider=LLMProvider.openrouter,
+            model="gpt-4o-mini",  # bare name stored in DB
+            input_price_per_mtok=Decimal("0.150000"),
+            output_price_per_mtok=Decimal("0.600000"),
+            effective_from=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+    )
+    db_session.flush()
+    provider = FakeProvider(
+        Completion(
+            content="ok",
+            tool_calls=(),
+            usage=TokenUsage(input_tokens=1000, output_tokens=1000),
+            model="openai/gpt-4o-mini",  # prefixed form from provider
+        )
+    )
+
+    LLMService(
+        session=db_session,
+        provider=provider,
+        provider_name=LLMProvider.openrouter,
+    ).complete(
+        task_id=task.id,
+        messages=[ChatMessage(role="user", content="hello")],
+    )
+
+    usage = db_session.scalar(select(LLMUsage).where(LLMUsage.task_id == task.id))
+    assert usage is not None
+    assert usage.cost_usd > Decimal("0")
+    assert usage.cost_source == "legacy_pricing"
+    events = list(
+        db_session.scalars(
+            select(TaskEvent).where(
+                TaskEvent.task_id == task.id,
+                TaskEvent.type == TaskEventType.llm_call,
+            )
+        )
+    )
+    assert events and events[-1].payload.get("cost_source") == "legacy_pricing"
+
+
+def test_llm_service_litellm_model_cost_fallback_prices_known_model(
+    db_session: Session,
+) -> None:
+    # A model known to litellm.model_cost (gpt-4o-mini via openai provider) but
+    # with NO model_pricing DB row should still get a non-zero cost via the
+    # litellm_model_cost fallback (cascade step d).
+    task = create_task(db_session)
+    # Do NOT add any ModelPricing row — fallback must fire.
+    provider = FakeProvider(
+        Completion(
+            content="ok",
+            tool_calls=(),
+            usage=TokenUsage(input_tokens=1000, output_tokens=1000),
+            model="gpt-4o-mini",
+        )
+    )
+
+    LLMService(
+        session=db_session,
+        provider=provider,
+        provider_name=LLMProvider.openai,
+    ).complete(
+        task_id=task.id,
+        messages=[ChatMessage(role="user", content="hello")],
+    )
+
+    usage = db_session.scalar(select(LLMUsage).where(LLMUsage.task_id == task.id))
+    assert usage is not None
+    assert usage.cost_usd > Decimal("0"), "litellm fallback should price known model"
+    assert usage.cost_source == "litellm_model_cost"
+
+
+def test_llm_service_cost_source_recorded_in_event(db_session: Session) -> None:
+    # cost_source must appear in the llm_call event payload.
+    task = create_task(db_session)
+    db_session.add(
+        ModelPricing(
+            provider=LLMProvider.openrouter,
+            model="openai/gpt-4o-mini",
+            input_price_per_mtok=Decimal("10.000000"),
+            output_price_per_mtok=Decimal("30.000000"),
+            effective_from=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+    )
+    db_session.flush()
+    provider = FakeProvider(
+        Completion(
+            content="ok",
+            tool_calls=(),
+            usage=TokenUsage(input_tokens=100, output_tokens=100),
+            model="openai/gpt-4o-mini",
+        )
+    )
+
+    LLMService(
+        session=db_session,
+        provider=provider,
+        provider_name=LLMProvider.openrouter,
+    ).complete(
+        task_id=task.id,
+        messages=[ChatMessage(role="user", content="hi")],
+    )
+
+    events = list(
+        db_session.scalars(
+            select(TaskEvent).where(
+                TaskEvent.task_id == task.id,
+                TaskEvent.type == TaskEventType.llm_call,
+            )
+        )
+    )
+    assert events
+    assert events[-1].payload.get("cost_source") == "legacy_pricing"
+
+
+def test_llm_service_provider_kind_persisted_in_usage(db_session: Session) -> None:
+    # provider_kind passed to LLMService.__init__ must land in the llm_usage row.
+    task = create_task(db_session)
+    provider = FakeProvider(
+        Completion(
+            content="ok",
+            tool_calls=(),
+            usage=TokenUsage(input_tokens=10, output_tokens=10),
+            cost_usd=Decimal("0.000001"),
+            model="gemini/gemini-1.5-flash",
+        )
+    )
+
+    LLMService(
+        session=db_session,
+        provider=provider,
+        provider_name=LLMProvider.openrouter,
+        provider_kind="gemini",
+    ).complete(
+        task_id=task.id,
+        messages=[ChatMessage(role="user", content="hi")],
+    )
+
+    usage = db_session.scalar(select(LLMUsage).where(LLMUsage.task_id == task.id))
+    assert usage is not None
+    assert usage.provider_kind == "gemini"

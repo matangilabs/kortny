@@ -2632,9 +2632,12 @@ class LLMUsage(Base):
     event_id: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("task_events.id")
     )
-    provider: Mapped[LLMProvider] = mapped_column(LLM_PROVIDER, nullable=False)
+    provider: Mapped[LLMProvider | None] = mapped_column(LLM_PROVIDER, nullable=True)
     model: Mapped[str] = mapped_column(String, nullable=False)
     model_tier: Mapped[str | None] = mapped_column(String)
+    provider_kind: Mapped[str | None] = mapped_column(String)
+    provider_account_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    cost_source: Mapped[str | None] = mapped_column(String)
     input_tokens: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default=text("0")
     )
