@@ -8,7 +8,7 @@ _INTENT = "kortny.intent_classifier"
 
 
 def test_intent_classifier_is_registered_with_version() -> None:
-    assert prompt_version(_INTENT) == "1"
+    assert prompt_version(_INTENT) == "2"
     definition = PROMPT_REGISTRY[_INTENT]
     assert definition.subsystem == "intent"
     assert definition.description

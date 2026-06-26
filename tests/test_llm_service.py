@@ -556,4 +556,4 @@ def test_llm_service_stamps_registered_prompt_version(db_session: Session) -> No
     completed = [e for e in events if e.payload.get("message") == "llm_call_completed"]
     assert completed
     assert completed[-1].payload["prompt_name"] == "kortny.intent_classifier"
-    assert completed[-1].payload["prompt_version"] == "1"
+    assert completed[-1].payload["prompt_version"] == "2"
