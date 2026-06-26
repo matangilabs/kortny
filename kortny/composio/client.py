@@ -6,6 +6,12 @@ need provider-specific SDK dependencies before runtime tool execution exists.
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
+import json
+import time
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -450,6 +456,89 @@ class ComposioClient:
             if close_client:
                 client.close()
 
+    def _delete(self, path: str) -> httpx.Response:
+        client = self.http_client or httpx.Client(timeout=self.timeout_seconds)
+        close_client = self.http_client is None
+        try:
+            response = client.delete(
+                f"{self.base_url}{path}",
+                headers={"x-api-key": self.api_key},
+            )
+            response.raise_for_status()
+            return response
+        except httpx.HTTPStatusError as exc:
+            raise ComposioConnectionError(_http_error_summary(exc)) from exc
+        except httpx.HTTPError as exc:
+            raise ComposioConnectionError(str(exc)) from exc
+        finally:
+            if close_client:
+                client.close()
+
+    def create_trigger(
+        self,
+        slug: str,
+        user_id: str,
+        trigger_config: dict[str, Any],
+        connected_account_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Create a Composio trigger subscription for a user."""
+        payload: dict[str, Any] = {
+            "trigger_slug": slug,
+            "user_id": user_id,
+            "trigger_config": trigger_config,
+        }
+        if connected_account_id is not None:
+            payload["connected_account_id"] = connected_account_id
+        response = self._post("/api/v3.1/triggers", json_payload=payload)
+        result: dict[str, Any] = response.json()
+        return result
+
+    def list_triggers(
+        self,
+        toolkit_slugs: Sequence[str] = (),
+    ) -> list[dict[str, Any]]:
+        """List available trigger definitions, optionally filtered by toolkit."""
+        params: dict[str, str | int] = {}
+        if toolkit_slugs:
+            params["toolkit_slugs"] = ",".join(toolkit_slugs)
+        response = self._get("/api/v3.1/triggers", params=params)
+        payload = response.json()
+        items: Any = payload.get("items") or payload.get("triggers") or payload
+        if not isinstance(items, list):
+            return []
+        return [item for item in items if isinstance(item, dict)]
+
+    def list_active_triggers(
+        self,
+        trigger_ids: Sequence[str] = (),
+        connected_account_ids: Sequence[str] = (),
+    ) -> list[dict[str, Any]]:
+        """List active trigger instances, optionally filtered by id or account."""
+        params: dict[str, str | int] = {}
+        if trigger_ids:
+            params["trigger_ids"] = ",".join(trigger_ids)
+        if connected_account_ids:
+            params["connected_account_ids"] = ",".join(connected_account_ids)
+        response = self._get("/api/v3.1/triggers/active", params=params)
+        payload = response.json()
+        items: Any = payload.get("items") or payload.get("triggers") or payload
+        if not isinstance(items, list):
+            return []
+        return [item for item in items if isinstance(item, dict)]
+
+    def disable_trigger(self, trigger_id: str) -> dict[str, Any]:
+        """Disable an active trigger instance by its ti_* id."""
+        response = self._patch(
+            f"/api/v3.1/triggers/{trigger_id}/disable",
+            json_payload={},
+        )
+        result: dict[str, Any] = response.json()
+        return result
+
+    def delete_trigger(self, trigger_id: str) -> None:
+        """Delete a trigger instance by its ti_* id."""
+        self._delete(f"/api/v3.1/triggers/{trigger_id}")
+
 
 def _toolkit_from_payload(payload: dict[str, Any]) -> ComposioToolkit:
     raw_meta = payload.get("meta")
@@ -625,3 +714,141 @@ def _response_error_detail(response: httpx.Response) -> str:
         if message:
             return message[:500]
     return str(payload)[:500]
+
+
+# ---------------------------------------------------------------------------
+# Webhook verification and parsing
+# ---------------------------------------------------------------------------
+
+
+class TriggerWebhookError(Exception):
+    """Base for all trigger webhook verification/parse errors."""
+
+
+class TriggerSignatureError(TriggerWebhookError):
+    """HMAC signature on the incoming webhook did not match."""
+
+
+class TriggerTimestampError(TriggerWebhookError):
+    """Webhook timestamp is outside the allowed replay-tolerance window."""
+
+
+class TriggerParseError(TriggerWebhookError):
+    """Webhook body could not be parsed as a valid Composio trigger envelope."""
+
+
+@dataclass(frozen=True)
+class ParsedTriggerEvent:
+    """Decoded, verified Composio trigger webhook envelope."""
+
+    id: str
+    type: str
+    trigger_slug: str
+    trigger_id: str | None
+    connected_account_id: str | None
+    user_id: str | None
+    data: dict[str, Any]
+    timestamp: str  # ISO string from the envelope
+
+
+def verify_and_parse_trigger_webhook(
+    *,
+    raw_body: bytes,
+    headers: Mapping[str, str],
+    secret: str,
+    tolerance_seconds: int = 300,
+) -> ParsedTriggerEvent:
+    """Verify Composio webhook HMAC-SHA256 signature and parse the V3 envelope.
+
+    HMAC mechanics:
+    - The signed string is: ``{webhook-id}.{webhook-timestamp}.{body_as_str}``
+    - The key is the raw shared-secret string encoded as UTF-8 (NOT base64-decoded).
+    - The expected signature is HMAC-SHA256 over that string, base64-encoded.
+    - The ``webhook-signature`` header is formatted ``v1,<base64sig>``; multiple
+      comma-separated signatures may appear (any valid one passes).
+    - Timestamps outside ``tolerance_seconds`` of now are rejected.
+
+    Raises:
+        TriggerSignatureError: signature does not match.
+        TriggerTimestampError: timestamp skew exceeds tolerance.
+        TriggerParseError: body is not valid JSON or missing required fields.
+    """
+    # Normalise header lookup to lowercase.
+    lower_headers: dict[str, str] = {k.lower(): v for k, v in headers.items()}
+
+    webhook_id = lower_headers.get("webhook-id", "")
+    webhook_timestamp = lower_headers.get("webhook-timestamp", "")
+    sig_header = lower_headers.get("webhook-signature", "")
+
+    # --- Timestamp replay check ------------------------------------------------
+    try:
+        ts_int = int(webhook_timestamp)
+    except ValueError as exc:
+        raise TriggerTimestampError(
+            f"webhook-timestamp is not a valid integer: {webhook_timestamp!r}"
+        ) from exc
+    now = int(time.time())
+    if abs(now - ts_int) > tolerance_seconds:
+        raise TriggerTimestampError(
+            f"webhook-timestamp {ts_int} is {abs(now - ts_int)}s from now "
+            f"(tolerance {tolerance_seconds}s)"
+        )
+
+    # --- HMAC verification ----------------------------------------------------
+    # Signed string: "{webhook-id}.{webhook-timestamp}.{body_as_str}"
+    body_str = raw_body.decode("utf-8", errors="replace")
+    signed_string = f"{webhook_id}.{webhook_timestamp}.{body_str}"
+    key = secret.encode("utf-8")
+    expected_mac = hmac.new(key, signed_string.encode("utf-8"), hashlib.sha256).digest()
+    expected_b64 = base64.b64encode(expected_mac).decode("ascii")
+
+    # webhook-signature may contain multiple "v1,<sig>" entries separated by spaces
+    accepted_sigs: list[str] = []
+    for part in sig_header.split():
+        if part.startswith("v1,"):
+            accepted_sigs.append(part[3:])
+        else:
+            accepted_sigs.append(part)
+
+    if not any(
+        hmac.compare_digest(expected_b64, candidate) for candidate in accepted_sigs
+    ):
+        raise TriggerSignatureError("webhook-signature did not match HMAC-SHA256")
+
+    # --- Parse envelope -------------------------------------------------------
+    try:
+        envelope: Any = json.loads(raw_body)
+    except json.JSONDecodeError as exc:
+        raise TriggerParseError(f"webhook body is not valid JSON: {exc}") from exc
+
+    if not isinstance(envelope, dict):
+        raise TriggerParseError("webhook envelope must be a JSON object")
+
+    try:
+        event_id = str(envelope["id"])
+        event_type = str(envelope.get("type", "composio.trigger.message"))
+        metadata: dict[str, Any] = envelope.get("metadata") or {}
+        data: dict[str, Any] = envelope.get("data") or {}
+        trigger_slug = str(metadata.get("trigger_slug") or "")
+        trigger_id = _optional_str(metadata.get("trigger_id"))
+        connected_account_id = _optional_str(metadata.get("connected_account_id"))
+        user_id = _optional_str(metadata.get("user_id"))
+        timestamp = str(envelope.get("timestamp") or "")
+    except (KeyError, TypeError) as exc:
+        raise TriggerParseError(
+            f"webhook envelope is missing required fields: {exc}"
+        ) from exc
+
+    if not trigger_slug:
+        raise TriggerParseError("webhook envelope metadata.trigger_slug is empty")
+
+    return ParsedTriggerEvent(
+        id=event_id,
+        type=event_type,
+        trigger_slug=trigger_slug,
+        trigger_id=trigger_id,
+        connected_account_id=connected_account_id,
+        user_id=user_id,
+        data=data,
+        timestamp=timestamp,
+    )

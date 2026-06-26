@@ -481,6 +481,18 @@ class Settings(BaseSettings):
     composio_sync_advisory_lock_key: int = Field(
         default=759340222, validation_alias="KORTNY_COMPOSIO_SYNC_ADVISORY_LOCK_KEY"
     )
+    composio_triggers_enabled: bool = Field(
+        default=False,
+        validation_alias="KORTNY_COMPOSIO_TRIGGERS_ENABLED",
+    )
+    composio_webhook_secret: str | None = Field(
+        default=None,
+        validation_alias="KORTNY_COMPOSIO_WEBHOOK_SECRET",
+    )
+    composio_trigger_retention_days: int = Field(
+        default=90,
+        validation_alias="KORTNY_COMPOSIO_TRIGGER_RETENTION_DAYS",
+    )
     profiler_enabled: bool = Field(
         default=True, validation_alias="KORTNY_PROFILER_ENABLED"
     )
@@ -639,6 +651,7 @@ class Settings(BaseSettings):
         "vercel_token",
         "vercel_team_id",
         "egress_url_allowlist",
+        "composio_webhook_secret",
         mode="before",
     )
     @classmethod

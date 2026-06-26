@@ -30,7 +30,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import BYTEA, ENUM, JSONB, TIMESTAMP, UUID
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
 class Base(DeclarativeBase):
@@ -2900,4 +2900,159 @@ class ProactiveActionEvent(Base):
         Index("idx_pae_candidate_id", "candidate_id"),
         Index("idx_pae_installation_id", "installation_id"),
         Index("idx_pae_candidate_created_at", "candidate_id", "created_at"),
+    )
+
+
+class ComposioTriggerSubscription(Base):
+    """Per-user, per-trigger subscription for the Composio proactive triggers layer.
+
+    A subscription records that a specific connected account (identified by
+    ``connected_account_id``) should have ``trigger_slug`` active on Composio.
+    ``composio_trigger_id`` (the ``ti_*`` id) is nullable until the trigger is
+    actually created on Composio's side.
+
+    The unique constraint on (installation_id, connected_account_id, trigger_slug)
+    ensures each account has at most one active subscription per trigger type.
+    """
+
+    __tablename__ = "composio_trigger_subscriptions"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    installation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("installations.id", ondelete="CASCADE"), nullable=False
+    )
+    composio_connection_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("composio_connections.id", ondelete="SET NULL"), nullable=True
+    )
+    connected_account_id: Mapped[str] = mapped_column(String, nullable=False)
+    composio_user_id: Mapped[str] = mapped_column(String, nullable=False)
+    owner_slack_user_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    toolkit_slug: Mapped[str] = mapped_column(String, nullable=False)
+    trigger_slug: Mapped[str] = mapped_column(String, nullable=False)
+    # The ti_* trigger-instance id from Composio. Nullable until trigger is created.
+    composio_trigger_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    trigger_config_json: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    status: Mapped[str] = mapped_column(
+        String, nullable=False, server_default=text("'active'")
+    )
+    target_scope_type: Mapped[str | None] = mapped_column(String, nullable=True)
+    target_scope_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    min_importance: Mapped[Decimal] = mapped_column(
+        Numeric(4, 3), nullable=False, server_default=text("0.0")
+    )
+    cooldown_seconds: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    daily_cap: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    digest_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    installation: Mapped[Installation] = relationship("Installation", lazy="raise")
+    composio_connection: Mapped[ComposioConnection | None] = relationship(
+        "ComposioConnection", lazy="raise"
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "status in ('active', 'paused', 'disabled')",
+            name="ck_composio_trigger_subscriptions_status",
+        ),
+        UniqueConstraint(
+            "installation_id",
+            "connected_account_id",
+            "trigger_slug",
+            name="uq_composio_trigger_subscriptions_account_trigger",
+        ),
+        Index(
+            "idx_composio_trigger_subscriptions_installation",
+            "installation_id",
+            "status",
+        ),
+        Index(
+            "idx_composio_trigger_subscriptions_account",
+            "installation_id",
+            "connected_account_id",
+            "trigger_slug",
+        ),
+    )
+
+
+class ComposioTriggerEvent(Base):
+    """Raw inbound Composio webhook event, persisted before any processing.
+
+    Deduplication key: (installation_id, trigger_slug, event_id).
+    We use this triplet rather than (trigger_id, event_id) because trigger_id
+    (the ti_* id) can be null at ingest time if the subscription row has not yet
+    been created on Composio. The top-level ``id`` from the webhook envelope is
+    stable and unique within a project, so (installation_id, trigger_slug, event_id)
+    is the safe dedup surface.
+    """
+
+    __tablename__ = "composio_trigger_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    installation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("installations.id", ondelete="CASCADE"), nullable=False
+    )
+    subscription_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("composio_trigger_subscriptions.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    composio_trigger_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Top-level id from the Composio webhook envelope.
+    event_id: Mapped[str] = mapped_column(String, nullable=False)
+    trigger_slug: Mapped[str] = mapped_column(String, nullable=False)
+    connected_account_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    composio_user_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    raw_payload_json: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    importance_score: Mapped[Decimal | None] = mapped_column(
+        Numeric(5, 4), nullable=True
+    )
+    decision: Mapped[str | None] = mapped_column(String, nullable=True)
+    decision_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    received_at: Mapped[datetime] = mapped_column(
+        TZ, nullable=False, server_default=func.now()
+    )
+
+    installation: Mapped[Installation] = relationship("Installation", lazy="raise")
+    subscription: Mapped[ComposioTriggerSubscription | None] = relationship(
+        "ComposioTriggerSubscription", lazy="raise"
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "decision in ('ask', 'silent', 'digest', 'duplicate', 'unmatched')",
+            name="ck_composio_trigger_events_decision",
+        ),
+        UniqueConstraint(
+            "installation_id",
+            "trigger_slug",
+            "event_id",
+            name="uq_composio_trigger_events_dedup",
+        ),
+        Index(
+            "idx_composio_trigger_events_installation",
+            "installation_id",
+            "received_at",
+        ),
+        Index(
+            "idx_composio_trigger_events_subscription",
+            "subscription_id",
+            "received_at",
+        ),
     )
