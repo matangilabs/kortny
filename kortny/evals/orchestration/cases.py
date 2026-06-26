@@ -58,6 +58,13 @@ class OrchestrationCase:
     forbidden_apps: tuple[str, ...] = ()
     note: str = ""
     tags: tuple[str, ...] = field(default=())
+    requires_toolkits: tuple[str, ...] = ()
+    """Toolkit slugs that must be connected for this case to run.
+
+    If any slug is absent from the resolved connected set, the case is skipped
+    in the live runner. Use for cases covering unconnected top-25 apps — they
+    document target workflows and skip cleanly until connected.
+    """
 
 
 _DM = IntentSurface.dm
@@ -179,5 +186,71 @@ SEED_ORCHESTRATION_CASES: tuple[OrchestrationCase, ...] = (
         forbidden_apps=("github", "linear", "gmail", "googlecalendar", "notion"),
         tags=("source_priority", "knowledge", "guard"),
         note="stable general knowledge → answer directly, no connected tool",
+    ),
+    # 13 — cross-app: GitHub PRs → Linear issue (flaky CI angle)
+    OrchestrationCase(
+        request="summarize my open GitHub PRs and open a Linear issue for the one with flaky CI",
+        connected_toolkits=CONNECTED_LIVE,
+        surface=_DM,
+        expected_apps=("github", "linear"),
+        tags=("cross_app", "dev_tickets", "top25"),
+        note="dev→tickets workflow; both apps connected",
+    ),
+    # 14 — cross-app: Confluence → Notion knowledge transfer
+    OrchestrationCase(
+        request="pull the onboarding doc from Confluence and draft a summary page in Notion",
+        connected_toolkits=CONNECTED_LIVE,
+        surface=_DM,
+        expected_apps=("confluence", "notion"),
+        tags=("cross_app", "knowledge_deliverable", "top25"),
+        note="knowledge→deliverable; both apps connected",
+    ),
+    # 15 — cross-app: Gmail → Google Calendar (email thread + calendar write)
+    OrchestrationCase(
+        request="find the latest email from the Northwind thread and add a 30-min review to my calendar Thursday",
+        connected_toolkits=CONNECTED_LIVE,
+        surface=_DM,
+        expected_apps=("gmail", "googlecalendar"),
+        tags=("cross_app", "email_calendar", "top25"),
+        note="email→calendar workflow; both apps connected",
+    ),
+    # 16 — cross-app: Notion → Linear (open questions to tickets)
+    OrchestrationCase(
+        request="look at our product spec in Notion and file Linear issues for any open questions",
+        connected_toolkits=CONNECTED_LIVE,
+        surface=_DM,
+        expected_apps=("notion", "linear"),
+        tags=("cross_app", "tracker_comms", "top25"),
+        note="variation of case 9 with more explicit intent; both connected",
+    ),
+    # 17 — SKIP (jira not connected): dev→tickets via Jira
+    OrchestrationCase(
+        request="create a Jira ticket for the authentication bug I just found in the login flow",
+        connected_toolkits=CONNECTED_LIVE,
+        surface=_DM,
+        expected_apps=("jira",),
+        requires_toolkits=("jira",),
+        tags=("single_app", "dev_tickets", "top25", "unconnected"),
+        note="tier-1 top-25; skip until jira connected in eval workspace",
+    ),
+    # 18 — SKIP (hubspot not connected): meeting→CRM
+    OrchestrationCase(
+        request="log this Zoom call outcome in HubSpot: we agreed on a Q3 pilot with Northwind",
+        connected_toolkits=CONNECTED_LIVE,
+        surface=_DM,
+        expected_apps=("hubspot",),
+        requires_toolkits=("hubspot",),
+        tags=("single_app", "meeting_crm", "top25", "unconnected"),
+        note="tier-1 top-25; skip until hubspot connected in eval workspace",
+    ),
+    # 19 — SKIP (zoom not connected): schedule a Zoom meeting
+    OrchestrationCase(
+        request="schedule a Zoom for the launch sync — invite the product team for next Friday at 2 PM",
+        connected_toolkits=CONNECTED_LIVE,
+        surface=_DM,
+        expected_apps=("zoom",),
+        requires_toolkits=("zoom",),
+        tags=("single_app", "calendar", "top25", "unconnected"),
+        note="tier-1 top-25; skip until zoom connected in eval workspace",
     ),
 )

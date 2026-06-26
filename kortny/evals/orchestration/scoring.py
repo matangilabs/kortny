@@ -25,14 +25,25 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from typing import NamedTuple
 
 from kortny.evals.orchestration.cases import OrchestrationCase
 
-# Given an OrchestrationCase, return the set of Composio toolkit slugs whose
-# tools were actually called during execution, plus a flag for whether ANY tool
-# at all was invoked (for the must_use_tools guard) and the final answer text
-# (optional, for debugging).
-RunResult = tuple[frozenset[str], bool, str]  # (called_apps, any_tool_called, answer)
+
+class RunResult(NamedTuple):
+    """Result of running a single orchestration case.
+
+    The live runner returns a ``RunResult`` for every case, including skipped
+    ones. The scorer handles both new-style ``RunResult`` NamedTuple values and
+    legacy 3-tuple returns for backward compatibility.
+    """
+
+    called_apps: frozenset[str]
+    any_tool_called: bool
+    answer: str
+    skipped: bool = False
+    skip_reason: str = ""
+
 
 RunFn = Callable[[OrchestrationCase], RunResult]
 
@@ -49,6 +60,8 @@ class OrchestrationAssertionResult:
     called_apps: frozenset[str]
     any_tool_called: bool
     failures: tuple[str, ...]
+    skipped: bool = False
+    skip_reason: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,16 +69,21 @@ class OrchestrationReport:
     case_count: int
     passed: int
     failed: int
+    skipped: int
     pass_rate: float
     results: tuple[OrchestrationAssertionResult, ...]
 
     def summary_line(self) -> str:
         pct = f"{self.pass_rate * 100:.0f}%"
-        return f"passed={self.passed}/{self.case_count} failed={self.failed} ({pct})"
+        skip_part = f" {self.skipped} skipped" if self.skipped else ""
+        return (
+            f"passed={self.passed}/{self.case_count - self.skipped} "
+            f"failed={self.failed} ({pct}){skip_part}"
+        )
 
     @property
     def failures(self) -> tuple[OrchestrationAssertionResult, ...]:
-        return tuple(r for r in self.results if not r.passed)
+        return tuple(r for r in self.results if not r.passed and not r.skipped)
 
 
 def score_orchestration(
@@ -77,7 +95,32 @@ def score_orchestration(
     results: list[OrchestrationAssertionResult] = []
 
     for idx, case in enumerate(cases):
-        called_apps, any_tool_called, _answer = run_fn(case)
+        run_result = run_fn(case)
+
+        called_apps = run_result.called_apps
+        any_tool_called = run_result.any_tool_called
+        _answer = run_result.answer
+        is_skipped = run_result.skipped
+        skip_reason = run_result.skip_reason
+
+        if is_skipped:
+            results.append(
+                OrchestrationAssertionResult(
+                    case_id=idx + 1,
+                    request=case.request,
+                    passed=True,
+                    apps_pass=True,
+                    tools_pass=True,
+                    scope_pass=True,
+                    expected_apps=case.expected_apps,
+                    called_apps=frozenset(),
+                    any_tool_called=False,
+                    failures=(),
+                    skipped=True,
+                    skip_reason=skip_reason,
+                )
+            )
+            continue
 
         # Normalize to lower-case sets for membership checks.
         called_lower = frozenset(a.casefold() for a in called_apps)
@@ -97,10 +140,25 @@ def score_orchestration(
 
         failures: list[str] = []
         if not apps_pass:
-            failures.append(
-                f"expected apps not called: {sorted(missing)!r}; "
-                f"got called={sorted(called_lower)!r}"
-            )
+            called_set = sorted(called_lower)
+            missing_set = sorted(missing)
+            # premature_final: for multi-app cases where SOME but not ALL apps
+            # were reached and the agent produced an answer anyway, emit a more
+            # descriptive failure string so "dropped a leg" is distinguishable
+            # from "reached nothing".
+            reached_any_expected = bool(called_lower & expected_lower)
+            is_multi_app = len(case.expected_apps) >= 2
+            if is_multi_app and reached_any_expected and any_tool_called and _answer:
+                reached = sorted(called_lower & expected_lower)
+                failures.append(
+                    f"premature_final: reached {reached!r} but not "
+                    f"{missing_set!r} before answering"
+                )
+            else:
+                failures.append(
+                    f"expected apps not called: {missing_set!r}; "
+                    f"got called={called_set!r}"
+                )
         if not tools_pass:
             failures.append(
                 "must_use_tools=True but no tool was called "
@@ -122,15 +180,21 @@ def score_orchestration(
                 called_apps=called_lower,
                 any_tool_called=any_tool_called,
                 failures=tuple(failures),
+                skipped=False,
+                skip_reason="",
             )
         )
 
-    passed = sum(1 for r in results if r.passed)
+    skipped_count = sum(1 for r in results if r.skipped)
+    non_skipped = [r for r in results if not r.skipped]
+    passed = sum(1 for r in non_skipped if r.passed)
     total = len(results)
+    denominator = total - skipped_count
     return OrchestrationReport(
         case_count=total,
         passed=passed,
-        failed=total - passed,
-        pass_rate=passed / total if total > 0 else 0.0,
+        failed=denominator - passed,
+        skipped=skipped_count,
+        pass_rate=passed / denominator if denominator > 0 else 0.0,
         results=tuple(results),
     )
