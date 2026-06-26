@@ -1490,7 +1490,13 @@ def _review_messages(
                 "that needs approval; performs external writes (including "
                 "anything email-like); exposes private data; or is "
                 "stale/speculative. For those, return defer, "
-                "monitor_only, ask_user, or dismiss. Return JSON only with schema: "
+                "monitor_only, ask_user, or dismiss. "
+                "When uncertain, prefer the quiet option (monitor_only or "
+                "dismiss) over interrupting — a wrong or low-value proactive "
+                "message costs more than staying silent, and staying silent is a "
+                "valid, often-correct outcome. Reserve ask_user for when a "
+                "clearly valuable action genuinely needs one piece of input. "
+                "Return JSON only with schema: "
                 '{"decision":"execute_task|defer|dismiss|monitor_only|ask_user",'
                 '"risk":"low|medium|high",'
                 '"action_kind":"read_only_analysis|status_check|'

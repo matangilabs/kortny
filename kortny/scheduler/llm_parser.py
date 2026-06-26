@@ -55,6 +55,18 @@ Rules:
   is_schedule=true, confidence below 0.72, and include a clarifying_question.
 - If the user asks to draft, propose, wait for confirmation, or asks for approval,
   set needs_confirmation=true.
+
+Examples:
+- "every weekday at 9am summarize my unread email" -> is_schedule=true,
+  schedule_kind="cron", cron_expr="0 9 * * 1-5", cadence_label="weekdays at 9am",
+  task_input="summarize my unread email".
+- "every 2 hours check the deploy status" -> schedule_kind="interval",
+  interval_seconds=7200, task_input="check the deploy status".
+- "remind me about the review sometime next week" -> timing ambiguous:
+  schedule_kind="unsupported", is_schedule=true, confidence below 0.72,
+  clarifying_question asking for the exact day and time.
+- "what's on my calendar tomorrow?" -> not a scheduling request:
+  is_schedule=false.
 """.strip()
 
 

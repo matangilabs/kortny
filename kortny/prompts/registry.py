@@ -101,6 +101,7 @@ def _seed() -> None:
             "kortny.schedule_parser",
             "scheduler",
             "Parse a natural-language schedule request.",
+            "2",  # v2: worked examples incl. ambiguous->clarify and not-a-schedule
         ),
         (
             "kortny.semantic_router.shadow",
@@ -151,6 +152,7 @@ def _seed() -> None:
             "kortny.witness_autopilot_reviewer",
             "witness",
             "Review an autopilot opportunity before delivery.",
+            "2",  # v2: silence-as-terminal-state bias (quiet over interrupting)
         ),
         (
             "kortny.knowledge_graph.channel_semantic_extractor",
