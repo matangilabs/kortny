@@ -178,6 +178,36 @@ def _service(
     )
 
 
+def test_connected_toolkits_includes_no_auth_connection(
+    db_session: Session,
+) -> None:
+    # A no-auth connection (active, no connected_account_id) must be synced so
+    # its tools enter the catalog and become retrievable. Observed bug:
+    # hackernews connected no-auth -> find_tools returned [] because the sync
+    # skipped it (filtered on connected_account_id IS NOT NULL).
+    installation_id = _installation(db_session)
+    _connect(db_session, installation_id, toolkit_slug="notion")
+    db_session.add(
+        ComposioConnection(
+            installation_id=installation_id,
+            toolkit_slug="hackernews",
+            auth_config_id=None,
+            connected_account_id=None,
+            composio_user_id=f"slack:{installation_id}:U1",
+            owner_slack_user_id="U1",
+            visibility_scope_type="workspace",
+            visibility_scope_id=None,
+            status="active",
+            no_auth=True,
+        )
+    )
+    db_session.flush()
+    client = FakeComposioClient(tools_by_toolkit={})
+    slugs = _service(db_session, client).connected_toolkits(installation_id)
+    assert "hackernews" in slugs
+    assert "notion" in slugs
+
+
 def test_sync_persists_full_catalog_and_embeddings_in_chunks(
     db_session: Session,
 ) -> None:

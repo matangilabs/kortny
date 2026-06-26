@@ -29,7 +29,7 @@ import logging
 import time
 import uuid
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from kortny.config import Settings, load_settings
@@ -183,7 +183,12 @@ class CapabilityProfilerWorker:
                 .where(
                     ComposioConnection.installation_id == installation_id,
                     ComposioConnection.status == "active",
-                    ComposioConnection.connected_account_id.is_not(None),
+                    # Include no-auth toolkits (connected, no account) so their
+                    # descriptions get enriched for retrieval too.
+                    or_(
+                        ComposioConnection.no_auth.is_(True),
+                        ComposioConnection.connected_account_id.is_not(None),
+                    ),
                 )
                 .distinct()
             )

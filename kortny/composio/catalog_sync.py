@@ -30,7 +30,7 @@ import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -116,7 +116,13 @@ class ComposioCatalogSyncService:
             .where(
                 ComposioConnection.installation_id == installation_id,
                 ComposioConnection.status == "active",
-                ComposioConnection.connected_account_id.is_not(None),
+                # No-auth toolkits are "connected" without a connected account
+                # (their tools run directly) — include them or their tools never
+                # get synced into the catalog and stay invisible to retrieval.
+                or_(
+                    ComposioConnection.no_auth.is_(True),
+                    ComposioConnection.connected_account_id.is_not(None),
+                ),
             )
             .distinct()
         )
