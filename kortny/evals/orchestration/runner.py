@@ -427,6 +427,22 @@ def build_live_run_fn(
             f"resolved {len(resolved)} connected toolkit(s): {sorted(resolved)!r}"
         )
 
+        # Skip cases whose required toolkits are not connected in this install.
+        if case.requires_toolkits:
+            missing_required = [
+                slug for slug in case.requires_toolkits if slug not in resolved
+            ]
+            if missing_required:
+                reason = f"requires {missing_required!r} not in connected set"
+                print(f"  SKIP: {reason}")
+                return RunResult(
+                    called_apps=frozenset(),
+                    any_tool_called=False,
+                    answer="",
+                    skipped=True,
+                    skip_reason=reason,
+                )
+
         # A write tool (e.g. case 1 "file a ticket", case 9 "create Linear
         # issues") pauses on the approval gate; execute() catches
         # ToolApprovalRequired internally and returns a result with the task
@@ -452,7 +468,11 @@ def build_live_run_fn(
         # Read whatever tool events exist — a task that paused at approval still
         # recorded its tool_call rows, so the app it reached still counts.
         called_apps, any_tool_called = _called_apps_from_events(session, task.id)
-        return called_apps, any_tool_called, answer
+        return RunResult(
+            called_apps=called_apps,
+            any_tool_called=any_tool_called,
+            answer=answer,
+        )
 
     return run
 
@@ -490,6 +510,10 @@ def _main() -> None:
     report = run()
     print(f"\nORCHESTRATION EVAL: {report.summary_line()}\n")
     for result in report.results:
+        if result.skipped:
+            print(f"  [SKIP] case {result.case_id}: {result.request!r}")
+            print(f"         reason: {result.skip_reason}")
+            continue
         status = "PASS" if result.passed else "FAIL"
         apps_label = (
             f"called={sorted(result.called_apps)!r} "
@@ -501,7 +525,7 @@ def _main() -> None:
             print(f"         ! {failure}")
     print()
     if not report.failures:
-        print("All cases passed.")
+        print("All non-skipped cases passed.")
     else:
         print(f"{report.failed} case(s) failed — see above for details.")
 

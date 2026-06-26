@@ -50,7 +50,9 @@ def _make_stub_run_fn(
 
     def run(case: OrchestrationCase) -> RunResult:
         called_apps, any_tool_called = case_map.get(case.request, (frozenset(), False))
-        return called_apps, any_tool_called, ""
+        return RunResult(
+            called_apps=called_apps, any_tool_called=any_tool_called, answer=""
+        )
 
     return run
 
@@ -250,11 +252,12 @@ def test_aggregate_pass_rate() -> None:
 
 
 def test_summary_line_format() -> None:
-    """summary_line must include passed/total, failed count, and a percentage."""
+    """summary_line must include passed/total (excluding skipped), failed count, and a percentage."""
     report = OrchestrationReport(
         case_count=10,
         passed=7,
         failed=3,
+        skipped=0,
         pass_rate=0.7,
         results=(),
     )
@@ -296,7 +299,7 @@ def test_failures_property_only_returns_failed() -> None:
         failures=("expected apps not called: ['linear']",),
     )
     report = OrchestrationReport(
-        case_count=2, passed=1, failed=1, pass_rate=0.5, results=(r1, r2)
+        case_count=2, passed=1, failed=1, skipped=0, pass_rate=0.5, results=(r1, r2)
     )
     assert len(report.failures) == 1
     assert report.failures[0].case_id == 2
@@ -429,8 +432,16 @@ def test_seed_dataset_surfaces_are_valid() -> None:
 
 
 def test_seed_dataset_expected_apps_subset_of_connected() -> None:
-    """Every case's expected_apps must be a subset of connected_toolkits."""
+    """Every runnable case's expected_apps must be a subset of connected_toolkits.
+
+    Cases with requires_toolkits set are intentionally unconnected and are
+    excluded from this check — they document target workflows and skip at
+    runtime until the required toolkits are connected.
+    """
     for case in SEED_ORCHESTRATION_CASES:
+        if case.requires_toolkits:
+            # Skip — intentionally unconnected case.
+            continue
         connected_set = set(case.connected_toolkits)
         for app in case.expected_apps:
             assert app in connected_set, (
@@ -517,3 +528,156 @@ def test_noop_slack_client_post_ts_is_unique() -> None:
     ts1 = client.chat_postMessage(channel="C", text="a")["ts"]
     ts2 = client.chat_postMessage(channel="C", text="b")["ts"]
     assert ts1 != ts2
+
+
+# ---------------------------------------------------------------------------
+# Skip semantics
+# ---------------------------------------------------------------------------
+
+
+def test_skipped_case_excluded_from_pass_rate() -> None:
+    """A skipped case must not count in the pass_rate denominator."""
+    case_run = OrchestrationCase(
+        request="open my github prs",
+        connected_toolkits=("github",),
+        surface=_DM,
+        expected_apps=("github",),
+    )
+    case_skip = OrchestrationCase(
+        request="create a jira ticket",
+        connected_toolkits=("github",),
+        surface=_DM,
+        expected_apps=("jira",),
+        requires_toolkits=("jira",),
+    )
+
+    def run_fn(case: OrchestrationCase) -> RunResult:
+        if case.requires_toolkits:
+            return RunResult(
+                called_apps=frozenset(),
+                any_tool_called=False,
+                answer="",
+                skipped=True,
+                skip_reason="jira not connected",
+            )
+        return RunResult(
+            called_apps=frozenset({"github"}), any_tool_called=True, answer="ok"
+        )
+
+    report = score_orchestration((case_run, case_skip), run_fn)
+    assert report.case_count == 2
+    assert report.skipped == 1
+    assert report.passed == 1
+    assert report.failed == 0
+    assert report.pass_rate == 1.0  # 1/1 non-skipped
+    assert "1 skipped" in report.summary_line()
+
+
+def test_skipped_case_not_in_failures() -> None:
+    """A skipped case must not appear in report.failures."""
+    case = OrchestrationCase(
+        request="schedule a zoom",
+        connected_toolkits=("github",),
+        surface=_DM,
+        expected_apps=("zoom",),
+        requires_toolkits=("zoom",),
+    )
+
+    def run_fn(case: OrchestrationCase) -> RunResult:
+        return RunResult(
+            called_apps=frozenset(),
+            any_tool_called=False,
+            answer="",
+            skipped=True,
+            skip_reason="zoom not connected",
+        )
+
+    report = score_orchestration((case,), run_fn)
+    assert report.skipped == 1
+    assert len(report.failures) == 0
+
+
+def test_premature_final_failure_label() -> None:
+    """Multi-app case that reached some but not all apps should show premature_final."""
+    case = OrchestrationCase(
+        request="pull the onboarding doc from confluence and create a notion page",
+        connected_toolkits=("confluence", "notion"),
+        surface=_DM,
+        expected_apps=("confluence", "notion"),
+    )
+
+    def run_fn(case: OrchestrationCase) -> RunResult:
+        # Only reached confluence, answered without notion.
+        return RunResult(
+            called_apps=frozenset({"confluence"}),
+            any_tool_called=True,
+            answer="Here is the summary.",
+        )
+
+    report = score_orchestration((case,), run_fn)
+    assert report.failed == 1
+    result = report.results[0]
+    assert not result.passed
+    assert any("premature_final" in f for f in result.failures)
+    assert any("notion" in f for f in result.failures)
+
+
+def test_requires_toolkits_field_default_empty() -> None:
+    """OrchestrationCase.requires_toolkits must default to empty tuple."""
+    case = OrchestrationCase(
+        request="open my github prs",
+        connected_toolkits=("github",),
+        surface=_DM,
+        expected_apps=("github",),
+    )
+    assert case.requires_toolkits == ()
+
+
+def test_top25_registry_has_25_entries() -> None:
+    """TOP25 must have exactly 25 entries."""
+    from kortny.integrations.top25 import TOP25, TOP25_SLUGS, tier_of  # noqa: F401
+
+    assert len(TOP25) == 25
+    assert len(TOP25_SLUGS) == 25
+
+
+def test_top25_tier_of_known_slugs() -> None:
+    """tier_of returns correct tiers for known slugs."""
+    from kortny.integrations.top25 import tier_of
+
+    assert tier_of("github") == 1
+    assert tier_of("linear") == 1
+    assert tier_of("slack") == 1
+    assert tier_of("confluence") == 2
+    assert tier_of("zendesk") == 2
+
+
+def test_top25_tier_of_unknown_slug() -> None:
+    """tier_of returns None for slugs not in top-25."""
+    from kortny.integrations.top25 import tier_of
+
+    assert tier_of("twelve_data") is None
+    assert tier_of("serpapi") is None
+    assert tier_of("notaslug") is None
+
+
+def test_top25_aliases_resolve() -> None:
+    """ALIASES map resolves known alias slugs correctly."""
+    from kortny.integrations.top25 import tier_of
+
+    # outlook_calendar is an alias for outlook (tier 1)
+    assert tier_of("outlook_calendar") == 1
+    assert tier_of("teams") == 1
+    assert tier_of("gdrive") == 1
+
+
+def test_seed_dataset_requires_toolkits_cases_are_top25() -> None:
+    """Cases with requires_toolkits must reference top-25 slugs only."""
+    from kortny.integrations.top25 import TOP25_SLUGS
+
+    for case in SEED_ORCHESTRATION_CASES:
+        for slug in case.requires_toolkits:
+            assert slug in TOP25_SLUGS, (
+                f"case {case.request!r}: requires_toolkits slug {slug!r} "
+                f"not in TOP25_SLUGS"
+            )
