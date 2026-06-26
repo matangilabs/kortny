@@ -1,4 +1,5 @@
 import json
+from decimal import Decimal
 
 import httpx
 import pytest
@@ -182,6 +183,35 @@ def test_openrouter_provider_sends_response_format() -> None:
     )
 
     assert captured_payloads[0]["response_format"] == {"type": "json_object"}
+
+
+def test_openrouter_provider_requests_usage_accounting() -> None:
+    # Cost accuracy: request usage accounting so OpenRouter returns the real
+    # per-call cost in usage.cost. Without it, cost is None, every call falls
+    # back to the model_pricing table, and spend silently reads $0.
+    captured_payloads: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_payloads.append(json.loads(request.read().decode()))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "hi"}}],
+                "usage": {"input_tokens": 1, "output_tokens": 1, "cost": 0.000012},
+            },
+        )
+
+    provider = OpenRouterProvider(
+        api_key="openrouter-key",
+        model="google/gemini-2.5-flash-lite",
+        transport=httpx.MockTransport(handler),
+    )
+
+    completion = provider.complete([ChatMessage(role="user", content="hi")])
+
+    assert captured_payloads[0]["usage"] == {"include": True}
+    # The returned cost is captured (not recomputed from a pricing table).
+    assert completion.cost_usd == Decimal("0.000012")
 
 
 def test_openrouter_provider_accepts_and_sends_max_output_tokens() -> None:

@@ -79,6 +79,11 @@ class OpenRouterProvider:
         # ``max_tokens``.
         if max_output_tokens is not None:
             payload["max_tokens"] = max_output_tokens
+        # Request usage accounting so OpenRouter returns the real per-call cost
+        # in usage.cost (verified: returns cost + cache-token details). Without
+        # this the response carries no cost, every call falls back to the brittle
+        # model_pricing table, and spend silently reads $0 / can't be tracked.
+        payload["usage"] = {"include": True}
 
         headers = {
             "Authorization": f"Bearer {self.api_key}",
