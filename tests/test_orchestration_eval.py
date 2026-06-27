@@ -1238,9 +1238,7 @@ def test_generalization_report_delta_exceeds_threshold_warns() -> None:
             )
         else:
             # Holdout fails (agent didn't call pagerduty).
-            return RunResult(
-                called_apps=frozenset(), any_tool_called=False, answer=""
-            )
+            return RunResult(called_apps=frozenset(), any_tool_called=False, answer="")
 
     report = score_orchestration((train_case, holdout_case), run_fn)
     gr = generalization_report(report)
@@ -1263,12 +1261,8 @@ def test_run_split_filter_excludes_holdout_from_train() -> None:
     excluded by the filter, we test the filter logic directly via the seed data.
     """
     # All train cases in the seed must have tuning_split='train'.
-    train_cases = [
-        c for c in SEED_ORCHESTRATION_CASES if c.tuning_split == "train"
-    ]
-    holdout_cases = [
-        c for c in SEED_ORCHESTRATION_CASES if c.tuning_split == "holdout"
-    ]
+    train_cases = [c for c in SEED_ORCHESTRATION_CASES if c.tuning_split == "train"]
+    holdout_cases = [c for c in SEED_ORCHESTRATION_CASES if c.tuning_split == "holdout"]
     # No case should be in both.
     train_requests = {c.request for c in train_cases}
     holdout_requests = {c.request for c in holdout_cases}
@@ -1373,9 +1367,7 @@ def test_load_fixtures_old_format_backcompat() -> None:
             # No S2 keys — simulates a pre-S2 fixture file.
         }
     }
-    with tempfile.NamedTemporaryFile(
-        suffix=".json", delete=False, mode="w"
-    ) as f:
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w") as f:
         json.dump(old_fixture, f)
         path = Path(f.name)
     try:
@@ -1402,9 +1394,7 @@ def test_top25_all_apps_have_tool_intents() -> None:
     from kortny.integrations.top25 import TOP25
 
     for app in TOP25:
-        assert len(app.tool_intents) > 0, (
-            f"TOP25 app {app.slug!r} has no tool_intents"
-        )
+        assert len(app.tool_intents) > 0, f"TOP25 app {app.slug!r} has no tool_intents"
 
 
 def test_holdout_apps_not_in_top25() -> None:
