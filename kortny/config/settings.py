@@ -169,6 +169,31 @@ class Settings(BaseSettings):
         validation_alias="KORTNY_SANDBOX_GC_ORPHAN_RUNNING_MAX_AGE_HOURS",
         gt=0,
     )
+    # --- CodeAct RPC bridge (HIG-301) -----------------------------------------
+    codeact_enabled: bool = Field(
+        default=False,
+        validation_alias="KORTNY_CODEACT_ENABLED",
+    )
+    codeact_max_tools: int = Field(
+        default=24,
+        validation_alias="KORTNY_CODEACT_MAX_TOOLS",
+    )
+    codeact_max_calls: int = Field(
+        default=50,
+        validation_alias="KORTNY_CODEACT_MAX_CALLS",
+    )
+    codeact_max_arg_bytes: int = Field(
+        default=65536,
+        validation_alias="KORTNY_CODEACT_MAX_ARG_BYTES",
+    )
+    codeact_max_result_bytes: int = Field(
+        default=262144,
+        validation_alias="KORTNY_CODEACT_MAX_RESULT_BYTES",
+    )
+    codeact_timeout_seconds: int = Field(
+        default=60,
+        validation_alias="KORTNY_CODEACT_TIMEOUT_SECONDS",
+    )
     artifacts_dir: str | None = Field(
         default=None,
         validation_alias="KORTNY_ARTIFACTS_DIR",
@@ -832,6 +857,41 @@ class Settings(BaseSettings):
             raise ValueError(
                 "KORTNY_BROWSER_SESSION_IDLE_TIMEOUT_SECONDS must be at least 10"
             )
+        return value
+
+    @field_validator("codeact_max_tools")
+    @classmethod
+    def _valid_codeact_max_tools(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("KORTNY_CODEACT_MAX_TOOLS must be at least 1")
+        return value
+
+    @field_validator("codeact_max_calls")
+    @classmethod
+    def _valid_codeact_max_calls(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("KORTNY_CODEACT_MAX_CALLS must be at least 1")
+        return value
+
+    @field_validator("codeact_max_arg_bytes")
+    @classmethod
+    def _valid_codeact_max_arg_bytes(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("KORTNY_CODEACT_MAX_ARG_BYTES must be at least 1")
+        return value
+
+    @field_validator("codeact_max_result_bytes")
+    @classmethod
+    def _valid_codeact_max_result_bytes(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("KORTNY_CODEACT_MAX_RESULT_BYTES must be at least 1")
+        return value
+
+    @field_validator("codeact_timeout_seconds")
+    @classmethod
+    def _valid_codeact_timeout_seconds(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("KORTNY_CODEACT_TIMEOUT_SECONDS must be at least 1")
         return value
 
     @field_validator("sandbox_default_image")
