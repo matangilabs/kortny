@@ -1,4 +1,4 @@
-"""Sandbox-backed code execution tool."""
+"""Sandbox-backed code execution tools (code_exec and codeact_exec placeholder)."""
 
 from __future__ import annotations
 
@@ -237,3 +237,102 @@ def _recoverable_error_result(
             },
         }
     )
+
+
+# ---------------------------------------------------------------------------
+# CodeActExecTool — public schema placeholder for codeact_exec (HIG-301 B)
+# ---------------------------------------------------------------------------
+# This class defines the tool's NAME, DESCRIPTION, and PARAMETERS schema —
+# the parts the LLM sees.  The actual execution is coordinator-owned (see
+# AgentCoordinator._handle_codeact_exec) because it needs the approval policy,
+# registry, and task context that a standalone tool.invoke() cannot access.
+#
+# invoke() is intentionally unreachable in production: the coordinator
+# intercepts codeact_exec before the registry.invoke() path.  If somehow
+# called directly (e.g. in a unit test for the stub alone), it returns a
+# structured error rather than silently succeeding.
+# ---------------------------------------------------------------------------
+
+
+class CodeActExecTool:
+    """Execute model-written Python that calls the task's tools as library functions.
+
+    The model writes a Python script that calls the tools listed in
+    ``allowed_tools`` as regular function calls (via the auto-generated
+    ``kortny_tools`` library).  The script runs in Kortny's isolated sandbox;
+    tool calls are dispatched host-side through the RPC bridge.
+
+    Security notes:
+    - Declare every tool the script will call in ``allowed_tools``; calls to
+      unlisted tools are rejected before the sandbox starts.
+    - The sandbox container has no outbound network (``NetworkMode=none``), so
+      the script cannot exfiltrate data via HTTP/DNS.  Its only side-effects
+      are the allowlisted tool calls, which are gated by the same approval
+      policy as direct tool calls.
+    - Secrets (API keys, Slack tokens) never enter the sandbox; the RPC bridge
+      dispatches tool calls host-side with credentials.
+    - Approval is collected once for the whole script and allowlist (approve-
+      once model).  Mid-script approval does not exist in v1.
+    - Only the script's final stdout is returned to the LLM; intermediate RPC
+      results stay in-process and never enter the message context.
+    """
+
+    name = "codeact_exec"
+    description = (
+        "Execute model-written Python that calls the task's tools as library functions. "
+        "Write a self-contained script that imports from kortny_tools and calls the "
+        "functions listed in allowed_tools. Only stdout is returned to you; "
+        "intermediate tool results are dispatched host-side and never pollute context. "
+        "Declare every tool the script will call in allowed_tools; calls to unlisted "
+        "tools are blocked before the sandbox starts. The sandbox has no outbound "
+        "network and no access to secrets or host filesystem."
+    )
+    parameters: JsonSchema = {
+        "type": "object",
+        "properties": {
+            "code": {
+                "type": "string",
+                "description": (
+                    "Self-contained Python 3 script. Import from kortny_tools to call "
+                    "the tools listed in allowed_tools. Print the final result to stdout."
+                ),
+            },
+            "allowed_tools": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Exact runtime names of every tool the script will call "
+                    "(e.g. 'composio_linear_list_issues'). The script cannot call "
+                    "any tool not listed here."
+                ),
+            },
+            "timeout_seconds": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 300,
+                "default": 60,
+                "description": "Wall-clock timeout for the sandboxed run.",
+            },
+        },
+        "required": ["code", "allowed_tools"],
+        "additionalProperties": False,
+    }
+
+    def invoke(self, args: JsonObject) -> ToolResult:
+        # The coordinator intercepts codeact_exec before the registry.invoke()
+        # path, so this method is intentionally unreachable in production.
+        # If called directly (e.g. in an integration test), return a
+        # structured error rather than a confusing exception.
+        return ToolResult(
+            output={
+                "successful": False,
+                "error": {
+                    "code": "codeact_exec_not_routed",
+                    "message": (
+                        "codeact_exec must be dispatched by the coordinator, not "
+                        "invoked directly via the tool registry."
+                    ),
+                    "recoverable": False,
+                },
+            }
+        )

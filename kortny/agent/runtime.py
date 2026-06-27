@@ -22,6 +22,7 @@ from kortny.agent.image_attachments import ImageAttachmentResolver
 from kortny.agent.planner import ExecutionPlanner
 from kortny.agent.thread_context import ThreadTranscriptProvider
 from kortny.approvals import ToolApprovalPolicy
+from kortny.config import Settings
 from kortny.db.models import Task
 from kortny.embeddings import EmbeddingIndex
 from kortny.slack.assistant_status import StatusReporter
@@ -68,6 +69,7 @@ class CustomAgentRuntime:
         agent_display_name: str = "Kortny",
         image_resolver: ImageAttachmentResolver | None = None,
         connected_tool_loader: ConnectedToolLoader | None = None,
+        settings: Settings | None = None,
     ) -> None:
         self.coordinator = AgentCoordinator(
             session=session,
@@ -96,6 +98,7 @@ class CustomAgentRuntime:
             agent_display_name=agent_display_name,
             image_resolver=image_resolver,
             connected_tool_loader=connected_tool_loader,
+            settings=settings,
         )
 
     def run(self, task: Task | uuid.UUID) -> AgentRunResult:

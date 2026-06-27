@@ -1,8 +1,9 @@
 """CodeAct RPC bridge engine — stub generator, file protocol, broker, orchestrator.
 
-This module is INERT in Slice A: it is not imported by any agent, coordinator,
-executor, or tool registry. Security gates and reachability land in Slice B.
-The flag KORTNY_CODEACT_ENABLED defaults False.
+Single-threaded poll loop (Slice B): no background broker thread, no
+ThreadPoolExecutor inside _rpc_dispatch. The main thread launches the script
+detached (nohup & background) and then polls request files + dispatches them
+synchronously, interleaved with done-marker checks.
 """
 
 from __future__ import annotations
@@ -31,6 +32,45 @@ from kortny.execution.sandbox_sessions import SandboxSessionClient
 _RPC_REQUEST_DIR = ".kortny_rpc/{run_id}/requests"
 _RPC_RESPONSE_DIR = ".kortny_rpc/{run_id}/responses"
 _WORKSPACE = "/workspace"
+
+# Cap the total requests/errors the poll loop will process before giving up.
+_MAX_DRAIN_REQUESTS: int = 200
+_MAX_DRAIN_ERRORS: int = 10
+
+# Interval (seconds) between poll iterations when no request file is ready.
+_BROKER_POLL_INTERVAL: float = 0.05
+
+# Maximum partial-read retries before treating a seq as errored and advancing.
+_MAX_PARTIAL_RETRIES: int = 3
+
+# Keys (lowercased) whose values should be redacted from RPC results before
+# sending them back to the sandbox script. Covers both snake_case and the
+# camelCase equivalents used by some Composio responses.
+_SCRUB_KEYS = frozenset(
+    {
+        # snake_case (Composio/standard)
+        "connected_account_id",
+        "auth",
+        "authorization",
+        "api_key",
+        "access_token",
+        "refresh_token",
+        "token",
+        "secret",
+        "password",
+        "x-api-key",
+        "headers",
+        # camelCase equivalents (lowercased so `.lower()` comparison works)
+        "connectedaccountid",  # connectedAccountId
+        "apikey",  # apiKey
+        "accesstoken",  # accessToken
+        "refreshtoken",  # refreshToken
+        "bearertoken",  # bearerToken
+        "authtoken",  # authToken
+        "clientsecret",  # clientSecret
+        "apisecret",  # apiSecret
+    }
+)
 
 
 def _rpc_request_path(run_id: str, seq: int) -> str:
@@ -198,6 +238,58 @@ class CodeActResult:
 
 
 # ---------------------------------------------------------------------------
+# Result scrubbing helpers
+# ---------------------------------------------------------------------------
+
+
+def _scrub_exception_message(msg: str) -> str:
+    """Redact secret-looking substrings from an exception message.
+
+    Targets common token/key patterns: Slack xox* tokens, JWT-like strings,
+    long base64 blobs, and sk-* API keys.
+    """
+    return re.sub(
+        r"(?i)(sk[-_][a-zA-Z0-9]{10,}|xox[bpar]-[a-zA-Z0-9\-]+|[a-zA-Z0-9+/]{32,}={0,2}|eyJ[a-zA-Z0-9\-_]+\.[a-zA-Z0-9\-_]+)",
+        "[redacted]",
+        msg,
+    )
+
+
+def _scrub_rpc_result(value: object) -> object:
+    """Recursively scrub secret-looking keys/values from an RPC result.
+
+    - Dict keys matching ``_SCRUB_KEYS`` (case-insensitive) have their values
+      replaced with ``"[redacted]"``.
+    - String values that parse as JSON dicts/lists are scrubbed recursively.
+    - Long error-like strings (tracebacks) are truncated.
+    """
+    if isinstance(value, dict):
+        return {
+            k: "[redacted]" if k.lower() in _SCRUB_KEYS else _scrub_rpc_result(v)
+            for k, v in value.items()
+        }
+    if isinstance(value, list):
+        return [_scrub_rpc_result(item) for item in value]
+    if isinstance(value, str):
+        # Try to parse as JSON — if it's a stringified dict/list with secret keys, scrub.
+        if len(value) > 10:
+            try:
+                parsed = json.loads(value)
+            except (json.JSONDecodeError, ValueError):
+                parsed = None
+            if isinstance(parsed, (dict, list)):
+                scrubbed = _scrub_rpc_result(parsed)
+                try:
+                    return json.dumps(scrubbed)
+                except (TypeError, ValueError):
+                    pass
+        if len(value) > 4096 and ("Traceback" in value or "Error:" in value):
+            return value[:200] + " [truncated]"
+        return value
+    return value
+
+
+# ---------------------------------------------------------------------------
 # Security-critical broker
 # ---------------------------------------------------------------------------
 
@@ -211,6 +303,9 @@ class CodeActRpcBroker:
     3. Arg byte cap — prevents oversized payloads.
     4. Call count cap — prevents floods.
     Then dispatch via the injected ``dispatch`` callable; cap the result bytes.
+
+    This class is ONLY called from the main thread (single-threaded poll loop).
+    No locking is needed — counters are simple integer increments.
     """
 
     def __init__(
@@ -297,12 +392,15 @@ class CodeActRpcBroker:
             result = self._dispatch(tool, args)
         except Exception as exc:  # noqa: BLE001
             self.rpc_error_count += 1
-            # Sanitise: only expose the exception type + a short message
+            # Scrub the error string before exposing it: redact secret-looking patterns
+            # and don't leak host-internal stack traces.
+            raw_error = f"{type(exc).__name__}: {str(exc)[:200]}"
+            scrubbed_error = _scrub_exception_message(raw_error)
             return {
                 "seq": seq,
                 "ok": False,
                 "result": None,
-                "error": f"dispatch error: {type(exc).__name__}: {str(exc)[:200]}",
+                "error": f"dispatch error: {scrubbed_error}",
             }
 
         # Cap result bytes
@@ -332,6 +430,39 @@ class CodeActRpcBroker:
 
 
 # ---------------------------------------------------------------------------
+# Done-marker and output-file helpers
+# ---------------------------------------------------------------------------
+
+
+def _check_done_marker(
+    session: SandboxSessionClient,
+    session_id: str,
+    run_id: str,
+) -> bool:
+    """Return True if the script's exit_code file has been written."""
+    try:
+        session.read_file(session_id, f"{_WORKSPACE}/.kortny_rpc/{run_id}/exit_code")
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _read_output_file(
+    session: SandboxSessionClient,
+    session_id: str,
+    path: str,
+    *,
+    max_bytes: int = 65536,
+) -> str:
+    """Read a text file from the sandbox, returning "" on any error."""
+    try:
+        raw = session.read_file(session_id, path)
+        return raw[:max_bytes].decode(errors="replace")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+# ---------------------------------------------------------------------------
 # Orchestrator
 # ---------------------------------------------------------------------------
 
@@ -348,33 +479,27 @@ def run_codeact(
     nonce: str,
     run_id: str,
 ) -> CodeActResult:
-    """Write files, start the script, run the broker poll loop, return result.
-
-    This is the only function that touches the real SandboxSessionClient.
-    Tests inject a fake session client so no real container is needed.
+    """Write files, launch the script detached, run the single-threaded poll loop.
 
     Steps:
     1. Write kortny_tools.py (stub library) into the workspace.
     2. Write main.py (model's code) into the workspace.
-    3. Create the RPC request/response directories (via mkdir -p in sandbox).
-    4. Start ``python main.py`` with the configured timeout.
-       Because exec() is synchronous and blocks until the process exits, we
-       run a broker poll loop CONCURRENTLY using a background thread for the
-       exec and a foreground loop for polling.  In practice (tests + sandbox)
-       the session is driven synchronously: the fake session pre-loads the
-       request files so the poll loop can drain them before exec returns.
+    3. Create the RPC request/response directories (best-effort exec).
+    4. Launch ``python main.py`` DETACHED via nohup so exec() returns immediately
+       (the script runs in the background; no thread is spawned).
+    5. SINGLE-THREADED POLL LOOP on the main thread: read request files,
+       dispatch them synchronously, write response files back, check the
+       done-marker (exit_code file) between iterations.
+    6. After the loop ends (done marker, deadline, or cap), read
+       stdout.log / stderr.log / exit_code from the per-run dir.
 
-    Implementation note: the production path needs concurrent exec + poll.
-    For Slice A (engine + unit tests), we use a sequential fake-session model:
-    the fake pre-loads requests; run_codeact writes responses then calls exec.
-    The real async bridge (thread-per-exec + poll loop) is wired in Slice B
-    when the tool is registered and can run against a live container.
+    No ``threading`` module is used. No ``ThreadPoolExecutor`` is spawned
+    inside this function. The overall ``codeact_timeout_seconds`` deadline
+    enforced by the loop replaces per-tool catalog timeouts for RPC calls.
 
-    For testability, this function:
-    - Writes stub + code files.
-    - Drains any pre-loaded request files (for fake sessions in tests).
-    - Calls session.exec(...) to run the script.
-    - Returns a CodeActResult.
+    Test compatibility: FakeSandboxSession.exec() detects the nohup launch
+    command and pre-writes exit_code/stdout.log/stderr.log, so the done-marker
+    is available immediately after launch and the loop exits fast.
     """
     broker = CodeActRpcBroker(
         allowed_tools=allowed_tools,
@@ -383,94 +508,141 @@ def run_codeact(
         dispatch=dispatch,
     )
 
-    # Write kortny_tools.py
+    # F5: write to per-run paths under the RPC dir, not fixed /workspace names.
     stub_src = generate_stub_module(stubs, nonce=nonce, run_id=run_id)
-    session.write_file(session_id, "/workspace/kortny_tools.py", stub_src.encode())
+    stub_path = f"{_WORKSPACE}/.kortny_rpc/{run_id}/kortny_tools.py"
+    main_path = f"{_WORKSPACE}/.kortny_rpc/{run_id}/main.py"
+    session.write_file(session_id, stub_path, stub_src.encode())
+    session.write_file(session_id, main_path, code.encode())
 
-    # Write main.py
-    session.write_file(session_id, "/workspace/main.py", code.encode())
-
-    # Ensure RPC dirs exist (best-effort via exec; ignored in fake sessions)
-    req_dir = f"/workspace/.kortny_rpc/{run_id}/requests"
-    resp_dir = f"/workspace/.kortny_rpc/{run_id}/responses"
+    # Ensure RPC dirs exist (best-effort via exec; ignored in fake sessions).
+    req_dir = f"{_WORKSPACE}/.kortny_rpc/{run_id}/requests"
+    resp_dir = f"{_WORKSPACE}/.kortny_rpc/{run_id}/responses"
     with contextlib.suppress(Exception):  # noqa: BLE001
         session.exec(
             session_id,
             f"mkdir -p {req_dir} {resp_dir}",
-            workdir="/workspace",
+            workdir=_WORKSPACE,
             timeout_seconds=5,
         )
 
-    # Pre-execution broker pass: drain any request files already written
-    # (supports fake in-memory session tests where requests are pre-seeded).
-    _drain_pending_requests(session, session_id, run_id=run_id, broker=broker)
+    # Launch the script detached so this exec() call returns immediately.
+    # The script runs under nohup in the background (&); stdout/stderr are
+    # redirected to log files; exit code is written to the exit_code file.
+    # FakeSandboxSession detects "nohup" in the command and pre-writes
+    # exit_code/stdout.log/stderr.log to make tests fast.
+    rpc_dir = f"{_WORKSPACE}/.kortny_rpc/{run_id}"
+    launch_cmd = (
+        f"cd {rpc_dir} && "
+        f"nohup sh -c "
+        f"'python main.py > stdout.log 2> stderr.log; echo $? > exit_code' "
+        f">/dev/null 2>&1 &"
+    )
+    with contextlib.suppress(Exception):  # noqa: BLE001
+        session.exec(session_id, launch_cmd, workdir=_WORKSPACE, timeout_seconds=5)
 
-    # Run the script
+    # Single-threaded poll loop.
     start_ms = int(time.monotonic() * 1000)
-    exec_result = session.exec(
-        session_id,
-        "python main.py",
-        workdir="/workspace",
-        timeout_seconds=settings.codeact_timeout_seconds,
-    )
-    duration_ms = int(time.monotonic() * 1000) - start_ms
-
-    # Post-execution broker pass: drain any remaining requests the script wrote
-    # before exit (handles the case where exec and poll are not concurrent).
-    _drain_pending_requests(session, session_id, run_id=run_id, broker=broker)
-
-    return CodeActResult(
-        successful=exec_result.exit_code == 0,
-        exit_code=exec_result.exit_code,
-        stdout=exec_result.stdout,
-        stderr=exec_result.stderr,
-        duration_ms=exec_result.duration_ms or duration_ms,
-        timed_out=exec_result.timed_out,
-        truncated=exec_result.truncated,
-        rpc_call_count=broker.rpc_call_count,
-        rpc_error_count=broker.rpc_error_count,
-    )
-
-
-def _drain_pending_requests(
-    session: SandboxSessionClient,
-    session_id: str,
-    *,
-    run_id: str,
-    broker: CodeActRpcBroker,
-) -> None:
-    """Read and handle any pending request files, writing response files back.
-
-    This is a best-effort drain — if a request file cannot be read or parsed,
-    we skip it.  Responses are written back via write_file.
-
-    Sequence numbers are discovered by listing files in the request directory;
-    we attempt seqs 0..N until a read fails (file not found / session error).
-    """
     seq = 0
-    while True:
+    partial_read_attempts: dict[int, int] = {}
+    deadline = time.monotonic() + settings.codeact_timeout_seconds
+
+    while time.monotonic() < deadline:
+        # Check caps.
+        if broker.rpc_call_count >= _MAX_DRAIN_REQUESTS:
+            break
+        if broker.rpc_error_count >= _MAX_DRAIN_ERRORS:
+            break
+
+        # Try to read the next request file.
         req_path = _rpc_request_path(run_id, seq)
         try:
             raw_bytes = session.read_file(session_id, req_path)
         except Exception:  # noqa: BLE001
-            break  # No more request files
+            # No request at this seq yet.
+            # Check if the script has finished (done marker) before sleeping —
+            # if so, break instead of polling further for a request that will
+            # never come. In production the script writes requests BEFORE
+            # writing exit_code, so we drain everything first.
+            if _check_done_marker(session, session_id, run_id):
+                break
+            time.sleep(_BROKER_POLL_INTERVAL)
+            continue
 
+        # Skip already-responded (idempotent).
         resp_path = _rpc_response_path(run_id, seq)
-        # Skip already-handled requests (idempotent across pre/post drain passes).
         try:
             session.read_file(session_id, resp_path)
             seq += 1
-            continue  # Response already written — skip re-dispatch
+            continue
         except Exception:  # noqa: BLE001
-            pass  # No response yet — proceed to dispatch
+            pass
 
+        # Parse — handle partial write with retry.
         try:
             raw = json.loads(raw_bytes.decode())
         except (json.JSONDecodeError, UnicodeDecodeError):
-            seq += 1
+            retries = partial_read_attempts.get(seq, 0) + 1
+            partial_read_attempts[seq] = retries
+            if retries >= _MAX_PARTIAL_RETRIES:
+                # Give up on this seq: write an error response and advance.
+                error_resp = {
+                    "seq": seq,
+                    "ok": False,
+                    "result": None,
+                    "error": "partial read after retries",
+                }
+                with contextlib.suppress(Exception):  # noqa: BLE001
+                    session.write_file(
+                        session_id, resp_path, json.dumps(error_resp).encode()
+                    )
+                broker.rpc_error_count += 1
+                seq += 1
+            else:
+                time.sleep(_BROKER_POLL_INTERVAL)
             continue
 
+        # Dispatch and write response.
         response = broker.handle_request(raw)
+        # F8: scrub the success result BEFORE writing it to the sandbox response file,
+        # so connected_account_id and other secrets never reach the script.
+        if response.get("ok") and response.get("result") is not None:
+            response = {**response, "result": _scrub_rpc_result(response["result"])}
+
         with contextlib.suppress(Exception):  # noqa: BLE001
             session.write_file(session_id, resp_path, json.dumps(response).encode())
         seq += 1
+
+    duration_ms = int(time.monotonic() * 1000) - start_ms
+
+    # Read results from the per-run output files.
+    stdout = _read_output_file(
+        session, session_id, f"{rpc_dir}/stdout.log", max_bytes=65536
+    )
+    stderr = _read_output_file(
+        session, session_id, f"{rpc_dir}/stderr.log", max_bytes=16384
+    )
+    exit_code_raw = _read_output_file(
+        session, session_id, f"{rpc_dir}/exit_code", max_bytes=16
+    ).strip()
+
+    # Determine exit code and timed_out.
+    timed_out = not _check_done_marker(session, session_id, run_id)
+    if exit_code_raw and exit_code_raw.isdigit():
+        exit_code = int(exit_code_raw)
+    elif timed_out:
+        exit_code = 124  # standard timeout exit code (same as `timeout` command)
+    else:
+        exit_code = 0  # done marker exists but exit_code unparseable; assume success
+
+    return CodeActResult(
+        successful=exit_code == 0 and not timed_out,
+        exit_code=exit_code,
+        stdout=stdout,
+        stderr=stderr,
+        duration_ms=duration_ms,
+        timed_out=timed_out,
+        truncated=False,
+        rpc_call_count=broker.rpc_call_count,
+        rpc_error_count=broker.rpc_error_count,
+    )

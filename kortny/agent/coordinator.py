@@ -6,6 +6,8 @@ OpenAI/OpenRouter chat completions so they can be adapted to ADK later.
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import json
 import logging
 import re
@@ -15,7 +17,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Protocol
+from typing import Any, Protocol
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -83,6 +85,7 @@ from kortny.approvals import (
 from kortny.autonomy import AutonomyLevel
 from kortny.autonomy_policy import AutonomyPolicyService
 from kortny.composio.connect import ComposioConnectionRequired
+from kortny.config import Settings
 from kortny.db.models import Task, TaskEvent, TaskEventType
 from kortny.embeddings import EmbeddingIndex
 from kortny.llm import ChatMessage, Completion, ToolCall
@@ -491,6 +494,7 @@ class AgentCoordinator:
         agent_display_name: str = "Kortny",
         image_resolver: ImageAttachmentResolver | None = None,
         connected_tool_loader: ConnectedToolLoader | None = None,
+        settings: Settings | None = None,
     ) -> None:
         if max_turns < 1:
             raise ValueError("max_turns must be at least 1")
@@ -510,6 +514,7 @@ class AgentCoordinator:
         self.session = session
         self.llm = llm
         self.registry = registry
+        self.settings = settings
         self.task_service = task_service or TaskService(session)
         self.guardrail_limits = guardrail_limits or ExecutionGuardrailLimits(
             max_turns=max_turns
@@ -1010,7 +1015,21 @@ class AgentCoordinator:
                         self._enforce_soft_tool_call_cap(
                             plan=plan, tool_call=tool_call, attempt=attempt
                         )
-                        result = self.registry.invoke(tool_call.name, arguments)
+                        # HIG-301: CodeAct dispatch is coordinator-owned because
+                        # it needs the approval policy, registry, and settings
+                        # that the tool's own invoke() cannot access.
+                        if tool_call.name == "codeact_exec" and (
+                            self.settings is not None and self.settings.codeact_enabled
+                        ):
+                            result = self._handle_codeact_exec(
+                                task_obj=task_obj,
+                                tool_call=tool_call,
+                                arguments=arguments,
+                                turn=turn,
+                                step_id=plan.current_step.step_id,
+                            )
+                        else:
+                            result = self.registry.invoke(tool_call.name, arguments)
                     except ToolNotFoundError as exc:
                         # Before surfacing a recoverable error, attempt to
                         # lazy-load the tool via the connected_tool_loader.
@@ -2273,6 +2292,514 @@ class AgentCoordinator:
             .limit(1)
         )
         return event is not None and event.payload.get("decision") == "approved"
+
+    # ------------------------------------------------------------------
+    # HIG-301: CodeAct coordinator-owned handler
+    # ------------------------------------------------------------------
+
+    def _handle_codeact_exec(
+        self,
+        *,
+        task_obj: Task,
+        tool_call: ToolCall,
+        arguments: JsonObject,
+        turn: int,
+        step_id: str,
+    ) -> ToolResult:
+        """Execute a codeact_exec tool call through the RPC bridge.
+
+        This method is the SECURITY CORE for CodeAct.  It:
+        1. Validates the allowlist (non-empty, within cap, all tools registered).
+        2. Runs an approve-once preflight: computes the worst-case approval
+           requirement across the allowlist using the same policy seam as regular
+           tools, PLUS the trifecta combo gate.
+        3. After approval (or none needed), calls run_codeact() with a dispatch
+           callback that invokes each tool SYNCHRONOUSLY on the main thread
+           (tool_obj.invoke — NOT registry.invoke, so no per-call timeout thread;
+           the whole codeact run is single-threaded), re-checks per-call approval
+           with the REAL args (fail-closed), and records an audit event per call.
+        4. Returns the script's stdout as the tool result.
+
+        Security invariants:
+        - codeact_exec is only reachable here when settings.codeact_enabled.
+        - The sandbox has no outbound network; the only side-effects are the
+          allowlisted tool calls dispatched host-side.
+        - Secrets never enter the sandbox; credentials stay host-side.
+        - Intermediate RPC results go to the script via response files only —
+          never into the LLM message context.
+        """
+        from kortny.agent.trifecta import (
+            is_outward_or_write_tool,
+            is_untrusted_origin_tool,
+        )
+        from kortny.execution.codeact_rpc import ToolStubSpec, run_codeact
+        from kortny.execution.sandbox_sessions import HttpSandboxSessionClient
+
+        settings = self.settings
+        if settings is None or not settings.codeact_enabled:
+            # Defense in depth: should never reach here with the flag off because
+            # codeact_exec is not registered, but guard explicitly.
+            return ToolResult(
+                output={
+                    "successful": False,
+                    "error": {
+                        "code": "codeact_disabled",
+                        "message": "codeact_exec is disabled (KORTNY_CODEACT_ENABLED=false).",
+                        "recoverable": False,
+                    },
+                }
+            )
+
+        # --- Step 1: parse + validate arguments ---
+        code = arguments.get("code")
+        if not isinstance(code, str) or not code.strip():
+            raise RecoverableToolError(
+                code="codeact_invalid_args",
+                message="codeact_exec requires a non-empty 'code' string.",
+                hint="Provide a Python script in the 'code' argument.",
+            )
+        code = code.strip()
+
+        raw_allowed = arguments.get("allowed_tools")
+        if not isinstance(raw_allowed, list) or not raw_allowed:
+            raise RecoverableToolError(
+                code="codeact_invalid_args",
+                message="codeact_exec requires a non-empty 'allowed_tools' list.",
+                hint="List every tool the script will call in 'allowed_tools'.",
+            )
+        allowed_tools: list[str] = []
+        for item in raw_allowed:
+            if not isinstance(item, str) or not item.strip():
+                raise RecoverableToolError(
+                    code="codeact_invalid_args",
+                    message="Every entry in 'allowed_tools' must be a non-empty string.",
+                    hint="Remove blank or non-string entries from 'allowed_tools'.",
+                )
+            allowed_tools.append(item.strip())
+
+        if len(allowed_tools) > settings.codeact_max_tools:
+            raise RecoverableToolError(
+                code="codeact_too_many_tools",
+                message=(
+                    f"'allowed_tools' lists {len(allowed_tools)} tools; "
+                    f"max is {settings.codeact_max_tools}."
+                ),
+                hint="Reduce the number of tools listed in 'allowed_tools'.",
+            )
+
+        # Verify every tool in the allowlist is actually registered for this task.
+        unregistered = [t for t in allowed_tools if not self.registry.has(t)]
+        if unregistered:
+            raise RecoverableToolError(
+                code="codeact_unregistered_tools",
+                message=(
+                    f"These tools are not registered for this task: "
+                    f"{', '.join(sorted(unregistered))}."
+                ),
+                hint=(
+                    "Only list tools currently in this task's registry. "
+                    "Call find_tools or describe_tools to discover available tools."
+                ),
+            )
+
+        timeout_seconds_raw = arguments.get(
+            "timeout_seconds", settings.codeact_timeout_seconds
+        )
+        timeout_seconds = (
+            int(timeout_seconds_raw)
+            if isinstance(timeout_seconds_raw, int)
+            else settings.codeact_timeout_seconds
+        )
+
+        # --- Step 2: allowlist preflight approval (the security core) ---
+        # Build the worst-case approval requirement across the allowlist.
+        autonomy_level = self._resolve_autonomy_level(task_obj)
+        worst_scope = ApprovalScope.none
+        worst_reason = ""
+        worst_risk = ""
+
+        for tool_name in allowed_tools:
+            if not self.registry.has(tool_name):
+                continue
+            tool = self.registry.get(tool_name)
+            risk = assess_tool_risk(tool, {})
+            req = self.approval_policy.requirement_for(
+                tool, {}, autonomy_level=autonomy_level, risk=risk
+            )
+            if req.scope is ApprovalScope.admin:
+                worst_scope = ApprovalScope.admin
+                worst_reason = req.reason
+                worst_risk = req.risk
+                break  # admin is the max
+            if req.scope is ApprovalScope.user and worst_scope is ApprovalScope.none:
+                worst_scope = ApprovalScope.user
+                worst_reason = req.reason
+                worst_risk = req.risk
+
+        # Trifecta combo gate: if any tool is untrusted-origin AND any other is
+        # outward/write, force user approval even if each alone wouldn't require it.
+        # (Mid-script, the per-call trifecta cannot fire, so gate the dangerous
+        # combo upfront.)
+        has_untrusted = any(is_untrusted_origin_tool(t) for t in allowed_tools)
+        has_outward = any(is_outward_or_write_tool(t) for t in allowed_tools)
+        if has_untrusted and has_outward and worst_scope is ApprovalScope.none:
+            worst_scope = ApprovalScope.user
+            worst_reason = (
+                "This script mixes tools that bring in untrusted content "
+                "(e.g. web results, Composio/MCP data) with tools that write "
+                "or communicate outward.  Approving upfront prevents "
+                "read-then-exfiltrate via injected instructions."
+            )
+            worst_risk = "trifecta_codeact_combo"
+
+        # F3: if the task is ALREADY trifecta-armed (prior untrusted content in
+        # THIS task's context) AND the allowlist contains any outward/write tool,
+        # force user approval — the per-call mid-script trifecta cannot fire.
+        # This check only applies when the combo gate above has NOT already fired
+        # (i.e. the script itself doesn't mix untrusted+outward tools, but the
+        # TASK context already has untrusted content from a prior turn).
+        if not (has_untrusted and has_outward):
+            live_state = self._trifecta_state(task_obj)
+            if live_state.armed and has_outward and worst_scope is ApprovalScope.none:
+                worst_scope = ApprovalScope.user
+                worst_reason = (
+                    "This task has already encountered untrusted content. Approving "
+                    "upfront prevents an injected instruction from abusing these "
+                    "outward/write tools mid-script."
+                )
+                worst_risk = "trifecta_armed_codeact_outward"
+
+        # F5: Build the approval key from tool name + sorted allowlist + FULL code SHA.
+        # Using the full 64-char sha256 hex (not truncated) prevents birthday-attack
+        # collisions that would let a different (code, allowlist) pair reuse a prior
+        # approval.
+        code_sha = hashlib.sha256(code.encode()).hexdigest()  # FULL sha256, not [:16]
+        sorted_tools_str = ",".join(sorted(allowed_tools))
+        allowlist_hash = hashlib.sha256(
+            f"{sorted_tools_str}:{code_sha}".encode()
+        ).hexdigest()  # FULL sha256, not [:24]
+        approval_key = approval_key_for("codeact_exec", allowlist_hash)
+
+        if worst_scope is not ApprovalScope.none:
+            if not self._approval_is_granted(task_obj, approval_key):
+                request = ToolApprovalRequest(
+                    approval_key=approval_key,
+                    tool_name="codeact_exec",
+                    tool_call_id=tool_call.id,
+                    normalized_args_hash=allowlist_hash,
+                    argument_keys=("code", "allowed_tools"),
+                    scope=worst_scope,
+                    reason=worst_reason,
+                    risk=worst_risk,
+                    arguments={
+                        "allowed_tools": allowed_tools,
+                        "code_sha256": code_sha,
+                    },
+                )
+                self.task_service.append_event(
+                    task_obj,
+                    TaskEventType.log,
+                    {
+                        "message": TOOL_APPROVAL_REQUIRED_MESSAGE,
+                        "turn": turn,
+                        "step_id": step_id,
+                        "request": request.to_payload(),
+                        "codeact_preflight": True,
+                    },
+                )
+                log_observation(
+                    logger,
+                    "tool_approval_required",
+                    task=task_obj,
+                    turn=turn,
+                    tool_call_id=tool_call.id,
+                    tool="codeact_exec",
+                    step_id=step_id,
+                    approval_key=approval_key,
+                    scope=worst_scope.value,
+                    risk=worst_risk,
+                    reason=worst_reason,
+                    codeact_preflight=True,
+                    allowed_tool_count=len(allowed_tools),
+                )
+                raise ToolApprovalRequired(request)
+            # Approval already granted — log the reuse.
+            self._append_log(
+                task_obj,
+                "tool_approval_previously_granted",
+                {
+                    "turn": turn,
+                    "tool_call_id": tool_call.id,
+                    "tool": "codeact_exec",
+                    "step_id": step_id,
+                    "approval_key": approval_key,
+                    "normalized_args_hash": allowlist_hash,
+                    "codeact_preflight": True,
+                },
+            )
+
+        # --- Step 3: build stubs, open session, run broker ---
+        # F2: capture the approval scope granted by the preflight so per-call
+        # re-checks can compare real-args scope against what was actually granted.
+        granted_scope = worst_scope
+
+        run_id = str(uuid.uuid4())
+        nonce = str(uuid.uuid4())
+        allowed_tools_frozen = frozenset(allowed_tools)
+
+        stubs: list[ToolStubSpec] = []
+        for tool_name in allowed_tools:
+            if self.registry.has(tool_name):
+                tool = self.registry.get(tool_name)
+                stubs.append(
+                    ToolStubSpec(
+                        name=tool_name,
+                        description=tool.description[:500],
+                    )
+                )
+
+        def _rpc_dispatch(tool_name: str, args: dict[str, Any]) -> object:
+            """Dispatch one RPC call host-side with per-call fail-closed re-check.
+
+            F2: The preflight approved the allowlist at empty args {}.  When the
+            script calls a tool with real args, the actual risk may be higher (e.g.
+            a delete tool with ids=[1,2,3] is more destructive than at empty args).
+            We re-assess with real args and block the call if it would require MORE
+            approval than was granted for this script.
+            """
+            if not self.registry.has(tool_name):
+                raise RecoverableToolError(
+                    code="codeact_rpc_tool_not_found",
+                    message=f"RPC tool '{tool_name}' not found in registry.",
+                    hint="This is a broker-level error; the allowlist check should have caught it.",
+                )
+            tool_obj = self.registry.get(tool_name)
+
+            # F2: Per-call fail-closed re-check with REAL args.
+            real_risk = assess_tool_risk(tool_obj, args)
+            real_req = self.approval_policy.requirement_for(
+                tool_obj, args, autonomy_level=autonomy_level, risk=real_risk
+            )
+
+            # F2: Also apply live trifecta state for real args.
+            live_state = self._trifecta_state(task_obj)
+            if (
+                live_state.armed
+                and is_outward_or_write_tool(tool_name)
+                and real_req.scope is ApprovalScope.none
+            ):
+                # Trifecta fires: escalate to user.
+                real_req = ToolApprovalRequirement(
+                    scope=ApprovalScope.user,
+                    risk="trifecta_outward_after_untrusted",
+                    reason=(
+                        f"{tool_name} acts outward while trifecta is armed; "
+                        "mid-script escalation blocked."
+                    ),
+                )
+
+            # Scope ordering for comparison: none < user < admin.
+            _scope_rank = {
+                ApprovalScope.none: 0,
+                ApprovalScope.user: 1,
+                ApprovalScope.admin: 2,
+            }
+            real_rank = _scope_rank[real_req.scope]
+            granted_rank = _scope_rank[granted_scope]
+
+            if real_req.required and real_rank > granted_rank:
+                # Real call requires MORE approval than user granted for this script.
+                # FAIL-CLOSED: do not invoke, record an audit event, raise.
+                self.task_service.append_event(
+                    task_obj,
+                    TaskEventType.log,
+                    {
+                        "message": "codeact_rpc_blocked",
+                        "run_id": run_id,
+                        "tool": tool_name,
+                        "real_scope": real_req.scope.value,
+                        "granted_scope": granted_scope.value,
+                        "risk": real_req.risk,
+                        "turn": turn,
+                        "step_id": step_id,
+                    },
+                )
+                raise RecoverableToolError(
+                    code="codeact_rpc_blocked",
+                    message=(
+                        f"RPC call blocked: '{tool_name}' with real args requires "
+                        f"'{real_req.scope.value}' approval but script was granted "
+                        f"'{granted_scope.value}'. Call cannot proceed."
+                    ),
+                    hint=(
+                        "The script attempted a more destructive action than approved. "
+                        "Request a new codeact_exec with explicit approval for this action."
+                    ),
+                )
+
+            # Invoke synchronously on the calling (main) thread.
+            # Per-tool catalog timeout is intentionally NOT enforced here —
+            # the overall codeact_timeout_seconds deadline in run_codeact's
+            # single-threaded poll loop is the control.
+            rpc_result = tool_obj.invoke(args)
+            arg_keys_hash = hashlib.sha256(
+                json.dumps(sorted(args.keys()), sort_keys=True).encode()
+            ).hexdigest()[:12]
+            self.task_service.append_event(
+                task_obj,
+                TaskEventType.log,
+                {
+                    "message": "codeact_rpc_call",
+                    "run_id": run_id,
+                    "tool": tool_name,
+                    "arg_keys_hash": arg_keys_hash,
+                    "output_type": type(rpc_result.output).__name__,
+                    "turn": turn,
+                    "step_id": step_id,
+                },
+            )
+            # F2 caveat: arm trifecta if this RPC call returned untrusted content,
+            # so a LATER write call in the same script is caught by the per-call
+            # re-check above.
+            live_state_for_arm = self._trifecta_state(task_obj)
+            if live_state_for_arm.note_tool_result(tool_name):
+                self.task_service.append_event(
+                    task_obj,
+                    TaskEventType.log,
+                    {
+                        "message": TRIFECTA_GATE_MESSAGE,
+                        "event": "armed",
+                        "armed_by": tool_name,
+                        "source": "codeact_rpc_mid_script",
+                        "run_id": run_id,
+                        "turn": turn,
+                        "step_id": step_id,
+                    },
+                )
+            return rpc_result.output
+
+        if settings.sandbox_runner_url is None:
+            return ToolResult(
+                output={
+                    "successful": False,
+                    "error": {
+                        "code": "sandbox_service_unavailable",
+                        "message": (
+                            "codeact_exec requires a sandbox runner "
+                            "(KORTNY_SANDBOX_RUNNER_URL is not configured)."
+                        ),
+                        "recoverable": False,
+                    },
+                }
+            )
+
+        session_client = HttpSandboxSessionClient(
+            base_url=settings.sandbox_runner_url,
+            timeout_seconds=settings.sandbox_runner_timeout_seconds,
+        )
+        # F5: unique session key per run — prevents SessionManager.create_or_get from
+        # reusing the task workbench container. The ephemeral session's "task_id" in the
+        # runner is keyed to this run only; it is NOT the real task's Postgres ID.
+        # Also use "code_exec" (ephemeral) not "workbench" (persistent) so prior runs
+        # cannot leak state or files into a subsequent run.
+        ephemeral_session_task_key = f"{task_obj.id}:codeact:{run_id}"
+        session_info = session_client.open_session(
+            ephemeral_session_task_key, profile="code_exec"
+        )
+        session_id = session_info.session_id
+
+        self._append_log(
+            task_obj,
+            "codeact_exec_started",
+            {
+                "turn": turn,
+                "step_id": step_id,
+                "run_id": run_id,
+                "allowed_tools": allowed_tools,
+                "timeout_seconds": timeout_seconds,
+                "code_sha256": code_sha,
+            },
+        )
+
+        try:
+            codeact_result = run_codeact(
+                session_client,
+                session_id=session_id,
+                code=code,
+                stubs=stubs,
+                allowed_tools=allowed_tools_frozen,
+                dispatch=_rpc_dispatch,
+                settings=settings,
+                nonce=nonce,
+                run_id=run_id,
+            )
+
+            self._append_log(
+                task_obj,
+                "codeact_exec_completed",
+                {
+                    "turn": turn,
+                    "step_id": step_id,
+                    "run_id": run_id,
+                    "successful": codeact_result.successful,
+                    "exit_code": codeact_result.exit_code,
+                    "rpc_call_count": codeact_result.rpc_call_count,
+                    "rpc_error_count": codeact_result.rpc_error_count,
+                    "duration_ms": codeact_result.duration_ms,
+                    "timed_out": codeact_result.timed_out,
+                },
+            )
+
+            # Arm the trifecta gate if any untrusted-origin tool was called via RPC.
+            if codeact_result.rpc_call_count > 0 and has_untrusted:
+                state = self._trifecta_state(task_obj)
+                if state.arm("codeact_exec_rpc_untrusted"):
+                    self._append_log(
+                        task_obj,
+                        TRIFECTA_GATE_MESSAGE,
+                        {
+                            "event": "armed",
+                            "armed_by": "codeact_exec_rpc_untrusted",
+                            "turn": turn,
+                        },
+                    )
+
+            stdout = codeact_result.stdout
+            # Truncate stdout if it exceeds the tool-result prompt budget.
+            max_chars = self.tool_result_prompt_max_chars
+            truncated_stdout = False
+            if len(stdout) > max_chars:
+                stdout = stdout[:max_chars]
+                truncated_stdout = True
+
+            output: JsonObject = {
+                "successful": codeact_result.successful,
+                "exit_code": codeact_result.exit_code,
+                "stdout": stdout,
+                "rpc_call_count": codeact_result.rpc_call_count,
+                "rpc_error_count": codeact_result.rpc_error_count,
+                "duration_ms": codeact_result.duration_ms,
+                "timed_out": codeact_result.timed_out,
+                "truncated": codeact_result.truncated or truncated_stdout,
+            }
+            if not codeact_result.successful:
+                output["error"] = {
+                    "code": "codeact_script_failed",
+                    "message": (
+                        f"CodeAct script exited with code {codeact_result.exit_code}."
+                    ),
+                    "recoverable": True,
+                    "details": {
+                        "stderr": codeact_result.stderr[:2000],
+                        "rpc_error_count": codeact_result.rpc_error_count,
+                    },
+                }
+            return ToolResult(output=output)
+        finally:
+            # F5: always close the ephemeral session, even if the script failed or
+            # an exception was raised, so the container is not left dangling.
+            with contextlib.suppress(Exception):
+                session_client.close_session(session_id)
 
     def _trifecta_state(self, task: Task) -> TrifectaGateState:
         """Return (creating once) the per-task trifecta gate state.

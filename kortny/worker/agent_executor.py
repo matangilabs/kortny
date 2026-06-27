@@ -1393,6 +1393,7 @@ class AgentTaskExecutor:
             agent_display_name=settings.agent_display_name,
             image_resolver=self._build_image_resolver(settings),
             connected_tool_loader=self._connected_tool_loader,
+            settings=settings,
         ).run(task)
 
     def _build_status_reporter(
@@ -1812,8 +1813,19 @@ class AgentTaskExecutor:
             task=task,
             external_cards=(),
         )
+        base_registry = ToolRegistry(native_tools)
+
+        # HIG-301: register codeact_exec ONLY when the feature flag is on.
+        # The tool's real dispatch is coordinator-owned (_handle_codeact_exec);
+        # registering it here exposes the schema to the LLM and makes
+        # registry.has("codeact_exec") true so the coordinator can reach it.
+        if settings.codeact_enabled:
+            from kortny.tools.code_exec import CodeActExecTool  # noqa: PLC0415
+
+            base_registry.register_if_absent(cast(Tool, CodeActExecTool()))
+
         return self._finalize_registry(
-            ToolRegistry(native_tools),
+            base_registry,
             settings=settings,
             session=session,
             task=task,

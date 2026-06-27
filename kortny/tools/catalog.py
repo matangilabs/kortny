@@ -948,6 +948,60 @@ NATIVE_TOOL_METADATA: dict[str, ToolMetadata] = {
         dashboard_exposed=False,
         notes=("Test-only registry probe.",),
     ),
+    # HIG-301: CodeAct RPC bridge — registered only when KORTNY_CODEACT_ENABLED.
+    # runtime_registered=False because the coordinator handles dispatch directly;
+    # the registry entry is used only for catalog metadata lookups (approval gate,
+    # timeout, dashboard display).
+    "codeact_exec": ToolMetadata(
+        name="codeact_exec",
+        namespace="native.execution",
+        category="Execution",
+        display_name="CodeAct executor",
+        capabilities=(
+            "sandboxed_code_execution",
+            "multi_tool_orchestration",
+            "codeact_rpc",
+        ),
+        side_effect="write",
+        # Approval is required: the coordinator enforces an allowlist preflight
+        # gate (approve-once for the whole script + allowlist) using the
+        # requirement_for() seam.  Marking user_approval here ensures the
+        # catalog-level approval queries surface it correctly; the actual gate
+        # is in _handle_codeact_exec, not the base approval policy.
+        approval="user_approval",
+        # Inner sandbox limit is codeact_timeout_seconds (default 60s); registry
+        # deadline sits above it (SANDBOX_TIMEOUT_MARGIN_SECONDS = 30s) so the
+        # sandbox limit fires first.
+        timeout_seconds=60 + SANDBOX_TIMEOUT_MARGIN_SECONDS,
+        # Flag-gated: only registered when settings.codeact_enabled is True.
+        runtime_registered=False,
+        required_env_vars=("KORTNY_SANDBOX_RUNNER_URL",),
+        plan_gates=(
+            "sandbox_required",
+            "network_disabled",
+            "codeact_enabled",
+        ),
+        result_budget="bounded_stdout",
+        notes=(
+            "Executes model-written Python that calls the task's tools via the "
+            "file-brokered RPC bridge.  Requires KORTNY_CODEACT_ENABLED=true.",
+            "Approval is collected once for the whole script + allowlist before "
+            "the sandbox starts.  No mid-script approval in v1.",
+            "Secrets never enter the sandbox; tool calls are dispatched host-side.",
+        ),
+        sandbox=ToolSandboxPolicy(
+            requires_sandbox=True,
+            profile="workbench",
+            network="none",
+            resource_limits=SandboxResourceLimits(
+                cpus=1.0,
+                memory_mb=512,
+                pids_limit=64,
+                timeout_seconds=60,
+            ),
+            reason="Model-written code must run in the isolated sandbox.",
+        ),
+    ),
 }
 
 
