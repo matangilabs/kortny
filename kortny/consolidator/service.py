@@ -32,6 +32,7 @@ from kortny.consolidator.passes import (
 )
 from kortny.consolidator.project_inference import ProjectInferencePass
 from kortny.consolidator.promotion import EpisodePromotionPass
+from kortny.consolidator.skill_induction import SkillInductionPass
 from kortny.consolidator.style_cards import (
     DEFAULT_STYLE_CARD_MIN_MESSAGES,
     StyleCardPass,
@@ -239,6 +240,39 @@ class ConsolidationService:
             return None
         return last_run.started_at
 
+    def skill_induction_since(self, installation_id: uuid.UUID) -> datetime | None:
+        """Window start for skill induction.
+
+        Mirrors ``promotion_since`` but reads the anchor from
+        ``counters_json["skill_induction"]["anchor"]`` so each pass drains its
+        own backlog independently.
+        """
+
+        last_run = self.session.scalar(
+            select(ConsolidationRun)
+            .where(
+                ConsolidationRun.installation_id == installation_id,
+                ConsolidationRun.status == "succeeded",
+            )
+            .order_by(ConsolidationRun.started_at.desc())
+            .limit(1)
+        )
+        if last_run is None:
+            return None
+        counters = (
+            last_run.counters_json if isinstance(last_run.counters_json, dict) else {}
+        )
+        induction = counters.get("skill_induction")
+        if isinstance(induction, dict) and "anchor" in induction:
+            anchor = induction.get("anchor")
+            if isinstance(anchor, str) and anchor:
+                try:
+                    return datetime.fromisoformat(anchor)
+                except ValueError:
+                    return last_run.started_at
+            return None
+        return last_run.started_at
+
     def last_activity_at(self, installation_id: uuid.UUID) -> datetime | None:
         latest_observation = self.session.scalar(
             select(func.max(ObservationEvent.observed_at)).where(
@@ -271,6 +305,7 @@ class ConsolidationService:
     ) -> ConsolidationOutcome:
         effective_now = now or datetime.now(UTC)
         since = self.promotion_since(installation_id)
+        si_since = self.skill_induction_since(installation_id)
         run = ConsolidationRun(
             installation_id=installation_id,
             started_at=effective_now,
@@ -424,6 +459,27 @@ class ConsolidationService:
                 ).to_payload(),
             ),
         ]
+        if self.settings is not None and self.settings.skill_induction_enabled:
+            passes.append(
+                (
+                    "skill_induction",
+                    lambda: (
+                        SkillInductionPass(
+                            self.session,
+                            llm=llm,
+                            embedding_index=self.embedding_index,
+                            min_tool_calls=self.settings.skill_induction_min_tool_calls,  # type: ignore[union-attr]
+                        )
+                        .run(
+                            installation_id=installation_id,
+                            task=task,
+                            since=si_since,
+                            now=effective_now,
+                        )
+                        .to_payload()
+                    ),
+                )
+            )
         for pass_name, pass_fn in passes:
             try:
                 counters[pass_name] = pass_fn()
@@ -471,6 +527,15 @@ class ConsolidationService:
             # Promotion blew up: keep the episode window open for retry.
             counters["promotion"] = {
                 "anchor": since.isoformat() if since is not None else None,
+            }
+        if (
+            self.settings is not None
+            and self.settings.skill_induction_enabled
+            and "skill_induction" not in counters
+        ):
+            # Skill induction blew up: keep the window open for retry.
+            counters["skill_induction"] = {
+                "anchor": si_since.isoformat() if si_since is not None else None,
             }
         if pass_errors:
             counters["pass_errors"] = dict(pass_errors)
