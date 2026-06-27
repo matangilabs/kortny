@@ -1311,6 +1311,31 @@ class SlackIngress:
         user_id = _required_str(event, "user")
         thread_ts = _context_thread_ts(event, source=source, channel_id=channel_id)
 
+        _base_identity = TaskIdentity.for_task_request(
+            slack_event_id=event_id,
+            slack_channel_id=channel_id,
+            slack_thread_ts=thread_ts,
+            slack_message_ts=message_ts,
+            slack_user_id=user_id,
+            input_text=input_text,
+            source_surface=source,
+        )
+        if self.settings is not None:
+            _payload_with_ceiling = {
+                **_base_identity.payload,
+                "runtime_cost_ceiling_usd": str(
+                    self.settings.interactive_task_cost_ceiling_usd
+                ),
+            }
+            _identity = TaskIdentity(
+                kind=_base_identity.kind,
+                key=_base_identity.key,
+                payload=_payload_with_ceiling,
+                fingerprint=_base_identity.fingerprint,
+            )
+        else:
+            _identity = _base_identity
+
         task = self.task_service.create_task(
             installation_id=installation.id,
             slack_event_id=event_id,
@@ -1320,6 +1345,7 @@ class SlackIngress:
             slack_user_id=user_id,
             input=input_text,
             source_surface=source,
+            identity=_identity,
         )
         self._maybe_intro_new_installation(
             installation=installation,

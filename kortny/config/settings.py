@@ -104,6 +104,9 @@ class Settings(BaseSettings):
     ambient_task_cost_ceiling_usd: float = Field(
         default=0.25, validation_alias="KORTNY_AMBIENT_TASK_COST_CEILING_USD"
     )
+    interactive_task_cost_ceiling_usd: float = Field(
+        default=1.00, validation_alias="KORTNY_INTERACTIVE_TASK_COST_CEILING_USD"
+    )
     consolidator_run_cost_ceiling_usd: float = Field(
         default=2.00, validation_alias="KORTNY_CONSOLIDATOR_RUN_COST_CEILING_USD"
     )

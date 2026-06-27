@@ -52,9 +52,29 @@ logger = logging.getLogger(__name__)
 # answer. Aggressive per-prompt tuning (and Anthropic thinking-effort config) is
 # a live-validated follow-up; this is the safe floor.
 UTILITY_PROMPT_OUTPUT_CLAMP: dict[str, int] = {
+    # Classifier / router (short structured output)
     "kortny.intent_classifier": 1024,
-    "kortny.project_inference_namer": 256,
+    "kortny.semantic_router.shadow": 1024,
+    # Planner / recovery (step lists, not free-form answers)
+    "kortny.execution_planner": 2048,
+    "kortny.execution_recovery_planner": 2048,
+    # Slack presentation layer
     "kortny.ack_generator": 256,
+    "kortny.response_humanizer": 4096,
+    "kortny.artifact_comment": 1024,
+    "kortny.honest_failure_synthesis": 1024,
+    # Scheduler
+    "kortny.schedule_parser": 1024,
+    # Tool-approval synthesis
+    "kortny.tool_approval_prompt": 1024,
+    # MCP / integration
+    "kortny.mcp_description_enricher": 512,
+    # Consolidator / knowledge graph utility prompts (short outputs)
+    "kortny.project_inference_namer": 256,
+    "kortny.consolidator_merge": 1024,
+    "kortny.consolidator_promotion": 1024,
+    # Tool selector
+    "kortny.integration_learning.capability_profiler": 1024,
 }
 
 
@@ -330,6 +350,7 @@ class LLMService:
                 "tool_call_names": [
                     tool_call.name for tool_call in completion.tool_calls
                 ],
+                "max_output_tokens": max_output_tokens,
             }
             if pricing_missing:
                 metadata["pricing_missing"] = True

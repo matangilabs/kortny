@@ -767,3 +767,139 @@ def test_llm_service_provider_kind_persisted_in_usage(db_session: Session) -> No
     usage = db_session.scalar(select(LLMUsage).where(LLMUsage.task_id == task.id))
     assert usage is not None
     assert usage.provider_kind == "gemini"
+
+
+# ---------------------------------------------------------------------------
+# COST-RELIABILITY Slice 1 tests
+# ---------------------------------------------------------------------------
+
+
+def test_utility_prompt_output_clamp_entries() -> None:
+    """Every new clamp entry exists with the expected cap value."""
+    from kortny.llm.service import UTILITY_PROMPT_OUTPUT_CLAMP
+
+    expected: dict[str, int] = {
+        "kortny.intent_classifier": 1024,
+        "kortny.semantic_router.shadow": 1024,
+        "kortny.execution_planner": 2048,
+        "kortny.execution_recovery_planner": 2048,
+        "kortny.ack_generator": 256,
+        "kortny.response_humanizer": 4096,
+        "kortny.artifact_comment": 1024,
+        "kortny.honest_failure_synthesis": 1024,
+        "kortny.schedule_parser": 1024,
+        "kortny.tool_approval_prompt": 1024,
+        "kortny.mcp_description_enricher": 512,
+        "kortny.project_inference_namer": 256,
+        "kortny.consolidator_merge": 1024,
+        "kortny.consolidator_promotion": 1024,
+        "kortny.integration_learning.capability_profiler": 1024,
+    }
+    for name, cap in expected.items():
+        assert UTILITY_PROMPT_OUTPUT_CLAMP.get(name) == cap, (
+            f"Expected {name!r} → {cap} in UTILITY_PROMPT_OUTPUT_CLAMP"
+        )
+
+
+def test_main_coordinator_call_is_unclamped() -> None:
+    """kortny.agent_coordinator.system must NOT appear in the clamp map."""
+    from kortny.llm.service import UTILITY_PROMPT_OUTPUT_CLAMP
+
+    assert "kortny.agent_coordinator.system" not in UTILITY_PROMPT_OUTPUT_CLAMP, (
+        "The main coordinator answer call must remain unclamped"
+    )
+
+
+def test_clamped_prompt_forwards_cap_to_provider(db_session: Session) -> None:
+    """A clamped support prompt passes the cap as max_output_tokens to the provider."""
+    task = create_task(db_session)
+    db_session.add(_usage_pricing())
+    db_session.flush()
+
+    provider = FakeProvider(
+        Completion(
+            content="done",
+            tool_calls=(),
+            usage=TokenUsage(input_tokens=10, output_tokens=10),
+            model="openai/gpt-4o-mini",
+        )
+    )
+    LLMService(
+        session=db_session,
+        provider=provider,
+        provider_name=LLMProvider.openrouter,
+    ).complete(
+        task_id=task.id,
+        messages=[ChatMessage(role="user", content="plan it")],
+        prompt_name="kortny.execution_planner",
+    )
+    assert provider.max_output_tokens == [2048]
+
+
+def test_llm_usage_event_records_max_output_tokens(db_session: Session) -> None:
+    """The llm_call event payload carries max_output_tokens for every LLM call."""
+    task = create_task(db_session)
+    db_session.add(_usage_pricing())
+    db_session.flush()
+
+    provider = FakeProvider(
+        Completion(
+            content="{}",
+            tool_calls=(),
+            usage=TokenUsage(input_tokens=5, output_tokens=5),
+            model="openai/gpt-4o-mini",
+        )
+    )
+    # Clamped call: expect the cap in the event.
+    LLMService(
+        session=db_session,
+        provider=provider,
+        provider_name=LLMProvider.openrouter,
+    ).complete(
+        task_id=task.id,
+        messages=[ChatMessage(role="user", content="hi")],
+        prompt_name="kortny.response_humanizer",
+    )
+    events = list(
+        db_session.scalars(
+            select(TaskEvent)
+            .where(
+                TaskEvent.task_id == task.id, TaskEvent.type == TaskEventType.llm_call
+            )
+            .order_by(TaskEvent.seq)
+        )
+    )
+    assert events
+    assert events[-1].payload["max_output_tokens"] == 4096
+
+    # Unclamped call (no prompt_name, tools path → agent_coordinator): max_output_tokens
+    # in the event should be None (no cap was applied).
+    provider2 = FakeProvider(
+        Completion(
+            content="answer",
+            tool_calls=(),
+            usage=TokenUsage(input_tokens=5, output_tokens=5),
+            model="openai/gpt-4o-mini",
+        )
+    )
+    LLMService(
+        session=db_session,
+        provider=provider2,
+        provider_name=LLMProvider.openrouter,
+    ).complete(
+        task_id=task.id,
+        messages=[ChatMessage(role="user", content="hi")],
+        tools=[{"name": "web_search", "description": "Search.", "parameters": {}}],
+    )
+    events2 = list(
+        db_session.scalars(
+            select(TaskEvent)
+            .where(
+                TaskEvent.task_id == task.id, TaskEvent.type == TaskEventType.llm_call
+            )
+            .order_by(TaskEvent.seq)
+        )
+    )
+    assert len(events2) == 2
+    # None is stripped by sanitize_payload, so the key is absent for unclamped calls.
+    assert "max_output_tokens" not in events2[-1].payload
