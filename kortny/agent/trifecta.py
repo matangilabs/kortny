@@ -43,8 +43,11 @@ _UNTRUSTED_NATIVE_TOOLS = frozenset(
 )
 
 # Runtime-name prefixes for external providers. Every Composio/MCP tool result
-# is third-party content by construction.
-_EXTERNAL_TOOL_PREFIXES = ("mcp__", "composio__")
+# is third-party content by construction. NOTE: Composio runtime tool names are
+# ``composio_<toolkit>_<tool>`` (SINGLE underscore — see
+# composio_execute.composio_runtime_tool_name), so the prefix is ``composio_``;
+# a double underscore here silently let every Composio result bypass the gate.
+_EXTERNAL_TOOL_PREFIXES = ("mcp__", "composio_")
 
 # Native tool namespaces that constitute an egress / outward / persistence
 # action — the dangerous leg of the lethal trifecta. A native "write" tool is

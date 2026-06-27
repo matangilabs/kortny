@@ -83,7 +83,7 @@ def test_untrusted_origin_classification() -> None:
     assert is_untrusted_origin_tool("web_search")
     assert is_untrusted_origin_tool("slack_file_read")
     assert is_untrusted_origin_tool("mcp__server__fetch")
-    assert is_untrusted_origin_tool("composio__github__get")
+    assert is_untrusted_origin_tool("composio_github_get")
     # First-party native state tools are trusted-origin.
     assert not is_untrusted_origin_tool("list_schedules")
     assert not is_untrusted_origin_tool("inspect_memory")
@@ -92,7 +92,7 @@ def test_untrusted_origin_classification() -> None:
 def test_outward_or_write_classification() -> None:
     assert is_outward_or_write_tool("deploy_site")
     assert is_outward_or_write_tool("mcp__server__create_issue")
-    assert is_outward_or_write_tool("composio__slack__send")
+    assert is_outward_or_write_tool("composio_slack_send")
     # Native outward / persistence writes escalate.
     assert is_outward_or_write_tool("slack_reply_thread")
     assert is_outward_or_write_tool("remember_fact")

@@ -62,7 +62,7 @@ def test_run_skill_script_is_not_outward() -> None:
     assert is_outward_or_write_tool("deploy_site") is True
     assert is_outward_or_write_tool("sandbox_publish_preview") is True
     assert is_outward_or_write_tool("slack_reply_thread") is True
-    assert is_outward_or_write_tool("composio__notion__create_page") is True
+    assert is_outward_or_write_tool("composio_notion_create_page") is True
 
 
 class FakeLLM:
@@ -114,7 +114,7 @@ class WebSearchTool:
 class OutwardWriteTool:
     """Outward write tool the gate escalates once the task is armed."""
 
-    name = "composio__notion__create_page"
+    name = "composio_notion_create_page"
     description = "Create a page in an external Notion workspace."
     parameters: JsonSchema = {
         "type": "object",
@@ -208,7 +208,7 @@ def test_gate_escalates_outward_after_untrusted_result(db_session: Session) -> N
                 tool_calls=(
                     ToolCall(
                         id="c2",
-                        name="composio__notion__create_page",
+                        name="composio_notion_create_page",
                         arguments={"text": "leak"},
                     ),
                 ),
@@ -225,7 +225,7 @@ def test_gate_escalates_outward_after_untrusted_result(db_session: Session) -> N
             execution_planner=NoopExecutionPlanner(),
         ).run(task)
 
-    assert exc_info.value.request.tool_name == "composio__notion__create_page"
+    assert exc_info.value.request.tool_name == "composio_notion_create_page"
     assert exc_info.value.request.risk == "trifecta_outward_after_untrusted"
     assert outward.calls == []
     trifecta = _trifecta_events(db_session, task)
@@ -248,7 +248,7 @@ def test_gate_does_not_fire_before_untrusted_content(db_session: Session) -> Non
                 tool_calls=(
                     ToolCall(
                         id="c1",
-                        name="composio__notion__create_page",
+                        name="composio_notion_create_page",
                         arguments={"text": "ok"},
                     ),
                 ),
@@ -298,7 +298,7 @@ def test_gate_disabled_does_not_escalate(db_session: Session) -> None:
                 tool_calls=(
                     ToolCall(
                         id="c2",
-                        name="composio__notion__create_page",
+                        name="composio_notion_create_page",
                         arguments={"text": "ok"},
                     ),
                 ),
