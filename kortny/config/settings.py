@@ -404,6 +404,14 @@ class Settings(BaseSettings):
         default=24.0,
         validation_alias="KORTNY_CONSOLIDATOR_NIGHTLY_FLOOR_HOURS",
     )
+    skill_induction_enabled: bool = Field(
+        default=False,
+        validation_alias="KORTNY_SKILL_INDUCTION_ENABLED",
+    )
+    skill_induction_min_tool_calls: int = Field(
+        default=3,
+        validation_alias="KORTNY_SKILL_INDUCTION_MIN_TOOL_CALLS",
+    )
     consolidator_advisory_lock_key: int = Field(
         default=759340187,
         validation_alias="KORTNY_CONSOLIDATOR_ADVISORY_LOCK_KEY",
@@ -667,6 +675,13 @@ class Settings(BaseSettings):
         if not stripped:
             raise ValueError("COMPOSIO_API_KEY cannot be blank")
         return stripped
+
+    @field_validator("skill_induction_min_tool_calls")
+    @classmethod
+    def _validate_skill_induction_min_tool_calls(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("KORTNY_SKILL_INDUCTION_MIN_TOOL_CALLS must be >= 1")
+        return value
 
     @field_validator("agent_runtime", mode="before")
     @classmethod
