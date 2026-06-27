@@ -139,6 +139,7 @@ def test_native_tool_surfaces_are_derived_from_metadata() -> None:
         {
             "forget_fact",
             "deploy_site",
+            "codeact_exec",
         }
     )
     assert native_tool_names_by_approval("admin_approval") == frozenset()
