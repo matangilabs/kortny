@@ -1,18 +1,41 @@
 """Cross-app tool-orchestration eval cases.
 
 Each case captures a realistic user request together with the set of toolkits
-that are connected for this task. The assertions cover three independent
-orchestration behaviors:
+that are connected for this task. The assertions cover orchestration behaviors:
+
+Core assertions (always evaluated):
 
 - ``expected_apps``: Composio toolkit slugs whose tools MUST be called to
   answer correctly. The agent must actually invoke at least one tool from each
   of these toolkits, not answer from cached/injected context.
 - ``must_use_tools``: when True, the answer MUST come from a live tool call,
   not from episodic/observe/KG context that happens to mention the same
-  information. This is the context-leak guard — the key regression for cases
-  where the agent answered from stale channel context instead of calling the API.
+  information. This is the context-leak guard.
 - ``forbidden_apps``: toolkits that must NOT be called. Used for scope/noise
   isolation (e.g. a finance query must not trigger GitHub/Linear calls).
+
+Granularity assertions (only evaluated when declared; default to no assertion):
+
+- ``expected_tool_slugs``: individual tool-level slugs (e.g.
+  ``"GITHUB_LIST_PULL_REQUESTS"``) that must appear in the executed tool calls.
+  Checked against ``RunResult.called_tool_slugs``.
+- ``required_arg_keys``: argument key names (e.g. ``"owner"``, ``"repo"``)
+  that must appear in the union of all tool call argument dictionaries.
+  Checked against ``RunResult.called_arg_keys``.
+- ``approval_expected``: when set (True/False), the task's approval-pause
+  behavior must match exactly. Checked against ``RunResult.approval_paused``.
+- ``max_turns``: upper bound on the number of LLM turns (``RunResult.turn_count``).
+- ``max_cost_usd``: upper bound on total task cost in USD (``RunResult.cost_usd``).
+
+Tuning split axis (ORTHOGONAL to ``Top25App.tier``):
+
+- ``tuning_split``: ``"train"`` (default) or ``"holdout"``. Train cases may be
+  tuned against; holdout cases use apps NOT in the curated Top-25 and are NEVER
+  tuned against — they measure generalization. The scorer computes
+  ``generalization_delta = train_score - holdout_score``; a delta > 0.12 flags
+  potential overfitting.
+  HARD RULE: the runner's ``split`` filter prevents holdout cases from being
+  included in a train-only run and vice versa.
 
 ``CONNECTED_LIVE`` is the realistic connected set for a typical Kortny install;
 reuse it as the ``connected_toolkits`` default wherever the specific toolkit
@@ -29,6 +52,7 @@ cross-app orchestration path is held to.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Literal
 
 from kortny.intent.models import IntentSurface
 
@@ -69,6 +93,37 @@ class OrchestrationCase:
     Smoke cases must have a committed fixture in ``fixtures/smoke_goldens.json``
     so ``make eval-smoke`` can score them without a live agent or API keys.
     """
+
+    # --- S2 tuning-split axis ------------------------------------------------
+    tuning_split: Literal["train", "holdout"] = "train"
+    """Whether this case is tuned against (``"train"``) or held out for
+    generalization measurement (``"holdout"``).
+
+    Train cases may be improved by prompt tuning. Holdout cases MUST NOT be
+    tuned against — they use apps outside the curated Top-25 so the
+    generalization delta measures how well orchestration transfers to new apps.
+    """
+
+    # --- S2 granularity assertions (all default to no assertion) -------------
+    expected_tool_slugs: tuple[str, ...] = ()
+    """Individual tool-level slugs that must appear in called_tool_slugs.
+
+    Empty (default) means no tool-slug assertion is made for this case.
+    """
+    required_arg_keys: tuple[str, ...] = ()
+    """Argument key names that must appear in the union of all tool call args.
+
+    Empty (default) means no argument-key assertion is made for this case.
+    """
+    approval_expected: bool | None = None
+    """When set, the task's approval-pause behavior must match this value.
+
+    None (default) means no approval assertion is made for this case.
+    """
+    max_turns: int | None = None
+    """Upper bound on coordinator LLM turns. None means no turn-budget check."""
+    max_cost_usd: float | None = None
+    """Upper bound on total task cost in USD. None means no cost-budget check."""
 
 
 _DM = IntentSurface.dm
@@ -273,5 +328,112 @@ SEED_ORCHESTRATION_CASES: tuple[OrchestrationCase, ...] = (
         requires_toolkits=("zoom",),
         tags=("single_app", "calendar", "top25", "unconnected"),
         note="tier-1 top-25; skip until zoom connected in eval workspace",
+    ),
+    # --- Train cases upgraded with S2 granularity assertions -----------------
+    # 20 — train, slug-level: GitHub list-issues; must call the right tool slug
+    # and pass the expected argument key names.
+    OrchestrationCase(
+        request="list my open GitHub issues assigned to me",
+        connected_toolkits=CONNECTED_LIVE,
+        surface=_DM,
+        expected_apps=("github",),
+        must_use_tools=True,
+        expected_tool_slugs=("GITHUB_ISSUES_LIST",),
+        required_arg_keys=("assignee",),
+        tags=("single_app", "dev", "slug_assertion", "arg_assertion"),
+        note="train slug+arg assertion: must call GITHUB_ISSUES_LIST with assignee key",
+        smoke=True,
+    ),
+    # 21 — train, slug-level + approval: Linear create issue requires approval
+    OrchestrationCase(
+        request="create a Linear issue titled 'Fix login timeout bug' in the Backend project",
+        connected_toolkits=CONNECTED_LIVE,
+        surface=_DM,
+        expected_apps=("linear",),
+        must_use_tools=True,
+        expected_tool_slugs=("LINEAR_CREATE_LINEAR_ISSUE",),
+        required_arg_keys=("title",),
+        approval_expected=True,
+        tags=("single_app", "pm", "slug_assertion", "arg_assertion", "approval"),
+        note="train slug+arg+approval assertion: create Linear issue must pause for approval",
+        smoke=True,
+    ),
+    # 22 — train, budget assertion: single-app read should be cheap and fast
+    OrchestrationCase(
+        request="show me the last 5 commits on the main branch of my primary repo",
+        connected_toolkits=CONNECTED_LIVE,
+        surface=_DM,
+        expected_apps=("github",),
+        must_use_tools=True,
+        expected_tool_slugs=("GITHUB_LIST_COMMITS",),
+        max_turns=4,
+        max_cost_usd=0.05,
+        tags=("single_app", "dev", "slug_assertion", "budget"),
+        note="train budget assertion: simple GitHub read should not exceed 4 turns or $0.05",
+        smoke=True,
+    ),
+    # 23 — train, slug+arg: Gmail search with subject filter
+    OrchestrationCase(
+        request="find emails from the finance team with 'invoice' in the subject",
+        connected_toolkits=CONNECTED_LIVE,
+        surface=_DM,
+        expected_apps=("gmail",),
+        must_use_tools=True,
+        required_arg_keys=("query",),
+        tags=("single_app", "comms", "arg_assertion"),
+        note="train arg assertion: Gmail search must pass a query key with filter params",
+        smoke=True,
+    ),
+    # --- Holdout cases (generalization tier) ---------------------------------
+    # These use apps from HOLDOUT_APPS (NOT in the curated Top-25).
+    # tuning_split="holdout" — NEVER tune prompts against these cases.
+    # 24 — holdout: Dropbox shared link creation
+    OrchestrationCase(
+        request="create a shared link for the Q3 report in Dropbox so anyone with the link can view it",
+        connected_toolkits=("dropbox",),
+        surface=_DM,
+        expected_apps=("dropbox",),
+        must_use_tools=True,
+        tuning_split="holdout",
+        tags=("single_app", "docs", "holdout"),
+        note="holdout: Dropbox shared-link creation — generalization to storage apps not in Top-25",
+        smoke=True,
+    ),
+    # 25 — holdout: PagerDuty on-call alert
+    OrchestrationCase(
+        request="page the on-call engineer — there's a critical outage in the payments service",
+        connected_toolkits=("pagerduty",),
+        surface=_DM,
+        expected_apps=("pagerduty",),
+        must_use_tools=True,
+        tuning_split="holdout",
+        tags=("single_app", "support", "holdout"),
+        note="holdout: PagerDuty incident trigger — generalization to ops tooling",
+        smoke=True,
+    ),
+    # 26 — holdout: Airtable record lookup
+    OrchestrationCase(
+        request="look up the campaign records in Airtable where status is 'active'",
+        connected_toolkits=("airtable",),
+        surface=_DM,
+        expected_apps=("airtable",),
+        must_use_tools=True,
+        tuning_split="holdout",
+        tags=("single_app", "pm", "holdout"),
+        note="holdout: Airtable record filter — generalization to low-code DB apps",
+        smoke=True,
+    ),
+    # 27 — holdout: Twilio SMS notification (write; expects approval gate)
+    OrchestrationCase(
+        request="send an SMS to the on-call number saying the deploy completed successfully",
+        connected_toolkits=("twilio",),
+        surface=_DM,
+        expected_apps=("twilio",),
+        must_use_tools=True,
+        approval_expected=True,
+        tuning_split="holdout",
+        tags=("single_app", "comms", "holdout", "approval"),
+        note="holdout: Twilio SMS send — generalization to messaging APIs; write should gate",
+        smoke=True,
     ),
 )
