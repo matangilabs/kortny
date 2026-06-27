@@ -2498,57 +2498,72 @@ p {
   margin-top: 20px;
 }
 
-.task-detail-hero {
-  display: grid;
-  gap: 16px;
-  grid-template-columns: minmax(0, 1fr) minmax(320px, 0.48fr);
-  margin-bottom: 20px;
-  padding: 16px;
-}
-
-.task-detail-request {
-  color: var(--foreground);
-  font-size: 18px;
-  font-weight: 700;
-  line-height: 1.35;
-  margin-top: 0;
-  overflow-wrap: anywhere;
-}
-
-.task-detail-facts {
-  background: var(--muted);
+/* Slim sticky run-summary strip — replaces the old hero + 4 metric cards. */
+.run-summary {
+  background: color-mix(in srgb, var(--muted) 50%, var(--card));
   border: 1px solid var(--border);
   border-radius: var(--radius);
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px 16px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  margin-bottom: 16px;
+  padding: 10px 14px;
+  position: sticky;
+  top: 0;
+  z-index: 5;
+}
+
+.run-summary-request {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* The generic .detail-label is block + bottom-margin (built for stacked
+   sections); inline it so the request reads as one clean baseline-aligned line. */
+.run-summary-request .detail-label {
+  flex: none;
   margin: 0;
 }
 
-.task-detail-facts div {
-  border-right: 1px solid var(--border);
-  display: grid;
-  gap: 3px;
-  min-width: 0;
-  padding: 10px 12px;
+.run-summary-request p {
+  color: var(--foreground);
+  font-size: 14px;
+  font-weight: 600;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.task-detail-facts div:last-child {
-  border-right: 0;
+.run-summary-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 18px;
+  margin: 0;
+  justify-content: flex-end;
 }
 
-.task-detail-facts dt {
+.run-summary-stats div {
+  align-items: baseline;
+  display: flex;
+  gap: 6px;
+}
+
+.run-summary-stats dt {
   color: var(--muted-foreground);
   font-size: 11px;
-  font-weight: 800;
+  font-weight: 700;
   text-transform: uppercase;
 }
 
-.task-detail-facts dd {
+.run-summary-stats dd {
   color: var(--foreground);
   font-size: 13px;
   font-variant-numeric: tabular-nums;
   margin: 0;
-  overflow-wrap: anywhere;
 }
 
 .task-error-summary {
@@ -5843,161 +5858,303 @@ pre {
   align-content: start;
 }
 
-.timeline {
-  display: grid;
-  gap: 0;
-  list-style: none;
+/* Tiered span/log timeline. Kortny's timeline is a ~100-row append-only log,
+   so we tier it: a handful of prominent model/tool *spans* (real durations +
+   one-click I/O) stand out, while the bulk of internal *dim* log lines recede
+   into thin muted text you skim past. No waterfall — the data isn't a clean
+   span tree, so a per-row latency NUMBER (only when present) is the anchor. */
+.span-timeline {
+  display: flex;
+  flex-direction: column;
   margin: 16px 0 0;
-  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--card);
 }
 
-.timeline-item {
+.span-row {
+  border-bottom: 1px solid var(--border);
+}
+
+.span-row:last-child {
+  border-bottom: 0;
+}
+
+.span-summary {
+  align-items: center;
   display: grid;
-  gap: 12px;
-  grid-template-columns: 34px minmax(0, 1fr);
-  padding-bottom: 14px;
-  position: relative;
+  gap: 10px;
+  grid-template-columns: 16px 34px minmax(0, 1fr) auto auto auto;
+  list-style: none;
+  padding: 5px 12px;
 }
 
-.timeline-item::before {
-  background: var(--border);
-  bottom: 0;
-  content: "";
-  left: 16px;
-  position: absolute;
-  top: 34px;
-  width: 2px;
-}
-
-.timeline-item:last-child {
-  padding-bottom: 0;
-}
-
-.timeline-item:last-child::before {
+.span-summary::-webkit-details-marker {
   display: none;
 }
 
-.timeline-marker {
-  align-items: center;
-  background: var(--muted);
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  color: var(--muted-foreground);
-  display: inline-flex;
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-  font-weight: 800;
-  height: 34px;
-  justify-content: center;
-  position: relative;
-  width: 34px;
-  z-index: 1;
+/* Suppress the global details>summary caret for span rows; we draw our own
+   caret to the left of the type dot (see .span-icon::after below). */
+.span-row > .span-summary::after {
+  content: none;
 }
 
-.timeline-accent .timeline-marker {
+/* Colour-coded type dot. */
+.span-icon {
+  width: 8px;
+  height: 8px;
+  border-radius: 99px;
+  background: var(--muted-foreground);
+  justify-self: center;
+}
+
+.span-seq {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+}
+
+.span-title {
+  color: var(--foreground);
+  display: flex;
+  flex-direction: column;
+  font-size: 13px;
+  line-height: 1.3;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.span-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.span-sub {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 400;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Inline preview chips on the collapsed row — compact, single line, clipped. */
+.span-tags {
+  display: flex;
+  gap: 4px;
+}
+
+.span-tag {
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 99px;
+  color: var(--muted-foreground);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.4;
+  padding: 1px 7px;
+  white-space: nowrap;
+}
+
+.span-tag-accent {
   background: var(--accent-bg);
   border-color: var(--accent-border);
   color: var(--accent-strong);
 }
 
-.timeline-success .timeline-marker {
-  background: var(--success-bg);
-  border-color: color-mix(in srgb, var(--success) 28%, transparent);
-  color: var(--success);
-}
-
-.timeline-warning .timeline-marker {
+.span-tag-warning {
   background: var(--warning-bg);
   border-color: color-mix(in srgb, var(--warning) 28%, transparent);
   color: var(--warning);
 }
 
-.timeline-danger .timeline-marker {
+.span-tag-danger {
   background: var(--destructive-bg);
   border-color: color-mix(in srgb, var(--destructive) 28%, transparent);
   color: var(--destructive);
 }
 
-.timeline-card {
-  overflow: hidden;
+.span-tag-success {
+  background: var(--success-bg);
+  border-color: color-mix(in srgb, var(--success) 28%, transparent);
+  color: var(--success);
 }
 
-.timeline-card-header {
-  align-items: start;
-  background: var(--card);
+.span-stats {
   display: flex;
-  gap: 14px;
-  justify-content: space-between;
-  padding: 14px 16px;
+  gap: 10px;
+  justify-content: flex-end;
 }
 
-.timeline-title-stack {
-  min-width: 0;
-}
-
-.timeline-title-row {
-  align-items: center;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.timeline-title-row h3 {
-  color: var(--foreground);
-  font-size: 15px;
-  line-height: 1.3;
-  margin: 0;
-}
-
-.timeline-badges {
-  display: inline-flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.timeline-card time {
+.span-stat {
   color: var(--muted-foreground);
-  flex: 0 0 auto;
-  font-size: 12px;
+  font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
   font-variant-numeric: tabular-nums;
-  line-height: 1.6;
-  text-align: right;
+  white-space: nowrap;
 }
 
-.event-metrics {
-  border-top: 1px solid var(--border);
-  display: grid;
-  gap: 0;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  margin: 0;
-}
-
-.event-metrics div {
-  border-bottom: 1px solid var(--border);
-  border-right: 1px solid var(--border);
-  display: grid;
-  gap: 2px;
-  min-width: 0;
-  padding: 10px 12px;
-}
-
-.event-metrics div:nth-child(4n) {
-  border-right: 0;
-}
-
-.event-metrics dt {
+.span-time {
   color: var(--muted-foreground);
   font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+
+/* --- PROMINENT span rows (llm_call / tool / error) --- */
+.span-tier-span > .span-summary {
+  cursor: pointer;
+}
+
+.span-tier-span .span-name {
+  font-weight: 600;
+}
+
+.span-tier-span .span-dur {
+  color: var(--foreground);
+}
+
+.span-tier-span .span-tok,
+.span-tier-span .span-cost {
+  color: var(--muted-foreground);
+}
+
+/* Disclosure caret to the left of the type dot, expandable rows only. */
+details.span-row > .span-summary .span-icon {
+  position: relative;
+}
+
+details.span-row > .span-summary .span-icon::after {
+  content: "";
+  position: absolute;
+  left: -11px;
+  top: 50%;
+  width: 0;
+  height: 0;
+  border-left: 4px solid var(--muted-foreground);
+  border-top: 3px solid transparent;
+  border-bottom: 3px solid transparent;
+  transform: translateY(-50%);
+  transition: transform 0.12s ease;
+}
+
+details.span-row[open] > .span-summary .span-icon::after {
+  transform: translateY(-50%) rotate(90deg);
+}
+
+.span-tier-span > .span-summary:hover {
+  background: var(--table-row-hover);
+}
+
+.span-tier-span.span-accent .span-icon {
+  background: var(--accent);
+}
+
+.span-tier-span.span-success .span-icon {
+  background: var(--success);
+}
+
+.span-tier-span.span-warning .span-icon {
+  background: var(--warning);
+}
+
+.span-tier-span.span-danger .span-icon {
+  background: var(--destructive);
+}
+
+.span-row[open] > .span-summary {
+  background: color-mix(in srgb, var(--muted) 45%, var(--card));
+  border-bottom: 1px solid var(--border);
+}
+
+/* Light nesting: tool_result reads as a child of its tool_call. */
+.span-nested > .span-summary {
+  padding-left: 24px;
+}
+
+/* --- DIM log rows (everything else) --- */
+.span-tier-dim > .span-summary {
+  padding-top: 3px;
+  padding-bottom: 3px;
+}
+
+.span-tier-dim .span-icon {
+  width: 5px;
+  height: 5px;
+  background: color-mix(in srgb, var(--muted-foreground) 45%, transparent);
+}
+
+.span-tier-dim .span-name {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.span-tier-dim .span-seq {
+  font-weight: 400;
+  opacity: 0.7;
+}
+
+/* --- Expanded body: content shown directly, raw demoted to the bottom --- */
+.span-body {
+  background: var(--payload-bg);
+  border-top: 1px solid var(--border);
+}
+
+.span-content {
+  padding: 8px 12px 0;
+}
+
+.span-content-label {
+  color: var(--muted-foreground);
+  display: block;
+  font-size: 11px;
   font-weight: 800;
+  letter-spacing: 0.02em;
+  margin-bottom: 4px;
   text-transform: uppercase;
 }
 
-.event-metrics dd {
-  color: var(--foreground);
-  font-size: 13px;
-  font-variant-numeric: tabular-nums;
+/* Flat: the span body IS the container — the pre shouldn't nest its own box. */
+.span-content pre {
+  background: transparent;
+  border-radius: 0;
   margin: 0;
-  overflow-wrap: anywhere;
+  padding: 0 0 10px;
+}
+
+.span-raw {
+  background: transparent;
+  border-top: 0;
+  margin-top: 4px;
+}
+
+.span-raw summary {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 8px 12px;
+  text-transform: uppercase;
+}
+
+@media (max-width: 860px) {
+  .span-summary {
+    grid-template-columns: 12px 28px minmax(0, 1fr) auto;
+    row-gap: 4px;
+  }
+  .span-tags {
+    display: none;
+  }
+  .span-stats {
+    grid-column: 1 / -1;
+    order: 6;
+    justify-content: flex-start;
+  }
+  .span-time {
+    display: none;
+  }
 }
 
 .event-payload {
@@ -6291,9 +6448,17 @@ pre {
     grid-template-columns: 1fr;
   }
 
-  .task-detail-hero,
+  .run-summary,
   .planned-trace-header {
     grid-template-columns: 1fr;
+  }
+
+  .run-summary {
+    position: static;
+  }
+
+  .run-summary-stats {
+    justify-content: flex-start;
   }
 
   .planned-trace-header {
@@ -6306,10 +6471,6 @@ pre {
   }
 
   .data-toolbar-filters {
-    grid-template-columns: 1fr;
-  }
-
-  .task-detail-facts {
     grid-template-columns: 1fr;
   }
 
@@ -6593,38 +6754,6 @@ pre {
     margin-right: 12px;
   }
 
-  .timeline-item {
-    grid-template-columns: 28px minmax(0, 1fr);
-  }
-
-  .timeline-item::before {
-    left: 13px;
-    top: 28px;
-  }
-
-  .timeline-marker {
-    font-size: 11px;
-    height: 28px;
-    width: 28px;
-  }
-
-  .timeline-card-header {
-    display: grid;
-    gap: 8px;
-  }
-
-  .timeline-card time {
-    text-align: left;
-  }
-
-  .event-metrics {
-    grid-template-columns: 1fr;
-  }
-
-  .event-metrics div,
-  .event-metrics div:nth-child(4n) {
-    border-right: 0;
-  }
 }
 
 /* Observability Trace Timeline UX Enhancements */
@@ -6729,44 +6858,6 @@ pre {
   font-size: 12px;
 }
 
-.timeline-time-col {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  text-align: right;
-  gap: 4px;
-  flex-shrink: 0;
-}
-
-.timeline-time-delta {
-  background: var(--muted);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  color: var(--muted-foreground);
-  font-size: 11px;
-  font-weight: 800;
-  font-variant-numeric: tabular-nums;
-  padding: 2px 6px;
-  display: inline-block;
-  white-space: nowrap;
-}
-
-.timeline-time-delta.delta-start {
-  background: var(--accent-bg);
-  border-color: var(--accent-border);
-  color: var(--accent-strong);
-}
-
-.timeline-time-delta.delta-slow {
-  background: var(--warning-bg);
-  border-color: color-mix(in srgb, var(--warning) 28%, transparent);
-  color: var(--warning);
-}
-
-.timeline-item.is-last-visible::before {
-  display: none !important;
-}
-
 @media (max-width: 760px) {
   .timeline-filters-row {
     flex-direction: column;
@@ -6817,143 +6908,6 @@ pre {
   background: var(--card);
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
   color: var(--foreground);
-}
-
-/* Reddit-style nested timeline tracing */
-:root {
-  --depth-step: 28px;
-}
-
-@media (max-width: 760px) {
-  :root {
-    --depth-step: 14px;
-  }
-}
-
-.timeline {
-  position: relative;
-}
-
-/* Remove default vertical connector */
-.timeline-item::before {
-  display: none !important;
-}
-
-.timeline-item {
-  position: relative;
-  padding-left: calc(var(--depth) * var(--depth-step));
-  transition: padding-left 0.25s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-.thread-line {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  width: 2px;
-  background: var(--border);
-  opacity: 0.35;
-  cursor: pointer;
-  z-index: 2;
-  transition: background-color 0.15s ease, opacity 0.15s ease, width 0.15s ease, transform 0.15s ease;
-}
-
-.thread-line:hover {
-  background: var(--accent);
-  opacity: 0.95;
-  width: 3px;
-  transform: translateX(-0.5px);
-}
-
-.thread-line.self-connect {
-  bottom: 0;
-}
-
-.timeline-item.is-last-visible .thread-line.self-connect {
-  display: none !important;
-}
-
-.thread-line.is-terminal {
-  bottom: 14px;
-}
-
-/* Terminal endpoint dots */
-.thread-line.is-terminal::after {
-  content: "";
-  position: absolute;
-  bottom: 0;
-  left: 50%;
-  transform: translate(-50%, 50%);
-  width: 6px;
-  height: 6px;
-  border-radius: 99px;
-  background: var(--border);
-  border: 1px solid var(--card);
-  box-shadow: 0 0 0 1px var(--border);
-  z-index: 4;
-  transition: background-color 0.15s ease, box-shadow 0.15s ease;
-}
-
-.thread-line.is-terminal:hover::after {
-  background: var(--accent);
-  box-shadow: 0 0 0 1px var(--accent);
-}
-
-/* Clickable markers for parent events */
-.thread-parent-marker {
-  cursor: pointer;
-  position: relative;
-  transition: border-color 0.15s ease, background-color 0.15s ease;
-}
-
-.thread-parent-marker:hover {
-  background: var(--accent-bg) !important;
-  border-color: var(--accent-border) !important;
-  color: var(--accent-strong) !important;
-}
-
-.thread-toggle {
-  position: absolute;
-  right: -5px;
-  top: -5px;
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: 99px;
-  width: 14px;
-  height: 14px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 9px;
-  font-weight: 900;
-  color: var(--muted-foreground);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
-  z-index: 3;
-  pointer-events: none; /* Let click bubble to marker */
-  transition: all 0.15s ease;
-}
-
-.thread-parent-marker:hover .thread-toggle {
-  color: var(--accent-strong);
-  border-color: var(--accent-border);
-  background: var(--card);
-}
-
-/* Collapsed Parent Card Styles */
-.timeline-item.is-collapsed .timeline-card {
-  border-style: dashed;
-  border-color: var(--accent-border);
-  background: var(--muted);
-  opacity: 0.75;
-}
-
-.timeline-item.is-collapsed .timeline-card-header {
-  background: transparent;
-  padding: 10px 14px;
-}
-
-.timeline-item.is-collapsed .timeline-card .event-metrics,
-.timeline-item.is-collapsed .timeline-card .event-payload {
-  display: none !important;
 }
 
 .timeline-footer {

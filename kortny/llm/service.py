@@ -338,6 +338,12 @@ class LLMService:
             if image_count:
                 metadata["image_count"] = image_count
                 metadata["vision_request"] = True
+            # Carry the prompt on the completed event too (it's otherwise only on
+            # llm_call_started), so the trace UI shows prompt + response together
+            # on the one LLM span. Both gated by the capture mode (None in the
+            # default "metadata" mode).
+            if request_messages is not None:
+                metadata["request_messages"] = request_messages
             if response_content is not None:
                 metadata["response"] = response_content
             self.task_service.record_llm_usage(

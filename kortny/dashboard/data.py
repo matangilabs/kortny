@@ -219,6 +219,24 @@ class TimelineEvent:
     response_json: str | None = None
     input_json: str | None = None
     output_json: str | None = None
+    # Kortny's timeline is a ~100-row append-only log, not a clean span tree.
+    # ``tier`` separates the handful of real model/tool *spans* (rendered
+    # prominently with durations + one-click I/O) from the bulk of internal
+    # *dim* log lines (thin, muted, non-expandable). See ``_event_tier``.
+    tier: str = "dim"
+    # For span rows: a short kind label ("LLM" / "Tool") plus the concrete
+    # name (model id / tool name) shown as the title. Empty for dim rows.
+    span_label: str = ""
+    span_name: str = ""
+    # At-a-glance metrics shown only when present; a dim/log row renders none.
+    duration_ms: int | None = None
+    tokens: int | None = None
+    cost_usd: str | None = None
+    turn: int | None = None
+    # Whether expanding the row reveals anything useful (tool I/O, prompt/
+    # response, or a raw payload worth inspecting). Rows with nothing to show
+    # are not expandable (no disclosure caret).
+    has_detail: bool = False
 
 
 @dataclass(frozen=True)
@@ -6834,17 +6852,62 @@ def _artifact_count_for_user(
     )
 
 
+# Event types rendered as prominent "spans": the handful of real model/tool
+# steps that carry durations + inspectable I/O. Everything else is a dim log
+# line. ``error`` rides along as a span so failures never recede into noise.
+_SPAN_EVENT_TYPES = frozenset({"llm_call", "tool_call", "tool_result", "error"})
+
+
+def _event_tier(event_type: str) -> str:
+    return "span" if event_type in _SPAN_EVENT_TYPES else "dim"
+
+
+def _span_identity(event_type: str, payload: dict[str, Any]) -> tuple[str, str]:
+    """Return ``(label, name)`` for a span row, e.g. ``("LLM", "openai/gpt")``.
+
+    ``name`` falls back to an empty string when the concrete model/tool is
+    unknown; the template then shows the generic title instead.
+    """
+
+    if event_type == "llm_call":
+        return "LLM", _payload_string(payload, "model")
+    if event_type in {"tool_call", "tool_result"}:
+        return "Tool", _payload_string(payload, "tool")
+    if event_type == "error":
+        return "Error", _payload_string(payload, "error_type")
+    return "", ""
+
+
 def _timeline_event(event: TaskEvent) -> TimelineEvent:
     payload = event.payload if isinstance(event.payload, dict) else {}
     message = _payload_string(payload, "message")
-    title = _event_title(event.type.value, message)
-    summary = _event_summary(event.type.value, payload, message)
-    tone = _event_tone(event.type.value, message)
-    badges = _event_badges(event.type.value, payload, message, tone)
-    metrics = _event_metrics(event.type.value, payload)
+    event_type = event.type.value
+    title = _event_title(event_type, message)
+    summary = _event_summary(event_type, payload, message)
+    tone = _event_tone(event_type, message)
+    badges = _event_badges(event_type, payload, message, tone)
+    metrics = _event_metrics(event_type, payload)
+    tier = _event_tier(event_type)
+    span_label, span_name = _span_identity(event_type, payload)
+    tokens = _payload_int_or_none(payload, "total_tokens")
+    if tokens is None:
+        input_tokens = _payload_int_or_none(payload, "input_tokens")
+        output_tokens = _payload_int_or_none(payload, "output_tokens")
+        if input_tokens is not None or output_tokens is not None:
+            tokens = (input_tokens or 0) + (output_tokens or 0)
+    input_json = _tool_io_json(payload.get("arguments"))
+    output_json = _tool_io_json(payload.get("output"))
+    prompt_json = _captured_content_json(payload.get("request_messages"))
+    response_json = _captured_content_json(payload.get("response"))
+    # A row is expandable only when expanding reveals real content: tool I/O,
+    # captured prompt/response, or (for spans) a raw payload worth inspecting.
+    # Dim log lines with only their one-line summary stay non-expandable.
+    has_detail = bool(input_json or output_json or prompt_json or response_json) or (
+        tier == "span" and bool(payload)
+    )
     return TimelineEvent(
         seq=event.seq,
-        event_type=event.type.value,
+        event_type=event_type,
         tone=tone,
         title=title,
         summary=summary,
@@ -6852,10 +6915,18 @@ def _timeline_event(event: TaskEvent) -> TimelineEvent:
         badges=badges,
         metrics=metrics,
         payload_json=json.dumps(payload, indent=2, sort_keys=True, default=str),
-        prompt_json=_captured_content_json(payload.get("request_messages")),
-        response_json=_captured_content_json(payload.get("response")),
-        input_json=_tool_io_json(payload.get("arguments")),
-        output_json=_tool_io_json(payload.get("output")),
+        prompt_json=prompt_json,
+        response_json=response_json,
+        input_json=input_json,
+        output_json=output_json,
+        tier=tier,
+        span_label=span_label,
+        span_name=span_name,
+        duration_ms=_payload_int_or_none(payload, "latency_ms"),
+        tokens=tokens,
+        cost_usd=_optional_payload_string(payload, "cost_usd"),
+        turn=_payload_int_or_none(payload, "turn"),
+        has_detail=has_detail,
     )
 
 

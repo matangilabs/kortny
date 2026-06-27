@@ -577,6 +577,45 @@ def test_llm_service_stamps_registered_prompt_version(db_session: Session) -> No
     assert completed[-1].payload["prompt_version"] == "2"
 
 
+def test_llm_service_completed_event_carries_prompt_when_capture_on(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # With content capture on, the llm_call_completed event must carry BOTH the
+    # prompt (request_messages) and the response, so the trace UI shows them
+    # together on the one LLM span (not split across started/completed).
+    monkeypatch.setattr(llm_service_module, "capture_content_mode", lambda: "full")
+    task = create_task(db_session)
+    provider = FakeProvider(
+        Completion(
+            content="the answer",
+            tool_calls=(),
+            usage=TokenUsage(input_tokens=3, output_tokens=2),
+            model="openai/gpt-4o-mini",
+        )
+    )
+    LLMService(
+        session=db_session,
+        provider=provider,
+        provider_name=LLMProvider.openrouter,
+    ).complete(
+        task_id=task.id,
+        messages=[ChatMessage(role="user", content="the question")],
+    )
+    events = list(
+        db_session.scalars(
+            select(TaskEvent)
+            .where(TaskEvent.task_id == task.id)
+            .order_by(TaskEvent.seq)
+        )
+    )
+    completed = [e for e in events if e.payload.get("message") == "llm_call_completed"]
+    assert completed
+    payload = completed[-1].payload
+    assert payload.get("request_messages"), "prompt missing from completed event"
+    assert payload.get("response"), "response missing from completed event"
+
+
 def test_llm_service_legacy_pricing_found_via_normalized_candidate(
     db_session: Session,
 ) -> None:

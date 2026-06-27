@@ -25,6 +25,7 @@ from kortny.composio import (
 )
 from kortny.dashboard.app import create_app
 from kortny.dashboard.auth import SlackOpenIDProfile
+from kortny.dashboard.data import _event_tier, _span_identity, _timeline_event
 from kortny.dashboard.settings import DashboardAuthMode, DashboardSettings
 from kortny.db.models import (
     Artifact,
@@ -3380,14 +3381,17 @@ def test_dashboard_task_detail_shows_events_usage_and_artifacts(
     assert "status_changed" in response.text
     assert "Task created" in response.text
     assert "LLM call started" in response.text
-    assert "LLM call completed" in response.text
-    assert "Tool result recorded" in response.text
+    # Span rows are titled by model / tool, not the generic event label.
+    assert "LLM · openai/gpt-5.4-mini" in response.text
+    assert "Tool · web_search" in response.text
     assert "1,200" in response.text
     assert "1,500 tokens" in response.text
     assert "12,345" in response.text
-    assert "Raw payload" in response.text
-    assert "&#34;source&#34;: &#34;test&#34;" in response.text
-    assert "{&#x27;source&#x27;: &#x27;test&#x27;}" not in response.text
+    # Raw payload is demoted to a single small "Raw" disclosure on span rows;
+    # it is JSON-encoded (not a Python dict repr).
+    assert ">Raw<" in response.text
+    assert "&#34;tool&#34;: &#34;web_search&#34;" in response.text
+    assert "{&#x27;tool&#x27;: &#x27;web_search&#x27;}" not in response.text
     assert "dashboard_report.pdf" in response.text
     assert "analysis" in response.text
     assert "Planned Trace" in response.text
@@ -3406,8 +3410,8 @@ def test_dashboard_task_detail_shows_events_usage_and_artifacts(
     assert "Planned budget reached" in response.text
     assert "A planned branch reached its budget" in response.text
     assert "tool calls" in response.text
-    assert 'class="card metric-card"' in response.text
-    assert 'class="timeline"' in response.text
+    assert 'class="run-summary"' in response.text
+    assert 'class="span-timeline"' in response.text
 
 
 def test_dashboard_usage_rollups_by_model_user_and_day(
@@ -5042,3 +5046,111 @@ def cleanup_database(session: Session) -> None:
         Installation,
     ):
         session.execute(delete(model))
+
+
+def _make_task_event(
+    *, seq: int, event_type: TaskEventType, payload: dict[str, object]
+) -> TaskEvent:
+    return TaskEvent(
+        task_id=uuid.uuid4(),
+        seq=seq,
+        type=event_type,
+        payload=payload,
+        created_at=datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC),
+    )
+
+
+def test_event_tier_separates_spans_from_dim_logs() -> None:
+    # The handful of real model/tool steps are prominent spans.
+    assert _event_tier("llm_call") == "span"
+    assert _event_tier("tool_call") == "span"
+    assert _event_tier("tool_result") == "span"
+    assert _event_tier("error") == "span"
+    # Everything else (internal logs, *_started markers, status, posts) is dim.
+    assert _event_tier("log") == "dim"
+    assert _event_tier("status_changed") == "dim"
+    assert _event_tier("task_created") == "dim"
+    assert _event_tier("message_posted") == "dim"
+
+
+def test_span_identity_uses_model_and_tool_names() -> None:
+    assert _span_identity("llm_call", {"model": "openai/gpt-5.4-mini"}) == (
+        "LLM",
+        "openai/gpt-5.4-mini",
+    )
+    assert _span_identity("tool_call", {"tool": "composio_serpapi_news_search"}) == (
+        "Tool",
+        "composio_serpapi_news_search",
+    )
+    assert _span_identity("tool_result", {"tool": "code_exec"}) == (
+        "Tool",
+        "code_exec",
+    )
+    # Missing name -> empty string; the template then falls back to the title.
+    assert _span_identity("llm_call", {}) == ("LLM", "")
+    assert _span_identity("log", {"message": "kg_retrieval"}) == ("", "")
+
+
+def test_timeline_event_span_carries_duration_and_is_expandable() -> None:
+    event = _make_task_event(
+        seq=4,
+        event_type=TaskEventType.tool_result,
+        payload={
+            "tool": "composio_serpapi_news_search",
+            "latency_ms": 4283,
+            "output": {"items": ["a", "b"]},
+        },
+    )
+
+    item = _timeline_event(event)
+
+    assert item.tier == "span"
+    assert item.span_label == "Tool"
+    assert item.span_name == "composio_serpapi_news_search"
+    assert item.duration_ms == 4283
+    # Tool I/O present -> the row expands to real content.
+    assert item.has_detail is True
+    assert item.output_json is not None
+
+
+def test_timeline_event_llm_span_exposes_tokens_and_cost() -> None:
+    event = _make_task_event(
+        seq=2,
+        event_type=TaskEventType.llm_call,
+        payload={
+            "model": "openai/gpt-5.4-mini",
+            "latency_ms": 1200,
+            "input_tokens": 900,
+            "output_tokens": 600,
+            "cost_usd": "0.0021",
+        },
+    )
+
+    item = _timeline_event(event)
+
+    assert item.tier == "span"
+    assert item.span_name == "openai/gpt-5.4-mini"
+    assert item.duration_ms == 1200
+    # total_tokens absent -> summed from input + output.
+    assert item.tokens == 1500
+    assert item.cost_usd == "0.0021"
+    # A span always has a raw payload worth inspecting.
+    assert item.has_detail is True
+
+
+def test_timeline_event_plain_log_is_dim_with_no_duration_or_detail() -> None:
+    event = _make_task_event(
+        seq=7,
+        event_type=TaskEventType.log,
+        payload={"message": "kg_retrieval_completed"},
+    )
+
+    item = _timeline_event(event)
+
+    assert item.tier == "dim"
+    assert item.span_name == ""
+    # No latency -> nothing rendered in the duration slot (never a bare "ms").
+    assert item.duration_ms is None
+    assert item.tokens is None
+    # A bare log line with no I/O and no captured content is not expandable.
+    assert item.has_detail is False
