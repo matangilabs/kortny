@@ -27,10 +27,21 @@ from kortny.tools.catalog import NATIVE_TOOL_METADATA
 # Native tools whose results introduce untrusted, attacker-influenceable content
 # into the context. ``web_search`` returns arbitrary web pages; ``slack_file_read``
 # returns file bodies a third party may have uploaded.
+#
+# F4: ``slack_channel_history`` and ``search_observed_slack_history`` return
+# user-authored Slack messages verbatim — third-party content that is a prompt
+# injection vector just like web pages.  Note: Slack WRITE tools (slack_post_message,
+# slack_add_reaction, etc.) are NOT listed here; they are outward/egress tools
+# already handled by ``_OUTWARD_NATIVE_NAMESPACES``.
 _UNTRUSTED_NATIVE_TOOLS = frozenset(
     {
         "web_search",
         "slack_file_read",
+        # Slack reads: user-authored channel messages are attacker-influenceable content.
+        "slack_channel_history",
+        "search_observed_slack_history",
+        # Slack canvas: user-authored canvas text is third-party content.
+        "slack_lookup_canvas_sections",
         # Browser tools: every visited page is untrusted content (prompt-injection vector).
         "browser_navigate",
         "browser_snapshot",
