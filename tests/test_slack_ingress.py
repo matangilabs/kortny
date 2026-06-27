@@ -15,6 +15,7 @@ from kortny.approvals import (
     TOOL_APPROVAL_REJECTED_PURPOSE,
     TOOL_APPROVAL_REQUIRED_MESSAGE,
 )
+from kortny.config.settings import Settings
 from kortny.db.models import (
     Artifact,
     ComposioConnection,
@@ -2539,3 +2540,113 @@ def reaction_event(
             "ts": ts,
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# COST-RELIABILITY Slice 1: interactive task cost ceiling tests
+# ---------------------------------------------------------------------------
+
+
+def _make_interactive_settings(**overrides: object) -> Settings:
+    """Build a minimal Settings for interactive-ceiling tests."""
+    base: dict[str, object] = {
+        "SLACK_BOT_TOKEN": "xoxb-test",
+        "SLACK_APP_TOKEN": "xapp-test",
+        "SLACK_SIGNING_SECRET": "signing-secret",
+        "LLM_PROVIDER": "openrouter",
+        "LLM_API_KEY": "key",
+        "LLM_MODEL": "openai/gpt-4o-mini",
+        "POSTGRES_URL": "postgresql://kortny:kortny@localhost/kortny",
+        "COMPOSIO_API_KEY": "composio-key",
+    }
+    base.update(overrides)
+    return Settings.model_validate(base)
+
+
+def test_app_mention_task_carries_interactive_cost_ceiling(
+    db_session: Session,
+) -> None:
+    """An app_mention task created with settings has runtime_cost_ceiling_usd in
+    identity_payload matching interactive_task_cost_ceiling_usd."""
+    settings = _make_interactive_settings(
+        KORTNY_INTERACTIVE_TASK_COST_CEILING_USD="2.50"
+    )
+    client = FakeSlackClient()
+    result = SlackIngress(
+        session=db_session,
+        client=client,
+        settings=settings,
+    ).handle_app_mention(
+        body=app_mention_body(event_id=f"Ev{uuid.uuid4().hex}"),
+        event=app_mention_event(ts=f"17164{uuid.uuid4().hex[:8]}"),
+    )
+    db_session.flush()
+
+    task = result.task
+    assert task.identity_payload.get("runtime_cost_ceiling_usd") == "2.5", (
+        f"Expected '2.5' in identity_payload, got: {task.identity_payload}"
+    )
+
+
+def test_app_mention_task_default_interactive_ceiling(
+    db_session: Session,
+) -> None:
+    """Without an explicit env override the ceiling defaults to 1.0."""
+    settings = _make_interactive_settings()
+    client = FakeSlackClient()
+    result = SlackIngress(
+        session=db_session,
+        client=client,
+        settings=settings,
+    ).handle_app_mention(
+        body=app_mention_body(event_id=f"Ev{uuid.uuid4().hex}"),
+        event=app_mention_event(ts=f"17165{uuid.uuid4().hex[:8]}"),
+    )
+    db_session.flush()
+
+    ceiling_raw = result.task.identity_payload.get("runtime_cost_ceiling_usd")
+    # float(1.0) serialised to str → "1.0"
+    assert ceiling_raw == "1.0", (
+        f"Expected '1.0' in identity_payload, got: {ceiling_raw}"
+    )
+
+
+def test_dm_task_carries_interactive_cost_ceiling(
+    db_session: Session,
+) -> None:
+    """A DM task also carries the interactive ceiling in identity_payload."""
+    settings = _make_interactive_settings(
+        KORTNY_INTERACTIVE_TASK_COST_CEILING_USD="0.75"
+    )
+    client = FakeSlackClient()
+    ts = f"17166{uuid.uuid4().hex[:8]}"
+    result = SlackIngress(
+        session=db_session,
+        client=client,
+        settings=settings,
+    ).handle_dm(
+        body=message_body(event_id=f"Ev{uuid.uuid4().hex}"),
+        event=dm_event(ts=ts),
+    )
+    db_session.flush()
+
+    assert result is not None
+    assert result.task.identity_payload.get("runtime_cost_ceiling_usd") == "0.75"
+
+
+def test_interactive_ceiling_absent_without_settings(
+    db_session: Session,
+) -> None:
+    """When no settings are passed, identity_payload has no runtime_cost_ceiling_usd."""
+    client = FakeSlackClient()
+    result = SlackIngress(
+        session=db_session,
+        client=client,
+        # settings intentionally not passed
+    ).handle_app_mention(
+        body=app_mention_body(event_id=f"Ev{uuid.uuid4().hex}"),
+        event=app_mention_event(ts=f"17167{uuid.uuid4().hex[:8]}"),
+    )
+    db_session.flush()
+
+    assert "runtime_cost_ceiling_usd" not in result.task.identity_payload
