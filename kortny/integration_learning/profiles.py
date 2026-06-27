@@ -20,6 +20,7 @@ import hashlib
 import json
 import logging
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, TypedDict
@@ -79,6 +80,7 @@ def build_capability_profile(
     task_id: uuid.UUID,
     toolkit_metadata: dict[str, Any] | None = None,
     max_tools: int | None = None,
+    tool_intents: Sequence[str] | None = None,
 ) -> CapabilityProfile | None:
     """Run batched cheap LLM passes to profile a toolkit and write enriched descriptions.
 
@@ -94,6 +96,16 @@ def build_capability_profile(
 
     When ``max_tools`` is None (legacy/backfill mode), the full set of cards is
     processed as before — app-level fields are always written.
+
+    When ``tool_intents`` is provided (a sequence of semantic intent strings,
+    e.g. ``("search_issues", "create_issue", "add_comment")``), those intents
+    are injected into the system prompt as targeting hints. The LLM optimizes
+    the ``enriched_description`` text to be retrieval-effective for those
+    specific workflow intents rather than writing generic descriptions. This is
+    the primary tuning lever from HIG-294: top-25 apps get their curated
+    ``tool_intents`` from the registry; long-tail apps pass ``None`` and get
+    the default behavior. Back-compat: ``None`` produces the same prompt as
+    before this parameter was added.
 
     Returns the parsed profile from the first successful batch (app-level
     fields), or None if there are no cards to process or every batch fails.
@@ -158,6 +170,19 @@ def build_capability_profile(
             }
         )
 
+    # Build intent-targeting clause when tool_intents are provided.
+    _intent_clause = ""
+    if tool_intents:
+        intents_str = ", ".join(f'"{i}"' for i in tool_intents)
+        _intent_clause = (
+            f"IMPORTANT: Optimize enriched_description text specifically for these "
+            f"workflow intents: {intents_str}. When a tool maps to one of these "
+            f"intents, the first few words of its enriched_description MUST name "
+            f"the intent concept clearly (e.g. for 'list_issues': "
+            f"'List open or filtered issues by assignee, label, or status'). "
+            f"Tools not matching any listed intent still need crisp descriptions. "
+        )
+
     system_prompt = (
         "You are a tool-description enrichment engine. "
         "Given a Composio toolkit's metadata and its raw tool list, produce a "
@@ -174,7 +199,8 @@ def build_capability_profile(
         "'technical indicators', 'real-time quotes'). "
         "(6) cross_app_affinity_hints: 0-4 short phrases naming complementary "
         "apps (e.g. 'pairs well with Alpaca for automated trading'). "
-        "Return ONLY JSON matching exactly: "
+        + _intent_clause
+        + "Return ONLY JSON matching exactly: "
         '{"summary": "...", "capability_buckets": [...], '
         '"per_tool": [{"tool_slug": "...", "enriched_description": "..."}, ...], '
         '"cross_app_affinity_hints": [...]}'

@@ -44,6 +44,7 @@ from kortny.integration_learning.profiles import (
     _DEFAULT_PROFILE_CARD_BUDGET,
     build_capability_profile,
 )
+from kortny.integrations.top25 import tool_intents_for
 from kortny.llm import LLMService
 from kortny.llm.routing import ModelRouter, ModelRouteTier
 from kortny.llm.runtime_config import (
@@ -146,6 +147,10 @@ class CapabilityProfilerWorker:
                         llm, task_id = self._build_llm(
                             session, installation_id, settings
                         )
+                        # Resolve tool_intents from the top-25 / holdout registry
+                        # so the profiler LLM targets the bounded workflow set
+                        # for curated apps. Long-tail apps get None (generic).
+                        intents = tool_intents_for(toolkit_slug) or None
                         build_capability_profile(
                             session,
                             installation_id=installation_id,
@@ -153,6 +158,7 @@ class CapabilityProfilerWorker:
                             llm=llm,
                             task_id=task_id,
                             max_tools=remaining_budget,
+                            tool_intents=intents,
                         )
                         session.commit()
                         # Decrement budget by the number of cards processed.

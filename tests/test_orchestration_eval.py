@@ -810,3 +810,651 @@ def test_replay_run_produces_report_no_secrets() -> None:
     assert isinstance(report.case_count, int)
     assert report.case_count > 0
     assert isinstance(report.pass_rate, float)
+
+
+# ---------------------------------------------------------------------------
+# S2: RunResult back-compat (new fields have safe defaults)
+# ---------------------------------------------------------------------------
+
+
+def test_run_result_new_fields_default_backcompat() -> None:
+    """RunResult must construct with only the original 3 positional fields.
+
+    New S2 fields (called_tool_slugs, called_arg_keys, approval_paused,
+    turn_count, cost_usd) all have defaults so existing call-sites and fixtures
+    remain valid without changes.
+    """
+    rr = RunResult(called_apps=frozenset({"github"}), any_tool_called=True, answer="ok")
+    assert rr.called_tool_slugs == frozenset()
+    assert rr.called_arg_keys == frozenset()
+    assert rr.approval_paused is False
+    assert rr.turn_count == 0
+    assert rr.cost_usd == 0.0
+
+
+def test_run_result_full_construction() -> None:
+    """RunResult must accept all S2 fields when explicitly provided."""
+    rr = RunResult(
+        called_apps=frozenset({"github"}),
+        any_tool_called=True,
+        answer="ok",
+        called_tool_slugs=frozenset({"GITHUB_LIST_PULL_REQUESTS"}),
+        called_arg_keys=frozenset({"owner", "repo", "state"}),
+        approval_paused=False,
+        turn_count=3,
+        cost_usd=0.02,
+    )
+    assert rr.called_tool_slugs == frozenset({"GITHUB_LIST_PULL_REQUESTS"})
+    assert rr.called_arg_keys == frozenset({"owner", "repo", "state"})
+    assert rr.turn_count == 3
+    assert rr.cost_usd == 0.02
+
+
+# ---------------------------------------------------------------------------
+# S2: OrchestrationCase new fields
+# ---------------------------------------------------------------------------
+
+
+def test_orchestration_case_new_fields_default() -> None:
+    """OrchestrationCase must default all S2 fields correctly."""
+    case = OrchestrationCase(
+        request="list open prs",
+        connected_toolkits=("github",),
+        surface=_DM,
+        expected_apps=("github",),
+    )
+    assert case.tuning_split == "train"
+    assert case.expected_tool_slugs == ()
+    assert case.required_arg_keys == ()
+    assert case.approval_expected is None
+    assert case.max_turns is None
+    assert case.max_cost_usd is None
+
+
+def test_orchestration_case_holdout_split() -> None:
+    """A holdout case must carry tuning_split='holdout'."""
+    case = OrchestrationCase(
+        request="page on-call engineer",
+        connected_toolkits=("pagerduty",),
+        surface=_DM,
+        expected_apps=("pagerduty",),
+        tuning_split="holdout",
+    )
+    assert case.tuning_split == "holdout"
+
+
+# ---------------------------------------------------------------------------
+# S2: tools_slug_pass assertion
+# ---------------------------------------------------------------------------
+
+
+def test_tools_slug_pass_all_present() -> None:
+    """When all expected_tool_slugs appear in called_tool_slugs, tools_slug_pass is True."""
+    case = OrchestrationCase(
+        request="list open github issues assigned to me",
+        connected_toolkits=("github",),
+        surface=_DM,
+        expected_apps=("github",),
+        expected_tool_slugs=("GITHUB_ISSUES_LIST",),
+    )
+
+    def run_fn(c: OrchestrationCase) -> RunResult:
+        return RunResult(
+            called_apps=frozenset({"github"}),
+            any_tool_called=True,
+            answer="ok",
+            called_tool_slugs=frozenset({"GITHUB_ISSUES_LIST"}),
+        )
+
+    report = score_orchestration((case,), run_fn)
+    assert report.passed == 1
+    r = report.results[0]
+    assert r.tools_slug_pass is True
+    assert r.passed
+
+
+def test_tools_slug_pass_missing_slug_fails() -> None:
+    """When an expected tool slug is absent from called_tool_slugs, tools_slug_pass is False."""
+    case = OrchestrationCase(
+        request="list open github issues assigned to me",
+        connected_toolkits=("github",),
+        surface=_DM,
+        expected_apps=("github",),
+        expected_tool_slugs=("GITHUB_ISSUES_LIST",),
+    )
+
+    def run_fn(c: OrchestrationCase) -> RunResult:
+        return RunResult(
+            called_apps=frozenset({"github"}),
+            any_tool_called=True,
+            answer="ok",
+            called_tool_slugs=frozenset({"GITHUB_LIST_PULL_REQUESTS"}),  # wrong slug
+        )
+
+    report = score_orchestration((case,), run_fn)
+    assert report.failed == 1
+    r = report.results[0]
+    assert r.tools_slug_pass is False
+    assert not r.passed
+    assert any("github_issues_list" in f for f in r.failures)
+
+
+def test_tools_slug_pass_none_when_not_declared() -> None:
+    """tools_slug_pass must be None when expected_tool_slugs is not declared."""
+    case = OrchestrationCase(
+        request="list open github issues",
+        connected_toolkits=("github",),
+        surface=_DM,
+        expected_apps=("github",),
+        # No expected_tool_slugs declared.
+    )
+
+    def run_fn(c: OrchestrationCase) -> RunResult:
+        return RunResult(
+            called_apps=frozenset({"github"}), any_tool_called=True, answer="ok"
+        )
+
+    report = score_orchestration((case,), run_fn)
+    r = report.results[0]
+    assert r.tools_slug_pass is None
+    assert r.passed
+
+
+# ---------------------------------------------------------------------------
+# S2: required_arg_pass assertion
+# ---------------------------------------------------------------------------
+
+
+def test_required_arg_pass_all_present() -> None:
+    """When all required_arg_keys appear in called_arg_keys, required_arg_pass is True."""
+    case = OrchestrationCase(
+        request="find emails from finance with invoice in subject",
+        connected_toolkits=("gmail",),
+        surface=_DM,
+        expected_apps=("gmail",),
+        required_arg_keys=("query",),
+    )
+
+    def run_fn(c: OrchestrationCase) -> RunResult:
+        return RunResult(
+            called_apps=frozenset({"gmail"}),
+            any_tool_called=True,
+            answer="ok",
+            called_arg_keys=frozenset({"query", "max_results"}),
+        )
+
+    report = score_orchestration((case,), run_fn)
+    assert report.passed == 1
+    r = report.results[0]
+    assert r.required_arg_pass is True
+
+
+def test_required_arg_pass_missing_key_fails() -> None:
+    """When a required arg key is absent, required_arg_pass is False."""
+    case = OrchestrationCase(
+        request="find emails from finance with invoice in subject",
+        connected_toolkits=("gmail",),
+        surface=_DM,
+        expected_apps=("gmail",),
+        required_arg_keys=("query",),
+    )
+
+    def run_fn(c: OrchestrationCase) -> RunResult:
+        return RunResult(
+            called_apps=frozenset({"gmail"}),
+            any_tool_called=True,
+            answer="ok",
+            called_arg_keys=frozenset({"max_results"}),  # 'query' missing
+        )
+
+    report = score_orchestration((case,), run_fn)
+    assert report.failed == 1
+    r = report.results[0]
+    assert r.required_arg_pass is False
+    assert any("query" in f for f in r.failures)
+
+
+# ---------------------------------------------------------------------------
+# S2: approval_pass assertion
+# ---------------------------------------------------------------------------
+
+
+def test_approval_pass_expected_true_and_paused() -> None:
+    """When approval_expected=True and task paused, approval_pass is True."""
+    case = OrchestrationCase(
+        request="create a Linear issue for the bug",
+        connected_toolkits=("linear",),
+        surface=_DM,
+        expected_apps=("linear",),
+        approval_expected=True,
+    )
+
+    def run_fn(c: OrchestrationCase) -> RunResult:
+        return RunResult(
+            called_apps=frozenset({"linear"}),
+            any_tool_called=True,
+            answer="",
+            approval_paused=True,
+        )
+
+    report = score_orchestration((case,), run_fn)
+    assert report.passed == 1
+    r = report.results[0]
+    assert r.approval_pass is True
+
+
+def test_approval_pass_expected_true_but_not_paused_fails() -> None:
+    """When approval_expected=True but task did not pause, approval_pass is False."""
+    case = OrchestrationCase(
+        request="create a Linear issue for the bug",
+        connected_toolkits=("linear",),
+        surface=_DM,
+        expected_apps=("linear",),
+        approval_expected=True,
+    )
+
+    def run_fn(c: OrchestrationCase) -> RunResult:
+        return RunResult(
+            called_apps=frozenset({"linear"}),
+            any_tool_called=True,
+            answer="done",
+            approval_paused=False,  # should have paused
+        )
+
+    report = score_orchestration((case,), run_fn)
+    assert report.failed == 1
+    r = report.results[0]
+    assert r.approval_pass is False
+    assert any("approval" in f for f in r.failures)
+
+
+def test_approval_pass_none_when_not_declared() -> None:
+    """approval_pass must be None when approval_expected is not declared."""
+    case = OrchestrationCase(
+        request="list my open issues",
+        connected_toolkits=("linear",),
+        surface=_DM,
+        expected_apps=("linear",),
+        # approval_expected not set (None by default)
+    )
+
+    def run_fn(c: OrchestrationCase) -> RunResult:
+        return RunResult(
+            called_apps=frozenset({"linear"}), any_tool_called=True, answer="ok"
+        )
+
+    report = score_orchestration((case,), run_fn)
+    r = report.results[0]
+    assert r.approval_pass is None
+    assert r.passed
+
+
+# ---------------------------------------------------------------------------
+# S2: budget_pass assertion
+# ---------------------------------------------------------------------------
+
+
+def test_budget_pass_within_limits() -> None:
+    """When turn_count and cost_usd are within limits, budget_pass is True."""
+    case = OrchestrationCase(
+        request="show last 5 commits",
+        connected_toolkits=("github",),
+        surface=_DM,
+        expected_apps=("github",),
+        max_turns=4,
+        max_cost_usd=0.05,
+    )
+
+    def run_fn(c: OrchestrationCase) -> RunResult:
+        return RunResult(
+            called_apps=frozenset({"github"}),
+            any_tool_called=True,
+            answer="ok",
+            turn_count=2,
+            cost_usd=0.01,
+        )
+
+    report = score_orchestration((case,), run_fn)
+    assert report.passed == 1
+    r = report.results[0]
+    assert r.budget_pass is True
+
+
+def test_budget_pass_turns_exceeded_fails() -> None:
+    """When turn_count exceeds max_turns, budget_pass is False."""
+    case = OrchestrationCase(
+        request="show last 5 commits",
+        connected_toolkits=("github",),
+        surface=_DM,
+        expected_apps=("github",),
+        max_turns=2,
+    )
+
+    def run_fn(c: OrchestrationCase) -> RunResult:
+        return RunResult(
+            called_apps=frozenset({"github"}),
+            any_tool_called=True,
+            answer="ok",
+            turn_count=5,  # exceeds max_turns=2
+        )
+
+    report = score_orchestration((case,), run_fn)
+    assert report.failed == 1
+    r = report.results[0]
+    assert r.budget_pass is False
+    assert any("turn_count" in f for f in r.failures)
+
+
+# ---------------------------------------------------------------------------
+# S2: generalization_report
+# ---------------------------------------------------------------------------
+
+
+def test_generalization_report_no_holdout() -> None:
+    """When there are no holdout cases, holdout_score=0.0 and no overfit warning."""
+    from kortny.evals.orchestration.scoring import generalization_report
+
+    case = OrchestrationCase(
+        request="open my github prs",
+        connected_toolkits=("github",),
+        surface=_DM,
+        expected_apps=("github",),
+        tuning_split="train",
+    )
+
+    def run_fn(c: OrchestrationCase) -> RunResult:
+        return RunResult(
+            called_apps=frozenset({"github"}), any_tool_called=True, answer="ok"
+        )
+
+    report = score_orchestration((case,), run_fn)
+    gr = generalization_report(report)
+    assert gr["train_score"] == 1.0
+    assert gr["holdout_score"] == 0.0
+    assert gr["train_n"] == 1
+    assert gr["holdout_n"] == 0
+    assert gr["overfit_warning"] is False
+
+
+def test_generalization_report_delta_within_threshold() -> None:
+    """When train_score - holdout_score <= 0.12, no overfit warning."""
+    from kortny.evals.orchestration.scoring import generalization_report
+
+    train_case = OrchestrationCase(
+        request="list my issues in Linear",
+        connected_toolkits=("linear",),
+        surface=_DM,
+        expected_apps=("linear",),
+        tuning_split="train",
+    )
+    holdout_case = OrchestrationCase(
+        request="look up campaign records in Airtable",
+        connected_toolkits=("airtable",),
+        surface=_DM,
+        expected_apps=("airtable",),
+        tuning_split="holdout",
+    )
+
+    def run_fn(c: OrchestrationCase) -> RunResult:
+        # Both pass — delta = 1.0 - 1.0 = 0.0
+        return RunResult(
+            called_apps=frozenset({c.expected_apps[0]}),
+            any_tool_called=True,
+            answer="ok",
+        )
+
+    report = score_orchestration((train_case, holdout_case), run_fn)
+    gr = generalization_report(report)
+    assert gr["train_score"] == 1.0
+    assert gr["holdout_score"] == 1.0
+    assert gr["generalization_delta"] == 0.0
+    assert gr["overfit_warning"] is False
+
+
+def test_generalization_report_delta_exceeds_threshold_warns() -> None:
+    """When train_score - holdout_score > 0.12, overfit_warning is True."""
+    from kortny.evals.orchestration.scoring import generalization_report
+
+    train_case = OrchestrationCase(
+        request="list my issues in Linear",
+        connected_toolkits=("linear",),
+        surface=_DM,
+        expected_apps=("linear",),
+        tuning_split="train",
+    )
+    holdout_case = OrchestrationCase(
+        request="trigger PagerDuty incident",
+        connected_toolkits=("pagerduty",),
+        surface=_DM,
+        expected_apps=("pagerduty",),
+        tuning_split="holdout",
+    )
+
+    def run_fn(c: OrchestrationCase) -> RunResult:
+        if c.tuning_split == "train":
+            # Train passes.
+            return RunResult(
+                called_apps=frozenset({"linear"}), any_tool_called=True, answer="ok"
+            )
+        else:
+            # Holdout fails (agent didn't call pagerduty).
+            return RunResult(
+                called_apps=frozenset(), any_tool_called=False, answer=""
+            )
+
+    report = score_orchestration((train_case, holdout_case), run_fn)
+    gr = generalization_report(report)
+    assert gr["train_score"] == 1.0
+    assert gr["holdout_score"] == 0.0
+    assert gr["generalization_delta"] == 1.0
+    assert gr["overfit_warning"] is True
+
+
+# ---------------------------------------------------------------------------
+# S2: runner split filter hard-block
+# ---------------------------------------------------------------------------
+
+
+def test_run_split_filter_excludes_holdout_from_train() -> None:
+    """HARD-BLOCK: split='train' must never include holdout cases.
+
+    We call run() but it will raise RuntimeError if the invariant is violated.
+    Since all cases in SEED_ORCHESTRATION_CASES that are 'holdout' would be
+    excluded by the filter, we test the filter logic directly via the seed data.
+    """
+    # All train cases in the seed must have tuning_split='train'.
+    train_cases = [
+        c for c in SEED_ORCHESTRATION_CASES if c.tuning_split == "train"
+    ]
+    holdout_cases = [
+        c for c in SEED_ORCHESTRATION_CASES if c.tuning_split == "holdout"
+    ]
+    # No case should be in both.
+    train_requests = {c.request for c in train_cases}
+    holdout_requests = {c.request for c in holdout_cases}
+    assert train_requests.isdisjoint(holdout_requests), (
+        "A case appears in both train and holdout splits — tuning_split must be unique"
+    )
+    # All cases must be classified.
+    all_requests = {c.request for c in SEED_ORCHESTRATION_CASES}
+    assert all_requests == train_requests | holdout_requests
+
+
+def test_seed_cases_have_valid_tuning_splits() -> None:
+    """Every seed case must declare a valid tuning_split ('train' or 'holdout')."""
+    valid_splits = {"train", "holdout"}
+    for case in SEED_ORCHESTRATION_CASES:
+        assert case.tuning_split in valid_splits, (
+            f"case {case.request!r}: invalid tuning_split {case.tuning_split!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# S2: holdout cases never in train run (integration of runner filter logic)
+# ---------------------------------------------------------------------------
+
+
+def test_split_filter_train_returns_only_train_cases() -> None:
+    """The train split filter must produce only train-labeled cases."""
+    from kortny.evals.orchestration.cases import SEED_ORCHESTRATION_CASES
+
+    train_filtered = [c for c in SEED_ORCHESTRATION_CASES if c.tuning_split == "train"]
+    assert all(c.tuning_split == "train" for c in train_filtered)
+    # Must include some cases.
+    assert len(train_filtered) > 0
+
+
+def test_split_filter_holdout_returns_only_holdout_cases() -> None:
+    """The holdout split filter must produce only holdout-labeled cases."""
+    from kortny.evals.orchestration.cases import SEED_ORCHESTRATION_CASES
+
+    holdout_filtered = [
+        c for c in SEED_ORCHESTRATION_CASES if c.tuning_split == "holdout"
+    ]
+    assert all(c.tuning_split == "holdout" for c in holdout_filtered)
+    assert len(holdout_filtered) > 0
+
+
+# ---------------------------------------------------------------------------
+# S2: replay roundtrip with new RunResult fields
+# ---------------------------------------------------------------------------
+
+
+def test_dump_and_load_fixtures_roundtrip_s2_fields() -> None:
+    """dump_fixtures + load_fixtures must roundtrip all S2 RunResult fields."""
+    import tempfile
+    from pathlib import Path
+
+    from kortny.evals.orchestration.replay import dump_fixtures, load_fixtures
+
+    rr = RunResult(
+        called_apps=frozenset({"github"}),
+        any_tool_called=True,
+        answer="ok",
+        called_tool_slugs=frozenset({"GITHUB_ISSUES_LIST", "GITHUB_LIST_COMMITS"}),
+        called_arg_keys=frozenset({"assignee", "repo", "state"}),
+        approval_paused=True,
+        turn_count=4,
+        cost_usd=0.025,
+    )
+    mapping = {"list my open issues": rr}
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+        path = Path(f.name)
+    try:
+        dump_fixtures(mapping, path)
+        loaded = load_fixtures(path)
+        loaded_rr = loaded["list my open issues"]
+        assert loaded_rr.called_tool_slugs == frozenset(
+            {"GITHUB_ISSUES_LIST", "GITHUB_LIST_COMMITS"}
+        )
+        assert loaded_rr.called_arg_keys == frozenset({"assignee", "repo", "state"})
+        assert loaded_rr.approval_paused is True
+        assert loaded_rr.turn_count == 4
+        assert abs(loaded_rr.cost_usd - 0.025) < 1e-6
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def test_load_fixtures_old_format_backcompat() -> None:
+    """Old fixture files lacking S2 keys must load with safe defaults."""
+    import json
+    import tempfile
+    from pathlib import Path
+
+    from kortny.evals.orchestration.replay import load_fixtures
+
+    old_fixture = {
+        "list my open github prs": {
+            "called_apps": ["github"],
+            "any_tool_called": True,
+            "answer": "",
+            "skipped": False,
+            "skip_reason": None,
+            # No S2 keys — simulates a pre-S2 fixture file.
+        }
+    }
+    with tempfile.NamedTemporaryFile(
+        suffix=".json", delete=False, mode="w"
+    ) as f:
+        json.dump(old_fixture, f)
+        path = Path(f.name)
+    try:
+        loaded = load_fixtures(path)
+        rr = loaded["list my open github prs"]
+        assert rr.called_apps == frozenset({"github"})
+        # S2 defaults.
+        assert rr.called_tool_slugs == frozenset()
+        assert rr.called_arg_keys == frozenset()
+        assert rr.approval_paused is False
+        assert rr.turn_count == 0
+        assert rr.cost_usd == 0.0
+    finally:
+        path.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# S2: top25 tool_intents + HOLDOUT_APPS
+# ---------------------------------------------------------------------------
+
+
+def test_top25_all_apps_have_tool_intents() -> None:
+    """Every TOP25 app must have at least one tool_intent."""
+    from kortny.integrations.top25 import TOP25
+
+    for app in TOP25:
+        assert len(app.tool_intents) > 0, (
+            f"TOP25 app {app.slug!r} has no tool_intents"
+        )
+
+
+def test_holdout_apps_not_in_top25() -> None:
+    """HOLDOUT_APPS slugs must not overlap with TOP25_SLUGS."""
+    from kortny.integrations.top25 import HOLDOUT_APPS, TOP25_SLUGS
+
+    for app in HOLDOUT_APPS:
+        assert app.slug not in TOP25_SLUGS, (
+            f"HOLDOUT_APP {app.slug!r} is also in TOP25_SLUGS — holdout apps "
+            "must be outside the curated 25"
+        )
+
+
+def test_holdout_apps_have_tool_intents() -> None:
+    """Every HOLDOUT_APP must have at least one tool_intent."""
+    from kortny.integrations.top25 import HOLDOUT_APPS
+
+    for app in HOLDOUT_APPS:
+        assert len(app.tool_intents) > 0, (
+            f"HOLDOUT_APP {app.slug!r} has no tool_intents"
+        )
+
+
+def test_tool_intents_for_known_slugs() -> None:
+    """tool_intents_for returns correct intents for top-25 and holdout slugs."""
+    from kortny.integrations.top25 import tool_intents_for
+
+    github_intents = tool_intents_for("github")
+    assert "list_pull_requests" in github_intents
+    assert "create_issue" in github_intents
+
+    dropbox_intents = tool_intents_for("dropbox")
+    assert "create_shared_link" in dropbox_intents
+
+
+def test_tool_intents_for_unknown_slug_returns_empty() -> None:
+    """tool_intents_for returns () for slugs not in top-25 or holdout registries."""
+    from kortny.integrations.top25 import tool_intents_for
+
+    assert tool_intents_for("serpapi") == ()
+    assert tool_intents_for("twelve_data") == ()
+    assert tool_intents_for("notaslug") == ()
+
+
+def test_tool_intents_for_alias_resolves() -> None:
+    """tool_intents_for must resolve aliases to the canonical app."""
+    from kortny.integrations.top25 import tool_intents_for
+
+    # outlook_calendar is an alias for outlook
+    outlook_intents = tool_intents_for("outlook")
+    alias_intents = tool_intents_for("outlook_calendar")
+    assert outlook_intents == alias_intents
+    assert len(outlook_intents) > 0

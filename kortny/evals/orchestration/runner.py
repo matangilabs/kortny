@@ -65,7 +65,7 @@ from __future__ import annotations
 import os
 import uuid
 from collections.abc import Mapping
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -79,6 +79,7 @@ from kortny.db.models import (
     Task,
     TaskEvent,
     TaskEventType,
+    TaskStatus,
 )
 from kortny.evals.orchestration.cases import SEED_ORCHESTRATION_CASES, OrchestrationCase
 from kortny.evals.orchestration.replay import (
@@ -207,28 +208,28 @@ def _toolkit_slug_from_tool_result(payload: Mapping[str, object]) -> str | None:
     return None
 
 
-def _called_apps_from_events(
+def _granular_data_from_events(
     session: Session,
     task_id: uuid.UUID,
-) -> tuple[frozenset[str], bool]:
-    """Read tool TaskEvent rows and return the called-apps set.
+) -> tuple[frozenset[str], bool, frozenset[str], frozenset[str], bool, int]:
+    """Read TaskEvent rows and return the full set of orchestration signals.
+
+    Returns a 6-tuple:
+        called_apps: frozenset of Composio toolkit slugs reached.
+        any_tool_called: True if at least one tool of any kind was invoked.
+        called_tool_slugs: frozenset of individual tool slugs called
+            (the tool_slug field from tool_result, e.g.
+            ``"GITHUB_LIST_PULL_REQUESTS"``; native tool names for
+            non-Composio tools).
+        called_arg_keys: union of all argument key names across tool_call events.
+        approval_paused: True if the task hit the approval gate (a
+            tool_approval_required log row exists or the task's final status
+            is waiting_approval).
+        turn_count: number of llm_call TaskEvent rows (coordinator turns).
 
     Authoritative source: the canonical ``toolkit_slug`` carried in each
-    successful Composio ``tool_result`` output. To also count writes that
-    *reached* an integration but paused at the approval gate before a
-    ``tool_result`` was ever recorded, this additionally unions in Composio
-    toolkit slugs name-parsed from ``tool_call`` rows. A write that paused
-    pre-result therefore still registers as "reached for that app" — which is
-    exactly the orchestration signal the eval wants (the agent picked the right
-    integration), independent of whether a real artifact was created.
-
-    Returns:
-        A tuple of (called_toolkit_slugs, any_tool_called) where
-        called_toolkit_slugs is the set of Composio toolkit slugs whose tools
-        were reached (completed or paused at approval) and any_tool_called is
-        True if at least one tool of any kind was invoked (Composio, native, or
-        MCP — including a call that paused before its result, for the
-        must_use_tools guard).
+    successful Composio ``tool_result`` output. Writes that paused at approval
+    are also credited (name-parsed from tool_call rows).
     """
     result_rows = list(
         session.scalars(
@@ -243,6 +244,14 @@ def _called_apps_from_events(
             select(TaskEvent).where(
                 TaskEvent.task_id == task_id,
                 TaskEvent.type == TaskEventType.tool_call,
+            )
+        )
+    )
+    llm_call_rows = list(
+        session.scalars(
+            select(TaskEvent).where(
+                TaskEvent.task_id == task_id,
+                TaskEvent.type == TaskEventType.llm_call,
             )
         )
     )
@@ -269,19 +278,37 @@ def _called_apps_from_events(
     )
 
     slugs: set[str] = set()
+    tool_slugs: set[str] = set()
+    arg_keys: set[str] = set()
+
     # Authoritative: real toolkit_slug from successful Composio results.
     for row in result_rows:
         slug = _toolkit_slug_from_tool_result(row.payload)
         if slug:
             slugs.add(slug)
+        # Also collect the individual tool_slug from the result output.
+        output = row.payload.get("output")
+        if isinstance(output, dict):
+            ts = output.get("tool_slug")
+            if isinstance(ts, str) and ts:
+                tool_slugs.add(ts)
+
     # Supplemental: name-parsed Composio slug from every tool_call, so an
     # app reached by a write that paused pre-result still counts.
+    # Also collect tool names and argument keys.
     for row in call_rows:
         tool_name = row.payload.get("tool")
         if isinstance(tool_name, str):
             slug = _toolkit_slug_from_tool_name(tool_name)
             if slug:
                 slugs.add(slug)
+            # For non-Composio tools (native, MCP), use the tool_name as slug.
+            tool_slugs.add(tool_name)
+        # Collect argument keys from this call.
+        arguments = row.payload.get("arguments")
+        if isinstance(arguments, dict):
+            arg_keys.update(arguments.keys())
+
     # Tools paused at approval (request["tool"]) — the app was reached even with
     # no tool_call row.
     for row in approval_rows:
@@ -291,7 +318,36 @@ def _called_apps_from_events(
             slug = _toolkit_slug_from_tool_name(tool_name)
             if slug:
                 slugs.add(slug)
-    return frozenset(slugs), any_tool_called
+
+    # approval_paused: any approval log event is sufficient.
+    approval_paused = len(approval_rows) > 0
+
+    turn_count = len(llm_call_rows)
+
+    return (
+        frozenset(slugs),
+        any_tool_called,
+        frozenset(tool_slugs),
+        frozenset(arg_keys),
+        approval_paused,
+        turn_count,
+    )
+
+
+# Keep the original name as a thin wrapper for backward compatibility with any
+# call-sites outside the module (the internal runner only uses the full version).
+def _called_apps_from_events(
+    session: Session,
+    task_id: uuid.UUID,
+) -> tuple[frozenset[str], bool]:
+    """Read tool TaskEvent rows and return (called_apps, any_tool_called).
+
+    Thin backward-compatible wrapper around ``_granular_data_from_events``.
+    """
+    called_apps, any_tool_called, _, _, _, _ = _granular_data_from_events(
+        session, task_id
+    )
+    return called_apps, any_tool_called
 
 
 def _first_installation_id(session: Session) -> uuid.UUID:
@@ -478,18 +534,46 @@ def build_live_run_fn(
 
         # Read whatever tool events exist — a task that paused at approval still
         # recorded its tool_call rows, so the app it reached still counts.
-        called_apps, any_tool_called = _called_apps_from_events(session, task.id)
+        (
+            called_apps,
+            any_tool_called,
+            called_tool_slugs,
+            called_arg_keys,
+            approval_paused_events,
+            turn_count,
+        ) = _granular_data_from_events(session, task.id)
+
+        # Also check the task's final status for waiting_approval (the approval
+        # gate may have fired after the task was committed but before an event
+        # was flushed, or the event may have been written under the gate path).
+        session.refresh(task)
+        approval_paused = approval_paused_events or (
+            task.status == TaskStatus.waiting_approval
+        )
+
+        # Read cost from the denormalized total on the Task row.
+        cost_usd = float(task.total_cost_usd)
+
         return RunResult(
             called_apps=called_apps,
             any_tool_called=any_tool_called,
             answer=answer,
+            called_tool_slugs=called_tool_slugs,
+            called_arg_keys=called_arg_keys,
+            approval_paused=approval_paused,
+            turn_count=turn_count,
+            cost_usd=cost_usd,
         )
 
     return run
 
 
-def run(*, record: bool = True) -> OrchestrationReport:
-    """Run the full seed eval against the live install and return the report.
+def run(
+    *,
+    record: bool = True,
+    split: Literal["train", "holdout", "all"] = "all",
+) -> OrchestrationReport:
+    """Run the seed eval against the live install and return the report.
 
     Args:
         record: When True (default), write each case's ``RunResult`` to the
@@ -497,7 +581,50 @@ def run(*, record: bool = True) -> OrchestrationReport:
             the goldens so ``make eval-smoke`` stays in sync.  Set to False to
             skip fixture recording (e.g. when running interactively without a
             writable filesystem).
+        split: Which tuning_split to include in this run.
+            - ``"all"`` (default): run every case (train + holdout).
+            - ``"train"``: run ONLY train cases. HARD-BLOCK: holdout cases are
+              excluded and MUST NOT be tuned against.
+            - ``"holdout"``: run ONLY holdout cases (for generalization measurement).
+
+    HARD RULE:
+        A tuning run (``split="train"``) must never include holdout cases.
+        A holdout run (``split="holdout"``) must never include train cases.
+        This is enforced here — not by convention.
     """
+    # Apply split filter.
+    if split == "all":
+        cases_to_run = SEED_ORCHESTRATION_CASES
+    elif split == "train":
+        cases_to_run = tuple(
+            c for c in SEED_ORCHESTRATION_CASES if c.tuning_split == "train"
+        )
+    elif split == "holdout":
+        cases_to_run = tuple(
+            c for c in SEED_ORCHESTRATION_CASES if c.tuning_split == "holdout"
+        )
+    else:
+        raise ValueError(f"split must be 'train', 'holdout', or 'all'; got {split!r}")
+
+    # Enforce: a train-only run must contain no holdout cases.
+    if split == "train":
+        holdout_leaked = [c for c in cases_to_run if c.tuning_split == "holdout"]
+        if holdout_leaked:
+            raise RuntimeError(
+                f"HARD-BLOCK: {len(holdout_leaked)} holdout case(s) would be included "
+                "in a train-only run. This violates the tuning-split isolation rule. "
+                "Check SEED_ORCHESTRATION_CASES for misclassified cases."
+            )
+    # Enforce: a holdout-only run must contain no train cases.
+    if split == "holdout":
+        train_leaked = [c for c in cases_to_run if c.tuning_split == "train"]
+        if train_leaked:
+            raise RuntimeError(
+                f"HARD-BLOCK: {len(train_leaked)} train case(s) would be included "
+                "in a holdout-only run. This violates the tuning-split isolation rule. "
+                "Check SEED_ORCHESTRATION_CASES for misclassified cases."
+            )
+
     settings = load_settings()
     session_factory = make_session_factory(database_url=settings.postgres_url)
     with session_factory() as session:
@@ -506,7 +633,7 @@ def run(*, record: bool = True) -> OrchestrationReport:
         scope_channel_id = _resolve_scope_channel_id()
         print(
             f"Eval scope: installation={installation_id} "
-            f"user={scope_user_id} channel={scope_channel_id}"
+            f"user={scope_user_id} channel={scope_channel_id} split={split!r}"
         )
         # Inject a no-op Slack client so the post-completion hook never reaches
         # Slack (the synthetic eval channel does not exist). LLM + tools still
@@ -522,7 +649,7 @@ def run(*, record: bool = True) -> OrchestrationReport:
             scope_user_id=scope_user_id,
             scope_channel_id=scope_channel_id,
         )
-        report = score_orchestration(SEED_ORCHESTRATION_CASES, run_fn)
+        report = score_orchestration(cases_to_run, run_fn)
         if record:
             dump_fixtures(report.results, DEFAULT_FIXTURES_PATH)
             print(f"  [record] fixtures written to {DEFAULT_FIXTURES_PATH}")

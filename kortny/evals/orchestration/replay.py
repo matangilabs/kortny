@@ -66,24 +66,46 @@ DEFAULT_FIXTURES_PATH: Path = FIXTURES_DIR / "smoke_goldens.json"
 
 
 def _run_result_to_dict(result: RunResult) -> dict[str, Any]:
-    """Serialize a RunResult to a JSON-compatible dict."""
+    """Serialize a RunResult to a JSON-compatible dict.
+
+    New S2 fields are always serialized so fixtures capture the full granularity
+    data when recorded by the live runner. Older fixtures that lack these keys
+    are handled by ``_dict_to_run_result`` which supplies safe defaults.
+    """
     return {
         "called_apps": sorted(result.called_apps),
         "any_tool_called": result.any_tool_called,
         "answer": result.answer,
         "skipped": result.skipped,
         "skip_reason": result.skip_reason if result.skip_reason else None,
+        # S2 granularity fields — always serialized; defaults on old fixtures.
+        "called_tool_slugs": sorted(result.called_tool_slugs),
+        "called_arg_keys": sorted(result.called_arg_keys),
+        "approval_paused": result.approval_paused,
+        "turn_count": result.turn_count,
+        "cost_usd": result.cost_usd,
     }
 
 
 def _dict_to_run_result(data: dict[str, Any]) -> RunResult:
-    """Deserialize a dict (from JSON) back to a RunResult."""
+    """Deserialize a dict (from JSON) back to a RunResult.
+
+    Back-compatible: fixture dicts that predate S2 will lack the new keys;
+    those fields default to their zero values so existing fixtures load without
+    changes and all smoke assertions still pass.
+    """
     return RunResult(
         called_apps=frozenset(data.get("called_apps") or []),
         any_tool_called=bool(data.get("any_tool_called", False)),
         answer=str(data.get("answer") or ""),
         skipped=bool(data.get("skipped", False)),
         skip_reason=str(data.get("skip_reason") or ""),
+        # S2 fields — default if absent (back-compat with pre-S2 fixtures).
+        called_tool_slugs=frozenset(data.get("called_tool_slugs") or []),
+        called_arg_keys=frozenset(data.get("called_arg_keys") or []),
+        approval_paused=bool(data.get("approval_paused", False)),
+        turn_count=int(data.get("turn_count") or 0),
+        cost_usd=float(data.get("cost_usd") or 0.0),
     )
 
 
@@ -120,6 +142,12 @@ def dump_fixtures(
     else:
         new_entries = {}
         for ar in results:
+            # OrchestrationAssertionResult does not carry the S2 granularity
+            # fields (tool slugs, arg keys, etc.) because those live only on
+            # RunResult (which the scorer does not re-expose on the result).
+            # When recording from AssertionResults, we only round-trip what
+            # AssertionResult carries; the live runner path (Mapping branch)
+            # passes full RunResults which carry everything.
             rr = RunResult(
                 called_apps=ar.called_apps,
                 any_tool_called=ar.any_tool_called,
