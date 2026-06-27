@@ -1,4 +1,4 @@
-.PHONY: install lock lint lint-fix format format-check typecheck test test-serial check migrate downgrade compose-up compose-up-observability compose-up-workflow compose-down compose-down-observability compose-down-workflow compose-down-observability-volumes compose-logs compose-logs-observability compose-logs-workflow clean seed-sim clean-sim status-sim
+.PHONY: install lock lint lint-fix format format-check typecheck test test-serial check migrate downgrade compose-up compose-up-observability compose-up-workflow compose-down compose-down-observability compose-down-workflow compose-down-observability-volumes compose-logs compose-logs-observability compose-logs-workflow clean seed-sim clean-sim status-sim eval eval-smoke
 
 install:
 	uv sync
@@ -77,6 +77,21 @@ clean-sim:
 
 status-sim:
 	docker compose exec worker uv run python -m scripts.demo.db_seed status
+
+# Orchestration evals
+# --------------------
+# eval: live run that executes cases against the real agent and records goldens.
+#   Needs: Postgres, LLM API key, connected Composio integrations.
+#   Side effect: updates kortny/evals/orchestration/fixtures/smoke_goldens.json.
+#   Commit the updated file after a successful run.
+eval:
+	uv run python -m kortny.evals.orchestration.runner
+
+# eval-smoke: offline replay of the smoke subset — scores committed goldens.
+#   Needs: nothing. No API keys, no DB, no live agent. Runs in CI / $0.
+#   Fails if any smoke case result diverges from the committed fixture.
+eval-smoke:
+	uv run python -m kortny.evals.orchestration.replay
 
 clean:
 	rm -rf .mypy_cache .pytest_cache .ruff_cache htmlcov .coverage build dist
