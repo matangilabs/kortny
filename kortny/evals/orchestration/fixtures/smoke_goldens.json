@@ -1,0 +1,79 @@
+{
+  "summarize my open GitHub PRs and file a ticket for anything that needs follow-up": {
+    "called_apps": ["github", "linear"],
+    "any_tool_called": true,
+    "answer": "",
+    "skipped": false,
+    "skip_reason": null
+  },
+  "what did I ship this week, and what's still open?": {
+    "called_apps": ["github", "linear"],
+    "any_tool_called": true,
+    "answer": "",
+    "skipped": false,
+    "skip_reason": null
+  },
+  "find my most recent email from Acme and put a 30-min follow-up on my calendar tomorrow afternoon": {
+    "called_apps": ["gmail", "googlecalendar"],
+    "any_tool_called": true,
+    "answer": "",
+    "skipped": false,
+    "skip_reason": null
+  },
+  "what are my open issues in Linear?": {
+    "called_apps": ["linear"],
+    "any_tool_called": true,
+    "answer": "",
+    "skipped": false,
+    "skip_reason": null
+  },
+  "any important unread emails this morning?": {
+    "called_apps": ["gmail"],
+    "any_tool_called": true,
+    "answer": "",
+    "skipped": false,
+    "skip_reason": null
+  },
+  "what's on my calendar tomorrow?": {
+    "called_apps": ["googlecalendar"],
+    "any_tool_called": true,
+    "answer": "",
+    "skipped": false,
+    "skip_reason": null
+  },
+  "has my latest PR been merged yet?": {
+    "called_apps": ["github"],
+    "any_tool_called": true,
+    "answer": "",
+    "skipped": false,
+    "skip_reason": null
+  },
+  "turn the open questions in our Notion doc into Linear issues": {
+    "called_apps": ["linear", "notion"],
+    "any_tool_called": true,
+    "answer": "",
+    "skipped": false,
+    "skip_reason": null
+  },
+  "what's AAPL trading at right now?": {
+    "called_apps": ["twelve_data"],
+    "any_tool_called": true,
+    "answer": "",
+    "skipped": false,
+    "skip_reason": null
+  },
+  "what do I have scheduled right now?": {
+    "called_apps": [],
+    "any_tool_called": false,
+    "answer": "",
+    "skipped": false,
+    "skip_reason": null
+  },
+  "explain how OAuth 2.0 authorization code flow works": {
+    "called_apps": [],
+    "any_tool_called": false,
+    "answer": "",
+    "skipped": false,
+    "skip_reason": null
+  }
+}

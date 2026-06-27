@@ -8,6 +8,13 @@ The runner is **on-demand only** — it creates real tasks, runs the agent, and
 reads the resulting ``TaskEvent`` rows to derive the called-apps set. It is
 never run in CI.
 
+Record mode
+-----------
+When ``run(record=True)`` (the default), after scoring each case the runner
+writes the resulting ``RunResult`` into ``fixtures/smoke_goldens.json`` via
+``replay.dump_fixtures``.  This means ``make eval`` regenerates the goldens in
+one shot — commit the updated file to keep the offline smoke subset in sync.
+
 Toolkit-slug derivation
 -----------------------
 The authoritative source for the called-app slug is the ``tool_result``
@@ -74,6 +81,10 @@ from kortny.db.models import (
     TaskEventType,
 )
 from kortny.evals.orchestration.cases import SEED_ORCHESTRATION_CASES, OrchestrationCase
+from kortny.evals.orchestration.replay import (
+    DEFAULT_FIXTURES_PATH,
+    dump_fixtures,
+)
 from kortny.evals.orchestration.scoring import (
     OrchestrationReport,
     RunFn,
@@ -477,8 +488,16 @@ def build_live_run_fn(
     return run
 
 
-def run() -> OrchestrationReport:
-    """Run the full seed eval against the live install and return the report."""
+def run(*, record: bool = True) -> OrchestrationReport:
+    """Run the full seed eval against the live install and return the report.
+
+    Args:
+        record: When True (default), write each case's ``RunResult`` to the
+            ``fixtures/smoke_goldens.json`` file after scoring.  This regenerates
+            the goldens so ``make eval-smoke`` stays in sync.  Set to False to
+            skip fixture recording (e.g. when running interactively without a
+            writable filesystem).
+    """
     settings = load_settings()
     session_factory = make_session_factory(database_url=settings.postgres_url)
     with session_factory() as session:
@@ -503,7 +522,11 @@ def run() -> OrchestrationReport:
             scope_user_id=scope_user_id,
             scope_channel_id=scope_channel_id,
         )
-        return score_orchestration(SEED_ORCHESTRATION_CASES, run_fn)
+        report = score_orchestration(SEED_ORCHESTRATION_CASES, run_fn)
+        if record:
+            dump_fixtures(report.results, DEFAULT_FIXTURES_PATH)
+            print(f"  [record] fixtures written to {DEFAULT_FIXTURES_PATH}")
+        return report
 
 
 def _main() -> None:
@@ -528,6 +551,13 @@ def _main() -> None:
         print("All non-skipped cases passed.")
     else:
         print(f"{report.failed} case(s) failed — see above for details.")
+
+
+def _main_replay() -> None:
+    """CLI: offline smoke replay (delegates to replay._main_replay)."""
+    from kortny.evals.orchestration.replay import _main_replay as _replay_main
+
+    _replay_main()
 
 
 if __name__ == "__main__":

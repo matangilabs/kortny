@@ -681,3 +681,132 @@ def test_seed_dataset_requires_toolkits_cases_are_top25() -> None:
                 f"case {case.request!r}: requires_toolkits slug {slug!r} "
                 f"not in TOP25_SLUGS"
             )
+
+
+# ---------------------------------------------------------------------------
+# Replay module
+# ---------------------------------------------------------------------------
+
+
+def test_smoke_cases_have_committed_fixture() -> None:
+    """Every smoke=True case must have a committed fixture in smoke_goldens.json.
+
+    This test is the drift guard: if a new smoke case is added to cases.py but
+    its fixture is not committed to smoke_goldens.json, this test fails loudly
+    rather than silently skipping the case at eval-smoke time.
+    """
+    from kortny.evals.orchestration.replay import DEFAULT_FIXTURES_PATH, load_fixtures
+
+    fixtures = load_fixtures(DEFAULT_FIXTURES_PATH)
+    smoke_cases = [c for c in SEED_ORCHESTRATION_CASES if c.smoke]
+    assert smoke_cases, "no smoke=True cases found — mark at least one case smoke=True"
+    missing = [c.request for c in smoke_cases if c.request not in fixtures]
+    assert not missing, (
+        f"{len(missing)} smoke case(s) have no committed fixture in "
+        f"{DEFAULT_FIXTURES_PATH.name}: {missing!r}. "
+        "Run `make eval` (live) to record goldens, then commit the updated file."
+    )
+
+
+def test_replay_scores_smoke_cases_from_goldens() -> None:
+    """Scoring smoke cases with committed fixtures must produce expected pass/fail.
+
+    Loads the committed ``smoke_goldens.json``, builds the replay RunFn, and
+    asserts that ``score_orchestration`` agrees with what the fixture encodes.
+    For each smoke case:
+    - If the fixture has the correct apps (meeting expected_apps and not
+      forbidden_apps), the case passes.
+    - If the fixture has called_apps=[] and expected_apps=(), the case passes
+      (negative/no-tool guard cases).
+
+    Pure offline: no DB, no LLM, no API keys.
+    """
+    from kortny.evals.orchestration.replay import (
+        DEFAULT_FIXTURES_PATH,
+        build_replay_run_fn,
+        load_fixtures,
+    )
+
+    fixtures = load_fixtures(DEFAULT_FIXTURES_PATH)
+    smoke_cases = [c for c in SEED_ORCHESTRATION_CASES if c.smoke]
+    # Only score cases that have a fixture (others would be skipped).
+    replay_fn = build_replay_run_fn(fixtures)
+    report = score_orchestration(smoke_cases, replay_fn)
+
+    # The goldens encode desired behavior, so non-skipped smoke cases should pass.
+    non_skipped_failures = [r for r in report.results if not r.skipped and not r.passed]
+    assert not non_skipped_failures, (
+        f"{len(non_skipped_failures)} smoke case(s) FAIL against committed goldens:\n"
+        + "\n".join(f"  {r.request!r}: {r.failures}" for r in non_skipped_failures)
+    )
+
+
+def test_replay_missing_fixture_returns_skipped() -> None:
+    """build_replay_run_fn must return skipped=True for cases with no fixture."""
+    from kortny.evals.orchestration.replay import build_replay_run_fn
+
+    case = OrchestrationCase(
+        request="__no_fixture_for_this_request__",
+        connected_toolkits=("github",),
+        surface=_DM,
+        expected_apps=("github",),
+    )
+    run_fn = build_replay_run_fn({})
+    result = run_fn(case)
+    assert result.skipped is True
+    assert result.skip_reason == "no replay fixture recorded"
+    assert result.called_apps == frozenset()
+
+
+def test_dump_and_load_fixtures_roundtrip() -> None:
+    """dump_fixtures + load_fixtures must roundtrip RunResults faithfully."""
+    import tempfile
+    from pathlib import Path
+
+    from kortny.evals.orchestration.replay import dump_fixtures, load_fixtures
+
+    rr_a = RunResult(
+        called_apps=frozenset({"github", "linear"}),
+        any_tool_called=True,
+        answer="some answer",
+        skipped=False,
+        skip_reason="",
+    )
+    rr_b = RunResult(
+        called_apps=frozenset(),
+        any_tool_called=False,
+        answer="",
+        skipped=True,
+        skip_reason="not connected",
+    )
+    mapping: dict[str, RunResult] = {
+        "request alpha": rr_a,
+        "request beta": rr_b,
+    }
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+        path = Path(f.name)
+    try:
+        dump_fixtures(mapping, path)
+        loaded = load_fixtures(path)
+        assert loaded["request alpha"].called_apps == frozenset({"github", "linear"})
+        assert loaded["request alpha"].any_tool_called is True
+        assert loaded["request alpha"].skipped is False
+        assert loaded["request beta"].called_apps == frozenset()
+        assert loaded["request beta"].skipped is True
+        assert loaded["request beta"].skip_reason == "not connected"
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def test_replay_run_produces_report_no_secrets() -> None:
+    """run_replay() produces an OrchestrationReport with no secrets/DB/LLM."""
+    from kortny.evals.orchestration.replay import DEFAULT_FIXTURES_PATH, run_replay
+
+    # Only run if the fixture file exists (it is committed as a golden).
+    if not DEFAULT_FIXTURES_PATH.exists():
+        pytest.skip("smoke_goldens.json not present (run make eval first)")
+
+    report = run_replay(smoke_only=True)
+    assert isinstance(report.case_count, int)
+    assert report.case_count > 0
+    assert isinstance(report.pass_rate, float)
