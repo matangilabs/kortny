@@ -38,7 +38,7 @@ working in.
    signed color-coding, the live formulas, and column auto-width.
 5. **Upload the file to the thread** with a one-line description of what the
    workbook contains and which cells are inputs vs. computed. Offer a chart
-   (`chart-maker`) or a PDF (`styled-report-pdf`) as the next artifact.
+   (`chart-maker`) or a PDF (`document_studio`) as the next artifact.
 
 ## Professional standards (non-negotiable)
 

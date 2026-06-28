@@ -74,7 +74,6 @@ authored from scratch.
 | last30days | catalog | — | original (concept: mvanhorn/last30days-skill, MIT) | Kortny |
 | spreadsheet-builder | default | V2/V3 | original (concept-rewrite) | — |
 | deck-builder | catalog | V9 | original (concept-rewrite) | — |
-| styled-report-pdf | default | V9 | original (concept-rewrite) | — |
 | chart-maker | default | V3 | original (concept-rewrite) | — |
 
 > Source/license columns for Agent A/B/D rows reflect the HIG-239 plan and are

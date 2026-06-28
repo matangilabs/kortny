@@ -38,4 +38,4 @@ Lead with a bold title and date. Follow with TL;DR (one sentence), then 3-5 key 
 
 ## File upload format
 Upload as `[report-title]-[date].md` for markdown.
-For PDF: invoke the `styled-report-pdf` skill with this report's content.
+For PDF: call the `document_studio` tool with this report's content as block IR.

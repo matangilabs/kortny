@@ -18,6 +18,6 @@ Use this table to determine the appropriate version(s) of a report for each audi
 
 ## Upgrade options
 
-- For styled PDF output: pair with the `styled-report-pdf` skill.
+- For styled PDF output: use the `document_studio` tool (`format: "pdf"`).
 - For slide deck version: pair with the `deck-builder` skill.
 - For spreadsheet appendix: pair with the `spreadsheet-builder` skill.
