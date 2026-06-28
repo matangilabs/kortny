@@ -26,7 +26,7 @@ that states the takeaway, no chart junk — and upload it to the Slack thread.
    the value axis only, thousands-separated ticks, and the source caption.
 5. **Upload the PNG to the thread** with a one-line read of what the chart
    shows. If it belongs in a deck or report, hand the file path to
-   `deck-builder` or `styled-report-pdf`.
+   `deck-builder` or `document_studio`.
 
 ## Visualization standards (non-negotiable)
 
@@ -42,7 +42,7 @@ that states the takeaway, no chart junk — and upload it to the Slack thread.
 ## Pairing
 
 - `data-brief` / `data-digest` → the prose read of the same numbers.
-- `deck-builder` / `styled-report-pdf` → embed the PNG by file path.
+- `deck-builder` / `document_studio` → embed the PNG by file path.
 
 ## Script
 

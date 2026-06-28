@@ -320,8 +320,6 @@ DOCUMENT_TOOL_HINTS = frozenset(
         "pdf_generator",
         "document_generation",
         "report_generation",
-        "styled_report_pdf",
-        "styled-report-pdf",
         "deck_builder",
         "deck-builder",
         "spreadsheet_builder",

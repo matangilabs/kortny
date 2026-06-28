@@ -22,7 +22,7 @@ discipline (the script caps pies at 5 slices).
 ## Slack-first adaptations
 
 - Output targets a Slack file upload (the PNG itself), or hand-off to
-  `deck-builder` / `styled-report-pdf` by file path.
+  `deck-builder` / `document_studio` by file path.
 - File paths use workbench paths, not local development paths.
 
 ## License
