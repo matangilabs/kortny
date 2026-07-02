@@ -8,6 +8,7 @@ license = { text = "Apache-2.0" }
 authors = [{ name = "Kortny Contributors" }]
 dependencies = [
     "alembic>=1.13",
+    "composio>=0.17.1",
     "cryptography>=48.0.1",
     "fastapi>=0.136",
     "fastembed>=0.8.0",
