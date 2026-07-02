@@ -377,10 +377,12 @@ class ComposioTriggerListener:
     def _resolve_dm_channel(self, user_id: str) -> str | None:
         """Resolve a Slack user id to a DM ('D...') channel id, memoized.
 
-        Lazily builds a single process-lifetime ``WebClient``; the result per
-        ``user_id`` is cached in-process for the life of the listener so a
-        noisy trigger doesn't re-open the same DM on every event. Any
-        exception (bad token, rate limit, deactivated user, ...) is caught
+        Lazily builds a single process-lifetime ``WebClient``; a successful
+        resolution per ``user_id`` is cached in-process for the life of the
+        listener so a noisy trigger doesn't re-open the same DM on every
+        event. Failures are NEVER cached: one transient Slack error (rate
+        limit, network hiccup) must not permanently suppress projections for
+        that owner — the next event simply retries. Any exception is caught
         and logged; the caller treats a ``None`` return as "skip projection"
         rather than a fatal error.
         """
@@ -397,14 +399,17 @@ class ComposioTriggerListener:
                 "composio listener: failed to open DM channel for user_id=%s",
                 user_id,
             )
-            self._dm_channel_cache[user_id] = None
+            # Deliberately not cached — retry on the next event.
             return None
 
         payload = getattr(response, "data", response)
         channel = payload.get("channel") if isinstance(payload, Mapping) else None
         channel_id = channel.get("id") if isinstance(channel, Mapping) else None
         resolved = channel_id if isinstance(channel_id, str) and channel_id else None
-        self._dm_channel_cache[user_id] = resolved
+        if resolved is not None:
+            # Success-only cache. Unbounded growth is fine: the key space is
+            # bounded by the workspace's user count.
+            self._dm_channel_cache[user_id] = resolved
         return resolved
 
     # -- event handling ----------------------------------------------------
@@ -412,7 +417,18 @@ class ComposioTriggerListener:
     def _handle_raw_event(self, raw: Any) -> None:
         # Never let one bad event tear down the subscription or the health
         # loop — every branch below is guarded.
+        #
+        # Two-phase by design (slice C2 review): tx1 records the event and
+        # commits with no network I/O inside the transaction; only then, when
+        # ask mode is on and the event decided 'ask' with a matched
+        # subscription, does phase 2 resolve the DM channel (Slack call,
+        # outside any transaction) and project in a fresh tx2. A projection
+        # failure can never roll back the already-committed event row.
         self._state.last_event_at = self._clock()
+        event_id: uuid.UUID | None = None
+        subscription_id: uuid.UUID | None = None
+        owner_slack_user_id: str | None = None
+        decision: str | None = None
         try:
             parsed = adapt_sdk_event(raw)
             if parsed is None:
@@ -421,17 +437,92 @@ class ComposioTriggerListener:
                 installation_id = _resolve_installation_id(session, parsed)
                 if installation_id is None:
                     return
-                ingest_trigger_event(
+                event = ingest_trigger_event(
                     session,
                     installation_id=installation_id,
                     parsed=parsed,
                     shadow=(self._settings.composio_triggers_mode != "ask"),
-                    dm_channel_resolver=self._resolve_dm_channel,
                 )
+                if event is not None:
+                    # Capture before commit (the ORM row expires on commit).
+                    event_id = event.id
+                    subscription_id = event.subscription_id
+                    decision = event.decision
+                    if subscription_id is not None:
+                        subscription = session.get(
+                            ComposioTriggerSubscription, subscription_id
+                        )
+                        owner_slack_user_id = (
+                            subscription.owner_slack_user_id
+                            if subscription is not None
+                            else None
+                        )
                 session.commit()
         except Exception:
             logger.exception(
                 "composio listener: failed to ingest a trigger event; dropping"
+            )
+            return
+
+        if (
+            self._settings.composio_triggers_mode == "ask"
+            and decision == "ask"
+            and event_id is not None
+            and subscription_id is not None
+        ):
+            self._project_ask_event(
+                event_id=event_id,
+                subscription_id=subscription_id,
+                owner_slack_user_id=owner_slack_user_id,
+            )
+
+    def _project_ask_event(
+        self,
+        *,
+        event_id: uuid.UUID,
+        subscription_id: uuid.UUID,
+        owner_slack_user_id: str | None,
+    ) -> None:
+        """Phase 2: resolve the owner's DM channel and project into Witness.
+
+        The Slack ``conversations.open`` call happens BEFORE the session is
+        opened, so no network I/O ever runs inside a DB transaction. The
+        event row was committed in phase 1; any failure here is logged and
+        swallowed — the event stays on record for audit either way.
+        """
+
+        try:
+            dm_channel_id = (
+                self._resolve_dm_channel(owner_slack_user_id)
+                if owner_slack_user_id
+                else None
+            )
+
+            # Deferred import: kortny.witness.opportunities imports from
+            # kortny.composio (LAUNCH_TRIGGERS); importing it lazily here
+            # keeps the module import graph acyclic by construction.
+            from kortny.witness.opportunities import (  # noqa: PLC0415
+                WitnessOpportunityService,
+            )
+
+            with self._session_factory() as session:
+                event = session.get(ComposioTriggerEvent, event_id)
+                subscription = session.get(ComposioTriggerSubscription, subscription_id)
+                if event is None or subscription is None:
+                    return
+                WitnessOpportunityService(session).project_from_trigger_event(
+                    event=event,
+                    subscription=subscription,
+                    # Pre-resolved outside the transaction; the projection's
+                    # own guard clauses (owner set, 'D…'-shaped id) still run.
+                    dm_channel_resolver=lambda _user_id: dm_channel_id,
+                )
+                session.commit()
+        except Exception:
+            logger.exception(
+                "composio listener: witness projection failed for event %s; "
+                "the event row is already committed and kept",
+                event_id,
             )
 
     # -- connection lifecycle ----------------------------------------------

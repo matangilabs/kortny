@@ -1,29 +1,34 @@
 """Real-Postgres tests for slice C2: Composio trigger events → Witness DM candidates.
 
-Covers WitnessOpportunityService.project_from_trigger_event, the
-ingest_trigger_event(shadow=False) call site, the mode='ask' end-to-end flow
-(and the shadow-mode default staying inert), and the ask-only clamp that keeps
+Covers WitnessOpportunityService.project_from_trigger_event, the listener's
+two-phase flow (tx1 pure ingest → commit → DM resolution outside any
+transaction → tx2 projection) in both shadow and ask modes, the
+never-cache-failures DM resolver, the ask-only clamp that keeps
 composio_trigger-sourced candidates out of autopilot at both the query layer
 (autopilot._eligible_candidates) and the policy layer
-(ProactiveActionPolicy._decide_autopilot).
+(ProactiveActionPolicy._decide_autopilot), and the 0061 migration roundtrip
+(downgrade remaps composio_trigger rows to 'manual').
 """
 
 from __future__ import annotations
 
 import os
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Any
 
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import Engine, delete
-from sqlalchemy.orm import Session
+from sqlalchemy import Engine, delete, text
+from sqlalchemy.orm import Session, sessionmaker
 
 from kortny.composio.client import ParsedTriggerEvent
+from kortny.composio.listener import ComposioTriggerListener
 from kortny.composio.trigger_ingress import ingest_trigger_event
+from kortny.config import Settings
 from kortny.db.models import (
     ComposioConnection,
     ComposioTriggerEvent,
@@ -63,8 +68,14 @@ def engine() -> Iterator[Engine]:
 
 
 @pytest.fixture
-def db_session(engine: Engine) -> Iterator[Session]:
-    session_factory = make_session_factory(engine=engine)
+def session_factory(engine: Engine) -> sessionmaker[Session]:
+    return make_session_factory(engine=engine)
+
+
+@pytest.fixture
+def db_session(
+    engine: Engine, session_factory: sessionmaker[Session]
+) -> Iterator[Session]:
     with session_factory() as session:
         _cleanup(session)
         session.commit()
@@ -72,6 +83,22 @@ def db_session(engine: Engine) -> Iterator[Session]:
         session.rollback()
         _cleanup(session)
         session.commit()
+
+
+def _test_settings(**overrides: Any) -> Settings:
+    base: dict[str, Any] = {
+        "SLACK_BOT_TOKEN": "xoxb-test",
+        "SLACK_APP_TOKEN": "xapp-test",
+        "SLACK_SIGNING_SECRET": "test-secret",
+        "LLM_PROVIDER": "openai",
+        "LLM_API_KEY": "sk-test",
+        "LLM_MODEL": "gpt-4o",
+        "POSTGRES_URL": TEST_POSTGRES_URL or "postgresql://test:test@localhost/test",
+        "COMPOSIO_API_KEY": "composio-test",
+        "KORTNY_COMPOSIO_TRIGGERS_ENABLED": "true",
+        **{k.upper(): v for k, v in overrides.items()},
+    }
+    return Settings.model_validate(base)
 
 
 def _cleanup(session: Session) -> None:
@@ -291,7 +318,7 @@ def test_double_projection_is_idempotent(db_session: Session) -> None:
 
 
 # ---------------------------------------------------------------------------
-# ingest_trigger_event call site — shadow vs ask mode
+# ingest_trigger_event — pure ingest, never projects
 # ---------------------------------------------------------------------------
 
 
@@ -314,49 +341,114 @@ def _parsed_ask_github(
     )
 
 
-def test_shadow_mode_default_creates_no_candidate_even_for_ask_event(
-    db_session: Session,
+def test_ingest_is_pure_and_never_projects(db_session: Session) -> None:
+    """Ingest records the event only — projection belongs to the listener's tx2."""
+
+    iid = _installation(db_session)
+    _subscription(db_session, iid, owner_slack_user_id="U_OWNER_PURE")
+    db_session.commit()
+
+    event = ingest_trigger_event(
+        db_session,
+        installation_id=iid,
+        parsed=_parsed_ask_github(event_id="evt_pure"),
+        shadow=False,
+    )
+    db_session.commit()
+
+    assert event is not None
+    assert event.decision == "ask"
+    assert event.subscription_id is not None
+    assert db_session.query(WitnessOpportunityCandidate).count() == 0
+
+
+# ---------------------------------------------------------------------------
+# Listener two-phase flow — shadow vs ask mode
+# ---------------------------------------------------------------------------
+
+
+def _raw_github_ask_event(
+    *, connected_account_id: str = "ca_synthetic", pr_title: str = "Synthetic PR"
+) -> dict[str, Any]:
+    """SDK-shaped raw frame that the GitHub scorer decides 'ask' on."""
+
+    return {
+        "id": "ti_synthetic",
+        "uuid": "ti_synthetic",
+        "user_id": "composio_user_synthetic",
+        "trigger_slug": "GITHUB_PULL_REQUEST_EVENT",
+        "toolkit_slug": "GITHUB",
+        "payload": {
+            "action": "review_requested",
+            "pull_request": {"draft": False, "title": pr_title},
+            "requested_reviewer": {"login": "synthetic-reviewer"},
+        },
+        "metadata": {
+            "id": "ti_synthetic",
+            "connected_account": {"id": connected_account_id},
+        },
+        "original_payload": None,
+    }
+
+
+def _listener(
+    session_factory: sessionmaker[Session], *, mode: str
+) -> ComposioTriggerListener:
+    return ComposioTriggerListener(
+        settings=_test_settings(KORTNY_COMPOSIO_TRIGGERS_MODE=mode),
+        session_factory=session_factory,
+        sleep=lambda _seconds: None,
+    )
+
+
+def test_listener_shadow_mode_records_event_without_projection(
+    db_session: Session, session_factory: sessionmaker[Session]
 ) -> None:
     iid = _installation(db_session)
     _subscription(db_session, iid, owner_slack_user_id="U_OWNER_SHADOW")
     db_session.commit()
 
-    event = ingest_trigger_event(
-        db_session,
-        installation_id=iid,
-        parsed=_parsed_ask_github(event_id="evt_shadow"),
-        # shadow defaults to True — mirrors KORTNY_COMPOSIO_TRIGGERS_MODE=shadow.
-        dm_channel_resolver=_always_channel("D_SYNTHETIC_SHADOW"),
-    )
-    db_session.commit()
+    listener = _listener(session_factory, mode="shadow")
+    resolver_calls: list[str] = []
 
-    assert event is not None
+    def _tracking_resolver(user_id: str) -> str | None:
+        resolver_calls.append(user_id)
+        return "D_SYNTHETIC_SHADOW"
+
+    listener._resolve_dm_channel = _tracking_resolver  # type: ignore[method-assign]
+    listener._handle_raw_event(_raw_github_ask_event())
+
+    db_session.expire_all()
+    event = db_session.query(ComposioTriggerEvent).one()
     assert event.decision == "ask"
     assert db_session.query(WitnessOpportunityCandidate).count() == 0
+    # Phase 2 never ran: the resolver was never consulted in shadow mode.
+    assert resolver_calls == []
 
 
-def test_ask_mode_end_to_end_is_eligible_for_dm_digest(db_session: Session) -> None:
-    """Mirrors the listener's real call shape: shadow=False + a resolver."""
-
+def test_listener_ask_mode_two_phase_projects_dm_digest_eligible_candidate(
+    db_session: Session, session_factory: sessionmaker[Session]
+) -> None:
     iid = _installation(db_session)
     _subscription(db_session, iid, owner_slack_user_id="U_OWNER_E2E")
     db_session.commit()
 
-    event = ingest_trigger_event(
-        db_session,
-        installation_id=iid,
-        parsed=_parsed_ask_github(event_id="evt_e2e"),
-        shadow=False,
-        dm_channel_resolver=_always_channel("D_SYNTHETIC_E2E"),
+    listener = _listener(session_factory, mode="ask")
+    listener._resolve_dm_channel = (  # type: ignore[method-assign]
+        lambda user_id: "D_SYNTHETIC_E2E"
     )
-    db_session.commit()
+    listener._handle_raw_event(_raw_github_ask_event())
 
-    assert event is not None
+    db_session.expire_all()
+    event = db_session.query(ComposioTriggerEvent).one()
     assert event.decision == "ask"
 
     candidate = db_session.query(WitnessOpportunityCandidate).one()
     assert candidate.target_slack_user_id == "U_OWNER_E2E"
+    assert candidate.channel_id == "D_SYNTHETIC_E2E"
     assert candidate.source_type == "composio_trigger"
+    assert candidate.source_id == str(event.id)
+    assert candidate.source_task_id is None
 
     eligible = WitnessRunner(db_session)._eligible_dm_candidates(
         installation_id=iid, now=datetime.now(UTC), limit=10
@@ -364,24 +456,83 @@ def test_ask_mode_end_to_end_is_eligible_for_dm_digest(db_session: Session) -> N
     assert candidate.id in {c.id for c in eligible}
 
 
-def test_ask_mode_without_resolver_skips_projection(db_session: Session) -> None:
-    """shadow=False but no dm_channel_resolver supplied: skip, don't raise."""
-
+def test_listener_ask_mode_unresolvable_dm_keeps_event_without_candidate(
+    db_session: Session, session_factory: sessionmaker[Session]
+) -> None:
     iid = _installation(db_session)
-    _subscription(db_session, iid, owner_slack_user_id="U_OWNER_NORESOLVER")
+    _subscription(db_session, iid, owner_slack_user_id="U_OWNER_NODM")
     db_session.commit()
 
-    event = ingest_trigger_event(
-        db_session,
-        installation_id=iid,
-        parsed=_parsed_ask_github(event_id="evt_noresolver"),
-        shadow=False,
-    )
-    db_session.commit()
+    listener = _listener(session_factory, mode="ask")
+    listener._resolve_dm_channel = lambda user_id: None  # type: ignore[method-assign]
+    listener._handle_raw_event(_raw_github_ask_event())
 
-    assert event is not None
+    db_session.expire_all()
+    event = db_session.query(ComposioTriggerEvent).one()
     assert event.decision == "ask"
     assert db_session.query(WitnessOpportunityCandidate).count() == 0
+
+
+def test_listener_projection_failure_never_rolls_back_event_row(
+    db_session: Session, session_factory: sessionmaker[Session]
+) -> None:
+    """A phase-2 failure is swallowed; the phase-1 event commit is untouched."""
+
+    iid = _installation(db_session)
+    _subscription(db_session, iid, owner_slack_user_id="U_OWNER_FAIL")
+    db_session.commit()
+
+    listener = _listener(session_factory, mode="ask")
+
+    def _raising_resolver(user_id: str) -> str | None:
+        raise RuntimeError("synthetic Slack outage")
+
+    listener._resolve_dm_channel = _raising_resolver  # type: ignore[method-assign]
+    listener._handle_raw_event(_raw_github_ask_event())
+
+    db_session.expire_all()
+    event = db_session.query(ComposioTriggerEvent).one()
+    assert event.decision == "ask"
+    assert db_session.query(WitnessOpportunityCandidate).count() == 0
+
+
+# ---------------------------------------------------------------------------
+# DM resolver cache — successes only
+# ---------------------------------------------------------------------------
+
+
+class _FlakySlackClient:
+    """conversations_open fails on the first call, succeeds afterwards."""
+
+    def __init__(self, channel_id: str) -> None:
+        self._channel_id = channel_id
+        self.calls = 0
+
+    def conversations_open(self, *, users: str) -> Mapping[str, Any]:
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("synthetic transient Slack error")
+        return {"ok": True, "channel": {"id": self._channel_id}}
+
+
+def test_resolve_dm_channel_never_caches_failures(
+    session_factory: sessionmaker[Session],
+) -> None:
+    listener = _listener(session_factory, mode="ask")
+    fake = _FlakySlackClient("D_SYNTHETIC_CACHE")
+    listener._slack_client = fake  # type: ignore[assignment]
+
+    # First call fails transiently → None, and the failure is NOT cached.
+    assert listener._resolve_dm_channel("U_OWNER_CACHE") is None
+    assert "U_OWNER_CACHE" not in listener._dm_channel_cache
+
+    # Second call retries and succeeds → cached.
+    assert listener._resolve_dm_channel("U_OWNER_CACHE") == "D_SYNTHETIC_CACHE"
+    assert listener._dm_channel_cache["U_OWNER_CACHE"] == "D_SYNTHETIC_CACHE"
+
+    # Third call is served from the cache — no further Slack call.
+    assert listener._resolve_dm_channel("U_OWNER_CACHE") == "D_SYNTHETIC_CACHE"
+    assert fake.calls == 2
 
 
 # ---------------------------------------------------------------------------
@@ -470,3 +621,80 @@ def test_migration_allows_composio_trigger_source_type_on_insert(
     reloaded = db_session.get(WitnessOpportunityCandidate, candidate.id)
     assert reloaded is not None
     assert reloaded.source_type == "composio_trigger"
+
+
+def _migration_0061_down_revision() -> str:
+    """Read 0061's parent so the test survives orchestrator re-parenting.
+
+    Mirrors the pattern in tests/test_witness_quality.py.
+    """
+
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "kortny_migration_0061",
+        "kortny/db/migrations/versions/0061_witness_composio_trigger_source.py",
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    down_revision = module.down_revision
+    assert isinstance(down_revision, str)
+    return down_revision
+
+
+def test_migration_0061_downgrade_remaps_composio_trigger_rows(
+    engine: Engine,
+) -> None:
+    """Downgrade must not fail once ask-mode has projected candidates.
+
+    0061's downgrade remaps source_type='composio_trigger' rows to 'manual'
+    before recreating the old constraint; otherwise the recreate would abort
+    against existing rows. Roundtrips back to head at the end.
+    """
+
+    assert TEST_POSTGRES_URL is not None
+    config = Config("alembic.ini")
+    config.set_main_option("sqlalchemy.url", normalize_database_url(TEST_POSTGRES_URL))
+
+    installation_id = uuid.uuid4()
+    dedupe_key = f"downgrade-remap-{uuid.uuid4().hex[:8]}"
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO installations (id, slack_team_id) VALUES (:id, :team_id)"
+            ),
+            {"id": installation_id, "team_id": f"T{uuid.uuid4().hex}"},
+        )
+        conn.execute(
+            text(
+                "INSERT INTO witness_opportunity_candidates "
+                "(installation_id, channel_id, target_slack_user_id, "
+                "visibility_scope_type, visibility_scope_id, candidate_type, "
+                "title, summary, source_type, dedupe_key) "
+                "VALUES (:installation_id, 'D_SYNTHETIC_DOWNGRADE', "
+                "'U_OWNER_DOWNGRADE', 'dm', 'D_SYNTHETIC_DOWNGRADE', "
+                "'general_help', 'Downgrade remap test', 'Synthetic row.', "
+                "'composio_trigger', :dedupe_key)"
+            ),
+            {"installation_id": installation_id, "dedupe_key": dedupe_key},
+        )
+
+    try:
+        command.downgrade(config, _migration_0061_down_revision())
+        with engine.begin() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT source_type FROM witness_opportunity_candidates "
+                    "WHERE dedupe_key = :dedupe_key"
+                ),
+                {"dedupe_key": dedupe_key},
+            ).one()
+            assert row.source_type == "manual"
+    finally:
+        command.upgrade(config, "head")
+        with engine.begin() as conn:
+            conn.execute(
+                text("DELETE FROM installations WHERE id = :id"),
+                {"id": installation_id},
+            )

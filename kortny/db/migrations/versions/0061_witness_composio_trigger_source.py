@@ -36,6 +36,16 @@ def downgrade() -> None:
         "witness_opportunity_candidates",
         type_="check",
     )
+    # Remap any rows ask-mode has already projected: 'composio_trigger' is not
+    # in the old allowed set, so recreating the constraint below would fail
+    # against existing rows. 'manual' is the closest legacy bucket (no source
+    # FKs, no profile); losing the finer-grained provenance label is an
+    # accepted downgrade tradeoff.
+    op.execute(
+        "UPDATE witness_opportunity_candidates "
+        "SET source_type = 'manual' "
+        "WHERE source_type = 'composio_trigger'"
+    )
     op.create_check_constraint(
         "ck_witness_opportunity_candidates_source_type",
         "witness_opportunity_candidates",
