@@ -884,18 +884,6 @@ def test_reaction_accept_recurring_drafts_schedule_confirmation(
 # --- Design-doc test: reaction dismiss -> dismissed + receptivity history ---
 
 
-@pytest.mark.xfail(
-    reason=(
-        "Wall-clock/date-dependent flake (HIG-273): green in main CI on 2026-06-14, "
-        "red on 2026-06-16 with NO change to the witness code (last touched 2026-06-11) "
-        "or this test (2026-06-12). The dismissal->receptivity->silent assertion is "
-        "entangled with the 24h digest budget window via datetime.now(UTC); the candidate "
-        "lands 'budget_deferred' instead of 'silent'. Quarantined to unblock the merge "
-        "train; fix deterministically by threading an injectable clock through the "
-        "reaction-dismissal path so the test does not depend on real wall-clock."
-    ),
-    strict=False,
-)
 def test_reaction_dismiss_records_feedback_for_receptivity(
     db_session: Session,
 ) -> None:
@@ -916,7 +904,14 @@ def test_reaction_dismiss_records_feedback_for_receptivity(
     body, event = _reaction_event(reaction="no_entry_sign", message_ts=message_ts)
     body["team_id"] = installation.slack_team_id
 
-    result = ingress.handle_reaction_added(body=body, event=event)
+    # Fixed offsets from the module-level NOW, not datetime.now(UTC): pinning
+    # the dismissal + follow-up delivery clocks to the fixture clock keeps the
+    # receptivity/confidence-span math (and thus the "silent" outcome below)
+    # independent of the real calendar date (HIG-273 flake root cause).
+    dismiss_at = NOW + timedelta(minutes=5)
+    follow_up_delivery_now = NOW + timedelta(minutes=10)
+
+    result = ingress.handle_reaction_added(body=body, event=event, now=dismiss_at)
     db_session.flush()
 
     assert result.handled is True
@@ -932,11 +927,12 @@ def test_reaction_dismiss_records_feedback_for_receptivity(
     assert last["reason"] == "slack_reaction"
 
     # The dismissal now feeds channel receptivity: the next candidate of the
-    # same type scores lower and stays silent. A single-scan candidate keeps its
-    # raw confidence (f(1, e, 0)=1.0), so without the fresh dismissal it scores
-    # 0.8 >= 0.55; the dismissal penalty (x~0.6) lands it below the threshold
-    # (0.8 * 0.6 = 0.48). The dismissal feedback entry is stamped with
-    # wall-clock time, so score at wall-clock now.
+    # same type scores lower and stays silent. With reinforcement_count=1 the
+    # confidence boost's reinforcement term is 0, but the span term still
+    # grows with (follow_up_delivery_now - first_observed_at) — 10 fixture
+    # days here — giving f(1, e, 10) ~= 1.105, so raw confidence 0.8 composes
+    # to ~0.884. The dismissal penalty (x=0.6, negligible recovery over the
+    # 5-minute gap) lands the score at ~0.53, below the 0.55 threshold.
     follow_up = make_channel_candidate(
         db_session,
         installation.id,
@@ -951,7 +947,7 @@ def test_reaction_dismiss_records_feedback_for_receptivity(
         db_session,
         installation.id,
         client,
-        now=datetime.now(UTC),
+        now=follow_up_delivery_now,
     )
     db_session.flush()
     outcome = next(o for o in after.deliveries if o.candidate_id == follow_up.id)

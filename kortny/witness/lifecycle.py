@@ -67,11 +67,12 @@ def dismiss_candidate(
     installation_id: uuid.UUID,
     by_user_id: str,
     reason: str | None = None,
+    now: datetime | None = None,
 ) -> WitnessOpportunityCandidate:
     candidate = _candidate_for_update(session, candidate_id, installation_id)
     _ensure_not_archived(candidate)
     _ensure_not_automated(candidate)
-    now = datetime.now(UTC)
+    now = now or datetime.now(UTC)
     prev_status = candidate.status
     candidate.status = "dismissed"
     candidate.cooldown_until = None

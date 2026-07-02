@@ -1151,8 +1151,14 @@ class SlackIngress:
         *,
         body: Mapping[str, Any],
         event: Mapping[str, Any],
+        now: datetime | None = None,
     ) -> ReactionResult:
-        """Dispatch a Slack reaction to cancel/retry/confirmation handlers."""
+        """Dispatch a Slack reaction to cancel/retry/confirmation handlers.
+
+        ``now`` overrides the wall clock used to stamp Witness dismissal
+        feedback; tests pass a fixed value so receptivity scoring stays
+        deterministic. Production callers omit it and get real time.
+        """
 
         team_id = _team_id(body, event)
         installation = self._get_or_create_installation(team_id)
@@ -1164,7 +1170,7 @@ class SlackIngress:
             team_id=team_id,
         )
         try:
-            result = self._handle_reaction_added(event)
+            result = self._handle_reaction_added(event, now=now)
         except Exception as exc:
             self.inbound_events.mark_failed(
                 inbound_event,
@@ -1185,7 +1191,12 @@ class SlackIngress:
             )
         return result
 
-    def _handle_reaction_added(self, event: Mapping[str, Any]) -> ReactionResult:
+    def _handle_reaction_added(
+        self,
+        event: Mapping[str, Any],
+        *,
+        now: datetime | None = None,
+    ) -> ReactionResult:
         reaction = _required_str(event, "reaction")
         user_id = _required_str(event, "user")
         item = event.get("item")
@@ -1212,6 +1223,7 @@ class SlackIngress:
                 channel_id=channel_id,
                 message_ts=message_ts,
                 user_id=user_id,
+                now=now,
             )
             if witness_result.handled:
                 return witness_result
@@ -2465,13 +2477,16 @@ class SlackIngress:
         channel_id: str,
         message_ts: str,
         user_id: str,
+        now: datetime | None = None,
     ) -> ReactionResult:
         """Route accept/dismiss reactions on Witness channel suggestion posts.
 
         HIG-198: the suggestion post is an outbox row whose idempotency key is
         ``witness_channel_suggestion:{candidate_id}``. Accept reuses the
         existing lifecycle (accept_candidate -> materialize_acceptance, same
-        as the dashboard); dismiss feeds HIG-227 receptivity learning.
+        as the dashboard); dismiss feeds HIG-227 receptivity learning. ``now``
+        overrides the wall clock used to stamp the dismissal feedback entry
+        (tests pin it for deterministic receptivity scoring).
         """
 
         side_effect = self.session.scalar(
@@ -2530,6 +2545,7 @@ class SlackIngress:
                 installation_id=side_effect.installation_id,
                 by_user_id=user_id,
                 reason="slack_reaction",
+                now=now,
             )
             logger.info(
                 "slack witness suggestion dismissed candidate_id=%s user=%s",
