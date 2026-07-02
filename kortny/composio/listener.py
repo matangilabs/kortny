@@ -62,11 +62,12 @@ import logging
 import random
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from slack_sdk import WebClient
 from sqlalchemy import CursorResult, create_engine, delete, func, select
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.orm import Session, sessionmaker
@@ -321,6 +322,12 @@ class ComposioTriggerListener:
         self._retention_days = settings.composio_trigger_retention_days
         self._last_retention_run: float | None = None
         self._state = _ListenerState()
+        # Lazily-built, process-lifetime WebClient + per-user_id memoized DM
+        # channel cache for the ask-mode projection path (slice C2). Built
+        # only when the mode setting turns projection on, so shadow-mode
+        # deployments never construct a Slack client here.
+        self._slack_client: WebClient | None = None
+        self._dm_channel_cache: dict[str, str | None] = {}
 
     # -- leader election -----------------------------------------------
 
@@ -365,6 +372,41 @@ class ComposioTriggerListener:
         except Exception:
             logger.exception("composio listener: retention sweep failed; continuing")
 
+    # -- ask-mode DM channel resolution (slice C2) --------------------------
+
+    def _resolve_dm_channel(self, user_id: str) -> str | None:
+        """Resolve a Slack user id to a DM ('D...') channel id, memoized.
+
+        Lazily builds a single process-lifetime ``WebClient``; the result per
+        ``user_id`` is cached in-process for the life of the listener so a
+        noisy trigger doesn't re-open the same DM on every event. Any
+        exception (bad token, rate limit, deactivated user, ...) is caught
+        and logged; the caller treats a ``None`` return as "skip projection"
+        rather than a fatal error.
+        """
+
+        if user_id in self._dm_channel_cache:
+            return self._dm_channel_cache[user_id]
+
+        try:
+            if self._slack_client is None:
+                self._slack_client = WebClient(token=self._settings.slack_bot_token)
+            response = self._slack_client.conversations_open(users=user_id)
+        except Exception:
+            logger.exception(
+                "composio listener: failed to open DM channel for user_id=%s",
+                user_id,
+            )
+            self._dm_channel_cache[user_id] = None
+            return None
+
+        payload = getattr(response, "data", response)
+        channel = payload.get("channel") if isinstance(payload, Mapping) else None
+        channel_id = channel.get("id") if isinstance(channel, Mapping) else None
+        resolved = channel_id if isinstance(channel_id, str) and channel_id else None
+        self._dm_channel_cache[user_id] = resolved
+        return resolved
+
     # -- event handling ----------------------------------------------------
 
     def _handle_raw_event(self, raw: Any) -> None:
@@ -383,7 +425,8 @@ class ComposioTriggerListener:
                     session,
                     installation_id=installation_id,
                     parsed=parsed,
-                    shadow=True,
+                    shadow=(self._settings.composio_triggers_mode != "ask"),
+                    dm_channel_resolver=self._resolve_dm_channel,
                 )
                 session.commit()
         except Exception:
