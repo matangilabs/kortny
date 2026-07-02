@@ -26,6 +26,7 @@ from kortny.agent.thread_context import (
     ThreadTranscriptMessage,
     ThreadTranscriptProvider,
 )
+from kortny.composio.identity import resolve_external_identities
 from kortny.db.models import (
     Artifact,
     SlackChannelMembership,
@@ -802,13 +803,27 @@ class ContextAssembler:
         body = (fact.value_text or "").strip()
         if not body:
             return None
-        return (
+        base = (
             f"Who you're helping — {body}.\n"
             "This request is about their own work. Resolve it against THIS "
             "user's own connected tools for those work surfaces and their active "
             "projects (use find_tools to load them), scoped to what they can "
             "access. Frame the answer for their role; do not dump every "
             "connected tool or assume a generic role."
+        )
+        identities = resolve_external_identities(
+            self.session,
+            task.installation_id,
+            task.slack_user_id,
+        )
+        if not identities:
+            return base
+        handle_lines = "\n".join(
+            f'- {slug}: account "{label}"' for slug, label in sorted(identities.items())
+        )
+        return (
+            f"{base}\nKnown account handles for this user (use for server-side "
+            f"filters, e.g. assignee:<handle>):\n{handle_lines}"
         )
 
     def _prior_context(self, task: Task) -> _PriorContext:

@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 
 from kortny.agent.context import ContextAssembler
 from kortny.db.models import (
+    ComposioConnection,
     Installation,
     Task,
     TaskEvent,
@@ -67,7 +68,7 @@ def db_session(engine: Engine) -> Iterator[Session]:
 
 
 def _cleanup(session: Session) -> None:
-    for model in (WorkspaceState, TaskEvent, Task, Installation):
+    for model in (ComposioConnection, WorkspaceState, TaskEvent, Task, Installation):
         session.execute(delete(model))
 
 
@@ -176,3 +177,46 @@ def test_persona_fact_never_rides_in_known_facts(db_session: Session) -> None:
     # The persona text appears in exactly one message: the dedicated block.
     assert len(carrying) == 1
     assert carrying[0].startswith("Who you're helping")
+
+
+def test_persona_block_includes_external_account_handle_when_captured(
+    db_session: Session,
+) -> None:
+    installation = _installation(db_session)
+    _seed_persona_fact(db_session, installation)
+    db_session.add(
+        ComposioConnection(
+            installation_id=installation.id,
+            toolkit_slug="github",
+            auth_config_id="ac_gh",
+            connected_account_id="ca_gh",
+            composio_user_id=f"slack:{installation.id}:{USER}",
+            owner_slack_user_id=USER,
+            visibility_scope_type="user",
+            visibility_scope_id=USER,
+            status="active",
+            external_account_label="octocat-x",
+        )
+    )
+    db_session.commit()
+    task = _task(db_session, installation)
+    _record_intent(db_session, task, persona_relevant=True)
+
+    blocks = _persona_messages(db_session, task)
+
+    assert len(blocks) == 1
+    assert 'github: account "octocat-x"' in blocks[0]
+
+
+def test_persona_block_omits_handle_section_without_captured_identities(
+    db_session: Session,
+) -> None:
+    installation = _installation(db_session)
+    _seed_persona_fact(db_session, installation)
+    task = _task(db_session, installation)
+    _record_intent(db_session, task, persona_relevant=True)
+
+    blocks = _persona_messages(db_session, task)
+
+    assert len(blocks) == 1
+    assert "Known account handles" not in blocks[0]

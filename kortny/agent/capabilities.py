@@ -45,6 +45,7 @@ class ConnectedToolkitSummary:
     tool_names: tuple[str, ...]
     profile_summary: str | None = None
     capability_buckets: tuple[str, ...] = ()
+    external_account_label: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,6 +138,8 @@ def render_connected_integrations(
                 human_name = _humanize_slug(tk.toolkit_slug)
                 desc = f"{human_name} — Third-party integration via Composio."
         lines.append(f"- {tk.toolkit_slug}: {desc}")
+        if tk.external_account_label:
+            lines.append(f'  {tk.toolkit_slug}: account "{tk.external_account_label}"')
         if tk.capability_buckets:
             lines.append(f"  Capabilities: {', '.join(tk.capability_buckets[:6])}")
     lines.append("</connected_integrations>")

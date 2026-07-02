@@ -508,6 +508,82 @@ def test_worker_registry_exposes_integration_inventory_for_capability_lookup(
     )
 
 
+def test_list_integrations_includes_external_account_label_when_present(
+    db_session: Session,
+    tmp_path: Path,
+) -> None:
+    task = create_task(db_session, slack_channel_id="CAlpha", slack_user_id="UAneesh")
+    task.input = "What integrations do you have?"
+    add_connection(
+        db_session,
+        task,
+        connected_account_id="ca_notion",
+        scope_type="workspace",
+        scope_id=None,
+        toolkit_slug="notion",
+        display_name="Notion workspace",
+        # No external identity ever captured for this one.
+    )
+    add_connection(
+        db_session,
+        task,
+        connected_account_id="ca_firecrawl",
+        scope_type="user",
+        scope_id="UAneesh",
+        toolkit_slug="firecrawl",
+        display_name="Firecrawl personal",
+        external_account_label="firecrawl-user-x",
+    )
+    task_service = TaskService(db_session)
+    task_service.append_event(
+        task,
+        TaskEventType.log,
+        {
+            "message": "intent_classification_completed",
+            "source": "app_mention",
+            "decision": {
+                "addressed_to_kortny": True,
+                "classification": "task_request",
+                "confidence": 0.95,
+                "should_create_task": True,
+                "should_ack_with_reaction": False,
+                "needs_channel_context": False,
+                "needs_thread_context": False,
+                "needs_file_context": False,
+                "likely_tools": ["describe_tools", "list_integrations"],
+                "model_tier": "cheap",
+                "reason": "Capability lookup.",
+            },
+        },
+    )
+    db_session.commit()
+    settings = build_settings(
+        composio_api_key="composio-key",
+        sandbox_runner_url="http://sandbox-runner:8090",
+    )
+    composio_client = FakeComposioClient()
+
+    registry = AgentTaskExecutor(
+        settings=settings,
+        web_search_tool=StaticWebSearchTool(),
+        composio_client=composio_client,
+    )._build_registry(
+        settings=settings,
+        session=db_session,
+        task=task,
+        task_service=task_service,
+        working_dir=tmp_path,
+    )
+    result = registry.invoke("list_integrations", {})
+
+    by_slug = {
+        connection["toolkit_slug"]: connection
+        for connection in result.output["connected_integrations"]
+    }
+    assert by_slug["firecrawl"]["external_account_label"] == "firecrawl-user-x"
+    assert by_slug["notion"]["external_account_label"] is None
+
+
 def test_worker_registry_omits_code_exec_when_sandbox_runner_is_unconfigured(
     db_session: Session,
     tmp_path: Path,
@@ -619,6 +695,7 @@ def add_connection(
     toolkit_slug: str = "firecrawl",
     status: str = "active",
     display_name: str | None = None,
+    external_account_label: str | None = None,
 ) -> None:
     session.add(
         ComposioConnection(
@@ -633,6 +710,7 @@ def add_connection(
             visibility_scope_id=scope_id,
             status=status,
             display_name=display_name,
+            external_account_label=external_account_label,
         )
     )
 

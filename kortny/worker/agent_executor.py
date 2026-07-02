@@ -49,7 +49,7 @@ from kortny.composio.connect import (
     park_payload,
 )
 from kortny.composio.provider import ComposioExternalToolProvider
-from kortny.composio.runtime import connected_toolkit_slugs
+from kortny.composio.runtime import ComposioConnectionResolver, connected_toolkit_slugs
 from kortny.config import Settings, load_settings
 from kortny.db.models import (
     Artifact,
@@ -2095,9 +2095,16 @@ class AgentTaskExecutor:
                     attrs = row.attrs_json or {}
                     if attrs.get("kind") == "capability_profile":
                         profile_by_slug[slug] = attrs
+                # External-identity capture: the connection this task actually
+                # resolves to (user scope wins over channel/workspace) carries
+                # the best-effort captured handle, if any.
+                connection_resolver = ComposioConnectionResolver(session, task)
                 for slug in toolkit_slugs:
                     tool_names = tuple(sorted(tools_by_slug.get(slug, [])))
                     profile = profile_by_slug.get(slug)
+                    best_connection = connection_resolver.best_connection(
+                        toolkit_slug=slug
+                    )
                     summaries.append(
                         ConnectedToolkitSummary(
                             toolkit_slug=slug,
@@ -2108,6 +2115,11 @@ class AgentTaskExecutor:
                                 tuple(profile.get("capability_buckets", [])[:8])
                                 if profile
                                 else ()
+                            ),
+                            external_account_label=(
+                                best_connection.external_account_label
+                                if best_connection
+                                else None
                             ),
                         )
                     )
