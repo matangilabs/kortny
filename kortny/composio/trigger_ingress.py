@@ -9,8 +9,10 @@ with the deterministic launch-trigger scorer, and persists the result as a
 ``ComposioTriggerEvent`` row.
 
 The caller owns the transaction; this function flushes but does not commit.
-In shadow mode (the default) the function stops after recording the event and
-never creates witness candidates or posts to Slack.
+Ingest is pure recording: it never creates witness candidates and never
+touches Slack. Ask-mode Witness projection (slice C2) runs in a separate
+follow-up transaction owned by the listener, keyed off the returned row's
+``decision`` and ``subscription_id``.
 """
 
 from __future__ import annotations
@@ -92,7 +94,7 @@ def ingest_trigger_event(
     parsed: ParsedTriggerEvent,
     shadow: bool = True,
 ) -> ComposioTriggerEvent | None:
-    """Ingest a verified Composio trigger event.
+    """Ingest a verified Composio trigger event (pure ingest — no side effects).
 
     Steps:
     1. RESOLVE: find an active ComposioTriggerSubscription by
@@ -108,7 +110,13 @@ def ingest_trigger_event(
        ``(installation_id, trigger_slug, event_id)`` unique constraint. A
        concurrent duplicate delivery loses the race harmlessly; the caller
        gets the existing row back either way.
-    4. In shadow mode: stop here — no witness candidates, no Slack delivery.
+    4. STOP. This function never creates witness candidates and never touches
+       Slack — ask-mode Witness projection (slice C2) is the caller's job in
+       a SEPARATE follow-up transaction (see
+       ``ComposioTriggerListener._project_ask_event``), so Slack network I/O
+       never runs inside the ingest transaction and a projection failure can
+       never roll back the event row. The returned row carries everything the
+       caller needs to decide (``decision``, ``subscription_id``).
 
     The caller owns the transaction. This function flushes but does not
     commit. Returns ``None`` when the event was dropped (ambiguous routing).
@@ -205,8 +213,9 @@ def ingest_trigger_event(
     event = session.get(ComposioTriggerEvent, inserted_id)
     assert event is not None, "just-inserted row must be loadable in this transaction"
 
-    # Shadow mode: stop here.
-    # When shadow=False, future slices will project into the Witness ledger.
-    _ = shadow  # acknowledged; future use
+    # Pure ingest: witness projection happens in the caller's second
+    # transaction (see docstring step 4). ``shadow`` is retained for call-path
+    # signature stability; ingest itself behaves identically either way.
+    _ = shadow
 
     return event
