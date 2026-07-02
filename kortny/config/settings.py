@@ -541,7 +541,10 @@ class Settings(BaseSettings):
         # If the socket reports alive but neither a connection renewal nor an
         # inbound event has been observed in this window, force a reconnect —
         # a defense against a zombie connection the SDK itself doesn't detect.
-        default=180.0,
+        # Quiet workspaces legitimately see zero events for long stretches, so
+        # this bounds zombie detection, not normal cadence: one preventive
+        # reconnect per half hour, not a treadmill every few minutes.
+        default=1800.0,
         validation_alias="KORTNY_COMPOSIO_LISTENER_STALE_RECONNECT_SECONDS",
     )
     composio_listener_reconnect_max_seconds: float = Field(
