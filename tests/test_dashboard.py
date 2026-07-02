@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 from kortny.composio import (
     ComposioAuthConfig,
     ComposioCatalog,
+    ComposioClient,
     ComposioConnectedAccountDetails,
     ComposioConnectionError,
     ComposioConnectionRequest,
@@ -33,6 +34,7 @@ from kortny.dashboard.settings import DashboardAuthMode, DashboardSettings
 from kortny.db.models import (
     Artifact,
     ComposioConnection,
+    ComposioTriggerSubscription,
     DashboardOAuthState,
     DashboardUser,
     EncryptedSecret,
@@ -4781,6 +4783,186 @@ def test_dashboard_style_card_pin_and_clear_actions(
     assert "pinned_style" not in profile.profile_json
 
 
+def _trigger_route_connection(
+    session: Session,
+    installation: Installation,
+    *,
+    connected_account_id: str,
+    toolkit_slug: str = "github",
+    owner: str = "UTrig",
+) -> ComposioConnection:
+    connection = ComposioConnection(
+        installation_id=installation.id,
+        toolkit_slug=toolkit_slug,
+        connected_account_id=connected_account_id,
+        composio_user_id=f"slack:{installation.id}:{owner}",
+        owner_slack_user_id=owner,
+        visibility_scope_type="user",
+        visibility_scope_id=owner,
+        status="active",
+        metadata_json={},
+    )
+    session.add(connection)
+    session.flush()
+    return connection
+
+
+def test_composio_trigger_enable_unknown_connection_id_is_404(
+    client: tuple[TestClient, Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    test_client, _session = client
+    set_runtime_settings_env(monkeypatch)
+    monkeypatch.setenv("KORTNY_COMPOSIO_TRIGGERS_ENABLED", "true")
+    login(test_client)
+
+    response = test_client.post(
+        "/composio/github/triggers/GITHUB_PULL_REQUEST_EVENT/enable",
+        data={"connection_id": str(uuid.uuid4())},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 404
+
+
+def test_composio_trigger_enable_toolkit_mismatch_is_404(
+    client: tuple[TestClient, Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    test_client, session = client
+    installation = Installation(slack_team_id=f"T{uuid.uuid4().hex}")
+    session.add(installation)
+    session.flush()
+    other_toolkit = _trigger_route_connection(
+        session,
+        installation,
+        connected_account_id="ca_notion_x",
+        toolkit_slug="notion",
+    )
+    session.commit()
+    set_runtime_settings_env(monkeypatch)
+    monkeypatch.setenv("KORTNY_COMPOSIO_TRIGGERS_ENABLED", "true")
+    login(test_client)
+
+    response = test_client.post(
+        "/composio/github/triggers/GITHUB_PULL_REQUEST_EVENT/enable",
+        data={"connection_id": str(other_toolkit.id)},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 404
+
+
+def test_composio_trigger_enable_targets_posted_connection_not_latest(
+    client: tuple[TestClient, Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With two active accounts on one toolkit, the enable acts on exactly the
+    connection the form posted — never a latest-updated guess."""
+
+    test_client, session = client
+    installation = Installation(slack_team_id=f"T{uuid.uuid4().hex}")
+    session.add(installation)
+    session.flush()
+    target = _trigger_route_connection(
+        session, installation, connected_account_id="ca_target"
+    )
+    _trigger_route_connection(
+        session, installation, connected_account_id="ca_other", owner="UOther"
+    )
+    session.commit()
+    set_runtime_settings_env(monkeypatch)
+    monkeypatch.setenv("KORTNY_COMPOSIO_TRIGGERS_ENABLED", "true")
+    login(test_client)
+
+    def fake_create_trigger(
+        self: ComposioClient,
+        slug: str,
+        user_id: str,
+        trigger_config: dict[str, object],
+        connected_account_id: str | None = None,
+    ) -> dict[str, object]:
+        assert connected_account_id == "ca_target"
+        return {"id": "ti_route_scoped"}
+
+    monkeypatch.setattr(ComposioClient, "create_trigger", fake_create_trigger)
+
+    response = test_client.post(
+        "/composio/github/triggers/GITHUB_PULL_REQUEST_EVENT/enable",
+        data={"connection_id": str(target.id)},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    subscriptions = session.scalars(select(ComposioTriggerSubscription)).all()
+    assert len(subscriptions) == 1
+    assert subscriptions[0].connected_account_id == "ca_target"
+    assert subscriptions[0].composio_connection_id == target.id
+    assert subscriptions[0].status == "active"
+    assert subscriptions[0].composio_trigger_id == "ti_route_scoped"
+
+
+def test_composio_trigger_disable_scopes_to_posted_connection(
+    client: tuple[TestClient, Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Disabling via connection A leaves connection B's active trigger alone."""
+
+    test_client, session = client
+    installation = Installation(slack_team_id=f"T{uuid.uuid4().hex}")
+    session.add(installation)
+    session.flush()
+    target = _trigger_route_connection(
+        session, installation, connected_account_id="ca_target"
+    )
+    other = _trigger_route_connection(
+        session, installation, connected_account_id="ca_other", owner="UOther"
+    )
+    for connection, trigger_instance in ((target, "ti_a"), (other, "ti_b")):
+        session.add(
+            ComposioTriggerSubscription(
+                installation_id=installation.id,
+                composio_connection_id=connection.id,
+                connected_account_id=connection.connected_account_id or "",
+                composio_user_id=connection.composio_user_id,
+                owner_slack_user_id=connection.owner_slack_user_id,
+                toolkit_slug="github",
+                trigger_slug="GITHUB_PULL_REQUEST_EVENT",
+                composio_trigger_id=trigger_instance,
+                status="active",
+            )
+        )
+    session.commit()
+    set_runtime_settings_env(monkeypatch)
+    monkeypatch.setenv("KORTNY_COMPOSIO_TRIGGERS_ENABLED", "true")
+    login(test_client)
+
+    disabled_remote: list[str] = []
+
+    def fake_disable_trigger(
+        self: ComposioClient, trigger_id: str
+    ) -> dict[str, object]:
+        disabled_remote.append(trigger_id)
+        return {}
+
+    monkeypatch.setattr(ComposioClient, "disable_trigger", fake_disable_trigger)
+
+    response = test_client.post(
+        "/composio/github/triggers/GITHUB_PULL_REQUEST_EVENT/disable",
+        data={"connection_id": str(target.id)},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert disabled_remote == ["ti_a"]
+    session.expire_all()
+    by_account = {
+        row.connected_account_id: row.status
+        for row in session.scalars(select(ComposioTriggerSubscription))
+    }
+    assert by_account == {"ca_target": "disabled", "ca_other": "active"}
+
+
 def login(test_client: TestClient) -> Response:
     return cast(
         Response,
@@ -5266,6 +5448,7 @@ def cleanup_database(session: Session) -> None:
         LLMUsage,
         WorkspaceState,
         Episode,
+        ComposioTriggerSubscription,
         ComposioConnection,
         DashboardOAuthState,
         DashboardUser,

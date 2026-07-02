@@ -26,11 +26,13 @@ from kortny.composio import (
     ComposioTool,
     ComposioToolkit,
 )
+from kortny.composio.triggers import LAUNCH_TRIGGERS
 from kortny.config import Settings
 from kortny.dashboard.settings import DashboardSettings
 from kortny.db.models import (
     Artifact,
     ComposioConnection,
+    ComposioTriggerSubscription,
     ConsolidationRun,
     Episode,
     Installation,
@@ -1272,6 +1274,17 @@ class ComposioScopeOption:
 
 
 @dataclass(frozen=True)
+class ComposioTriggerRow:
+    """One launch trigger's opt-in state for a toolkit's active connection."""
+
+    slug: str
+    display_name: str
+    status: str
+    tone: str
+    subscription_id: uuid.UUID | None
+
+
+@dataclass(frozen=True)
 class ComposioToolkitDetail:
     slug: str
     configured: bool
@@ -1287,6 +1300,7 @@ class ComposioToolkitDetail:
     user_options: tuple[IdentityLabel, ...]
     channel_options: tuple[IdentityLabel, ...]
     error: str | None
+    trigger_rows: tuple[ComposioTriggerRow, ...] = ()
 
     @property
     def active_connection(self) -> ComposioConnectionRow | None:
@@ -3702,6 +3716,21 @@ def get_composio_toolkit_detail(
         tools_error = f"Tools unavailable: {_short_error(str(exc))}"
 
     status_map = _composio_status_by_toolkit(connections)
+    active_connection = next(
+        (connection for connection in connections if connection.status == "active"),
+        None,
+    )
+    trigger_rows = (
+        _composio_trigger_rows(
+            session,
+            toolkit_slug=normalized_slug,
+            connected_account_id=(
+                active_connection.connected_account_id if active_connection else None
+            ),
+        )
+        if runtime_settings.composio_triggers_enabled
+        else ()
+    )
     return ComposioToolkitDetail(
         slug=normalized_slug,
         configured=True,
@@ -3717,7 +3746,79 @@ def get_composio_toolkit_detail(
         user_options=user_options,
         channel_options=channel_options,
         error=auth_config_error,
+        trigger_rows=trigger_rows,
     )
+
+
+def _composio_trigger_rows(
+    session: Session,
+    *,
+    toolkit_slug: str,
+    connected_account_id: str | None,
+) -> tuple[ComposioTriggerRow, ...]:
+    """Launch-trigger opt-in state for a toolkit's active connected account.
+
+    Read-only display helper: matched by ``connected_account_id`` alone
+    (Composio-assigned, globally unique), not by installation — the write
+    paths (enable/disable) resolve the owning installation precisely from
+    the ``ComposioConnection`` row itself.
+    """
+
+    launch_triggers = tuple(
+        trigger
+        for trigger in LAUNCH_TRIGGERS.values()
+        if trigger.toolkit_slug == toolkit_slug
+    )
+    if not launch_triggers:
+        return ()
+
+    subscriptions_by_slug: dict[str, ComposioTriggerSubscription] = {}
+    if connected_account_id:
+        rows = session.scalars(
+            select(ComposioTriggerSubscription).where(
+                ComposioTriggerSubscription.connected_account_id
+                == connected_account_id,
+                ComposioTriggerSubscription.trigger_slug.in_(
+                    [trigger.slug for trigger in launch_triggers]
+                ),
+            )
+        )
+        subscriptions_by_slug = {row.trigger_slug: row for row in rows}
+
+    trigger_rows: list[ComposioTriggerRow] = []
+    for trigger in launch_triggers:
+        subscription = subscriptions_by_slug.get(trigger.slug)
+        if subscription is None:
+            trigger_rows.append(
+                ComposioTriggerRow(
+                    slug=trigger.slug,
+                    display_name=trigger.display_name,
+                    status="off",
+                    tone="neutral",
+                    subscription_id=None,
+                )
+            )
+        elif subscription.status == "active":
+            trigger_rows.append(
+                ComposioTriggerRow(
+                    slug=trigger.slug,
+                    display_name=trigger.display_name,
+                    status="active",
+                    tone="success",
+                    subscription_id=subscription.id,
+                )
+            )
+        else:
+            trigger_rows.append(
+                ComposioTriggerRow(
+                    slug=trigger.slug,
+                    display_name=trigger.display_name,
+                    status=subscription.status,
+                    tone="neutral",
+                    subscription_id=subscription.id,
+                )
+            )
+    return tuple(trigger_rows)
 
 
 def parse_date_bound(
