@@ -354,11 +354,17 @@
             {% if trigger.status == "active" %}
               <form method="post" action="/composio/{{ detail.slug }}/triggers/{{ trigger.slug }}/disable">
                 <input type="hidden" name="next" value="{{ detail_base_path }}/{{ detail.slug }}">
-                <button class="btn-ghost btn-danger" type="submit">Disable</button>
+                {% if active_connection %}
+                  <input type="hidden" name="connection_id" value="{{ active_connection.id }}">
+                {% endif %}
+                <button class="btn-ghost btn-danger" type="submit" {{ "disabled" if not active_connection else "" }}>Disable</button>
               </form>
             {% else %}
               <form method="post" action="/composio/{{ detail.slug }}/triggers/{{ trigger.slug }}/enable">
                 <input type="hidden" name="next" value="{{ detail_base_path }}/{{ detail.slug }}">
+                {% if active_connection %}
+                  <input type="hidden" name="connection_id" value="{{ active_connection.id }}">
+                {% endif %}
                 <button class="btn-ghost" type="submit" {{ "disabled" if not active_connection else "" }}>Enable</button>
               </form>
             {% endif %}

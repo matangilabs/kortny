@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from kortny.composio.client import ComposioClient, ComposioConnectionError
@@ -27,6 +28,7 @@ class TriggerSubscriptionResult:
     ok: bool
     subscription: ComposioTriggerSubscription | None
     error: str | None
+    already_enabled: bool = False
 
 
 def enable_trigger_subscription(
@@ -38,10 +40,21 @@ def enable_trigger_subscription(
 ) -> TriggerSubscriptionResult:
     """Turn a launch trigger on for a connection's connected account.
 
-    REST ``create_trigger`` runs first; only on success is the local
-    subscription row upserted to ``status="active"`` carrying the returned
-    ``ti_*`` id. A REST failure leaves no active local row (an existing
-    disabled row, if any, is left untouched) and the error is returned for
+    Concurrency: the local subscription row is claimed and row-locked FIRST
+    (inserting an inert ``status="disabled"`` placeholder when absent, then
+    ``SELECT ... FOR UPDATE``), and only then does the remote REST
+    ``create_trigger`` run. Two concurrent enables serialize on the row lock:
+    the second waits, finds ``status="active"``, and returns an
+    already-enabled no-op instead of firing a second remote create.
+
+    Activation requires a trigger instance id: if the REST create response
+    yields no ``ti_*`` id, the enable is treated as a failure and the row is
+    NOT activated — an active row with ``composio_trigger_id=None`` would
+    strand the upstream trigger (disable would skip the REST call) and
+    silently degrade trigger-id-first event routing.
+
+    A REST failure leaves no active local row (the caller rolls back, which
+    also discards a just-inserted placeholder) and the error is returned for
     the caller to surface.
     """
 
@@ -50,6 +63,40 @@ def enable_trigger_subscription(
             ok=False,
             subscription=None,
             error="This connection has no connected account yet — finish connecting first.",
+        )
+
+    # Claim + lock the local row BEFORE the remote create so concurrent
+    # enables serialize here rather than both firing REST create_trigger.
+    session.execute(
+        pg_insert(ComposioTriggerSubscription)
+        .values(
+            installation_id=connection.installation_id,
+            composio_connection_id=connection.id,
+            connected_account_id=connection.connected_account_id,
+            composio_user_id=connection.composio_user_id,
+            owner_slack_user_id=connection.owner_slack_user_id,
+            toolkit_slug=connection.toolkit_slug,
+            trigger_slug=trigger_slug,
+            status="disabled",
+        )
+        .on_conflict_do_nothing(
+            index_elements=["installation_id", "connected_account_id", "trigger_slug"]
+        )
+    )
+    subscription = session.execute(
+        select(ComposioTriggerSubscription)
+        .where(
+            ComposioTriggerSubscription.installation_id == connection.installation_id,
+            ComposioTriggerSubscription.connected_account_id
+            == connection.connected_account_id,
+            ComposioTriggerSubscription.trigger_slug == trigger_slug,
+        )
+        .with_for_update()
+    ).scalar_one()
+
+    if subscription.status == "active":
+        return TriggerSubscriptionResult(
+            ok=True, subscription=subscription, error=None, already_enabled=True
         )
 
     try:
@@ -71,38 +118,29 @@ def enable_trigger_subscription(
         return TriggerSubscriptionResult(ok=False, subscription=None, error=str(exc))
 
     composio_trigger_id = _extract_trigger_id(response)
-
-    existing = session.execute(
-        select(ComposioTriggerSubscription).where(
-            ComposioTriggerSubscription.installation_id == connection.installation_id,
-            ComposioTriggerSubscription.connected_account_id
-            == connection.connected_account_id,
-            ComposioTriggerSubscription.trigger_slug == trigger_slug,
+    if composio_trigger_id is None:
+        logger.warning(
+            "composio trigger enable returned no trigger instance id "
+            "toolkit=%s trigger_slug=%s connected_account_id=%s",
+            connection.toolkit_slug,
+            trigger_slug,
+            connection.connected_account_id,
         )
-    ).scalar_one_or_none()
+        return TriggerSubscriptionResult(
+            ok=False,
+            subscription=None,
+            error=(
+                "Composio did not return a trigger instance id; "
+                "the trigger was not enabled."
+            ),
+        )
 
-    if existing is not None:
-        existing.status = "active"
-        existing.composio_trigger_id = composio_trigger_id
-        existing.composio_connection_id = connection.id
-        existing.composio_user_id = connection.composio_user_id
-        existing.owner_slack_user_id = connection.owner_slack_user_id
-        existing.toolkit_slug = connection.toolkit_slug
-        session.flush()
-        return TriggerSubscriptionResult(ok=True, subscription=existing, error=None)
-
-    subscription = ComposioTriggerSubscription(
-        installation_id=connection.installation_id,
-        composio_connection_id=connection.id,
-        connected_account_id=connection.connected_account_id,
-        composio_user_id=connection.composio_user_id,
-        owner_slack_user_id=connection.owner_slack_user_id,
-        toolkit_slug=connection.toolkit_slug,
-        trigger_slug=trigger_slug,
-        composio_trigger_id=composio_trigger_id,
-        status="active",
-    )
-    session.add(subscription)
+    subscription.status = "active"
+    subscription.composio_trigger_id = composio_trigger_id
+    subscription.composio_connection_id = connection.id
+    subscription.composio_user_id = connection.composio_user_id
+    subscription.owner_slack_user_id = connection.owner_slack_user_id
+    subscription.toolkit_slug = connection.toolkit_slug
     session.flush()
     return TriggerSubscriptionResult(ok=True, subscription=subscription, error=None)
 

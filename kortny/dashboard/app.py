@@ -3347,19 +3347,15 @@ def register_routes(app: FastAPI) -> None:
                 tone="danger",
             )
 
-        connection = session.execute(
-            select(ComposioConnection)
-            .where(
-                ComposioConnection.toolkit_slug == normalized_slug,
-                ComposioConnection.status == "active",
-            )
-            .order_by(ComposioConnection.updated_at.desc())
-            .limit(1)
-        ).scalar_one_or_none()
-        if connection is None:
+        connection = _composio_connection_for_trigger_action(
+            session,
+            form=form,
+            toolkit_slug=normalized_slug,
+        )
+        if connection.status != "active":
             return _redirect_with_notice(
                 next_path,
-                "Connect this toolkit before enabling a trigger.",
+                "This connection is not active — reconnect it before enabling a trigger.",
                 tone="danger",
             )
 
@@ -3381,6 +3377,10 @@ def register_routes(app: FastAPI) -> None:
                 tone="danger",
             )
         session.commit()
+        if result.already_enabled:
+            return _redirect_with_notice(
+                next_path, f"{launch_trigger.display_name} is already enabled."
+            )
         return _redirect_with_notice(
             next_path, f"Enabled {launch_trigger.display_name}."
         )
@@ -3415,15 +3415,27 @@ def register_routes(app: FastAPI) -> None:
                 tone="danger",
             )
 
+        connection = _composio_connection_for_trigger_action(
+            session,
+            form=form,
+            toolkit_slug=normalized_slug,
+        )
+        if connection.status != "active" or not connection.connected_account_id:
+            return _redirect_with_notice(
+                next_path,
+                "This connection is not active.",
+                tone="danger",
+            )
+
         subscription = session.execute(
-            select(ComposioTriggerSubscription)
-            .where(
-                ComposioTriggerSubscription.toolkit_slug == normalized_slug,
+            select(ComposioTriggerSubscription).where(
+                ComposioTriggerSubscription.installation_id
+                == connection.installation_id,
+                ComposioTriggerSubscription.connected_account_id
+                == connection.connected_account_id,
                 ComposioTriggerSubscription.trigger_slug == trigger_slug,
                 ComposioTriggerSubscription.status == "active",
             )
-            .order_by(ComposioTriggerSubscription.updated_at.desc())
-            .limit(1)
         ).scalar_one_or_none()
         if subscription is None:
             return _redirect_with_notice(
@@ -4736,6 +4748,31 @@ def _catalog_count_label(visible_count: int, total_items: int | None) -> str:
     if total_items is None:
         return f"{visible_count:,} shown"
     return f"{visible_count:,} shown of {total_items:,}"
+
+
+def _composio_connection_for_trigger_action(
+    session: Session,
+    *,
+    form: dict[str, list[str]],
+    toolkit_slug: str,
+) -> ComposioConnection:
+    """Resolve the concrete connection a trigger enable/disable acts on.
+
+    The Triggers card posts the specific ``connection_id`` it rendered —
+    never "the latest active connection for the toolkit", which could act on
+    the WRONG account when two accounts are connected to one toolkit. A
+    missing/invalid id, an unknown row, or a toolkit mismatch is a 404.
+    """
+
+    raw_connection_id = _form_value(form, "connection_id")
+    try:
+        connection_id = UUID(raw_connection_id)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND) from None
+    connection = session.get(ComposioConnection, connection_id)
+    if connection is None or connection.toolkit_slug != toolkit_slug:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    return connection
 
 
 def _form_value(form: dict[str, list[str]], name: str) -> str:

@@ -197,8 +197,94 @@ def test_enable_rest_failure_leaves_no_active_row(db_session: Session) -> None:
     assert result.ok is False
     assert result.error is not None
     assert result.subscription is None
+    active = (
+        db_session.query(ComposioTriggerSubscription)
+        .filter(ComposioTriggerSubscription.status == "active")
+        .count()
+    )
+    assert active == 0
+    # The caller (dashboard route) rolls back on failure, which also discards
+    # the just-claimed placeholder row.
+    db_session.rollback()
     remaining = db_session.query(ComposioTriggerSubscription).count()
     assert remaining == 0
+
+
+def test_enable_missing_trigger_instance_id_fails_without_activating(
+    db_session: Session,
+) -> None:
+    """A create response with no ti_* id must NOT activate the row: an active
+    subscription with composio_trigger_id=None would strand the upstream
+    trigger (disable skips the REST call) and degrade trigger-id routing."""
+
+    iid = _installation(db_session)
+    connection = _connection(db_session, iid)
+    db_session.commit()
+
+    client = FakeComposioClient(create_response={"status": "success"})
+    result = enable_trigger_subscription(
+        db_session,
+        connection=connection,
+        trigger_slug="GITHUB_PULL_REQUEST_EVENT",
+        client=client,
+    )
+
+    assert result.ok is False
+    assert result.subscription is None
+    assert result.error is not None
+    assert "trigger instance id" in result.error
+    # The REST create DID run (once) but nothing was activated.
+    assert len(client.create_calls) == 1
+    active = (
+        db_session.query(ComposioTriggerSubscription)
+        .filter(ComposioTriggerSubscription.status == "active")
+        .count()
+    )
+    assert active == 0
+    db_session.rollback()
+    remaining = db_session.query(ComposioTriggerSubscription).count()
+    assert remaining == 0
+
+
+def test_enable_serializes_concurrent_enables_single_rest_create(
+    db_session: Session,
+) -> None:
+    """The local row is claimed + row-locked BEFORE the remote create; the
+    enable that loses the race finds the active row under the lock and
+    returns already-enabled without firing another REST create."""
+
+    iid = _installation(db_session)
+    connection = _connection(db_session, iid)
+    db_session.commit()
+
+    client = FakeComposioClient(create_response={"id": "ti_once"})
+
+    first = enable_trigger_subscription(
+        db_session,
+        connection=connection,
+        trigger_slug="GITHUB_PULL_REQUEST_EVENT",
+        client=client,
+    )
+    assert first.ok is True
+    assert first.already_enabled is False
+    assert first.subscription is not None
+    db_session.commit()
+
+    second = enable_trigger_subscription(
+        db_session,
+        connection=connection,
+        trigger_slug="GITHUB_PULL_REQUEST_EVENT",
+        client=client,
+    )
+    assert second.ok is True
+    assert second.already_enabled is True
+    assert second.subscription is not None
+    assert second.subscription.id == first.subscription.id
+
+    # Exactly one remote create across both calls.
+    assert len(client.create_calls) == 1
+    rows = db_session.query(ComposioTriggerSubscription).count()
+    assert rows == 1
 
 
 def test_enable_re_enables_existing_disabled_subscription(db_session: Session) -> None:

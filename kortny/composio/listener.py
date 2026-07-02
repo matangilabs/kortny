@@ -43,6 +43,15 @@ trigger into a single row. ``adapt_sdk_event`` below works around this by
 synthesizing a content-hash dedup id from ``(trigger_id, connected_account_id,
 canonical_payload)`` instead — a real, distinct event still gets its own row;
 an identical re-delivery (e.g. a websocket hiccup) still collapses to one.
+
+Reviewed-and-accepted tradeoff of that content-hash scheme: two genuinely
+distinct events whose ``(trigger_id, connected_account_id, payload)`` triple
+is byte-identical collapse into one row by design. The three launch triggers'
+payloads all carry distinguishing fields (PR/action metadata, message ids,
+event start times), so an exact byte-level repeat is overwhelmingly a
+re-delivery, not a new event — and because this slice is shadow-mode only,
+the recorded event stream will surface any real-world collapse pattern before
+delivery is ever turned on.
 """
 
 from __future__ import annotations
