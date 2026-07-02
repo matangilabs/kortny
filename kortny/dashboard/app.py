@@ -40,7 +40,6 @@ from sqlalchemy.orm import Session, sessionmaker
 from starlette.middleware.sessions import SessionMiddleware
 
 from kortny.composio import (
-    CAPTURE_TIMEOUT_SECONDS,
     ComposioCatalogError,
     ComposioClient,
     ComposioConnectionError,
@@ -2911,6 +2910,33 @@ def register_routes(app: FastAPI) -> None:
         resolved_connected_account_id = (
             connected_account_id or connected_account_id_camel
         )
+        base_path = "/composio" if principal.role == "admin" else "/me/composio"
+        if (
+            connection.status == "active"
+            and connection.connected_account_id
+            and resolved_connected_account_id
+            and resolved_connected_account_id != connection.connected_account_id
+        ):
+            # An established connection must not be rebound to a different
+            # connected account by a replayed or forged callback: keep the
+            # existing account id, skip identity capture, and leave the row
+            # untouched. Known follow-up (out of scope here): callback tokens
+            # are not yet one-shot — consuming the token on first successful
+            # completion would close the replay surface entirely.
+            logger.warning(
+                "composio callback rebind attempt blocked connection_id=%s "
+                "toolkit=%s existing_connected_account_id=%s "
+                "incoming_connected_account_id=%s",
+                connection.id,
+                connection.toolkit_slug,
+                connection.connected_account_id,
+                resolved_connected_account_id,
+            )
+            return _redirect_with_notice(
+                f"{base_path}/{quote(connection.toolkit_slug, safe='')}",
+                "This connection is already established.",
+                tone="warning",
+            )
         if resolved_connected_account_id:
             connection.connected_account_id = resolved_connected_account_id
             _capture_composio_callback_identity(connection)
@@ -2929,7 +2955,6 @@ def register_routes(app: FastAPI) -> None:
         connection.metadata_json = metadata
         session.commit()
 
-        base_path = "/composio" if principal.role == "admin" else "/me/composio"
         return _redirect_with_notice(
             f"{base_path}/{quote(connection.toolkit_slug, safe='')}",
             notice,
@@ -4800,13 +4825,10 @@ def _capture_composio_callback_identity(connection: ComposioConnection) -> None:
         return
     client = ComposioClient(
         api_key=runtime_settings.composio_api_key,
-        # Capture rides inside connect completion: cap the timeout well below
-        # the scrape-tolerant runtime default so a slow Composio API can never
-        # stall the OAuth callback redirect.
-        timeout_seconds=min(
-            runtime_settings.composio_request_timeout_seconds,
-            CAPTURE_TIMEOUT_SECONDS,
-        ),
+        # capture_external_identity clamps every capture call to
+        # CAPTURE_TIMEOUT_SECONDS internally, so a slow Composio API can never
+        # stall the OAuth callback redirect regardless of the runtime timeout.
+        timeout_seconds=runtime_settings.composio_request_timeout_seconds,
     )
     capture_external_identity(client, connection)
 

@@ -220,3 +220,50 @@ def test_persona_block_omits_handle_section_without_captured_identities(
 
     assert len(blocks) == 1
     assert "Known account handles" not in blocks[0]
+
+
+def test_persona_handles_capped_with_omission_recorded(db_session: Session) -> None:
+    """10 labeled connections -> at most 6 handle lines + a recorded omission."""
+
+    installation = _installation(db_session)
+    _seed_persona_fact(db_session, installation)
+    for index in range(10):
+        db_session.add(
+            ComposioConnection(
+                installation_id=installation.id,
+                toolkit_slug=f"toolkit{index:02d}",
+                auth_config_id=f"ac_{index:02d}",
+                connected_account_id=f"ca_{index:02d}",
+                composio_user_id=f"slack:{installation.id}:{USER}",
+                owner_slack_user_id=USER,
+                visibility_scope_type="user",
+                visibility_scope_id=USER,
+                status="active",
+                external_account_label=f"handle-{index:02d}",
+            )
+        )
+    db_session.commit()
+    task = _task(db_session, installation)
+    _record_intent(db_session, task, persona_relevant=True)
+
+    package = ContextAssembler(session=db_session).build_for_task(task)
+
+    blocks = [
+        m.content
+        for m in package.messages
+        if m.content and m.content.startswith("Who you're helping")
+    ]
+    assert len(blocks) == 1
+    handle_lines = [
+        line for line in blocks[0].splitlines() if line.startswith("- toolkit")
+    ]
+    assert len(handle_lines) == 6
+    handle_section_chars = sum(len(line) + 1 for line in handle_lines)
+    assert handle_section_chars <= 360
+
+    persona_omissions = [
+        omission for omission in package.omissions if omission.kind == "persona_handles"
+    ]
+    assert len(persona_omissions) == 1
+    assert persona_omissions[0].reason == "budget_compacted"
+    assert persona_omissions[0].count == 4

@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from kortny.composio.identity import sanitize_external_label
 from kortny.db.models import McpServer
 from kortny.tool_selection.models import ToolCard
 from kortny.tools.catalog import ToolDescriptor
@@ -138,8 +139,11 @@ def render_connected_integrations(
                 human_name = _humanize_slug(tk.toolkit_slug)
                 desc = f"{human_name} — Third-party integration via Composio."
         lines.append(f"- {tk.toolkit_slug}: {desc}")
-        if tk.external_account_label:
-            lines.append(f'  {tk.toolkit_slug}: account "{tk.external_account_label}"')
+        # Labels are untrusted third-party payload data: re-sanitize at the
+        # render boundary even though capture sanitized at storage.
+        account_label = sanitize_external_label(tk.external_account_label)
+        if account_label:
+            lines.append(f'  {tk.toolkit_slug}: account "{account_label}"')
         if tk.capability_buckets:
             lines.append(f"  Capabilities: {', '.join(tk.capability_buckets[:6])}")
     lines.append("</connected_integrations>")

@@ -21,6 +21,7 @@ from kortny.composio.identity import (
     extract_external_handle,
     extract_whoami_handle,
     resolve_external_identities,
+    sanitize_external_label,
 )
 from kortny.composio.runtime import (
     ComposioConnectionResolver,
@@ -48,4 +49,5 @@ __all__ = [
     "extract_external_handle",
     "extract_whoami_handle",
     "resolve_external_identities",
+    "sanitize_external_label",
 ]

@@ -2982,6 +2982,64 @@ def test_dashboard_composio_callback_captures_label_via_whoami_fallback(
     assert updated.external_account_label == "octocat-fallback"
 
 
+def test_dashboard_composio_callback_blocks_rebind_of_established_connection(
+    client: tuple[TestClient, Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A replayed/forged callback must not rebind an active connection."""
+
+    test_client, session = client
+    task = create_dashboard_task(session)
+    set_runtime_settings_env(monkeypatch)
+    monkeypatch.setenv("COMPOSIO_API_KEY", "composio-dashboard-secret")
+
+    class MustNotBeCalledComposioClient:
+        def __init__(self, **_kwargs: object) -> None:
+            raise AssertionError("identity capture must not run for a blocked rebind")
+
+    monkeypatch.setattr(
+        "kortny.dashboard.app.ComposioClient", MustNotBeCalledComposioClient
+    )
+    connection = ComposioConnection(
+        installation_id=task.installation_id,
+        toolkit_slug="github",
+        auth_config_id="ac_est",
+        connected_account_id="ca_original",
+        connection_request_id="conn_req_est",
+        composio_user_id=f"slack:{task.installation_id}:UCost",
+        owner_slack_user_id="UCost",
+        visibility_scope_type="user",
+        visibility_scope_id="UCost",
+        status="active",
+        display_name="GitHub personal",
+        external_account_label="octocat-original",
+        metadata_json={},
+    )
+    session.add(connection)
+    session.commit()
+    connection_id = connection.id
+    login(test_client)
+
+    response = test_client.get(
+        "/composio/callback"
+        f"?connection_id={connection_id}"
+        "&status=success"
+        "&connected_account_id=ca_attacker",
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"].startswith("/composio/github?")
+    assert "notice=" in response.headers["location"]
+    session.expire_all()
+    updated = session.get(ComposioConnection, connection_id)
+    assert updated is not None
+    # Established binding is untouched.
+    assert updated.connected_account_id == "ca_original"
+    assert updated.status == "active"
+    assert updated.external_account_label == "octocat-original"
+
+
 def test_dashboard_member_composio_connect_uses_logged_in_user_scope(
     db_session: Session,
     engine: Engine,

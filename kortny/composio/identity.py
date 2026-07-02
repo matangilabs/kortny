@@ -39,6 +39,7 @@ label ``None``.
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -57,11 +58,22 @@ logger = logging.getLogger(__name__)
 
 MAX_LABEL_LENGTH = 120
 
-# Modest cap for capture-time client timeouts: identity capture rides inside
-# connect completion, so callers constructing a dedicated client for it should
-# bound the timeout with this (e.g. ``min(settings_timeout, ...)``) rather
-# than inherit a scrape-tolerant 30s runtime timeout.
+# Modest cap for capture-time request timeouts: identity capture rides inside
+# connect completion, so ``capture_external_identity`` swaps a real client for
+# a short-timeout sibling (see ``_capture_client``) rather than inherit a
+# scrape-tolerant 30s runtime timeout.
 CAPTURE_TIMEOUT_SECONDS = 10.0
+
+# Characters stripped from labels outright: quoting/markup characters that
+# could break out of the `account "<label>"` framing the context renderers
+# use, or smuggle tag-like structure into the prompt.
+_LABEL_STRIPPED_CHARS = "\"'`<>"
+
+# Literal escape-sequence remnants (a backslash followed by n/r) surviving
+# sanitization indicate an attacker-shaped label; reject those outright.
+_LABEL_ESCAPE_REMNANT = re.compile(r"\\[nr]")
+
+_WHITESPACE_RUN = re.compile(r"\s+")
 
 # Best-effort key names that, if present in a connected account's dynamic
 # `state.val` payload, plausibly carry the user's identity on the connected
@@ -95,12 +107,18 @@ class WhoamiSpec:
 # Toolkit slug -> verified whoami tool. Slugs verified against Composio's
 # published toolkit catalog before hardcoding:
 # - github: GITHUB_GET_THE_AUTHENTICATED_USER (GitHub GET /user -> `login`)
-# - linear: LINEAR_GET_CURRENT_USER (viewer profile -> `name`, `email`)
+# - linear: LINEAR_GET_CURRENT_USER (viewer profile -> `email`, `name`)
 # - gmail:  GMAIL_GET_PROFILE (users.getProfile -> `emailAddress`)
 # googlecalendar is deliberately absent: Composio exposes no calendar tool
 # that returns the authenticated user's identity (settings/list tools return
 # timezone/preferences only), so we skip it rather than infer from
 # side-channel fields.
+#
+# Field ordering favors stable identifiers over display names: Linear prefers
+# `email` because the viewer `name` is attacker-controllable free text, while
+# the email is a verified account identifier (and the value Linear's own
+# assignee filters accept). GitHub `login` and Gmail `emailAddress` are
+# already the stable identifiers for their toolkits.
 WHOAMI_REGISTRY: dict[str, WhoamiSpec] = {
     "github": WhoamiSpec(
         tool_slug="GITHUB_GET_THE_AUTHENTICATED_USER",
@@ -108,7 +126,7 @@ WHOAMI_REGISTRY: dict[str, WhoamiSpec] = {
     ),
     "linear": WhoamiSpec(
         tool_slug="LINEAR_GET_CURRENT_USER",
-        field_keys=("name", "email"),
+        field_keys=("email", "name"),
     ),
     "gmail": WhoamiSpec(
         tool_slug="GMAIL_GET_PROFILE",
@@ -127,6 +145,35 @@ _RESPONSE_WRAPPER_KEYS: tuple[str, ...] = (
     "user",
     "profile",
 )
+
+
+def sanitize_external_label(value: str | None) -> str | None:
+    """Sanitize an external handle as untrusted input.
+
+    External labels originate from third-party API payloads (display names
+    especially are attacker-controllable free text), and they are rendered
+    into the model's prompt. Keep only printable non-control characters,
+    collapse whitespace runs to single spaces, strip quote/backtick/angle
+    characters, and reject the label entirely when nothing survives or when
+    literal escape-sequence remnants (``\\n`` / ``\\r``) remain. Applied both
+    before storage and again at every render site (defense in depth for rows
+    written before this sanitizer existed).
+    """
+
+    if value is None:
+        return None
+    # Collapse whitespace runs (including newlines/tabs) to single spaces
+    # BEFORE the printable filter, so a newline becomes a word boundary
+    # rather than silently gluing two fragments together.
+    cleaned = _WHITESPACE_RUN.sub(" ", value)
+    cleaned = "".join(ch for ch in cleaned if ch.isprintable())
+    cleaned = cleaned.translate(str.maketrans("", "", _LABEL_STRIPPED_CHARS))
+    cleaned = _WHITESPACE_RUN.sub(" ", cleaned).strip()
+    if not cleaned:
+        return None
+    if _LABEL_ESCAPE_REMNANT.search(cleaned):
+        return None
+    return cleaned[:MAX_LABEL_LENGTH]
 
 
 def extract_external_handle(state_val: Mapping[str, object]) -> str | None:
@@ -160,21 +207,51 @@ def extract_whoami_handle(toolkit_slug: str, data: Mapping[str, object]) -> str 
 
 
 def _pluck(payload: Mapping[str, object], keys: tuple[str, ...]) -> str | None:
-    """First non-empty string under ``keys``, top level then one wrapper deep."""
+    """First sanitized non-empty string under ``keys`` (top level, then one
+    wrapper deep)."""
 
     for key in keys:
         value = payload.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()[:MAX_LABEL_LENGTH]
+        if isinstance(value, str):
+            sanitized = sanitize_external_label(value)
+            if sanitized:
+                return sanitized
     for wrapper in _RESPONSE_WRAPPER_KEYS:
         inner = payload.get(wrapper)
         if not isinstance(inner, Mapping):
             continue
         for key in keys:
             value = inner.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()[:MAX_LABEL_LENGTH]
+            if isinstance(value, str):
+                sanitized = sanitize_external_label(value)
+                if sanitized:
+                    return sanitized
     return None
+
+
+def _capture_client(client: ComposioClient) -> ComposioClient:
+    """A short-timeout sibling of ``client`` for capture-time calls.
+
+    The single latency bound for every capture call site (connect.py's
+    immediate branch, both dashboard connect paths): a plain ``ComposioClient``
+    configured with a longer runtime timeout is swapped for a sibling capped
+    at ``CAPTURE_TIMEOUT_SECONDS``, so capture can never stall a connect flow
+    past ~10s per call. Subclasses (test fakes) and clients with an injected
+    ``http_client`` (whose transport carries its own timeout) pass through
+    unchanged.
+    """
+
+    if type(client) is not ComposioClient:
+        return client
+    if client.http_client is not None:
+        return client
+    if client.timeout_seconds <= CAPTURE_TIMEOUT_SECONDS:
+        return client
+    return ComposioClient(
+        api_key=client.api_key,
+        base_url=client.base_url,
+        timeout_seconds=CAPTURE_TIMEOUT_SECONDS,
+    )
 
 
 def capture_external_identity(
@@ -191,13 +268,13 @@ def capture_external_identity(
     field, log (for client errors) and leave
     ``connection.external_account_label`` at its current value (``None`` by
     default). Never raises — the connect flow must never fail because of
-    this. Latency is bounded by the passed client's own request timeout;
-    capture-path callers construct their client with
-    ``CAPTURE_TIMEOUT_SECONDS`` as the cap.
+    this. Latency is bounded to ``CAPTURE_TIMEOUT_SECONDS`` per call via
+    ``_capture_client``. Stored labels pass ``sanitize_external_label``.
     """
 
     if not connection.connected_account_id:
         return
+    client = _capture_client(client)
     handle: str | None = None
     try:
         details = client.get_connected_account(connection.connected_account_id)
@@ -217,6 +294,9 @@ def capture_external_identity(
         )
     if handle is None:
         handle = _whoami_fallback(client, connection)
+    # Extraction already sanitizes, but storage re-applies it so no future
+    # extraction path can write an unsanitized label.
+    handle = sanitize_external_label(handle)
     if handle:
         connection.external_account_label = handle
 
@@ -296,7 +376,9 @@ def resolve_external_identities(
     )
     identities: dict[str, str] = {}
     for row in rows:
-        label = row.external_account_label
+        # Re-sanitize at read: rows written before the sanitizer existed (or
+        # by any other writer) must not reach the prompt unsanitized.
+        label = sanitize_external_label(row.external_account_label)
         if label:
             identities[row.toolkit_slug] = label
     return identities
