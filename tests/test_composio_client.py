@@ -458,3 +458,64 @@ def test_composio_client_executes_tool_without_connected_account_id() -> None:
     assert execution.successful is True
     assert execution.data == [{"title": "Show HN: something cool"}]
     assert execution.log_id == "log_hn"
+
+
+def test_composio_client_gets_connected_account_details() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v3.1/connected_accounts/ca_gh_123"
+        assert request.method == "GET"
+        return httpx.Response(
+            200,
+            json={
+                "id": "ca_gh_123",
+                "status": "ACTIVE",
+                "toolkit": {"slug": "GITHUB"},
+                "state": {
+                    "authScheme": "OAUTH2",
+                    "val": {
+                        "oauth_token": "gho_...",
+                        "instanceName": "my-instance",
+                    },
+                },
+            },
+        )
+
+    client = ComposioClient(
+        api_key="test-key",
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    details = client.get_connected_account("ca_gh_123")
+
+    assert details.id == "ca_gh_123"
+    assert details.status == "active"
+    assert details.toolkit_slug == "github"
+    assert details.state_val == {
+        "oauth_token": "gho_...",
+        "instanceName": "my-instance",
+    }
+
+
+def test_composio_client_get_connected_account_defaults_state_val_when_missing() -> (
+    None
+):
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v3.1/connected_accounts/ca_notion_1"
+        return httpx.Response(
+            200,
+            json={
+                "status": "active",
+                "toolkit": {"slug": "notion"},
+            },
+        )
+
+    client = ComposioClient(
+        api_key="test-key",
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    details = client.get_connected_account("ca_notion_1")
+
+    assert details.id == "ca_notion_1"
+    assert details.toolkit_slug == "notion"
+    assert details.state_val == {}

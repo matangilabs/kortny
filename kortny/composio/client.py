@@ -54,6 +54,24 @@ class ComposioConnectionRequest:
 
 
 @dataclass(frozen=True)
+class ComposioConnectedAccountDetails:
+    """Parsed ``GET /connected_accounts/{id}`` response.
+
+    ``state_val`` is the dynamic ``state.val`` payload Composio returns for the
+    connection. Its shape varies per toolkit/auth-scheme (OAuth token/scope
+    bookkeeping, instance URLs, subdomains, ...); it is NOT a reliable source of
+    the connected app's end-user identity (no guaranteed username/login/email
+    field — see ``kortny.composio.identity`` for the best-effort extraction and
+    its caveats).
+    """
+
+    id: str
+    status: str
+    toolkit_slug: str
+    state_val: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class ComposioToolkit:
     slug: str
     name: str
@@ -348,6 +366,39 @@ class ComposioClient:
             redirect_url=redirect_url,
             status=str(payload.get("status") or "pending").lower(),
             connected_account_id=connected_account_id,
+        )
+
+    def get_connected_account(
+        self, connected_account_id: str
+    ) -> ComposioConnectedAccountDetails:
+        """Fetch one connected account's details (``GET /connected_accounts/{id}``)."""
+
+        response = self._get(
+            f"/api/v3.1/connected_accounts/{connected_account_id}",
+            params={},
+        )
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ComposioConnectionError(
+                "Composio connected account response was invalid"
+            )
+        toolkit = payload.get("toolkit")
+        if isinstance(toolkit, dict):
+            toolkit_slug = _optional_str(toolkit.get("slug"))
+        else:
+            toolkit_slug = _optional_str(toolkit)
+        state = payload.get("state")
+        state_val: dict[str, Any] = {}
+        if isinstance(state, dict):
+            val = state.get("val")
+            if isinstance(val, dict):
+                state_val = val
+        account_id = _optional_str(payload.get("id")) or connected_account_id
+        return ComposioConnectedAccountDetails(
+            id=account_id,
+            status=(_optional_str(payload.get("status")) or "").lower(),
+            toolkit_slug=(toolkit_slug or "").lower(),
+            state_val=state_val,
         )
 
     def set_connected_account_enabled(

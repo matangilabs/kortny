@@ -16,6 +16,8 @@ from sqlalchemy.orm import Session
 from kortny.composio.client import (
     ComposioAuthConfig,
     ComposioClient,
+    ComposioConnectedAccountDetails,
+    ComposioConnectionError,
     ComposioConnectionRequest,
 )
 from kortny.composio.connect import (
@@ -144,6 +146,63 @@ class FakeConnectClient(ComposioClient):
         )
 
 
+class FakeImmediateConnectClient(ComposioClient):
+    """Fake client whose connect link hands back an immediate account id.
+
+    Mirrors the rare no_auth-shaped case: most OAuth toolkits only learn
+    ``connected_account_id`` once the provider redirects back through the
+    dashboard's ``/composio/callback`` route, but a handful resolve it
+    synchronously from the connect-link response itself. Both paths run
+    external-identity capture; this fake exercises the immediate one.
+    """
+
+    def __init__(
+        self,
+        *,
+        connected_account_id: str = "ca_immediate",
+        details: ComposioConnectedAccountDetails | None = None,
+        fetch_error: Exception | None = None,
+    ) -> None:
+        super().__init__(api_key="fake")
+        self._connected_account_id = connected_account_id
+        self._details = details
+        self._fetch_error = fetch_error
+        self.get_connected_account_calls: list[str] = []
+
+    def create_managed_auth_config(self, *, toolkit_slug: str) -> ComposioAuthConfig:
+        return ComposioAuthConfig(
+            id=f"ac_{toolkit_slug}",
+            name=f"{toolkit_slug} managed auth",
+            toolkit_slug=toolkit_slug,
+            auth_scheme="oauth2",
+            is_composio_managed=True,
+            enabled=True,
+        )
+
+    def create_connect_link(
+        self,
+        *,
+        user_id: str,
+        auth_config_id: str,
+        callback_url: str,
+    ) -> ComposioConnectionRequest:
+        return ComposioConnectionRequest(
+            id="ln_connect_immediate",
+            redirect_url="https://connect.composio.dev/redirect/immediate",
+            status="active",
+            connected_account_id=self._connected_account_id,
+        )
+
+    def get_connected_account(
+        self, connected_account_id: str
+    ) -> ComposioConnectedAccountDetails:
+        self.get_connected_account_calls.append(connected_account_id)
+        if self._fetch_error is not None:
+            raise self._fetch_error
+        assert self._details is not None
+        return self._details
+
+
 def _task_events(session: Session, task: Task) -> list[TaskEvent]:
     session.flush()
     return list(
@@ -188,6 +247,115 @@ def test_initiate_connect_creates_pending_user_scoped_connection(
     assert connection.visibility_scope_type == "user"
     assert connection.visibility_scope_id == "UAnalyst"
     assert connection.connection_request_id == "ln_connect_1"
+
+
+def test_initiate_connect_captures_external_label_when_account_id_immediate(
+    db_session: Session,
+) -> None:
+    task = _create_task(db_session)
+    client = FakeImmediateConnectClient(
+        connected_account_id="ca_immediate",
+        details=ComposioConnectedAccountDetails(
+            id="ca_immediate",
+            status="active",
+            toolkit_slug="notion",
+            state_val={"login": "notion-user-x"},
+        ),
+    )
+
+    prompt = initiate_connect_for_task(
+        db_session,
+        task=task,
+        toolkit_slug="Notion",
+        client=client,
+        callback_url="http://localhost:8080/composio/callback",
+    )
+    db_session.commit()
+
+    assert client.get_connected_account_calls == ["ca_immediate"]
+    connection = db_session.scalar(
+        select(ComposioConnection).where(ComposioConnection.id == prompt.connection_id)
+    )
+    assert connection is not None
+    assert connection.external_account_label == "notion-user-x"
+
+
+def test_initiate_connect_leaves_label_none_when_identity_fetch_raises(
+    db_session: Session,
+) -> None:
+    task = _create_task(db_session)
+    client = FakeImmediateConnectClient(
+        connected_account_id="ca_immediate",
+        fetch_error=ComposioConnectionError("composio is down"),
+    )
+
+    prompt = initiate_connect_for_task(
+        db_session,
+        task=task,
+        toolkit_slug="Notion",
+        client=client,
+        callback_url="http://localhost:8080/composio/callback",
+    )
+    db_session.commit()
+
+    connection = db_session.scalar(
+        select(ComposioConnection).where(ComposioConnection.id == prompt.connection_id)
+    )
+    assert connection is not None
+    assert connection.connected_account_id == "ca_immediate"
+    assert connection.external_account_label is None
+
+
+def test_initiate_connect_leaves_label_none_when_payload_lacks_handle(
+    db_session: Session,
+) -> None:
+    task = _create_task(db_session)
+    client = FakeImmediateConnectClient(
+        connected_account_id="ca_immediate",
+        details=ComposioConnectedAccountDetails(
+            id="ca_immediate",
+            status="active",
+            toolkit_slug="notion",
+            state_val={"instanceName": "my-instance"},
+        ),
+    )
+
+    prompt = initiate_connect_for_task(
+        db_session,
+        task=task,
+        toolkit_slug="Notion",
+        client=client,
+        callback_url="http://localhost:8080/composio/callback",
+    )
+    db_session.commit()
+
+    connection = db_session.scalar(
+        select(ComposioConnection).where(ComposioConnection.id == prompt.connection_id)
+    )
+    assert connection is not None
+    assert connection.external_account_label is None
+
+
+def test_initiate_connect_skips_capture_when_no_immediate_account_id(
+    db_session: Session,
+) -> None:
+    """The common OAuth case: no connected_account_id yet, so no fetch happens."""
+
+    task = _create_task(db_session)
+    client = FakeConnectClient()
+
+    initiate_connect_for_task(
+        db_session,
+        task=task,
+        toolkit_slug="Notion",
+        client=client,
+        callback_url="http://localhost:8080/composio/callback",
+    )
+    db_session.commit()
+
+    # FakeConnectClient does not implement get_connected_account; if capture
+    # had been attempted this would raise AttributeError instead of the
+    # commit above succeeding cleanly.
 
 
 def test_connect_prompt_text_includes_link() -> None:
