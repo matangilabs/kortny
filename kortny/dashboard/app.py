@@ -40,6 +40,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from starlette.middleware.sessions import SessionMiddleware
 
 from kortny.composio import (
+    CAPTURE_TIMEOUT_SECONDS,
     ComposioCatalogError,
     ComposioClient,
     ComposioConnectionError,
@@ -4799,7 +4800,13 @@ def _capture_composio_callback_identity(connection: ComposioConnection) -> None:
         return
     client = ComposioClient(
         api_key=runtime_settings.composio_api_key,
-        timeout_seconds=runtime_settings.composio_request_timeout_seconds,
+        # Capture rides inside connect completion: cap the timeout well below
+        # the scrape-tolerant runtime default so a slow Composio API can never
+        # stall the OAuth callback redirect.
+        timeout_seconds=min(
+            runtime_settings.composio_request_timeout_seconds,
+            CAPTURE_TIMEOUT_SECONDS,
+        ),
     )
     capture_external_identity(client, connection)
 

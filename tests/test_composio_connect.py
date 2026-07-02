@@ -19,6 +19,7 @@ from kortny.composio.client import (
     ComposioConnectedAccountDetails,
     ComposioConnectionError,
     ComposioConnectionRequest,
+    ComposioToolExecution,
 )
 from kortny.composio.connect import (
     WAIT_AUTH_RECOVERY_ACTION,
@@ -162,12 +163,15 @@ class FakeImmediateConnectClient(ComposioClient):
         connected_account_id: str = "ca_immediate",
         details: ComposioConnectedAccountDetails | None = None,
         fetch_error: Exception | None = None,
+        whoami_execution: ComposioToolExecution | None = None,
     ) -> None:
         super().__init__(api_key="fake")
         self._connected_account_id = connected_account_id
         self._details = details
         self._fetch_error = fetch_error
+        self._whoami_execution = whoami_execution
         self.get_connected_account_calls: list[str] = []
+        self.execute_calls: list[dict[str, Any]] = []
 
     def create_managed_auth_config(self, *, toolkit_slug: str) -> ComposioAuthConfig:
         return ComposioAuthConfig(
@@ -201,6 +205,27 @@ class FakeImmediateConnectClient(ComposioClient):
             raise self._fetch_error
         assert self._details is not None
         return self._details
+
+    def execute_tool(
+        self,
+        *,
+        tool_slug: str,
+        user_id: str,
+        connected_account_id: str | None = None,
+        arguments: dict[str, Any],
+        version: str | None = None,
+    ) -> ComposioToolExecution:
+        self.execute_calls.append(
+            {
+                "tool_slug": tool_slug,
+                "user_id": user_id,
+                "connected_account_id": connected_account_id,
+                "arguments": arguments,
+            }
+        )
+        if self._whoami_execution is None:
+            raise AssertionError("unexpected whoami execution in this test")
+        return self._whoami_execution
 
 
 def _task_events(session: Session, task: Task) -> list[TaskEvent]:
@@ -278,6 +303,53 @@ def test_initiate_connect_captures_external_label_when_account_id_immediate(
     )
     assert connection is not None
     assert connection.external_account_label == "notion-user-x"
+
+
+def test_initiate_connect_captures_label_via_whoami_fallback(
+    db_session: Session,
+) -> None:
+    """Details payload lacks a handle -> the toolkit's whoami tool supplies it."""
+
+    task = _create_task(db_session)
+    client = FakeImmediateConnectClient(
+        connected_account_id="ca_immediate",
+        details=ComposioConnectedAccountDetails(
+            id="ca_immediate",
+            status="active",
+            toolkit_slug="github",
+            state_val={"oauth_token": "gho_test"},
+        ),
+        whoami_execution=ComposioToolExecution(
+            data={"login": "octocat-connect"},
+            successful=True,
+            error=None,
+            log_id=None,
+            session_info=None,
+        ),
+    )
+
+    prompt = initiate_connect_for_task(
+        db_session,
+        task=task,
+        toolkit_slug="GitHub",
+        client=client,
+        callback_url="http://localhost:8080/composio/callback",
+    )
+    db_session.commit()
+
+    connection = db_session.scalar(
+        select(ComposioConnection).where(ComposioConnection.id == prompt.connection_id)
+    )
+    assert connection is not None
+    assert connection.external_account_label == "octocat-connect"
+    assert client.execute_calls == [
+        {
+            "tool_slug": "GITHUB_GET_THE_AUTHENTICATED_USER",
+            "user_id": connection.composio_user_id,
+            "connected_account_id": "ca_immediate",
+            "arguments": {},
+        }
+    ]
 
 
 def test_initiate_connect_leaves_label_none_when_identity_fetch_raises(

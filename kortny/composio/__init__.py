@@ -14,8 +14,12 @@ from kortny.composio.client import (
     ComposioToolkit,
 )
 from kortny.composio.identity import (
+    CAPTURE_TIMEOUT_SECONDS,
+    WHOAMI_REGISTRY,
+    WhoamiSpec,
     capture_external_identity,
     extract_external_handle,
+    extract_whoami_handle,
     resolve_external_identities,
 )
 from kortny.composio.runtime import (
@@ -24,6 +28,8 @@ from kortny.composio.runtime import (
 )
 
 __all__ = [
+    "CAPTURE_TIMEOUT_SECONDS",
+    "WHOAMI_REGISTRY",
     "ComposioAuthConfig",
     "ComposioCatalog",
     "ComposioCatalogError",
@@ -37,7 +43,9 @@ __all__ = [
     "ComposioToolkit",
     "ComposioToolExecution",
     "RuntimeComposioConnection",
+    "WhoamiSpec",
     "capture_external_identity",
     "extract_external_handle",
+    "extract_whoami_handle",
     "resolve_external_identities",
 ]

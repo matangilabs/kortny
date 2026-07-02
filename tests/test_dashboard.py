@@ -23,6 +23,7 @@ from kortny.composio import (
     ComposioConnectionError,
     ComposioConnectionRequest,
     ComposioTool,
+    ComposioToolExecution,
     ComposioToolkit,
 )
 from kortny.dashboard.app import create_app
@@ -2898,6 +2899,89 @@ def test_dashboard_composio_callback_leaves_label_none_when_identity_fetch_fails
     assert updated.external_account_label is None
 
 
+def test_dashboard_composio_callback_captures_label_via_whoami_fallback(
+    client: tuple[TestClient, Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Details payload lacks a handle -> the whoami execution supplies it."""
+
+    test_client, session = client
+    task = create_dashboard_task(session)
+    set_runtime_settings_env(monkeypatch)
+    monkeypatch.setenv("COMPOSIO_API_KEY", "composio-dashboard-secret")
+
+    class WhoamiFallbackComposioClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def get_connected_account(
+            self, connected_account_id: str
+        ) -> ComposioConnectedAccountDetails:
+            # OAuth bookkeeping only — no identity-shaped fields.
+            return ComposioConnectedAccountDetails(
+                id=connected_account_id,
+                status="active",
+                toolkit_slug="github",
+                state_val={"oauth_token": "gho_test"},
+            )
+
+        def execute_tool(
+            self,
+            *,
+            tool_slug: str,
+            user_id: str,
+            connected_account_id: str | None = None,
+            arguments: dict[str, object],
+            version: str | None = None,
+        ) -> ComposioToolExecution:
+            assert tool_slug == "GITHUB_GET_THE_AUTHENTICATED_USER"
+            assert connected_account_id == "ca_789"
+            assert arguments == {}
+            return ComposioToolExecution(
+                data={"login": "octocat-fallback"},
+                successful=True,
+                error=None,
+                log_id=None,
+                session_info=None,
+            )
+
+    monkeypatch.setattr(
+        "kortny.dashboard.app.ComposioClient", WhoamiFallbackComposioClient
+    )
+    connection = ComposioConnection(
+        installation_id=task.installation_id,
+        toolkit_slug="github",
+        auth_config_id="ac_789",
+        connection_request_id="conn_req_789",
+        composio_user_id=f"slack:{task.installation_id}:UCost",
+        owner_slack_user_id="UCost",
+        visibility_scope_type="user",
+        visibility_scope_id="UCost",
+        status="pending",
+        display_name="GitHub personal",
+        metadata_json={},
+    )
+    session.add(connection)
+    session.commit()
+    connection_id = connection.id
+    login(test_client)
+
+    response = test_client.get(
+        "/composio/callback"
+        f"?connection_id={connection_id}"
+        "&status=success"
+        "&connected_account_id=ca_789",
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    session.expire_all()
+    updated = session.get(ComposioConnection, connection_id)
+    assert updated is not None
+    assert updated.status == "active"
+    assert updated.external_account_label == "octocat-fallback"
+
+
 def test_dashboard_member_composio_connect_uses_logged_in_user_scope(
     db_session: Session,
     engine: Engine,
@@ -3168,10 +3252,25 @@ def test_dashboard_member_composio_callback_returns_to_me_scope(
                 },
             )
 
+    class NoIdentityComposioClient:
+        """Deterministic identity-capture stub: gmail is a whoami-registry
+        toolkit, so without this patch the capture path's behavior would
+        depend on ambient runtime env (and could attempt a live call)."""
+
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def get_connected_account(self, connected_account_id: str) -> object:
+            raise ComposioConnectionError("no identity in this test")
+
+        def execute_tool(self, **_kwargs: object) -> object:
+            raise ComposioConnectionError("no whoami in this test")
+
     monkeypatch.setattr(
         "kortny.dashboard.app.SlackOpenIDClient",
         FakeSlackOpenIDClient,
     )
+    monkeypatch.setattr("kortny.dashboard.app.ComposioClient", NoIdentityComposioClient)
     with TestClient(
         create_app(settings=settings, session_factory=session_factory)
     ) as test_client:
@@ -3197,6 +3296,7 @@ def test_dashboard_member_composio_callback_returns_to_me_scope(
     assert updated.status == "active"
     assert updated.connected_account_id == "ca_gmail"
     assert updated.metadata_json["callback"]["connection_token"] == "callback-secret"
+    assert updated.external_account_label is None
 
 
 def test_dashboard_integrations_page_marks_missing_optional_search(
