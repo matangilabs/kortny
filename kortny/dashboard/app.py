@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import secrets
 import uuid
 from collections.abc import AsyncIterator, Iterator, Mapping
@@ -43,6 +44,7 @@ from kortny.composio import (
     ComposioClient,
     ComposioConnectionError,
     ComposioToolkit,
+    capture_external_identity,
 )
 from kortny.config import Settings, SettingsError, load_settings
 from kortny.dashboard.auth import (
@@ -191,6 +193,8 @@ from kortny.witness import (
 )
 from kortny.witness.automation import AutomationOutcome, materialize_acceptance
 from kortny.witness.lifecycle import WitnessSlackClient
+
+logger = logging.getLogger(__name__)
 
 TEMPLATE_DIR = Path(__file__).parent / "templates"
 STATIC_DIR = Path(__file__).parent / "static"
@@ -2908,6 +2912,7 @@ def register_routes(app: FastAPI) -> None:
         )
         if resolved_connected_account_id:
             connection.connected_account_id = resolved_connected_account_id
+            _capture_composio_callback_identity(connection)
         if resolved_connected_account_id or callback_status in {
             "success",
             "active",
@@ -3261,6 +3266,10 @@ def register_routes(app: FastAPI) -> None:
         connection.connection_request_id = connect_request.id
         if connect_request.connected_account_id:
             connection.connected_account_id = connect_request.connected_account_id
+            # Best-effort, non-blocking: only fires here for auth schemes that
+            # hand back an immediate connected_account_id. The common OAuth
+            # case captures via composio_callback once the redirect completes.
+            capture_external_identity(client, connection)
         connection.metadata_json = {
             **dict(connection.metadata_json or {}),
             "auth_config_source": auth_config_source,
@@ -4767,6 +4776,32 @@ def _load_runtime_settings() -> tuple[Settings | None, str | None]:
         return load_settings(), None
     except SettingsError as exc:
         return None, str(exc)
+
+
+def _capture_composio_callback_identity(connection: ComposioConnection) -> None:
+    """Best-effort external-identity capture on OAuth connect completion.
+
+    This is the real capture point for the common OAuth toolkit case: the
+    connect callback is where ``connected_account_id`` first becomes known for
+    both the in-thread task connect flow and the dashboard-initiated connect
+    flow (both redirect through this same route). Never blocks or fails the
+    callback: skipped entirely when runtime settings/API key are unavailable,
+    and any client or parsing failure inside ``capture_external_identity`` is
+    already caught and logged there.
+    """
+
+    runtime_settings, runtime_error = _load_runtime_settings()
+    if (
+        runtime_error
+        or runtime_settings is None
+        or not runtime_settings.composio_api_key
+    ):
+        return
+    client = ComposioClient(
+        api_key=runtime_settings.composio_api_key,
+        timeout_seconds=runtime_settings.composio_request_timeout_seconds,
+    )
+    capture_external_identity(client, connection)
 
 
 def _embedding_index_for(session: Session) -> EmbeddingIndex | None:
