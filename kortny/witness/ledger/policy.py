@@ -47,6 +47,11 @@ class CandidateInputs:
     span_days: int
     candidate_type: str
     created_at: datetime
+    # source_type of the underlying WitnessOpportunityCandidate. Populated for
+    # the autopilot surface so composio_trigger-sourced (ask-mode-only, slice
+    # C2) candidates can never be autonomously acted on. None for call sites
+    # that predate this field (safe default: no special-case).
+    source_type: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,6 +212,14 @@ class ProactiveActionPolicy:
     def _decide_autopilot(
         self, candidate: CandidateInputs, ctx: DeliveryContext
     ) -> LedgerDecision:
+        # Ask-mode-only clamp (slice C2): a composio_trigger-sourced candidate
+        # never carries a source_task_id for autopilot's auditable-review path
+        # to key on, so it must never be autonomously acted on. Match the
+        # existing conservative 'ask' style used for draft_artifact above.
+        if candidate.source_type == "composio_trigger":
+            return LedgerDecision(
+                decision="ask", reason_code="composio_trigger_ask_only"
+            )
         if ctx.autopilot_preflight_defer_reason is not None:
             return LedgerDecision(decision="defer", reason_code="preflight_defer")
         # Channel activation gate (only when ctx signals a channel target)
