@@ -529,6 +529,25 @@ class Settings(BaseSettings):
         default=90,
         validation_alias="KORTNY_COMPOSIO_TRIGGER_RETENTION_DAYS",
     )
+    composio_listener_advisory_lock_key: int = Field(
+        default=831774501,
+        validation_alias="KORTNY_COMPOSIO_LISTENER_ADVISORY_LOCK_KEY",
+    )
+    composio_listener_health_tick_seconds: float = Field(
+        default=15.0,
+        validation_alias="KORTNY_COMPOSIO_LISTENER_HEALTH_TICK_SECONDS",
+    )
+    composio_listener_stale_reconnect_seconds: float = Field(
+        # If the socket reports alive but neither a connection renewal nor an
+        # inbound event has been observed in this window, force a reconnect —
+        # a defense against a zombie connection the SDK itself doesn't detect.
+        default=180.0,
+        validation_alias="KORTNY_COMPOSIO_LISTENER_STALE_RECONNECT_SECONDS",
+    )
+    composio_listener_reconnect_max_seconds: float = Field(
+        default=300.0,
+        validation_alias="KORTNY_COMPOSIO_LISTENER_RECONNECT_MAX_SECONDS",
+    )
     profiler_enabled: bool = Field(
         default=True, validation_alias="KORTNY_PROFILER_ENABLED"
     )
