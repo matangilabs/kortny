@@ -521,6 +521,14 @@ class Settings(BaseSettings):
         default=False,
         validation_alias="KORTNY_COMPOSIO_TRIGGERS_ENABLED",
     )
+    # "shadow" (default): trigger events are recorded but never projected into
+    # Witness. "ask": events decided 'ask' by the listener are projected as
+    # ask-mode DM suggestions (slice C2) — still gated by the listener flag
+    # above and by having a resolvable DM channel for the subscription owner.
+    composio_triggers_mode: str = Field(
+        default="shadow",
+        validation_alias="KORTNY_COMPOSIO_TRIGGERS_MODE",
+    )
     composio_webhook_secret: str | None = Field(
         default=None,
         validation_alias="KORTNY_COMPOSIO_WEBHOOK_SECRET",
@@ -799,6 +807,15 @@ class Settings(BaseSettings):
     def _valid_composio_catalog_limit(cls, value: int) -> int:
         if value < 1 or value > 1000:
             raise ValueError("COMPOSIO_CATALOG_LIMIT must be between 1 and 1000")
+        return value
+
+    @field_validator("composio_triggers_mode")
+    @classmethod
+    def _valid_composio_triggers_mode(cls, value: str) -> str:
+        if value not in {"shadow", "ask"}:
+            raise ValueError(
+                "KORTNY_COMPOSIO_TRIGGERS_MODE must be one of: shadow, ask"
+            )
         return value
 
     @field_validator("composio_request_timeout_seconds")

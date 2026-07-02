@@ -92,6 +92,7 @@ def _candidate_inputs_from_orm(
         span_days=0,
         candidate_type=candidate.candidate_type,
         created_at=created_at,
+        source_type=candidate.source_type,
     )
 
 
@@ -427,6 +428,10 @@ class WitnessAutopilot:
         filters = [
             WitnessOpportunityCandidate.status == "candidate",
             WitnessOpportunityCandidate.confidence_score >= min_confidence,
+            # Composio-trigger-sourced candidates are ask-mode-only (slice C2):
+            # they carry no source_task_id for autopilot's auditable-review
+            # path to key on, and are never eligible for autonomous action.
+            WitnessOpportunityCandidate.source_type != "composio_trigger",
             or_(
                 WitnessOpportunityCandidate.source_task_id.is_(None),
                 WitnessOpportunityCandidate.source_task_id.not_in(

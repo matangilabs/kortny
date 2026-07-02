@@ -7,8 +7,10 @@ and public proactive posting are separate policy slices.
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -17,12 +19,17 @@ from typing import Any
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
+from kortny.composio.triggers import LAUNCH_TRIGGERS
 from kortny.db.models import (
+    ComposioTriggerEvent,
+    ComposioTriggerSubscription,
     ObserveChannelProfile,
     SlackChannelMembership,
     Task,
     WitnessOpportunityCandidate,
 )
+
+logger = logging.getLogger(__name__)
 
 WITNESS_OPPORTUNITY_CANDIDATES_PROJECTED_MESSAGE = (
     "witness_opportunity_candidates_projected"
@@ -421,6 +428,136 @@ class WitnessOpportunityService:
             skipped_count=0,
             candidate_ids=tuple(candidate_ids),
         )
+
+    def project_from_trigger_event(
+        self,
+        *,
+        event: ComposioTriggerEvent,
+        subscription: ComposioTriggerSubscription,
+        dm_channel_resolver: Callable[[str], str | None],
+    ) -> WitnessOpportunityCandidate | None:
+        """Project one ask-decision Composio trigger event into a DM candidate.
+
+        Slice C2 (ask-mode only). Deterministic, no LLM: title comes from the
+        launch trigger's short human ``label``; summary is the trigger
+        scorer's own ``decision_reason``. Delivery is NOT handled here — the
+        resulting row rides the existing DM digest path
+        (``WitnessRunner._eligible_dm_candidates``: status='candidate',
+        scope='dm', channel_id LIKE 'D%', target user non-null) exactly like
+        any other candidate, which additionally requires the installation to
+        have a digest epoch set (``digest_enabled_at``) or the
+        ``deliver_private`` env gate — neither of which this method touches.
+
+        Guard clauses (each logs and returns ``None`` without raising; the
+        ``ComposioTriggerEvent`` row itself always exists for audit
+        regardless of whether a candidate gets created):
+        - ``event.decision`` must be ``'ask'``.
+        - ``subscription.owner_slack_user_id`` must be set — the SDK/webhook
+          event doesn't independently carry a Slack identity, so an
+          unresolved owner means there is nobody to DM.
+        - ``dm_channel_resolver`` must return a channel id starting with
+          ``'D'`` — anything else (None, a non-DM id) means no DM channel
+          could be opened for the owner.
+
+        Safety: this candidate never sets ``source_task_id`` or
+        ``source_profile_id`` — autopilot's auditable-review path keys on
+        ``source_task_id``, and a composio_trigger-sourced candidate must
+        never be eligible for autonomous action (see the
+        ``source_type != 'composio_trigger'`` filter in
+        ``WitnessAutopilotRunner._eligible_candidates`` and the matching
+        clamp in ``ProactiveActionPolicy._decide_autopilot``).
+        """
+
+        if event.decision != "ask":
+            return None
+
+        owner_slack_user_id = subscription.owner_slack_user_id
+        if not owner_slack_user_id:
+            logger.info(
+                "witness composio_trigger projection skipped: subscription %s has "
+                "no owner_slack_user_id (event_id=%s)",
+                subscription.id,
+                event.id,
+            )
+            return None
+
+        dm_channel_id = dm_channel_resolver(owner_slack_user_id)
+        if not dm_channel_id or not dm_channel_id.startswith("D"):
+            logger.info(
+                "witness composio_trigger projection skipped: no DM channel "
+                "resolved for owner_slack_user_id=%s (event_id=%s)",
+                owner_slack_user_id,
+                event.id,
+            )
+            return None
+
+        launch_trigger = LAUNCH_TRIGGERS.get(event.trigger_slug)
+        title = _bounded_text(
+            launch_trigger.label if launch_trigger is not None else event.trigger_slug,
+            140,
+        )
+        summary = _bounded_text(event.decision_reason or title, 1000)
+        confidence_score = _bounded_confidence(
+            event.importance_score
+            if event.importance_score is not None
+            else Decimal("0.5")
+        )
+        dedupe_key = hashlib.sha256(
+            f"composio_trigger:{event.trigger_slug}:{event.event_id}".encode()
+        ).hexdigest()
+
+        existing = self._find_existing(
+            installation_id=event.installation_id,
+            scope_type="dm",
+            scope_id=dm_channel_id,
+            candidate_type="general_help",
+            dedupe_key=dedupe_key,
+        )
+        if existing is not None:
+            return existing
+
+        now = datetime.now(UTC)
+        candidate = WitnessOpportunityCandidate(
+            installation_id=event.installation_id,
+            channel_id=dm_channel_id,
+            target_slack_user_id=owner_slack_user_id,
+            visibility_scope_type="dm",
+            visibility_scope_id=dm_channel_id,
+            candidate_type="general_help",
+            title=title,
+            summary=summary,
+            suggested_action=None,
+            suggested_message=None,
+            evidence_json=[
+                {
+                    "kind": "composio_trigger_event",
+                    "event_id": str(event.id),
+                    "trigger_slug": event.trigger_slug,
+                }
+            ],
+            source_type="composio_trigger",
+            source_id=str(event.id),
+            source_task_id=None,
+            source_profile_id=None,
+            dedupe_key=dedupe_key,
+            confidence_score=confidence_score,
+            confidence_reason="Composio trigger scorer decided 'ask'.",
+            status="candidate",
+            automation_kind=None,
+            reinforcement_count=1,
+            first_observed_at=now,
+            feedback_json={},
+            metadata_json={
+                "source": "composio_trigger",
+                "trigger_slug": event.trigger_slug,
+                "toolkit_slug": subscription.toolkit_slug,
+            },
+            created_at=now,
+            updated_at=now,
+        )
+        self.session.add(candidate)
+        self.session.flush()
+        return candidate
 
     def eligible_private_suggestions(
         self,

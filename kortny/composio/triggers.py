@@ -32,6 +32,11 @@ class LaunchTrigger:
     toolkit_slug: str
     display_name: str
     scorer: Callable[[dict[str, Any]], TriggerDecision]
+    # Short human label used as the deterministic Witness candidate title when
+    # an 'ask'-decision event from this trigger is projected into the DM
+    # digest (slice C2) — no LLM involved, so this string carries the whole
+    # framing.
+    label: str
 
 
 # ---------------------------------------------------------------------------
@@ -247,17 +252,20 @@ LAUNCH_TRIGGERS: dict[str, LaunchTrigger] = {
         toolkit_slug="github",
         display_name="GitHub Pull Request Review Request",
         scorer=_score_github_review_request,
+        label="Review requested on GitHub",
     ),
     "GMAIL_NEW_GMAIL_MESSAGE": LaunchTrigger(
         slug="GMAIL_NEW_GMAIL_MESSAGE",
         toolkit_slug="gmail",
         display_name="Gmail New Message",
         scorer=_score_important_email,
+        label="Important email received",
     ),
     "GOOGLECALENDAR_EVENT_TRIGGERED": LaunchTrigger(
         slug="GOOGLECALENDAR_EVENT_TRIGGERED",
         toolkit_slug="googlecalendar",
         display_name="Google Calendar Event Upcoming",
         scorer=_score_calendar_event_upcoming,
+        label="Upcoming calendar event",
     ),
 }

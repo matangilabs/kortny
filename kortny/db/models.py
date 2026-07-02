@@ -1839,7 +1839,7 @@ class WitnessOpportunityCandidate(Base):
         CheckConstraint(
             "source_type in "
             "('channel_profile', 'knowledge_graph', 'task_summary', "
-            "'scheduled_witness', 'manual')",
+            "'scheduled_witness', 'manual', 'composio_trigger')",
             name="ck_witness_opportunity_candidates_source_type",
         ),
         CheckConstraint(
