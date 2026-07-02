@@ -44,6 +44,11 @@ from kortny.composio import (
     ComposioConnectionError,
     ComposioToolkit,
 )
+from kortny.composio.trigger_subscriptions import (
+    disable_trigger_subscription,
+    enable_trigger_subscription,
+)
+from kortny.composio.triggers import LAUNCH_TRIGGERS
 from kortny.config import Settings, SettingsError, load_settings
 from kortny.dashboard.auth import (
     DashboardAuthError,
@@ -134,6 +139,7 @@ from kortny.dashboard.skills_actions import (
 from kortny.dashboard.skills_data import get_skill_detail, get_skills_dashboard
 from kortny.db.models import (
     ComposioConnection,
+    ComposioTriggerSubscription,
     DashboardOAuthState,
     DashboardUser,
     EncryptedSecret,
@@ -3301,6 +3307,139 @@ def register_routes(app: FastAPI) -> None:
                 "notice": notice,
                 "notice_tone": _notice_tone(notice_tone),
             },
+        )
+
+    @app.post("/composio/{toolkit_slug}/triggers/{trigger_slug}/enable")
+    async def composio_trigger_enable(
+        request: Request,
+        toolkit_slug: str,
+        trigger_slug: str,
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> RedirectResponse:
+        del principal
+        normalized_slug = toolkit_slug.strip().lower()
+        default_next_path = f"/composio/{quote(normalized_slug, safe='')}"
+        form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+        next_path = _safe_next_path(form.get("next", [default_next_path])[0])
+
+        launch_trigger = LAUNCH_TRIGGERS.get(trigger_slug)
+        if launch_trigger is None or launch_trigger.toolkit_slug != normalized_slug:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+
+        runtime_settings, runtime_error = _load_runtime_settings()
+        if runtime_error or runtime_settings is None:
+            return _redirect_with_notice(
+                next_path,
+                "Runtime settings are invalid. Fix System configuration first.",
+                tone="danger",
+            )
+        if not runtime_settings.composio_triggers_enabled:
+            return _redirect_with_notice(
+                next_path,
+                "Composio triggers are disabled for this deployment.",
+                tone="danger",
+            )
+        if not runtime_settings.composio_api_key:
+            return _redirect_with_notice(
+                next_path,
+                "COMPOSIO_API_KEY is required before enabling triggers.",
+                tone="danger",
+            )
+
+        connection = session.execute(
+            select(ComposioConnection)
+            .where(
+                ComposioConnection.toolkit_slug == normalized_slug,
+                ComposioConnection.status == "active",
+            )
+            .order_by(ComposioConnection.updated_at.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        if connection is None:
+            return _redirect_with_notice(
+                next_path,
+                "Connect this toolkit before enabling a trigger.",
+                tone="danger",
+            )
+
+        client = ComposioClient(
+            api_key=runtime_settings.composio_api_key,
+            timeout_seconds=runtime_settings.composio_request_timeout_seconds,
+        )
+        result = enable_trigger_subscription(
+            session,
+            connection=connection,
+            trigger_slug=trigger_slug,
+            client=client,
+        )
+        if not result.ok:
+            session.rollback()
+            return _redirect_with_notice(
+                next_path,
+                f"Could not enable {launch_trigger.display_name}: {result.error}",
+                tone="danger",
+            )
+        session.commit()
+        return _redirect_with_notice(
+            next_path, f"Enabled {launch_trigger.display_name}."
+        )
+
+    @app.post("/composio/{toolkit_slug}/triggers/{trigger_slug}/disable")
+    async def composio_trigger_disable(
+        request: Request,
+        toolkit_slug: str,
+        trigger_slug: str,
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> RedirectResponse:
+        del principal
+        normalized_slug = toolkit_slug.strip().lower()
+        default_next_path = f"/composio/{quote(normalized_slug, safe='')}"
+        form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+        next_path = _safe_next_path(form.get("next", [default_next_path])[0])
+
+        launch_trigger = LAUNCH_TRIGGERS.get(trigger_slug)
+        if launch_trigger is None or launch_trigger.toolkit_slug != normalized_slug:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+
+        runtime_settings, runtime_error = _load_runtime_settings()
+        if (
+            runtime_error
+            or runtime_settings is None
+            or not runtime_settings.composio_api_key
+        ):
+            return _redirect_with_notice(
+                next_path,
+                "Runtime settings are invalid. Fix System configuration first.",
+                tone="danger",
+            )
+
+        subscription = session.execute(
+            select(ComposioTriggerSubscription)
+            .where(
+                ComposioTriggerSubscription.toolkit_slug == normalized_slug,
+                ComposioTriggerSubscription.trigger_slug == trigger_slug,
+                ComposioTriggerSubscription.status == "active",
+            )
+            .order_by(ComposioTriggerSubscription.updated_at.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        if subscription is None:
+            return _redirect_with_notice(
+                next_path,
+                f"{launch_trigger.display_name} is not currently on.",
+                tone="danger",
+            )
+
+        client = ComposioClient(
+            api_key=runtime_settings.composio_api_key,
+            timeout_seconds=runtime_settings.composio_request_timeout_seconds,
+        )
+        disable_trigger_subscription(session, subscription=subscription, client=client)
+        session.commit()
+        return _redirect_with_notice(
+            next_path, f"Disabled {launch_trigger.display_name}."
         )
 
     @app.get("/admin/users", response_class=HTMLResponse)
