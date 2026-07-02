@@ -80,6 +80,7 @@ def _subscription(
     trigger_slug: str = "GITHUB_PULL_REQUEST_EVENT",
     toolkit_slug: str = "github",
     status: str = "active",
+    composio_trigger_id: str | None = None,
 ) -> ComposioTriggerSubscription:
     sub = ComposioTriggerSubscription(
         installation_id=installation_id,
@@ -88,6 +89,7 @@ def _subscription(
         toolkit_slug=toolkit_slug,
         trigger_slug=trigger_slug,
         status=status,
+        composio_trigger_id=composio_trigger_id,
     )
     session.add(sub)
     session.flush()
@@ -127,8 +129,10 @@ def test_ingest_dedup_same_event_returns_same_row(db_session: Session) -> None:
 
     p = _parsed(event_id="evt_dedup_01")
     first = ingest_trigger_event(db_session, installation_id=iid, parsed=p)
+    assert first is not None
     db_session.flush()
     second = ingest_trigger_event(db_session, installation_id=iid, parsed=p)
+    assert second is not None
     db_session.flush()
 
     assert first.id == second.id
@@ -142,10 +146,12 @@ def test_ingest_different_event_ids_create_separate_rows(db_session: Session) ->
     first = ingest_trigger_event(
         db_session, installation_id=iid, parsed=_parsed(event_id="evt_a")
     )
+    assert first is not None
     db_session.flush()
     second = ingest_trigger_event(
         db_session, installation_id=iid, parsed=_parsed(event_id="evt_b")
     )
+    assert second is not None
     db_session.flush()
 
     assert first.id != second.id
@@ -168,6 +174,7 @@ def test_ingest_with_matching_subscription_links_subscription(
         installation_id=iid,
         parsed=_parsed(connected_account_id="ca_match"),
     )
+    assert event is not None
     db_session.flush()
 
     assert event.subscription_id == sub.id
@@ -181,12 +188,27 @@ def test_ingest_without_subscription_marks_unmatched(db_session: Session) -> Non
     event = ingest_trigger_event(
         db_session,
         installation_id=iid,
-        parsed=_parsed(connected_account_id="ca_no_sub"),
+        parsed=_parsed(
+            connected_account_id="ca_no_sub",
+            data={"secret": "should never be persisted"},
+        ),
     )
+    assert event is not None
     db_session.flush()
 
     assert event.subscription_id is None
     assert event.decision == "unmatched"
+    # Unmatched events are metadata only — the untrusted payload is never
+    # persisted for an event that could not be attributed to a subscription.
+    assert "data" not in event.raw_payload_json
+    assert set(event.raw_payload_json) == {
+        "id",
+        "trigger_slug",
+        "trigger_id",
+        "connected_account_id",
+        "user_id",
+        "timestamp",
+    }
 
 
 def test_ingest_no_connected_account_id_marks_unmatched(db_session: Session) -> None:
@@ -199,9 +221,64 @@ def test_ingest_no_connected_account_id_marks_unmatched(db_session: Session) -> 
         installation_id=iid,
         parsed=_parsed(connected_account_id=None),
     )
+    assert event is not None
     db_session.flush()
 
     assert event.decision == "unmatched"
+
+
+def test_ingest_trigger_id_routing_beats_account_fallback(db_session: Session) -> None:
+    """A trigger_id match wins even when the connected_account_id would have
+    resolved to a *different* subscription (e.g. a stale/reused account id)."""
+
+    iid = _installation(db_session)
+    by_trigger_id = _subscription(
+        db_session,
+        iid,
+        connected_account_id="ca_other",
+        composio_trigger_id="ti_precise",
+    )
+    _subscription(
+        db_session,
+        iid,
+        connected_account_id="ca_test",
+    )
+    db_session.commit()
+
+    event = ingest_trigger_event(
+        db_session,
+        installation_id=iid,
+        parsed=_parsed(connected_account_id="ca_test", trigger_id="ti_precise"),
+    )
+    assert event is not None
+    db_session.flush()
+
+    assert event.subscription_id == by_trigger_id.id
+
+
+def test_ingest_ambiguous_trigger_id_match_is_dropped(db_session: Session) -> None:
+    iid = _installation(db_session)
+    _subscription(
+        db_session,
+        iid,
+        connected_account_id="ca_one",
+        composio_trigger_id="ti_dupe",
+    )
+    _subscription(
+        db_session,
+        iid,
+        connected_account_id="ca_two",
+        composio_trigger_id="ti_dupe",
+    )
+    db_session.commit()
+
+    event = ingest_trigger_event(
+        db_session,
+        installation_id=iid,
+        parsed=_parsed(connected_account_id="ca_one", trigger_id="ti_dupe"),
+    )
+
+    assert event is None
 
 
 # ---------------------------------------------------------------------------
@@ -224,6 +301,7 @@ def test_github_direct_review_request_asks(db_session: Session) -> None:
         installation_id=iid,
         parsed=_parsed(trigger_slug="GITHUB_PULL_REQUEST_EVENT", data=data),
     )
+    assert event is not None
     db_session.flush()
 
     assert event.decision == "ask"
@@ -246,6 +324,7 @@ def test_github_draft_pr_is_silent(db_session: Session) -> None:
         installation_id=iid,
         parsed=_parsed(trigger_slug="GITHUB_PULL_REQUEST_EVENT", data=data),
     )
+    assert event is not None
     db_session.flush()
 
     assert event.decision == "silent"
@@ -284,6 +363,7 @@ def test_email_important_label_asks(db_session: Session) -> None:
             data=data,
         ),
     )
+    assert event is not None
     db_session.flush()
 
     assert event.decision == "ask"
@@ -318,6 +398,7 @@ def test_email_noreply_sender_is_silent(db_session: Session) -> None:
             event_id="evt_email_silent",
         ),
     )
+    assert event is not None
     db_session.flush()
 
     assert event.decision == "silent"
@@ -361,6 +442,7 @@ def test_calendar_near_term_accepted_event_asks(db_session: Session) -> None:
             data=data,
         ),
     )
+    assert event is not None
     db_session.flush()
 
     assert event.decision == "ask"
@@ -400,6 +482,7 @@ def test_calendar_far_future_event_is_silent(db_session: Session) -> None:
             event_id="evt_cal_far",
         ),
     )
+    assert event is not None
     db_session.flush()
 
     assert event.decision == "silent"
@@ -434,6 +517,7 @@ def test_calendar_all_day_event_is_silent(db_session: Session) -> None:
             event_id="evt_cal_allday",
         ),
     )
+    assert event is not None
     db_session.flush()
 
     assert event.decision == "silent"
