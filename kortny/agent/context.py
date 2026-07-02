@@ -26,6 +26,7 @@ from kortny.agent.thread_context import (
     ThreadTranscriptMessage,
     ThreadTranscriptProvider,
 )
+from kortny.composio.identity import resolve_external_identities
 from kortny.db.models import (
     Artifact,
     SlackChannelMembership,
@@ -63,6 +64,11 @@ if TYPE_CHECKING:
 # HIG-277: the user persona fact key; injected only when the request is
 # persona-relevant. Kept as a literal to avoid importing the consolidator.
 _USER_PROFILE_FACT_KEY = "user_profile"
+
+# Budget for the persona block's known-account-handles section: one short
+# line per toolkit, capped both by toolkit count and total characters.
+PERSONA_HANDLES_MAX_TOOLKITS = 6
+PERSONA_HANDLES_MAX_CHARS = 360
 
 DEFAULT_THREAD_CONTEXT_MAX_CHARS = 12_000
 DEFAULT_THREAD_CONTEXT_RECENT_TASKS = 3
@@ -309,6 +315,12 @@ class _CapabilitiesContext:
     omissions: tuple[ContextOmission, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class _PersonaContext:
+    content: str | None
+    omissions: tuple[ContextOmission, ...]
+
+
 class ContextAssembler:
     """Builds the LLM message context for a task."""
 
@@ -490,9 +502,9 @@ class ContextAssembler:
         if known_facts.content:
             messages.append(ChatMessage(role="system", content=known_facts.content))
 
-        persona_block = self._persona_context(task)
-        if persona_block:
-            messages.append(ChatMessage(role="system", content=persona_block))
+        persona_context = self._persona_context(task)
+        if persona_context.content:
+            messages.append(ChatMessage(role="system", content=persona_context.content))
 
         prior_context = self._prior_context(task)
         if prior_context.content:
@@ -552,6 +564,7 @@ class ContextAssembler:
             omissions=(
                 capabilities_context.omissions
                 + known_facts.omissions
+                + persona_context.omissions
                 + prior_context.omissions
                 + episode_context.omissions
                 + graph_context.omissions
@@ -779,7 +792,7 @@ class ContextAssembler:
         decision = latest_intent_decision(events)
         return bool(decision and decision.get("persona_relevant"))
 
-    def _persona_context(self, task: Task) -> str | None:
+    def _persona_context(self, task: Task) -> _PersonaContext:
         """Render the gated "who you're helping" persona resolution block (HIG-277).
 
         Only on persona-relevant asks (PRISM): states the user's role + work
@@ -787,10 +800,15 @@ class ContextAssembler:
         THIS user's own connected tools for those surfaces and their active
         projects — persona × capability × project, scoped by identity — rather
         than dumping every connected tool or applying a role stereotype.
+
+        The account-handle section is budgeted: at most
+        ``PERSONA_HANDLES_MAX_TOOLKITS`` toolkits and
+        ``PERSONA_HANDLES_MAX_CHARS`` characters of handle lines; overflow is
+        recorded as a ``ContextOmission`` like every other budgeted section.
         """
 
         if not task.slack_user_id or not self._task_persona_relevant(task):
-            return None
+            return _PersonaContext(content=None, omissions=())
         fact = self.workspace_state_service.get(
             task.installation_id,
             scope_type="user",
@@ -798,17 +816,56 @@ class ContextAssembler:
             key=_USER_PROFILE_FACT_KEY,
         )
         if fact is None:
-            return None
+            return _PersonaContext(content=None, omissions=())
         body = (fact.value_text or "").strip()
         if not body:
-            return None
-        return (
+            return _PersonaContext(content=None, omissions=())
+        base = (
             f"Who you're helping — {body}.\n"
             "This request is about their own work. Resolve it against THIS "
             "user's own connected tools for those work surfaces and their active "
             "projects (use find_tools to load them), scoped to what they can "
             "access. Frame the answer for their role; do not dump every "
             "connected tool or assume a generic role."
+        )
+        # Labels come back sanitized (resolve_external_identities re-applies
+        # the untrusted-input sanitizer at read).
+        identities = resolve_external_identities(
+            self.session,
+            task.installation_id,
+            task.slack_user_id,
+        )
+        if not identities:
+            return _PersonaContext(content=base, omissions=())
+        items = sorted(identities.items())
+        omitted = 0
+        if len(items) > PERSONA_HANDLES_MAX_TOOLKITS:
+            omitted = len(items) - PERSONA_HANDLES_MAX_TOOLKITS
+            items = items[:PERSONA_HANDLES_MAX_TOOLKITS]
+        handle_lines: list[str] = []
+        section_chars = 0
+        for index, (slug, label) in enumerate(items):
+            line = f'- {slug}: account "{label}"'
+            if section_chars + len(line) + 1 > PERSONA_HANDLES_MAX_CHARS:
+                omitted += len(items) - index
+                break
+            handle_lines.append(line)
+            section_chars += len(line) + 1
+        omissions = (
+            (ContextOmission("persona_handles", "budget_compacted", omitted),)
+            if omitted
+            else ()
+        )
+        if not handle_lines:
+            return _PersonaContext(content=base, omissions=omissions)
+        rendered_handles = "\n".join(handle_lines)
+        return _PersonaContext(
+            content=(
+                f"{base}\nKnown account handles for this user (use for "
+                f"server-side filters, e.g. assignee:<handle>):\n"
+                f"{rendered_handles}"
+            ),
+            omissions=omissions,
         )
 
     def _prior_context(self, task: Task) -> _PriorContext:

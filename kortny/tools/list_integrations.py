@@ -66,6 +66,7 @@ class DescribeToolsTool:
                         "scope_type": connection.visibility_scope_type,
                         "scope_id": connection.visibility_scope_id,
                         "connected_account_id": connection.connected_account_id,
+                        "external_account_label": connection.external_account_label,
                     }
                     for connection in connections
                 ],

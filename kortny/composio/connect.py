@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session
 from kortny.composio.client import (
     ComposioClient,
 )
+from kortny.composio.identity import capture_external_identity
 from kortny.composio.runtime import ComposioConnectionResolver
 from kortny.db.models import ComposioConnection, Task, TaskEventType
 from kortny.db.models import TaskStatus as DbTaskStatus
@@ -134,6 +135,11 @@ def initiate_connect_for_task(
     connection.connection_request_id = connect_request.id
     if connect_request.connected_account_id:
         connection.connected_account_id = connect_request.connected_account_id
+        # Best-effort, non-blocking: only fires here for auth schemes that
+        # hand back an immediate connected_account_id (e.g. no_auth-shaped
+        # flows). The common OAuth case only knows the account id once the
+        # provider redirects back through the connect callback.
+        capture_external_identity(client, connection)
     connection.metadata_json = {
         **dict(connection.metadata_json or {}),
         "connect_link_status": connect_request.status,

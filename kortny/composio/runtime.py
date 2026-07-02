@@ -56,6 +56,7 @@ class RuntimeComposioConnection:
     visibility_scope_type: str
     visibility_scope_id: str | None
     display_name: str | None
+    external_account_label: str | None = None
 
 
 class ComposioConnectionResolver:
@@ -162,4 +163,5 @@ def _runtime_connection(row: ComposioConnection) -> RuntimeComposioConnection:
         visibility_scope_type=row.visibility_scope_type,
         visibility_scope_id=row.visibility_scope_id,
         display_name=row.display_name,
+        external_account_label=row.external_account_label,
     )
