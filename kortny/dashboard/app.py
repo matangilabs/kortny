@@ -44,6 +44,11 @@ from kortny.composio import (
     ComposioConnectionError,
     ComposioToolkit,
 )
+from kortny.composio.trigger_subscriptions import (
+    disable_trigger_subscription,
+    enable_trigger_subscription,
+)
+from kortny.composio.triggers import LAUNCH_TRIGGERS
 from kortny.config import Settings, SettingsError, load_settings
 from kortny.dashboard.auth import (
     DashboardAuthError,
@@ -134,6 +139,7 @@ from kortny.dashboard.skills_actions import (
 from kortny.dashboard.skills_data import get_skill_detail, get_skills_dashboard
 from kortny.db.models import (
     ComposioConnection,
+    ComposioTriggerSubscription,
     DashboardOAuthState,
     DashboardUser,
     EncryptedSecret,
@@ -3303,6 +3309,151 @@ def register_routes(app: FastAPI) -> None:
             },
         )
 
+    @app.post("/composio/{toolkit_slug}/triggers/{trigger_slug}/enable")
+    async def composio_trigger_enable(
+        request: Request,
+        toolkit_slug: str,
+        trigger_slug: str,
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> RedirectResponse:
+        del principal
+        normalized_slug = toolkit_slug.strip().lower()
+        default_next_path = f"/composio/{quote(normalized_slug, safe='')}"
+        form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+        next_path = _safe_next_path(form.get("next", [default_next_path])[0])
+
+        launch_trigger = LAUNCH_TRIGGERS.get(trigger_slug)
+        if launch_trigger is None or launch_trigger.toolkit_slug != normalized_slug:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+
+        runtime_settings, runtime_error = _load_runtime_settings()
+        if runtime_error or runtime_settings is None:
+            return _redirect_with_notice(
+                next_path,
+                "Runtime settings are invalid. Fix System configuration first.",
+                tone="danger",
+            )
+        if not runtime_settings.composio_triggers_enabled:
+            return _redirect_with_notice(
+                next_path,
+                "Composio triggers are disabled for this deployment.",
+                tone="danger",
+            )
+        if not runtime_settings.composio_api_key:
+            return _redirect_with_notice(
+                next_path,
+                "COMPOSIO_API_KEY is required before enabling triggers.",
+                tone="danger",
+            )
+
+        connection = _composio_connection_for_trigger_action(
+            session,
+            form=form,
+            toolkit_slug=normalized_slug,
+        )
+        if connection.status != "active":
+            return _redirect_with_notice(
+                next_path,
+                "This connection is not active — reconnect it before enabling a trigger.",
+                tone="danger",
+            )
+
+        client = ComposioClient(
+            api_key=runtime_settings.composio_api_key,
+            timeout_seconds=runtime_settings.composio_request_timeout_seconds,
+        )
+        result = enable_trigger_subscription(
+            session,
+            connection=connection,
+            trigger_slug=trigger_slug,
+            client=client,
+        )
+        if not result.ok:
+            session.rollback()
+            return _redirect_with_notice(
+                next_path,
+                f"Could not enable {launch_trigger.display_name}: {result.error}",
+                tone="danger",
+            )
+        session.commit()
+        if result.already_enabled:
+            return _redirect_with_notice(
+                next_path, f"{launch_trigger.display_name} is already enabled."
+            )
+        return _redirect_with_notice(
+            next_path, f"Enabled {launch_trigger.display_name}."
+        )
+
+    @app.post("/composio/{toolkit_slug}/triggers/{trigger_slug}/disable")
+    async def composio_trigger_disable(
+        request: Request,
+        toolkit_slug: str,
+        trigger_slug: str,
+        principal: Annotated[DashboardPrincipal, Depends(require_admin)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> RedirectResponse:
+        del principal
+        normalized_slug = toolkit_slug.strip().lower()
+        default_next_path = f"/composio/{quote(normalized_slug, safe='')}"
+        form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+        next_path = _safe_next_path(form.get("next", [default_next_path])[0])
+
+        launch_trigger = LAUNCH_TRIGGERS.get(trigger_slug)
+        if launch_trigger is None or launch_trigger.toolkit_slug != normalized_slug:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+
+        runtime_settings, runtime_error = _load_runtime_settings()
+        if (
+            runtime_error
+            or runtime_settings is None
+            or not runtime_settings.composio_api_key
+        ):
+            return _redirect_with_notice(
+                next_path,
+                "Runtime settings are invalid. Fix System configuration first.",
+                tone="danger",
+            )
+
+        connection = _composio_connection_for_trigger_action(
+            session,
+            form=form,
+            toolkit_slug=normalized_slug,
+        )
+        if connection.status != "active" or not connection.connected_account_id:
+            return _redirect_with_notice(
+                next_path,
+                "This connection is not active.",
+                tone="danger",
+            )
+
+        subscription = session.execute(
+            select(ComposioTriggerSubscription).where(
+                ComposioTriggerSubscription.installation_id
+                == connection.installation_id,
+                ComposioTriggerSubscription.connected_account_id
+                == connection.connected_account_id,
+                ComposioTriggerSubscription.trigger_slug == trigger_slug,
+                ComposioTriggerSubscription.status == "active",
+            )
+        ).scalar_one_or_none()
+        if subscription is None:
+            return _redirect_with_notice(
+                next_path,
+                f"{launch_trigger.display_name} is not currently on.",
+                tone="danger",
+            )
+
+        client = ComposioClient(
+            api_key=runtime_settings.composio_api_key,
+            timeout_seconds=runtime_settings.composio_request_timeout_seconds,
+        )
+        disable_trigger_subscription(session, subscription=subscription, client=client)
+        session.commit()
+        return _redirect_with_notice(
+            next_path, f"Disabled {launch_trigger.display_name}."
+        )
+
     @app.get("/admin/users", response_class=HTMLResponse)
     def admin_users(
         request: Request,
@@ -4597,6 +4748,31 @@ def _catalog_count_label(visible_count: int, total_items: int | None) -> str:
     if total_items is None:
         return f"{visible_count:,} shown"
     return f"{visible_count:,} shown of {total_items:,}"
+
+
+def _composio_connection_for_trigger_action(
+    session: Session,
+    *,
+    form: dict[str, list[str]],
+    toolkit_slug: str,
+) -> ComposioConnection:
+    """Resolve the concrete connection a trigger enable/disable acts on.
+
+    The Triggers card posts the specific ``connection_id`` it rendered —
+    never "the latest active connection for the toolkit", which could act on
+    the WRONG account when two accounts are connected to one toolkit. A
+    missing/invalid id, an unknown row, or a toolkit mismatch is a 404.
+    """
+
+    raw_connection_id = _form_value(form, "connection_id")
+    try:
+        connection_id = UUID(raw_connection_id)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND) from None
+    connection = session.get(ComposioConnection, connection_id)
+    if connection is None or connection.toolkit_slug != toolkit_slug:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    return connection
 
 
 def _form_value(form: dict[str, list[str]], name: str) -> str:

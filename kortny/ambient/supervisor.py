@@ -255,6 +255,10 @@ def build_default_loops(settings: Settings) -> list[LoopSpec]:
         SystemDriveGate,
     )
     from kortny.composio.catalog_sync import ComposioCatalogSyncWorker
+    from kortny.composio.listener import (
+        build_listener_loop,
+        composio_triggers_configured,
+    )
     from kortny.consolidator.runner import ConsolidatorWorker
     from kortny.db.session import make_session_factory
     from kortny.integration_learning.profiler_worker import CapabilityProfilerWorker
@@ -343,6 +347,11 @@ def build_default_loops(settings: Settings) -> list[LoopSpec]:
             name="capability_profiler",
             target=_capability_profiler,
             enabled=_composio_configured(settings) and settings.profiler_enabled,
+        ),
+        LoopSpec(
+            name="composio_trigger_listener",
+            target=build_listener_loop(settings),
+            enabled=composio_triggers_configured(settings),
         ),
     ]
 

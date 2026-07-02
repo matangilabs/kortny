@@ -336,6 +336,44 @@
     </section>
   {% endif %}
 
+  {% if dashboard_is_admin and detail.trigger_rows %}
+    <section class="card composio-triggers-card">
+      <header>
+        <div>
+          <h2>Triggers</h2>
+          <p>Proactive events from {{ integration_name }}. Kortny records these in shadow mode only — nothing is delivered to Slack yet.</p>
+        </div>
+      </header>
+      <div class="composio-tool-list">
+        {% for trigger in detail.trigger_rows %}
+          <article class="composio-tool-row">
+            <div>
+              <h3>{{ trigger.display_name }}</h3>
+              <span class="badge badge-{{ trigger.tone }}">{{ trigger.status|title }}</span>
+            </div>
+            {% if trigger.status == "active" %}
+              <form method="post" action="/composio/{{ detail.slug }}/triggers/{{ trigger.slug }}/disable">
+                <input type="hidden" name="next" value="{{ detail_base_path }}/{{ detail.slug }}">
+                {% if active_connection %}
+                  <input type="hidden" name="connection_id" value="{{ active_connection.id }}">
+                {% endif %}
+                <button class="btn-ghost btn-danger" type="submit" {{ "disabled" if not active_connection else "" }}>Disable</button>
+              </form>
+            {% else %}
+              <form method="post" action="/composio/{{ detail.slug }}/triggers/{{ trigger.slug }}/enable">
+                <input type="hidden" name="next" value="{{ detail_base_path }}/{{ detail.slug }}">
+                {% if active_connection %}
+                  <input type="hidden" name="connection_id" value="{{ active_connection.id }}">
+                {% endif %}
+                <button class="btn-ghost" type="submit" {{ "disabled" if not active_connection else "" }}>Enable</button>
+              </form>
+            {% endif %}
+          </article>
+        {% endfor %}
+      </div>
+    </section>
+  {% endif %}
+
   {% if detail.toolkit or detail.tools_error %}
     <section class="card composio-tools-card">
       <header>
